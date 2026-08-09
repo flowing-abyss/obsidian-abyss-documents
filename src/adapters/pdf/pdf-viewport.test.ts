@@ -66,7 +66,9 @@ function pdf(pageCount = 700): PDFDocumentProxy {
   } as unknown as PDFDocumentProxy;
 }
 
-function viewerRuntime() {
+function viewerRuntime(
+  findOptions: { findDelay?: number; findState?: number; suppressFindState?: boolean } = {},
+) {
   const state: {
     eventBus?: FakeEventBus;
     findController?: InstanceType<typeof FakeFindController>;
@@ -86,6 +88,7 @@ function viewerRuntime() {
     readonly pages: Array<number | string> = [];
     readonly positions: Array<[number, number, number]> = [];
     viewer: FakeViewer | null = null;
+    document: PDFDocumentProxy | null = null;
 
     constructor(readonly options: { eventBus: FakeEventBus }) {
       state.linkService = this;
@@ -93,6 +96,7 @@ function viewerRuntime() {
 
     setDocument(document: PDFDocumentProxy | null): void {
       this.documents.push(document);
+      this.document = document;
     }
 
     setViewer(viewer: FakeViewer): void {
@@ -101,24 +105,71 @@ function viewerRuntime() {
 
     goToPage(page: number | string): void {
       this.pages.push(page);
+      if (typeof page === 'number') this.page = page;
     }
 
     goToXY(page: number, x: number, y: number): void {
       this.positions.push([page, x, y]);
+      this.page = page;
+    }
+
+    get pagesCount(): number {
+      return this.document?.numPages ?? 0;
+    }
+
+    get page(): number {
+      return this.viewer?.currentPageNumber ?? 1;
+    }
+
+    set page(pageNumber: number) {
+      if (this.viewer !== null) this.viewer.currentPageNumber = pageNumber;
     }
   }
 
   class FakeFindController {
     readonly documents: Array<PDFDocumentProxy | null> = [];
+    readonly selections: Array<{ matchIndex: number; pageIndex: number; query: string }> = [];
+    private pending: number | null = null;
+    private matchIndex = -1;
 
     constructor(
       readonly options: { linkService: FakeLinkService; eventBus: FakeEventBus; delay?: number },
     ) {
       state.findController = this;
+      options.eventBus.on('find', (event) => {
+        this.onFind(event);
+      });
     }
 
     setDocument(document: PDFDocumentProxy | null): void {
       this.documents.push(document);
+    }
+
+    private onFind(event: unknown): void {
+      const data = event as Record<string, unknown>;
+      const query = typeof data['query'] === 'string' ? data['query'] : '';
+      if (data['type'] === '') {
+        if (this.pending !== null) window.clearTimeout(this.pending);
+        this.matchIndex = 0;
+      } else if (data['type'] === 'again')
+        this.matchIndex += data['findPrevious'] === true ? -1 : 1;
+      if (findOptions.suppressFindState === true) return;
+      const selection = {
+        matchIndex: this.matchIndex,
+        pageIndex: this.options.linkService.page - 1,
+        query,
+      };
+      this.pending = window.setTimeout(() => {
+        this.selections.push(selection);
+        this.options.eventBus.dispatch('updatefindcontrolstate', {
+          source: this,
+          state: findOptions.findState ?? 0,
+          previous: false,
+          entireWord: false,
+          matchesCount: { current: selection.matchIndex + 1, total: 10 },
+          rawQuery: query,
+        });
+      }, findOptions.findDelay ?? 0);
     }
   }
 
@@ -194,6 +245,7 @@ function viewerRuntime() {
 
   const module = {
     EventBus,
+    FindState: { FOUND: 0, NOT_FOUND: 1, PENDING: 3, WRAPPED: 2 },
     PDFLinkService: FakeLinkService,
     PDFFindController: FakeFindController,
     PDFViewer: FakeViewer,
@@ -201,9 +253,12 @@ function viewerRuntime() {
   return { module, state };
 }
 
-async function mountedViewport(pageCount = 700) {
+async function mountedViewport(
+  pageCount = 700,
+  options: { findDelay?: number; findState?: number; suppressFindState?: boolean } = {},
+) {
   const documentProxy = pdf(pageCount);
-  const runtime = viewerRuntime();
+  const runtime = viewerRuntime(options);
   const search = new PdfTextSearch(documentProxy);
   const viewport = new PdfDocumentViewport(documentProxy, runtime.module, search);
   const host = createDiv();
@@ -471,6 +526,130 @@ describe('PdfDocumentViewport', () => {
     });
   });
 
+  it('selects a delayed non-adjacent page-local occurrence through public find events', async () => {
+    vi.useFakeTimers();
+    const fixture = await mountedViewport(6, { findDelay: 25 });
+
+    const selecting = fixture.viewport.selectSearchHit(
+      { id: 'page-4-match-2', pageIndex: 4, matchIndex: 2, preview: 'Needle' },
+      '  needle  ',
+    );
+    await vi.runAllTimersAsync();
+    await selecting;
+
+    expect(fixture.runtime.state.linkService?.page).toBe(5);
+    expect(fixture.runtime.state.findController?.selections).toEqual([
+      { matchIndex: 0, pageIndex: 4, query: 'needle' },
+      { matchIndex: 1, pageIndex: 4, query: 'needle' },
+      { matchIndex: 2, pageIndex: 4, query: 'needle' },
+    ]);
+    const commands = fixture.runtime.state.eventBus?.dispatched.filter(
+      ({ name }) => name === 'find',
+    );
+    expect(commands?.map(({ data }) => [data['type'], data['query']])).toEqual([
+      ['', 'needle'],
+      ['again', 'needle'],
+      ['again', 'needle'],
+    ]);
+    expect(commands?.every(({ data }) => data['highlightAll'] === false)).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('cancels a stale selection when a newer page-local hit wins', async () => {
+    vi.useFakeTimers();
+    const fixture = await mountedViewport(6, { findDelay: 25 });
+    const first = fixture.viewport
+      .selectSearchHit(
+        { id: 'page-0-match-3', pageIndex: 0, matchIndex: 3, preview: 'First' },
+        'needle',
+      )
+      .catch((cause: unknown) => cause);
+
+    const second = fixture.viewport.selectSearchHit(
+      { id: 'page-5-match-1', pageIndex: 5, matchIndex: 1, preview: 'Second' },
+      'needle',
+    );
+    await vi.runAllTimersAsync();
+
+    await expect(first).resolves.toMatchObject({ name: 'AbortError' });
+    await expect(second).resolves.toBeUndefined();
+    expect(fixture.runtime.state.linkService?.page).toBe(6);
+    expect(fixture.runtime.state.findController?.selections).toEqual([
+      { matchIndex: 0, pageIndex: 5, query: 'needle' },
+      { matchIndex: 1, pageIndex: 5, query: 'needle' },
+    ]);
+    vi.useRealTimers();
+  });
+
+  it('times out a selection without leaking its public event listener', async () => {
+    vi.useFakeTimers();
+    const fixture = await mountedViewport(3, { suppressFindState: true });
+    const selecting = fixture.viewport
+      .selectSearchHit(
+        { id: 'page-1-match-0', pageIndex: 1, matchIndex: 0, preview: 'Missing' },
+        'needle',
+      )
+      .catch((cause: unknown) => cause);
+
+    await vi.runAllTimersAsync();
+
+    await expect(selecting).resolves.toMatchObject({ name: 'TimeoutError' });
+    expect(fixture.runtime.state.eventBus?.listeners.get('updatefindcontrolstate')).toHaveLength(0);
+    vi.useRealTimers();
+  });
+
+  it('contains a public not-found state and removes its listener', async () => {
+    const fixture = await mountedViewport(3, { findState: 1 });
+
+    await expect(
+      fixture.viewport.selectSearchHit(
+        { id: 'missing', pageIndex: 1, matchIndex: 0, preview: 'Missing' },
+        'needle',
+      ),
+    ).rejects.toThrow('PDF search could not find “needle”.');
+    expect(fixture.runtime.state.eventBus?.listeners.get('updatefindcontrolstate')).toHaveLength(0);
+  });
+
+  it('accepts a public wrapped state as a completed find step', async () => {
+    const fixture = await mountedViewport(3, { findState: 2 });
+
+    await expect(
+      fixture.viewport.selectSearchHit(
+        { id: 'wrapped', pageIndex: 2, matchIndex: 0, preview: 'Wrapped' },
+        'needle',
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects hit selection when the normalized query is empty', async () => {
+    const fixture = await mountedViewport(3);
+
+    await expect(
+      fixture.viewport.selectSearchHit(
+        { id: 'empty', pageIndex: 0, matchIndex: 0, preview: 'Empty' },
+        '   ',
+      ),
+    ).rejects.toMatchObject({ name: 'InvalidStateError' });
+  });
+
+  it('normalizes one query for extraction results and visible PDF find', async () => {
+    const fixture = await mountedViewport(1);
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+
+    fixture.viewport.search('  needle  ');
+
+    await vi.waitFor(() => {
+      expect(events[events.length - 1]).toMatchObject({
+        type: 'search-results',
+        results: { query: 'needle', complete: true },
+      });
+    });
+    expect(
+      fixture.runtime.state.eventBus?.dispatched.find(({ name }) => name === 'find')?.data['query'],
+    ).toBe('needle');
+  });
+
   it('aborts prior extraction for each query and clears public find matches for empty input', async () => {
     const fixture = await mountedViewport(3);
     const signals: AbortSignal[] = [];
@@ -623,6 +802,7 @@ describe('PdfDocumentViewport', () => {
     fixture.viewport.onEvent((event) => events.push(event));
 
     eventBus.dispatch('pagechanging', { pageNumber: 0 });
+    eventBus.dispatch('scalechanging', null as unknown as Record<string, unknown>);
     eventBus.dispatch('scalechanging', { scale: 'large' });
     eventBus.dispatch('scalechanging', { scale: Number.NaN });
     eventBus.dispatch('pagerendered', { pageNumber: 'two', error: new Error('ignored') });

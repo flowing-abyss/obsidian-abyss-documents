@@ -51,6 +51,7 @@ export interface DocumentViewport {
   setReadingColors(colors: ResolvedReadingColors): void;
   search(query: string): void;
   searchAgain(direction: 'next' | 'previous'): void;
+  selectSearchHit(hit: SearchHit, query: string): Promise<void>;
   onEvent(listener: (event: ViewportEvent) => void): () => void;
   focus(): void;
   destroy(): Promise<void>;

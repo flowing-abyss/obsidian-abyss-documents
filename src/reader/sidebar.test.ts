@@ -8,6 +8,7 @@ function callbacks(): ReaderSidebarCallbacks {
     onOutlineNavigate: vi.fn(),
     onSearchNavigate: vi.fn(),
     onSearchQuery: vi.fn(),
+    onTabChange: vi.fn(),
   };
 }
 
@@ -29,6 +30,7 @@ describe('ReaderSidebar', () => {
     shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
     expect(shell.sidebar?.activeTab).toBe('outline');
     shell.sidebar?.root.querySelector<HTMLButtonElement>('[data-sidebar-tab="search"]')?.click();
+    expect(handlers.onTabChange).toHaveBeenCalledWith('search');
     shell.closeSidebar();
     shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
 

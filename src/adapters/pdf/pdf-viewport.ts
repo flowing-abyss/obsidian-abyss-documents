@@ -2,6 +2,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import type {
   DocumentLocation,
   DocumentViewport,
+  SearchHit,
   ViewportEvent,
 } from '../../document-core/document.js';
 import { TypedEventSource } from '../../document-core/events.js';
@@ -13,10 +14,12 @@ import type { PdfTextSearch } from './pdf-text-search.js';
 const TEXT_LAYER_MODE_ENABLE = 1;
 const ANNOTATION_MODE_ENABLE_FORMS = 2;
 const MAX_CANVAS_PIXELS = 16_777_216;
+const FIND_SELECTION_TIMEOUT_MS = 2_000;
 
 type PdfEventBus = InstanceType<PdfRuntime['pdfjsViewer']['EventBus']>;
 type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
 type PdfViewer = InstanceType<PdfRuntime['pdfjsViewer']['PDFViewer']>;
+type PdfFindController = InstanceType<PdfRuntime['pdfjsViewer']['PDFFindController']>;
 type PdfEventListener = (event: unknown) => void;
 
 interface RebindablePdfViewer {
@@ -35,6 +38,13 @@ interface PreservedViewState {
 interface RetryablePdfPageView {
   reset(): void;
   draw(): Promise<void>;
+}
+
+interface FindRequest {
+  readonly query: string;
+  readonly findPrevious: boolean;
+  readonly type: '' | 'again';
+  readonly signal: AbortSignal;
 }
 
 function record(event: unknown): Record<string, unknown> | null {
@@ -62,11 +72,13 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly listeners = new Map<string, PdfEventListener>();
   private eventBus: PdfEventBus | null = null;
   private linkService: PdfLinkService | null = null;
+  private findController: PdfFindController | null = null;
   private viewer: PdfViewer | null = null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
   private searchAbort: AbortController | null = null;
+  private selectionAbort: AbortController | null = null;
   private lastQuery = '';
   private readonly failedPages = new Set<number>();
   private pagesInitialized = false;
@@ -107,6 +119,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       eventBus,
       linkService,
     });
+    this.findController = findController;
     const pageColors = resolvedPageColors(host);
     const viewer = new this.pdfjsViewer.PDFViewer({
       container: root,
@@ -178,13 +191,16 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   search(query: string): void {
     if (this.eventBus === null || this.destroyPromise !== null) return;
-    this.lastQuery = query;
-    this.dispatchFind(query, false, '');
+    const normalizedQuery = query.trim();
+    this.selectionAbort?.abort();
+    this.selectionAbort = null;
+    this.lastQuery = normalizedQuery;
+    this.dispatchFind(normalizedQuery, false, '');
     this.searchAbort?.abort();
     const abortController = new AbortController();
     this.searchAbort = abortController;
     void this.textSearch
-      .search(query, abortController.signal, (results) => {
+      .search(normalizedQuery, abortController.signal, (results) => {
         if (!abortController.signal.aborted && this.destroyPromise === null) {
           this.events.emit({ type: 'search-results', results });
         }
@@ -199,6 +215,38 @@ export class PdfDocumentViewport implements DocumentViewport {
   searchAgain(direction: 'next' | 'previous'): void {
     if (this.lastQuery.length === 0 || this.eventBus === null) return;
     this.dispatchFind(this.lastQuery, direction === 'previous', 'again');
+  }
+
+  async selectSearchHit(hit: SearchHit, query: string): Promise<void> {
+    const normalizedQuery = query.trim();
+    if (normalizedQuery.length === 0) {
+      throw new DOMException('Cannot select a search hit without a query.', 'InvalidStateError');
+    }
+    const eventBus = this.requireMounted(this.eventBus);
+    const linkService = this.requireMounted(this.linkService);
+    const findController = this.requireMounted(this.findController);
+    this.selectionAbort?.abort();
+    const abortController = new AbortController();
+    this.selectionAbort = abortController;
+    try {
+      linkService.page = hit.pageIndex + 1;
+      await this.dispatchFindAndWait(eventBus, findController, {
+        query: normalizedQuery,
+        findPrevious: false,
+        type: '',
+        signal: abortController.signal,
+      });
+      for (let matchIndex = 0; matchIndex < hit.matchIndex; matchIndex += 1) {
+        await this.dispatchFindAndWait(eventBus, findController, {
+          query: normalizedQuery,
+          findPrevious: false,
+          type: 'again',
+          signal: abortController.signal,
+        });
+      }
+    } finally {
+      if (this.selectionAbort === abortController) this.selectionAbort = null;
+    }
   }
 
   onEvent(listener: (event: ViewportEvent) => void): () => void {
@@ -227,8 +275,7 @@ export class PdfDocumentViewport implements DocumentViewport {
             : new Error(`Unknown PDF viewport cleanup failure: ${String(cause)}`);
       }
     };
-    this.searchAbort?.abort();
-    this.searchAbort = null;
+    this.abortSearches();
     const eventBus = this.eventBus;
     this.clearPendingPagesInit();
     this.colorRebindActive = false;
@@ -268,6 +315,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.events.clear();
     this.eventBus = null;
     this.linkService = null;
+    this.findController = null;
     this.viewer = null;
     this.viewerElement = null;
     this.root = null;
@@ -489,6 +537,61 @@ export class PdfDocumentViewport implements DocumentViewport {
       findPrevious,
       matchDiacritics: true,
     });
+  }
+
+  private dispatchFindAndWait(
+    eventBus: PdfEventBus,
+    findController: PdfFindController,
+    request: FindRequest,
+  ): Promise<void> {
+    const owner = this.requireMounted(this.root).win;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (failure?: Error): void => {
+        if (settled) return;
+        settled = true;
+        eventBus.off('updatefindcontrolstate', onState);
+        request.signal.removeEventListener('abort', onAbort);
+        owner.clearTimeout(timeout);
+        if (failure === undefined) resolve();
+        else reject(failure);
+      };
+      const onAbort = (): void => {
+        finish(this.selectionError('PDF search selection cancelled.', 'AbortError'));
+      };
+      const onState: PdfEventListener = (event) => {
+        const data = record(event);
+        if (data?.['source'] !== findController || data['rawQuery'] !== request.query) return;
+        const state = data['state'];
+        if (
+          state === this.pdfjsViewer.FindState.FOUND ||
+          state === this.pdfjsViewer.FindState.WRAPPED
+        )
+          finish();
+        else if (state === this.pdfjsViewer.FindState.NOT_FOUND)
+          finish(new Error(`PDF search could not find “${request.query}”.`));
+      };
+      const timeout = owner.setTimeout(() => {
+        finish(this.selectionError('PDF search selection timed out.', 'TimeoutError'));
+      }, FIND_SELECTION_TIMEOUT_MS);
+      eventBus.on('updatefindcontrolstate', onState);
+      request.signal.addEventListener('abort', onAbort, { once: true });
+      if (request.signal.aborted) onAbort();
+      else this.dispatchFind(request.query, request.findPrevious, request.type);
+    });
+  }
+
+  private abortSearches(): void {
+    this.searchAbort?.abort();
+    this.searchAbort = null;
+    this.selectionAbort?.abort();
+    this.selectionAbort = null;
+  }
+
+  private selectionError(message: string, name: 'AbortError' | 'TimeoutError'): Error {
+    const error = new Error(message);
+    error.name = name;
+    return error;
   }
 
   private requireMounted<T>(value: T | null): T {

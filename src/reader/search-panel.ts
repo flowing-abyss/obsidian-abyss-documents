@@ -21,7 +21,7 @@ export class SearchPanel {
   private readonly previous: HTMLButtonElement;
   private readonly next: HTMLButtonElement;
   private results: SearchResultSet = { query: '', hits: [], complete: true };
-  private visibleLimit = RESULT_BATCH_SIZE;
+  private windowStart = 0;
   private selectedIndex = -1;
 
   constructor(
@@ -54,21 +54,24 @@ export class SearchPanel {
 
   private bindEvents(): void {
     this.input.addEventListener('input', () => {
-      this.results = { query: this.input.value, hits: [], complete: false };
+      this.results = { query: this.input.value.trim(), hits: [], complete: false };
       this.selectedIndex = -1;
-      this.visibleLimit = RESULT_BATCH_SIZE;
+      this.windowStart = 0;
       this.render();
       this.callbacks.onQuery(this.input.value);
     });
-    this.input.addEventListener('keydown', (event) => {
+    this.root.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
+      event.stopPropagation();
       if (this.input.value.length > 0) {
         this.input.value = '';
         this.results = { query: '', hits: [], complete: true };
         this.selectedIndex = -1;
+        this.windowStart = 0;
         this.render();
         this.callbacks.onQuery('');
+        this.input.focus();
       } else this.callbacks.onClose();
     });
     this.previous.addEventListener('click', () => {
@@ -80,11 +83,12 @@ export class SearchPanel {
   }
 
   setResults(results: SearchResultSet): void {
-    if (results.query !== this.input.value) return;
+    if (results.query !== this.input.value.trim()) return;
     const selectedId = this.results.hits[this.selectedIndex]?.id;
     this.results = results;
     this.selectedIndex = this.nextSelectedIndex(results, selectedId);
     if (this.selectedIndex < 0 && results.hits.length > 0) this.selectedIndex = 0;
+    this.windowStart = this.windowStartFor(this.selectedIndex, results.hits.length);
     this.render();
   }
 
@@ -106,20 +110,26 @@ export class SearchPanel {
       this.count.textContent = `${hitCount} ${hitCount === 1 ? 'result' : 'results'}`;
     else this.count.textContent = `${hitCount}+ results`;
 
-    const visible = this.results.hits.slice(0, this.visibleLimit);
-    for (const [index, hit] of visible.entries()) this.list.append(this.resultButton(hit, index));
-    if (hitCount > visible.length) {
-      const more = ownerWindow(this.root).createEl('button');
-      more.type = 'button';
-      more.className = 'abyss-reader-search-more';
-      more.dataset['action'] = 'show-more-results';
-      more.textContent = `Show ${Math.min(RESULT_BATCH_SIZE, hitCount - visible.length)} more`;
-      more.addEventListener('click', () => {
-        this.visibleLimit += RESULT_BATCH_SIZE;
-        this.render();
-      });
-      this.list.append(more);
-    }
+    const end = Math.min(hitCount, this.windowStart + RESULT_BATCH_SIZE);
+    if (this.windowStart > 0)
+      this.list.append(
+        this.windowButton(
+          'show-previous-results',
+          `Show previous ${Math.min(RESULT_BATCH_SIZE, this.windowStart)}`,
+          Math.max(0, this.windowStart - RESULT_BATCH_SIZE),
+        ),
+      );
+    const visible = this.results.hits.slice(this.windowStart, end);
+    for (const [offset, hit] of visible.entries())
+      this.list.append(this.resultButton(hit, this.windowStart + offset));
+    if (end < hitCount)
+      this.list.append(
+        this.windowButton(
+          'show-next-results',
+          `Show next ${Math.min(RESULT_BATCH_SIZE, hitCount - end)}`,
+          end,
+        ),
+      );
     this.previous.disabled = hitCount === 0;
     this.next.disabled = hitCount === 0;
   }
@@ -156,12 +166,35 @@ export class SearchPanel {
     const hit = this.results.hits[index];
     if (hit === undefined) return;
     this.selectedIndex = index;
-    if (index >= this.visibleLimit) this.visibleLimit = index + 1;
+    this.windowStart = this.windowStartFor(index, this.results.hits.length);
     this.render();
     Array.from(this.list.querySelectorAll<HTMLElement>('[data-search-result]'))
       .find((element) => element.dataset['searchResult'] === hit.id)
       ?.focus();
     this.callbacks.onNavigate(hit, index, kind);
+  }
+
+  private windowStartFor(index: number, hitCount: number): number {
+    if (hitCount <= RESULT_BATCH_SIZE) return 0;
+    if (index >= 0 && (index < this.windowStart || index >= this.windowStart + RESULT_BATCH_SIZE))
+      return Math.floor(index / RESULT_BATCH_SIZE) * RESULT_BATCH_SIZE;
+    return Math.min(
+      this.windowStart,
+      Math.floor((hitCount - 1) / RESULT_BATCH_SIZE) * RESULT_BATCH_SIZE,
+    );
+  }
+
+  private windowButton(action: string, label: string, nextStart: number): HTMLButtonElement {
+    const button = ownerWindow(this.root).createEl('button');
+    button.type = 'button';
+    button.className = 'abyss-reader-search-more';
+    button.dataset['action'] = action;
+    button.textContent = label;
+    button.addEventListener('click', () => {
+      this.windowStart = nextStart;
+      this.render();
+    });
+    return button;
   }
 
   private iconButton(label: string, icon: 'chevron-down' | 'chevron-up'): HTMLButtonElement {

@@ -49,8 +49,10 @@ describe('SearchPanel', () => {
 
     panel.setResults(results('older query', 1, true));
     expect(panel.root.querySelectorAll('[data-search-result]')).toHaveLength(50);
-    panel.root.querySelector<HTMLButtonElement>('[data-action="show-more-results"]')?.click();
-    expect(panel.root.querySelectorAll('[data-search-result]')).toHaveLength(75);
+    panel.root.querySelector<HTMLButtonElement>('[data-action="show-next-results"]')?.click();
+    expect(panel.root.querySelectorAll('[data-search-result]')).toHaveLength(25);
+    panel.root.querySelector<HTMLButtonElement>('[data-action="show-previous-results"]')?.click();
+    expect(panel.root.querySelectorAll('[data-search-result]')).toHaveLength(50);
   });
 
   it('keeps the selected snippet, PDF occurrence direction, and page target synchronized', () => {
@@ -103,6 +105,34 @@ describe('SearchPanel', () => {
     expect(handlers.onClose).toHaveBeenCalledOnce();
   });
 
+  it('handles Escape from a focused result before returning focus to the input', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const handlers = callbacks();
+    const panel = new SearchPanel(host, handlers);
+    enterQuery(panel, 'needle');
+    panel.setResults(results('needle', 2, true));
+    const result = panel.root.querySelector<HTMLButtonElement>('[data-search-result]');
+    result?.focus();
+    const OwnerKeyboardEvent = (
+      panel.root.win as Window & {
+        KeyboardEvent: typeof KeyboardEvent;
+      }
+    ).KeyboardEvent;
+
+    result?.dispatchEvent(
+      new OwnerKeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(panel.input.value).toBe('');
+    expect(panel.root.doc.activeElement).toBe(panel.input);
+    expect(handlers.onQuery).toHaveBeenLastCalledWith('');
+    expect(handlers.onClose).not.toHaveBeenCalled();
+
+    panel.input.dispatchEvent(new OwnerKeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+    expect(handlers.onClose).toHaveBeenCalledOnce();
+  });
+
   it('covers empty, singular, next, and retained-selection states', () => {
     const handlers = callbacks();
     const panel = new SearchPanel(createDiv(), handlers);
@@ -135,17 +165,21 @@ describe('SearchPanel', () => {
     expect(panel.root.querySelector('[data-search-count]')?.textContent).toBe('0 results');
   });
 
-  it('reveals the selected result when next navigation crosses the render limit', () => {
+  it('keeps a fixed result-row window while paging and navigating 500 hits', () => {
     const handlers = callbacks();
     const panel = new SearchPanel(createDiv(), handlers);
     enterQuery(panel, 'many');
-    panel.setResults(results('many', 75, true));
+    panel.setResults(results('many', 500, true));
+    for (let page = 0; page < 8; page += 1) {
+      panel.root.querySelector<HTMLButtonElement>('[data-action="show-next-results"]')?.click();
+      expect(panel.root.querySelectorAll('[data-search-result]').length).toBeLessThanOrEqual(50);
+    }
     const next = panel.root.querySelector<HTMLButtonElement>('[data-action="next-result"]');
-    for (let index = 0; index < 50; index += 1) next?.click();
+    for (let index = 0; index < 120; index += 1) {
+      next?.click();
+      expect(panel.root.querySelectorAll('[data-search-result]').length).toBeLessThanOrEqual(50);
+    }
 
-    expect(panel.root.querySelectorAll('[data-search-result]')).toHaveLength(51);
-    expect(
-      panel.root.querySelectorAll('[data-search-result]')[50]?.getAttribute('aria-current'),
-    ).toBe('true');
+    expect(panel.root.querySelectorAll('[data-search-result]')).toHaveLength(50);
   });
 });

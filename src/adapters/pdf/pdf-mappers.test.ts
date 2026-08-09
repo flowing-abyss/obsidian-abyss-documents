@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
-import { mapPdfOutline } from './pdf-mappers.js';
+import { isPdfAbortFailure, mapPdfOpenFailure, mapPdfOutline } from './pdf-mappers.js';
 
 function pdfDocument(): PDFDocumentProxy {
   return {
@@ -16,6 +16,20 @@ function pdfDocument(): PDFDocumentProxy {
 }
 
 describe('mapPdfOutline', () => {
+  it('recognizes legacy numeric abort codes with a non-string name', () => {
+    expect(isPdfAbortFailure({ name: 42, code: 20 })).toBe(true);
+  });
+
+  it('uses the password-required message when a password code is not numeric', () => {
+    const failure = mapPdfOpenFailure(
+      'Guide.pdf',
+      { name: 'PasswordException', code: 'unknown' },
+      new AbortController().signal,
+    );
+
+    expect(failure.message).toBe('This PDF requires a password. Try again and enter the password.');
+  });
+
   it('maps named and explicit destinations recursively in source order', async () => {
     const pdf = pdfDocument();
 
@@ -62,5 +76,13 @@ describe('mapPdfOutline', () => {
     ]);
 
     expect(outline.map((item) => item.target)).toEqual([null, null, null]);
+  });
+
+  it('omits invalid optional XYZ coordinates', async () => {
+    const outline = await mapPdfOutline(pdfDocument(), [
+      { title: 'Position', dest: [2, { name: 'XYZ' }, null, Number.POSITIVE_INFINITY], items: [] },
+    ]);
+
+    expect(outline[0]?.target).toEqual({ pageIndex: 2 });
   });
 });

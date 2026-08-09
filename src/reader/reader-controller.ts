@@ -12,7 +12,6 @@ import type { ReadingProfileId } from '../document-core/reading.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
-import type { SearchNavigationKind } from './search-panel.js';
 import type { ReaderSidebarCallbacks, ReaderSidebarTab } from './sidebar.js';
 
 export type ShellFactory = (
@@ -43,7 +42,7 @@ export class ReaderController {
   private currentProfile: ReadingProfileId = 'auto';
   private outlineLoadedFor: DocumentSession | null = null;
   private outlineLoadingFor: DocumentSession | null = null;
-  private selectedSearchIndex = -1;
+  private currentSearchQuery = '';
 
   constructor(
     private readonly registry: DocumentAdapterRegistry,
@@ -129,7 +128,7 @@ export class ReaderController {
     shell: ReaderShell,
   ): () => void {
     this.currentPageIndex = 0;
-    this.selectedSearchIndex = -1;
+    this.currentSearchQuery = '';
     this.currentProfile = this.initialProfile(session.descriptor.fingerprint);
     this.profileService.setCustom(this.profileState.reading.custom);
     viewport.setReadingColors(
@@ -183,7 +182,7 @@ export class ReaderController {
     this.unsubscribeViewport = null;
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
-    this.selectedSearchIndex = -1;
+    this.currentSearchQuery = '';
 
     let failure = this.tryCleanup(unsubscribeViewport);
     const lifecycleFailure = await this.releasePartial(viewport, session);
@@ -259,16 +258,20 @@ export class ReaderController {
       onClose: () => {
         if (this.shell === shell && this.viewport === viewport) viewport.focus();
       },
+      onTabChange: (nextTab) => {
+        if (nextTab === 'outline' && this.session === session && this.shell === shell)
+          this.loadOutline(session, shell);
+      },
       onOutlineNavigate: (location) => {
         this.navigateToLocation(location);
       },
-      onSearchNavigate: (hit, index, kind) => {
-        this.navigateSearchResult(hit, index, kind);
+      onSearchNavigate: (hit) => {
+        this.navigateSearchResult(hit);
       },
       onSearchQuery: (query) => {
         if (this.viewport !== viewport) return;
-        this.selectedSearchIndex = -1;
-        viewport.search(query);
+        this.currentSearchQuery = query.trim();
+        viewport.search(this.currentSearchQuery);
       },
     };
     const sidebar = shell.openSidebar(tab, callbacks);
@@ -300,17 +303,26 @@ export class ReaderController {
       });
   }
 
-  private navigateSearchResult(hit: SearchHit, index: number, kind: SearchNavigationKind): void {
+  private navigateSearchResult(hit: SearchHit): void {
     const viewport = this.viewport;
     if (viewport === null) return;
-    if (kind === 'direct') {
-      const current = this.selectedSearchIndex < 0 ? 0 : this.selectedSearchIndex;
-      const direction = index >= current ? 'next' : 'previous';
-      for (let offset = 0; offset < Math.abs(index - current); offset += 1)
-        viewport.searchAgain(direction);
-    } else viewport.searchAgain(kind);
-    this.selectedSearchIndex = index;
-    this.navigateToLocation({ pageIndex: hit.pageIndex });
+    this.selectSearchResult(viewport, hit).catch((cause: unknown) => {
+      console.error('[abyss-documents] Failed to contain PDF search selection', { cause });
+    });
+  }
+
+  private async selectSearchResult(viewport: DocumentViewport, hit: SearchHit): Promise<void> {
+    try {
+      await viewport.selectSearchHit(hit, this.currentSearchQuery);
+    } catch (cause) {
+      if (this.viewport !== viewport || (cause instanceof Error && cause.name === 'AbortError'))
+        return;
+      new Notice(`Could not select search result: ${this.reason(cause)}`);
+      console.error('[abyss-documents] Failed to select PDF search result', {
+        hitId: hit.id,
+        cause,
+      });
+    }
   }
 
   private navigateTo(pageIndex: number): void {
@@ -418,8 +430,6 @@ export class ReaderController {
     shell: ReaderShell,
     results: Extract<ViewportEvent, { readonly type: 'search-results' }>['results'],
   ): void {
-    if (results.query.length > 0 && results.hits.length > 0 && this.selectedSearchIndex < 0)
-      this.selectedSearchIndex = 0;
     shell.sidebar?.searchPanel.setResults(results);
   }
 
@@ -488,7 +498,12 @@ export class ReaderController {
   }
 
   private reason(cause: unknown): string {
-    return cause instanceof Error ? cause.message : String(cause);
+    if (cause instanceof Error) return cause.message;
+    if (typeof cause === 'object' && cause !== null && 'message' in cause) {
+      const message = (cause as { readonly message?: unknown }).message;
+      if (typeof message === 'string') return message;
+    }
+    return String(cause);
   }
 }
 

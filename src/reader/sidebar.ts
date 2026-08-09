@@ -12,6 +12,7 @@ export type ReaderSidebarTab = 'outline' | 'search';
 
 export interface ReaderSidebarCallbacks {
   readonly onClose: () => void;
+  readonly onTabChange: (tab: ReaderSidebarTab) => void;
   readonly onOutlineNavigate: (location: DocumentLocation) => void;
   readonly onSearchNavigate: (hit: SearchHit, index: number, kind: SearchNavigationKind) => void;
   readonly onSearchQuery: (query: string) => void;
@@ -95,6 +96,7 @@ export class ReaderSidebar {
     button.addEventListener('click', () => {
       this.activateTab(tab);
       if (tab === 'search') this.searchPanel.focus();
+      this.callbacks.onTabChange(tab);
     });
     this.tabButtons.set(tab, button);
     return button;

@@ -37,6 +37,7 @@ function viewport(pageCount = 3) {
   const focus = vi.fn();
   const search = vi.fn();
   const searchAgain = vi.fn();
+  const selectSearchHit = vi.fn(async () => undefined);
   const setScale = vi.fn();
   const setReadingColors = vi.fn();
   let listener: Parameters<DocumentViewport['onEvent']>[0] | null = null;
@@ -49,6 +50,7 @@ function viewport(pageCount = 3) {
     setReadingColors,
     search,
     searchAgain,
+    selectSearchHit,
     onEvent: vi.fn((nextListener: Parameters<DocumentViewport['onEvent']>[0]) => {
       listener = nextListener;
       return unsubscribe;
@@ -66,6 +68,7 @@ function viewport(pageCount = 3) {
     mount,
     search,
     searchAgain,
+    selectSearchHit,
     setReadingColors,
     setScale,
     unsubscribe,
@@ -586,20 +589,110 @@ describe('ReaderController', () => {
       ?.click();
 
     expect(createdViewport.search).toHaveBeenCalledWith('needle');
-    expect(createdViewport.searchAgain).toHaveBeenCalledWith('next');
-    expect(createdViewport.goTo).toHaveBeenLastCalledWith({ pageIndex: 2 });
+    await vi.waitFor(() => {
+      expect(createdViewport.selectSearchHit).toHaveBeenCalledWith(
+        { id: 'second', pageIndex: 2, matchIndex: 0, preview: 'Second needle' },
+        'needle',
+      );
+    });
+    expect(createdViewport.goTo).not.toHaveBeenCalled();
 
     shell.created.sidebar?.searchPanel.root
       .querySelector<HTMLButtonElement>('[data-action="previous-result"]')
       ?.click();
-    expect(createdViewport.searchAgain).toHaveBeenLastCalledWith('previous');
-    expect(createdViewport.goTo).toHaveBeenLastCalledWith({ pageIndex: 0 });
+    await vi.waitFor(() => {
+      expect(createdViewport.selectSearchHit).toHaveBeenLastCalledWith(
+        { id: 'first', pageIndex: 0, matchIndex: 0, preview: 'First needle' },
+        'needle',
+      );
+    });
 
     input.dispatchEvent(new OwnerKeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
     expect(createdViewport.search).toHaveBeenLastCalledWith('');
     input.dispatchEvent(new OwnerKeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
     expect(shell.created.sidebar?.isOpen).toBe(false);
     expect(createdViewport.focus).toHaveBeenCalledOnce();
+  });
+
+  it('loads the outline once when its tab is selected after Search opened first', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const getOutline = vi.fn(async () => [
+      { id: 'chapter', label: 'Late outline', target: { pageIndex: 1 }, children: [] },
+    ]);
+    createdSession.value.getOutline = getOutline;
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    controller.searchDocument();
+
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="outline"]')
+      ?.click();
+
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.outlinePanel.root.textContent).toContain('Late outline');
+    });
+    expect(getOutline).toHaveBeenCalledOnce();
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="search"]')
+      ?.click();
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="outline"]')
+      ?.click();
+    expect(getOutline).toHaveBeenCalledOnce();
+  });
+
+  it('contains a timed-out search selection at the active reader boundary', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const cause = new DOMException('PDF search selection timed out.', 'TimeoutError');
+    createdViewport.selectSearchHit.mockRejectedValueOnce(cause);
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    controller.searchDocument();
+    const input = shell.created.sidebar?.searchPanel.input;
+    if (input === undefined) throw new Error('Expected search input.');
+    const OwnerEvent = (input.win as Window & { Event: typeof Event }).Event;
+    input.value = 'needle';
+    input.dispatchEvent(new OwnerEvent('input', { bubbles: true }));
+    createdViewport.emit({
+      type: 'search-results',
+      results: {
+        query: 'needle',
+        complete: true,
+        hits: [{ id: 'hit', pageIndex: 1, matchIndex: 0, preview: 'Needle' }],
+      },
+    });
+    shell.created.sidebar?.searchPanel.root
+      .querySelector<HTMLButtonElement>('[data-search-result]')
+      ?.click();
+
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledWith(
+        'Could not select search result: PDF search selection timed out.',
+        undefined,
+      );
+    });
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to select PDF search result', {
+      hitId: 'hit',
+      cause,
+    });
   });
 
   it('ignores reader commands and render errors when no interactive action is needed', async () => {

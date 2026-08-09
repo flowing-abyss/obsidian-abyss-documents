@@ -144,6 +144,7 @@ export interface DocumentViewport {
   setReadingColors(colors: ResolvedReadingColors): void;
   search(query: string): void;
   searchAgain(direction: 'next' | 'previous'): void;
+  selectSearchHit(hit: SearchHit, query: string): Promise<void>;
   onEvent(listener: (event: ViewportEvent) => void): () => void;
   focus(): void;
   destroy(): Promise<void>;
@@ -842,12 +843,12 @@ git commit -m "feat: add PDF navigation and reading profiles"
 
 - Produces: `ReaderSidebar.open(tab)`, `ReaderSidebar.close()`, `OutlinePanel.render(items)`, `SearchPanel.setResults(results)`.
 - Adds commands: `show-outline`, `show-annotations` only in later plan, and `search-document` without default hotkeys.
-- Consumes: `DocumentSession.getOutline`, `DocumentViewport.search/searchAgain/goTo`.
+- Consumes: `DocumentSession.getOutline`, `DocumentViewport.search/selectSearchHit`.
 
 **Required sources:**
 
 - Obsidian `Plugin.addCommand` and command naming rules from the [plugin self-critique checklist](https://docs.obsidian.md/oo/plugin) — no plugin-name prefix and no default hotkeys.
-- PDF.js `PDFFindController` from installed 6.2.108 viewer declarations — adapter-level document text search.
+- PDF.js 6.2.108 installed `pdf_find_controller.d.ts` and `pdf_viewer.mjs` — public `PDFLinkService.page`, `find`, and `updatefindcontrolstate` synchronization for adapter-level document text search.
 
 **Risk checks:**
 
@@ -883,7 +884,7 @@ The toolbar toggle opens the last selected tab. `search-document` and view-local
 
 - [ ] **Step 4: Implement outline and Search behaviors**
 
-Outline renders a recursive tree with native chevrons, roving tabindex, Enter navigation, and current-location state. Search has one input, previous/next, count, and virtualized/limited snippets. Each new query aborts the previous `PdfTextSearch` scan; partial results update the count/list in page order, while `PDFFindController` highlights and navigates the selected occurrence. Empty query aborts extraction and clears PDF.js matches. Escape first clears the query, then closes Search and returns focus to the document. Tests synchronize a clicked snippet, PDF.js active match, and current page, and assert no private PDF.js property access. No annotation terminology appears.
+Outline renders a recursive tree with native chevrons, roving tabindex, Enter navigation, and current-location state. Search has one input, previous/next, count, and a fixed-size moving snippet window. Each new query trims once, aborts the previous `PdfTextSearch` scan, and uses that normalized query for PDF.js find. Partial results update the count/list in page order. Selecting a hit calls `DocumentViewport.selectSearchHit`: the PDF adapter cancels any stale selection, sets the public `PDFLinkService.page`, dispatches a fresh public `find`, awaits a successful `updatefindcontrolstate`, then dispatches and awaits one `again` event per page-local `matchIndex`. The latest selection wins; timeout, abort, and destroy remove listeners, `highlightAll` stays false, and no private PDF.js fields are read. Empty query aborts extraction and clears PDF.js matches. Escape from anywhere in Search first clears the query and focuses the input, then closes Search and returns focus to the document. Tests synchronize a clicked snippet, the delayed PDF.js active match, and current page. No annotation terminology appears.
 
 - [ ] **Step 5: Run focused tests and task gate**
 

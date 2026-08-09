@@ -62,6 +62,7 @@ function viewport(): DocumentViewport {
     setReadingColors: vi.fn(),
     search: vi.fn(),
     searchAgain: vi.fn(),
+    selectSearchHit: vi.fn(async () => undefined),
     onEvent: vi.fn(() => () => undefined),
     focus: vi.fn(),
     destroy: vi.fn(async () => undefined),

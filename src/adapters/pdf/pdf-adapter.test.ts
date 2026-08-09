@@ -30,6 +30,12 @@ function deferred<T>(): Deferred<T> {
   return { promise, reject, resolve };
 }
 
+function rejectedWith<T>(reason: unknown): Promise<T> {
+  return new Promise<T>((_resolve, reject) => {
+    Reflect.apply(reject, undefined, [reason]);
+  });
+}
+
 function pdf(overrides: Partial<PDFDocumentProxy> = {}): PDFDocumentProxy {
   return {
     fingerprints: ['fingerprint', null],
@@ -56,11 +62,7 @@ function adapterFixture(options: {
   if (options.loadFailure === undefined) {
     defaultLoadingPromise = Promise.resolve(options.pdf ?? pdf());
   } else {
-    const failure =
-      options.loadFailure instanceof Error
-        ? options.loadFailure
-        : new Error('Unknown fixture failure.');
-    defaultLoadingPromise = Promise.reject(failure);
+    defaultLoadingPromise = rejectedWith(options.loadFailure);
   }
   const loadingPromise = options.loadingPromise ?? defaultLoadingPromise;
   const getDocument = vi.fn(() => ({ promise: loadingPromise, destroy }));
@@ -152,6 +154,30 @@ describe('PdfDocumentAdapter', () => {
 
     await expect(opening).rejects.toMatchObject({ name: 'DocumentCancelledError' });
     expect(fixture.destroy).toHaveBeenCalledOnce();
+    pending.resolve(pdf());
+  });
+
+  it('preserves a non-Error PDF.js loading rejection as the typed cause', async () => {
+    const { adapter } = adapterFixture({ loadFailure: 'raw loading rejection' });
+
+    await expect(adapter.open(file('Guide.pdf'), AbortSignal.timeout(1_000))).rejects.toMatchObject(
+      { name: 'DocumentOpenError', cause: 'raw loading rejection' },
+    );
+  });
+
+  it('keeps cancellation primary when destroying an aborted loading task also fails', async () => {
+    const pending = deferred<PDFDocumentProxy>();
+    const fixture = adapterFixture({ loadingPromise: pending.promise });
+    fixture.destroy.mockRejectedValueOnce(new Error('destroy failed'));
+    const controller = new AbortController();
+
+    const opening = fixture.adapter.open(file('Guide.pdf'), controller.signal);
+    await vi.waitFor(() => {
+      expect(fixture.getDocument).toHaveBeenCalledOnce();
+    });
+    controller.abort('non-error abort reason');
+
+    await expect(opening).rejects.toMatchObject({ name: 'DocumentCancelledError' });
     pending.resolve(pdf());
   });
 

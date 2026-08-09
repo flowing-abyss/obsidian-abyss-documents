@@ -16,6 +16,12 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
+function rejectedWith<T>(reason: unknown): Promise<T> {
+  return new Promise<T>((_resolve, reject) => {
+    Reflect.apply(reject, undefined, [reason]);
+  });
+}
+
 function content(...items: Array<string | { str: string; hasEOL: boolean }>): PdfTextContent {
   return {
     items: items.map((item) => {
@@ -34,15 +40,19 @@ function content(...items: Array<string | { str: string; hasEOL: boolean }>): Pd
   };
 }
 
-function pdfWithPages(pages: Array<PdfTextContent | Promise<PdfTextContent>>): {
+function pdfWithPages(
+  pages: Array<PdfTextContent | Promise<PdfTextContent>>,
+  onGetPage: () => void = () => undefined,
+): {
   getPage: ReturnType<typeof vi.fn>;
   pdf: PDFDocumentProxy;
   textCalls: Array<ReturnType<typeof vi.fn>>;
 } {
   const textCalls = pages.map((page) => vi.fn(async () => page));
-  const getPage = vi.fn(async (pageNumber: number) => ({
-    getTextContent: textCalls[pageNumber - 1],
-  }));
+  const getPage = vi.fn(async (pageNumber: number) => {
+    onGetPage();
+    return { getTextContent: textCalls[pageNumber - 1] };
+  });
   return {
     getPage,
     pdf: { numPages: pages.length, getPage } as unknown as PDFDocumentProxy,
@@ -124,6 +134,67 @@ describe('PdfTextSearch', () => {
     expect(result.hits[0]?.preview).toBe('first line second line');
   });
 
+  it('ignores marked-content structure while extracting searchable text', async () => {
+    const marked = {
+      items: [{ type: 'beginMarkedContent' }, { str: 'needle', hasEOL: false }],
+      styles: {},
+      lang: null,
+    } satisfies PdfTextContent;
+    const { pdf } = pdfWithPages([marked]);
+
+    const result = await new PdfTextSearch(pdf).search(
+      'needle',
+      AbortSignal.timeout(1_000),
+      () => {},
+    );
+
+    expect(result.hits).toHaveLength(1);
+  });
+
+  it('maps a non-Error page extraction rejection to a stable error', async () => {
+    const { pdf } = pdfWithPages([rejectedWith('raw extraction rejection')]);
+
+    await expect(
+      new PdfTextSearch(pdf).search('needle', AbortSignal.timeout(1_000), () => {}),
+    ).rejects.toThrow('Unknown PDF text extraction failure.');
+  });
+
+  it('preserves an Error page extraction rejection', async () => {
+    const cause = new Error('page extraction failed');
+    const { pdf } = pdfWithPages([Promise.reject(cause)]);
+
+    await expect(
+      new PdfTextSearch(pdf).search('needle', AbortSignal.timeout(1_000), () => {}),
+    ).rejects.toBe(cause);
+  });
+
+  it('stops when the caller aborts as page extraction begins', async () => {
+    const controller = new AbortController();
+    const fixture = pdfWithPages([content('needle')], () => {
+      controller.abort();
+    });
+
+    await expect(
+      new PdfTextSearch(fixture.pdf).search('needle', controller.signal, () => {}),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('completes a non-empty search in an empty PDF', async () => {
+    const { pdf } = pdfWithPages([]);
+    const updates: SearchResultSet[] = [];
+
+    const result = await new PdfTextSearch(pdf).search(
+      'needle',
+      new AbortController().signal,
+      (update) => {
+        updates.push(update);
+      },
+    );
+
+    expect(result).toEqual({ query: 'needle', hits: [], complete: true });
+    expect(updates).toEqual([result]);
+  });
+
   it('emits immutable partial results in page order while scanning', async () => {
     const { pdf } = pdfWithPages([
       content('needle first'),
@@ -181,6 +252,7 @@ describe('PdfTextSearch', () => {
     expect(fixture.getPage).toHaveBeenCalledOnce();
     expect(search.cachedPageCount).toBe(1);
 
+    search.dispose();
     search.dispose();
 
     expect(search.cachedPageCount).toBe(0);
