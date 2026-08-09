@@ -21,7 +21,8 @@ export async function prefixPdfStyles(pdfjsStyles, assetBasePath = dirname(PDFJS
     prefixSelector({
       prefix: SCOPE_SELECTOR,
       transform(_prefix, selector, prefixedSelector, _filePath, rule) {
-        return isNestedRule(rule) ? selector : prefixedSelector;
+        if (isNestedRule(rule)) return selector;
+        return selector.trim() === ':root' ? SCOPE_SELECTOR : prefixedSelector;
       },
     }),
   ]).process(pdfjsStyles, { from: PDFJS_STYLES_PATH });

@@ -47,14 +47,16 @@ export class PdfRuntimeLoader {
 
     const generation = this.generation;
     const pending = this.loadOnce();
-    const settled = pending.then((runtime) => {
-      if (generation !== this.generation) throw new DOMException('Disposed', 'AbortError');
-      return runtime;
-    });
-    const guarded = settled.catch((error: unknown) => {
-      if (this.loadPromise === guarded) this.loadPromise = null;
-      throw error;
-    });
+    const guarded = pending.then(
+      (runtime) => {
+        if (generation !== this.generation) throw new DOMException('Disposed', 'AbortError');
+        return runtime;
+      },
+      (error: unknown) => {
+        if (this.loadPromise === guarded) this.loadPromise = null;
+        throw error;
+      },
+    );
     this.loadPromise = guarded;
     return guarded;
   }

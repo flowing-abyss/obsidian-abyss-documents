@@ -147,6 +147,49 @@ describe('PdfRuntimeLoader', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:pdf-worker');
   });
 
+  it('settles through one guarded stage while preserving an immediate next generation', async () => {
+    const catchPromise = vi.spyOn(Promise.prototype, 'catch');
+    const activeUrls = new Set<string>();
+    const firstImports = deferred<ReturnType<typeof runtimeDependencies>>();
+    const secondImports = deferred<ReturnType<typeof runtimeDependencies>>();
+    const importRuntime = vi
+      .fn()
+      .mockReturnValueOnce(firstImports.promise)
+      .mockReturnValueOnce(secondImports.promise);
+    let sequence = 0;
+    const state: { currentLoad?: Promise<unknown> } = {};
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => {
+        const workerUrl = `blob:pdf-worker-${sequence}`;
+        sequence += 1;
+        activeUrls.add(workerUrl);
+        if (sequence === 1) {
+          queueMicrotask(() => {
+            loader.dispose();
+            state.currentLoad = loader.load();
+          });
+        }
+        return workerUrl;
+      }),
+      revokeObjectURL: vi.fn((url: string) => activeUrls.delete(url)),
+    });
+    const loader = new PdfRuntimeLoader(importRuntime);
+
+    const staleLoad = loader.load();
+    expect(catchPromise).not.toHaveBeenCalled();
+    firstImports.resolve(runtimeDependencies());
+
+    await expect(staleLoad).rejects.toMatchObject({ name: 'AbortError' });
+    expect(loader.load()).toBe(state.currentLoad);
+    expect(activeUrls).toHaveLength(0);
+
+    secondImports.resolve(runtimeDependencies());
+    await expect(state.currentLoad).resolves.toMatchObject({ version: PDFJS_VERSION });
+    expect(activeUrls).toHaveLength(1);
+    loader.dispose();
+    expect(activeUrls).toHaveLength(0);
+  });
+
   it('does not let a stale failed load erase an immediate reload', async () => {
     const { activeUrls } = stubWorkerUrls();
     const firstImports = deferred<ReturnType<typeof runtimeDependencies>>();

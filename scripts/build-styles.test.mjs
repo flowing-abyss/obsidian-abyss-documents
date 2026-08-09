@@ -43,6 +43,17 @@ describe('PDF.js style build', () => {
     expect(() => assertNoRelativeUrls(output)).not.toThrow();
   });
 
+  it('maps :root to the plugin wrapper without damaging selector lists', async () => {
+    const output = await prefixPdfStyles(':root, .messageBar { --pdfjs-test: 1; }');
+    const [rule] = postcss.parse(output).nodes;
+
+    expect(rule.selectors.map((selector) => selector.trim())).toEqual([
+      '.abyss-documents',
+      '.abyss-documents .messageBar',
+    ]);
+    expect(output).not.toContain('.abyss-documents :root');
+  });
+
   it('keeps production messageBar and text-layer nesting intact with no relative assets', async () => {
     const output = await readFile('styles.css', 'utf8');
     const root = postcss.parse(output);
@@ -54,6 +65,17 @@ describe('PDF.js style build', () => {
     expect(selectors).toContain('&::before');
     expect(selectors).toContain('.abyss-documents .textLayer');
     expect(selectors).toContain('&.highlighting');
+    expect(selectors).toContain('.abyss-documents');
+    expect(selectors).not.toContain('.abyss-documents :root');
+    const wrapperVariables = root.nodes.find(
+      (node) =>
+        node.type === 'rule' &&
+        node.selector === '.abyss-documents' &&
+        node.nodes.some(
+          (child) => child.type === 'decl' && child.prop === '--viewer-container-height',
+        ),
+    );
+    expect(wrapperVariables).toBeDefined();
     expect(() => assertNoRelativeUrls(output)).not.toThrow();
   });
 });

@@ -1201,13 +1201,13 @@
   }
 }
 
-.abyss-documents :root {
+.abyss-documents {
   --xfa-unfocused-field-background: url("data:image/svg+xml;charset=UTF-8,<svg width='1px' height='1px' xmlns='http://www.w3.org/2000/svg'><rect width='100%' height='100%' style='fill:rgba(0, 54, 255, 0.13);'/></svg>");
   --xfa-focus-outline: auto;
 }
 
 @media screen and (forced-colors: active) {
-  .abyss-documents :root {
+  .abyss-documents {
     --xfa-focus-outline: 2px solid CanvasText;
   }
   .abyss-documents .xfaLayer *:required {
@@ -1822,7 +1822,7 @@
   }
 }
 
-.abyss-documents :root {
+.abyss-documents {
   --clear-signature-button-icon: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgY2xpcC1ydWxlPSJldmVub2RkIgogICAgICAgIGQ9Ik0xMSAzSDEzLjZDMTQgMyAxNC4zIDMuMyAxNC4zIDMuNkMxNC4zIDMuOSAxNCA0LjIgMTMuNyA0LjJIMTMuM1YxNEMxMy4zIDE1LjEgMTIuNCAxNiAxMS4zIDE2SDQuODAwMDVDMy43MDAwNSAxNiAyLjgwMDA1IDE1LjEgMi44MDAwNSAxNFY0LjJIMi40MDAwNUMyLjAwMDA1IDQuMiAxLjgwMDA1IDQgMS44MDAwNSAzLjZDMS44MDAwNSAzLjIgMi4wMDAwNSAzIDIuNDAwMDUgM0g1LjAwMDA1VjJDNS4wMDAwNSAwLjkgNS45MDAwNSAwIDcuMDAwMDUgMEg5LjAwMDA1QzEwLjEgMCAxMSAwLjkgMTEgMlYzWk02LjkwMDA1IDEuMkw2LjMwMDA1IDEuOFYzSDkuODAwMDVWMS44TDkuMjAwMDUgMS4ySDYuOTAwMDVaTTExLjQgMTQuN0wxMiAxNC4xVjQuMkg0LjAwMDA1VjE0LjFMNC42MDAwNSAxNC43SDExLjRaTTcuMDAwMDUgMTIuNEM3LjAwMDA1IDEyLjcgNi43MDAwNSAxMyA2LjQwMDA1IDEzQzYuMTAwMDUgMTMgNS44MDAwNSAxMi43IDUuODAwMDUgMTIuNFY3LjZDNS43MDAwNSA3LjMgNi4wMDAwNSA3IDYuNDAwMDUgN0M2LjgwMDA1IDcgNy4wMDAwNSA3LjMgNy4wMDAwNSA3LjZWMTIuNFpNMTAuMjAwMSAxMi40QzEwLjIwMDEgMTIuNyA5LjkwMDA2IDEzIDkuNjAwMDYgMTNDOS4zMDAwNiAxMyA5LjAwMDA2IDEyLjcgOS4wMDAwNiAxMi40VjcuNkM5LjAwMDA2IDcuMyA5LjMwMDA2IDcgOS42MDAwNiA3QzkuOTAwMDYgNyAxMC4yMDAxIDcuMyAxMC4yMDAxIDcuNlYxMi40WiIKICAgICAgICBmaWxsPSJibGFjayIgLz4KPC9zdmc+);
   --signature-bg: light-dark(#f9f9fb, #2b2a33);
   --signature-hover-bg: light-dark(#f0f0f4, var(--signature-bg));
@@ -3308,7 +3308,7 @@
   }
 }
 
-.abyss-documents :root {
+.abyss-documents {
   --editor-toolbar-vert-offset: 6px;
   --outline-width: 2px;
   --outline-color: #0060df;
@@ -3376,7 +3376,7 @@
 }
 
 @media (min-resolution: 1.1dppx) {
-  .abyss-documents :root {
+  .abyss-documents {
     --editorFreeText-editing-cursor:
       url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTEyIDIuNzVIMTIuNVYyLjI1VjFWMC41SDEySDEwLjM1OEM5LjkxMTY1IDAuNSA5LjQ3NzMxIDAuNjI1NjYxIDkuMDk5ODkgMC44NjA0NDJMOS4wOTg4NiAwLjg2MTA4N0w4IDEuNTQ4MzdMNi44OTk5NyAwLjg2MDk3OUw2Ljg5OTExIDAuODYwNDQzQzYuNTIxOCAwLjYyNTczNCA2LjA4NzQ4IDAuNSA1LjY0MiAwLjVINEgzLjVWMVYyLjI1VjIuNzVINEg1LjY0MkM1LjY2NDc4IDIuNzUgNS42ODg1IDIuNzU2NDEgNS43MTAwOCAyLjc2OTY4QzUuNzEwMjMgMi43Njk3NyA1LjcxMDM4IDIuNzY5ODYgNS43MTA1MyAyLjc2OTk1TDYuODE3IDMuNDYxQzYuODE3MDQgMy40NjEwMyA2LjgxNzA5IDMuNDYxMDUgNi44MTcxMyAzLjQ2MTA4QzYuODE3MTMgMy40NjEwOCA2LjgxNzEzIDMuNDYxMDggNi44MTcxNCAzLjQ2MTA5QzYuODU1MiAzLjQ4NDk0IDYuODc2IDMuNTIyODUgNi44NzYgMy41NjdWOFYxMi40MzNDNi44NzYgMTIuNDc3MSA2Ljg1NTIzIDEyLjUxNSA2LjgxNzIyIDEyLjUzODlDNi44MTcxNSAxMi41Mzg5IDYuODE3MDcgMTIuNTM5IDYuODE3IDEyLjUzOUw1LjcwOTUzIDEzLjIzQzUuNzA5NDEgMTMuMjMwMSA1LjcwOTI5IDEzLjIzMDIgNS43MDkxNyAxMy4yMzAzQzUuNjg3MjMgMTMuMjQzOCA1LjY2NDQgMTMuMjUgNS42NDEgMTMuMjVINEgzLjVWMTMuNzVWMTVWMTUuNUg0SDUuNjQyQzYuMDg4MzUgMTUuNSA2LjUyMjY5IDE1LjM3NDMgNi45MDAxMSAxNS4xMzk2TDYuOTAwODYgMTUuMTM5MUw4IDE0LjQ1MjZMOS4xMDAwMyAxNS4xNEw5LjEwMDg5IDE1LjE0MDZDOS40NzgzMSAxNS4zNzUzIDkuOTEyNjUgMTUuNTAxIDEwLjM1OSAxNS41MDFIMTJIMTIuNVYxNS4wMDFWMTMuNzUxVjEzLjI1MUgxMkgxMC4zNThDMTAuMzM1MiAxMy4yNTEgMTAuMzExNSAxMy4yNDQ2IDEwLjI4OTkgMTMuMjMxM0MxMC4yODk3IDEzLjIzMTIgMTAuMjg5NiAxMy4yMzExIDEwLjI4OTUgMTMuMjMxTDkuMTgzIDEyLjU0QzkuMTgyOTggMTIuNTQgOS4xODI5NSAxMi41NCA5LjE4MjkzIDEyLjU0QzkuMTgyOTEgMTIuNTM5OSA5LjE4Mjg4IDEyLjUzOTkgOS4xODI4NiAxMi41Mzk5QzkuMTQ2MTUgMTIuNTE2OSA5LjEyNSAxMi40Nzk3IDkuMTI1IDEyLjQzNFY4VjMuNTY3QzkuMTI1IDMuNTIyNjYgOS4xNDYwMyAzLjQ4NDQxIDkuMTgzNjQgMy40NjA2QzkuMTgzNzcgMy40NjA1MiA5LjE4MzkgMy40NjA0MyA5LjE4NDA0IDMuNDYwMzVMMTAuMjg5NSAyLjc2OTk1QzEwLjI4OTYgMi43Njk4NSAxMC4yODk4IDIuNzY5NzUgMTAuMjg5OSAyLjc2OTY2QzEwLjMxMTkgMi43NTYxOSAxMC4zMzQ2IDIuNzUgMTAuMzU4IDIuNzVIMTJaIiBmaWxsPSJibGFjayIgc3Ryb2tlPSJ3aGl0ZSIvPgo8L3N2Zz4K)
         0 16,
@@ -3385,7 +3385,7 @@
 }
 
 @media screen and (forced-colors: active) {
-  .abyss-documents :root {
+  .abyss-documents {
     --outline-color: CanvasText;
     --outline-around-color: ButtonFace;
     --resizer-bg-color: ButtonText;
@@ -6046,7 +6046,7 @@
   }
 }
 
-.abyss-documents :root {
+.abyss-documents {
   color-scheme: light dark;
 
   --viewer-container-height: 0;
