@@ -101,6 +101,8 @@ export class PdfTextSearch {
     emit: (results: SearchResultSet) => void,
   ): Promise<SearchResultSet> {
     if (this.disposed) throw cancelled();
+    signal.throwIfAborted();
+    this.lifecycle.signal.throwIfAborted();
     const normalizedQuery = query.trim();
     const hits: SearchHit[] = [];
     if (normalizedQuery.length === 0) {
@@ -111,7 +113,10 @@ export class PdfTextSearch {
 
     const needle = normalizedQuery.toLocaleLowerCase();
     for (let pageIndex = 0; pageIndex < this.pdf.numPages; pageIndex += 1) {
-      const text = await waitFor(this.getPageText(pageIndex), [signal, this.lifecycle.signal]);
+      signal.throwIfAborted();
+      this.lifecycle.signal.throwIfAborted();
+      const extraction = this.getPageText(pageIndex);
+      const text = await waitFor(extraction, [signal, this.lifecycle.signal]);
       this.appendPageHits(hits, text, {
         matchLength: normalizedQuery.length,
         needle,

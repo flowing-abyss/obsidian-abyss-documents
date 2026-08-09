@@ -8,7 +8,7 @@ import type {
   OutlineItem,
 } from '../../document-core/document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../../document-core/errors.js';
-import { mapPdfOutline } from './pdf-mappers.js';
+import { isPdfAbortFailure, mapPdfOutline } from './pdf-mappers.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfTextSearch } from './pdf-text-search.js';
 
@@ -50,9 +50,18 @@ export class PdfDocumentSession implements DocumentSession {
     try {
       const outline = await this.pdf.getOutline();
       this.assertOpen();
-      return await mapPdfOutline(this.pdf, outline);
+      const mapped = await mapPdfOutline(this.pdf, outline);
+      this.assertOpen();
+      return mapped;
     } catch (cause) {
       if (cause instanceof DocumentOpenError) throw cause;
+      if (isPdfAbortFailure(cause)) {
+        throw new DocumentCancelledError(
+          this.file.path,
+          'Reading this PDF outline was cancelled.',
+          cause,
+        );
+      }
       throw new DocumentOpenError(
         this.file.path,
         'Could not read this PDF outline. Try again.',
@@ -64,10 +73,25 @@ export class PdfDocumentSession implements DocumentSession {
   async createViewport(): Promise<DocumentViewport> {
     this.assertOpen();
     this.search ??= new PdfTextSearch(this.pdf);
-    const viewport = await this.viewportFactory(this.pdf, this.pdfjsViewer, this.search);
+    let viewport: DocumentViewport;
+    try {
+      viewport = await this.viewportFactory(this.pdf, this.pdfjsViewer, this.search);
+    } catch (cause) {
+      if (this.closePromise !== null) throw this.cancelled(cause);
+      throw new DocumentOpenError(
+        this.file.path,
+        'Could not create this PDF view. Try reopening the document.',
+        cause,
+      );
+    }
     if (this.closePromise !== null) {
-      await viewport.destroy();
-      throw this.cancelled();
+      let destroyFailure: unknown;
+      try {
+        await viewport.destroy();
+      } catch (cause) {
+        destroyFailure = cause;
+      }
+      throw this.cancelled(destroyFailure);
     }
     return viewport;
   }
@@ -105,10 +129,11 @@ export class PdfDocumentSession implements DocumentSession {
     if (this.closePromise !== null) throw this.cancelled();
   }
 
-  private cancelled(): DocumentCancelledError {
+  private cancelled(cause?: unknown): DocumentCancelledError {
     return new DocumentCancelledError(
       this.file.path,
       'This PDF session is already closed. Open the document again.',
+      cause,
     );
   }
 }

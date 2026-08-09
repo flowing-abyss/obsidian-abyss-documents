@@ -51,6 +51,34 @@ function pdfWithPages(pages: Array<PdfTextContent | Promise<PdfTextContent>>): {
 }
 
 describe('PdfTextSearch', () => {
+  it('rejects an already-aborted empty query without emitting or extracting', async () => {
+    const fixture = pdfWithPages([content('alpha')]);
+    const search = new PdfTextSearch(fixture.pdf);
+    const emit = vi.fn();
+
+    await expect(search.search('', AbortSignal.abort(), emit)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+
+    expect(emit).not.toHaveBeenCalled();
+    expect(fixture.getPage).not.toHaveBeenCalled();
+    expect(search.cachedPageCount).toBe(0);
+  });
+
+  it('rejects an already-aborted query before starting page extraction', async () => {
+    const fixture = pdfWithPages([content('alpha')]);
+    const search = new PdfTextSearch(fixture.pdf);
+    const emit = vi.fn();
+
+    await expect(search.search('alpha', AbortSignal.abort(), emit)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+
+    expect(emit).not.toHaveBeenCalled();
+    expect(fixture.getPage).not.toHaveBeenCalled();
+    expect(search.cachedPageCount).toBe(0);
+  });
+
   it('finds repeated case-insensitive matches with stable page and match IDs', async () => {
     const { pdf } = pdfWithPages([content('Echo echo ECHO')]);
     const search = new PdfTextSearch(pdf);

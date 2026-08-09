@@ -155,6 +155,24 @@ describe('PdfDocumentAdapter', () => {
     pending.resolve(pdf());
   });
 
+  it('cancels and destroys loading when abort wins the settlement window', async () => {
+    const pending = deferred<PDFDocumentProxy>();
+    const fixture = adapterFixture({ loadingPromise: pending.promise });
+    const controller = new AbortController();
+
+    const opening = fixture.adapter.open(file('Guide.pdf'), controller.signal);
+    await vi.waitFor(() => {
+      expect(fixture.getDocument).toHaveBeenCalledOnce();
+    });
+    pending.resolve(pdf());
+    queueMicrotask(() => {
+      controller.abort();
+    });
+
+    await expect(opening).rejects.toMatchObject({ name: 'DocumentCancelledError' });
+    expect(fixture.destroy).toHaveBeenCalledOnce();
+  });
+
   it('rejects an already-aborted open as a typed cancellation', async () => {
     const fixture = adapterFixture({});
     const signal = AbortSignal.abort();

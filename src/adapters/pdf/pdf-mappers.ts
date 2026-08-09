@@ -37,7 +37,8 @@ function passwordCode(cause: unknown): number | undefined {
   return typeof code === 'number' ? code : undefined;
 }
 
-function isAbortFailure(cause: unknown, name: string | undefined): boolean {
+export function isPdfAbortFailure(cause: unknown): boolean {
+  const name = errorName(cause);
   if (name === 'AbortError' || name === 'AbortException') return true;
   if (typeof cause === 'object' && cause !== null && 'code' in cause && cause.code === 20)
     return true;
@@ -51,7 +52,7 @@ export function mapPdfOpenFailure(
   signal: AbortSignal,
 ): DocumentOpenError {
   const name = errorName(cause);
-  if (signal.aborted || isAbortFailure(cause, name)) {
+  if (signal.aborted || isPdfAbortFailure(cause)) {
     return new DocumentCancelledError(path, 'Opening this PDF was cancelled.', cause);
   }
   if (name === 'PasswordException') {
@@ -96,7 +97,8 @@ async function resolveDestination(
     if (pageIndex === null) return null;
 
     return locationFromDestination(pageIndex, explicit);
-  } catch {
+  } catch (cause) {
+    if (isPdfAbortFailure(cause)) throw cause;
     return null;
   }
 }

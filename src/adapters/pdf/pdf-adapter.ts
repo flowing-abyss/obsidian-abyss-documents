@@ -65,6 +65,10 @@ export class PdfDocumentAdapter implements DocumentAdapter {
       signal.throwIfAborted();
       const loadingTask = runtime.pdfjsLib.getDocument({ data: bytes });
       const pdf = await waitForDocument(loadingTask, signal);
+      if (signal.aborted) {
+        void loadingTask.destroy().catch(() => undefined);
+        throw abortReason(signal);
+      }
       return new PdfDocumentSession(file, pdf, runtime.pdfjsViewer, this.viewportFactory);
     } catch (cause) {
       const originalCause = cause instanceof PdfLoadingRejection ? cause.original : cause;
