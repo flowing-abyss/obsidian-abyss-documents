@@ -1,10 +1,33 @@
-import type { TFile } from 'obsidian';
+import { Notice, type TFile } from 'obsidian';
 import type { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
-import type { DocumentSession, DocumentViewport } from '../document-core/document.js';
+import type {
+  DocumentSession,
+  DocumentViewport,
+  ViewportEvent,
+} from '../document-core/document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../document-core/errors.js';
+import type { ReadingProfileId } from '../document-core/reading.js';
+import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
 import { ReaderShell } from './reader-shell.js';
+import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
+import type { ReaderToolbarIntent } from './toolbar.js';
 
-type ShellFactory = (host: HTMLElement) => ReaderShell;
+export type ShellFactory = (
+  host: HTMLElement,
+  onIntent: (intent: ReaderToolbarIntent) => void,
+) => ReaderShell;
+
+export interface ReaderProfileState {
+  readonly reading: PluginSettings['reading'];
+  readonly profileByFingerprint: Readonly<Record<string, ReadingProfileId>>;
+  updateProfileForFingerprint(fingerprint: string, profile: ReadingProfileId): void | Promise<void>;
+}
+
+const DEFAULT_PROFILE_STATE: ReaderProfileState = {
+  reading: DEFAULT_SETTINGS.reading,
+  profileByFingerprint: {},
+  updateProfileForFingerprint: () => undefined,
+};
 
 export class ReaderController {
   private queue: Promise<void> = Promise.resolve();
@@ -12,55 +35,23 @@ export class ReaderController {
   private session: DocumentSession | null = null;
   private viewport: DocumentViewport | null = null;
   private shell: ReaderShell | null = null;
+  private unsubscribeViewport: (() => void) | null = null;
+  private currentPageIndex = 0;
+  private currentProfile: ReadingProfileId = 'auto';
 
   constructor(
     private readonly registry: DocumentAdapterRegistry,
-    private readonly createShell: ShellFactory = (host) => new ReaderShell(host),
+    private readonly createShell: ShellFactory = (host, onIntent) =>
+      new ReaderShell(host, onIntent),
+    private readonly profileState: ReaderProfileState = DEFAULT_PROFILE_STATE,
+    private readonly profileService = new ReadingProfileService(),
   ) {}
 
   open(file: TFile, host: HTMLElement): Promise<void> {
     this.activeOpen?.abort();
     const abortController = new AbortController();
     this.activeOpen = abortController;
-    return this.enqueue(async () => {
-      try {
-        await this.releaseCurrent();
-        this.throwIfCancelled(file, abortController.signal);
-
-        const shell = this.createShell(host);
-        this.shell = shell;
-        let session: DocumentSession | null = null;
-        let viewport: DocumentViewport | null = null;
-        try {
-          const adapter = this.registry.requireFor(file);
-          session = await adapter.open(file, abortController.signal);
-          this.throwIfCancelled(file, abortController.signal);
-          viewport = await session.createViewport();
-          this.throwIfCancelled(file, abortController.signal);
-          await viewport.mount(shell.documentHost);
-          this.throwIfCancelled(file, abortController.signal);
-          this.session = session;
-          this.viewport = viewport;
-        } catch (cause) {
-          const cleanupFailure = await this.releasePartial(viewport, session);
-          if (cleanupFailure !== undefined) {
-            console.error('[abyss-documents] Failed to clean up a partial reader session', {
-              path: file.path,
-              cause: cleanupFailure,
-            });
-          }
-          if (abortController.signal.aborted) throw this.cancelled(file, cause);
-          if (cause instanceof DocumentOpenError) throw cause;
-          throw new DocumentOpenError(
-            file.path,
-            'Could not open this document view. Try again.',
-            cause,
-          );
-        }
-      } finally {
-        if (this.activeOpen === abortController) this.activeOpen = null;
-      }
-    });
+    return this.enqueue(() => this.openOnce(file, host, abortController));
   }
 
   close(): Promise<void> {
@@ -78,16 +69,104 @@ export class ReaderController {
     return result;
   }
 
+  private async openOnce(
+    file: TFile,
+    host: HTMLElement,
+    abortController: AbortController,
+  ): Promise<void> {
+    try {
+      await this.releaseCurrent();
+      this.throwIfCancelled(file, abortController.signal);
+      await this.mountCurrent(file, host, abortController.signal);
+    } finally {
+      if (this.activeOpen === abortController) this.activeOpen = null;
+    }
+  }
+
+  private async mountCurrent(file: TFile, host: HTMLElement, signal: AbortSignal): Promise<void> {
+    const shell = this.createShell(host, (intent) => {
+      this.handleToolbarIntent(intent);
+    });
+    this.shell = shell;
+    let session: DocumentSession | null = null;
+    let viewport: DocumentViewport | null = null;
+    let unsubscribeViewport: (() => void) | null = null;
+    try {
+      const adapter = this.registry.requireFor(file);
+      session = await adapter.open(file, signal);
+      this.throwIfCancelled(file, signal);
+      viewport = await session.createViewport();
+      this.throwIfCancelled(file, signal);
+      await viewport.mount(shell.documentHost);
+      this.throwIfCancelled(file, signal);
+      unsubscribeViewport = this.activate(session, viewport, shell);
+    } catch (cause) {
+      let cleanupFailure = this.tryCleanup(unsubscribeViewport);
+      const lifecycleFailure = await this.releasePartial(viewport, session);
+      cleanupFailure ??= lifecycleFailure;
+      this.reportPartialCleanupFailure(file.path, cleanupFailure);
+      this.throwOpenFailure(file, signal, cause);
+    }
+  }
+
+  private activate(
+    session: DocumentSession,
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+  ): () => void {
+    this.currentPageIndex = 0;
+    this.currentProfile = this.initialProfile(session.descriptor.fingerprint);
+    this.profileService.setCustom(this.profileState.reading.custom);
+    viewport.setReadingColors(
+      this.profileService.resolve(this.currentProfile, shell.obsidianTheme),
+    );
+    shell.toolbar.setPageCount(viewport.pageCount);
+    shell.toolbar.setCurrentPage(this.currentPageIndex);
+    shell.toolbar.setProfile(this.currentProfile);
+    const unsubscribeViewport = viewport.onEvent((event) => {
+      this.handleViewportEvent(viewport, shell, event);
+    });
+    shell.onThemeChange((theme) => {
+      this.handleThemeChange(viewport, shell, theme);
+    });
+    this.session = session;
+    this.viewport = viewport;
+    this.unsubscribeViewport = unsubscribeViewport;
+    return unsubscribeViewport;
+  }
+
+  private reportPartialCleanupFailure(path: string, cause: Error | undefined): void {
+    if (cause === undefined) return;
+    console.error('[abyss-documents] Failed to clean up a partial reader session', {
+      path,
+      cause,
+    });
+  }
+
+  private throwOpenFailure(file: TFile, signal: AbortSignal, cause: unknown): never {
+    if (signal.aborted) throw this.cancelled(file, cause);
+    if (cause instanceof DocumentOpenError) throw cause;
+    throw new DocumentOpenError(file.path, 'Could not open this document view. Try again.', cause);
+  }
+
   private async releaseCurrent(): Promise<void> {
     const viewport = this.viewport;
     const session = this.session;
     const shell = this.shell;
+    const unsubscribeViewport = this.unsubscribeViewport;
     this.viewport = null;
     this.session = null;
     this.shell = null;
+    this.unsubscribeViewport = null;
 
-    const failure = await this.releasePartial(viewport, session);
-    shell?.destroy();
+    let failure = this.tryCleanup(unsubscribeViewport);
+    const lifecycleFailure = await this.releasePartial(viewport, session);
+    failure ??= lifecycleFailure;
+    try {
+      shell?.destroy();
+    } catch (cause) {
+      failure ??= this.asError(cause);
+    }
     if (failure !== undefined) throw failure;
   }
 
@@ -113,6 +192,156 @@ export class ReaderController {
     return failure;
   }
 
+  private handleToolbarIntent(intent: ReaderToolbarIntent): void {
+    switch (intent.type) {
+      case 'toggle-sidebar':
+        return;
+      case 'go-to-page':
+        this.navigateTo(intent.pageIndex);
+        return;
+      case 'previous-page':
+        this.navigateTo(this.currentPageIndex - 1);
+        return;
+      case 'next-page':
+        this.navigateTo(this.currentPageIndex + 1);
+        return;
+      case 'set-scale':
+        this.setScale(intent.scale);
+        return;
+      case 'set-profile':
+        this.setProfile(intent.profile);
+    }
+  }
+
+  private navigateTo(pageIndex: number): void {
+    const viewport = this.viewport;
+    const shell = this.shell;
+    if (viewport === null || shell === null || viewport.pageCount === 0) return;
+    const target = Math.min(viewport.pageCount - 1, Math.max(0, Math.floor(pageIndex)));
+    void viewport.goTo({ pageIndex: target }).catch((cause: unknown) => {
+      if (this.viewport !== viewport) return;
+      shell.toolbar.setCurrentPage(this.currentPageIndex);
+      const reason = this.reason(cause);
+      new Notice(`Could not go to page ${target + 1}: ${reason}`);
+      console.error('[abyss-documents] Failed to navigate PDF page', {
+        pageIndex: target,
+        cause,
+      });
+    });
+  }
+
+  private setScale(scale: number | 'page-width' | 'page-fit'): void {
+    const viewport = this.viewport;
+    const shell = this.shell;
+    if (viewport === null || shell === null) return;
+    try {
+      viewport.setScale(scale);
+      shell.toolbar.setScale(scale);
+    } catch (cause) {
+      new Notice(`Could not change zoom: ${this.reason(cause)}`);
+      console.error('[abyss-documents] Failed to change PDF scale', { scale, cause });
+    }
+  }
+
+  private setProfile(profile: ReadingProfileId): void {
+    const viewport = this.viewport;
+    const session = this.session;
+    const shell = this.shell;
+    if (viewport === null || session === null || shell === null) return;
+    this.profileService.setCustom(this.profileState.reading.custom);
+    try {
+      viewport.setReadingColors(this.profileService.resolve(profile, shell.obsidianTheme));
+      this.currentProfile = profile;
+      shell.toolbar.setProfile(profile);
+    } catch (cause) {
+      new Notice(`Could not apply ${profile} profile: ${this.reason(cause)}`);
+      console.error('[abyss-documents] Failed to apply PDF reading profile', {
+        profile,
+        cause,
+      });
+      return;
+    }
+
+    const fingerprint = session.descriptor.fingerprint;
+    if (!this.profileState.reading.rememberPerDocument || fingerprint.length === 0) return;
+    try {
+      void Promise.resolve(
+        this.profileState.updateProfileForFingerprint(fingerprint, profile),
+      ).catch((cause: unknown) => {
+        this.profilePersistenceFailure(fingerprint, profile, cause);
+      });
+    } catch (cause) {
+      this.profilePersistenceFailure(fingerprint, profile, cause);
+    }
+  }
+
+  private handleViewportEvent(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    event: ViewportEvent,
+  ): void {
+    if (this.viewport !== viewport || this.shell !== shell) return;
+    if (event.type === 'page-change') {
+      this.currentPageIndex = Math.min(
+        Math.max(0, viewport.pageCount - 1),
+        Math.max(0, Math.floor(event.pageIndex)),
+      );
+      shell.toolbar.setCurrentPage(this.currentPageIndex);
+    } else if (event.type === 'scale-change') {
+      shell.toolbar.setScale(event.scale);
+    }
+  }
+
+  private handleThemeChange(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    theme: ObsidianTheme,
+  ): void {
+    if (this.viewport !== viewport || this.shell !== shell || this.currentProfile !== 'auto')
+      return;
+    this.profileService.setCustom(this.profileState.reading.custom);
+    try {
+      viewport.setReadingColors(this.profileService.resolve('auto', theme));
+    } catch (cause) {
+      console.error('[abyss-documents] Failed to update automatic PDF reading profile', {
+        theme,
+        cause,
+      });
+    }
+  }
+
+  private initialProfile(fingerprint: string): ReadingProfileId {
+    const saved = this.profileState.reading.rememberPerDocument
+      ? this.profileState.profileByFingerprint[fingerprint]
+      : undefined;
+    if (isReadingProfileId(saved)) return saved;
+    const fallback = this.profileState.reading.defaultProfile;
+    return isReadingProfileId(fallback) ? fallback : 'auto';
+  }
+
+  private profilePersistenceFailure(
+    fingerprint: string,
+    profile: ReadingProfileId,
+    cause: unknown,
+  ): void {
+    new Notice(`Could not remember reading profile: ${this.reason(cause)}`);
+    console.error('[abyss-documents] Failed to remember PDF reading profile', {
+      fingerprint,
+      profile,
+      cause,
+    });
+  }
+
+  private tryCleanup(cleanup: (() => void) | null): Error | undefined {
+    if (cleanup === null) return undefined;
+    try {
+      cleanup();
+      return undefined;
+    } catch (cause) {
+      return this.asError(cause);
+    }
+  }
+
   private throwIfCancelled(file: TFile, signal: AbortSignal): void {
     if (signal.aborted) throw this.cancelled(file, signal.reason);
   }
@@ -126,4 +355,18 @@ export class ReaderController {
       ? cause
       : new Error(`Unknown reader cleanup failure: ${String(cause)}`);
   }
+
+  private reason(cause: unknown): string {
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+function isReadingProfileId(value: unknown): value is ReadingProfileId {
+  return (
+    value === 'auto' ||
+    value === 'light' ||
+    value === 'sepia' ||
+    value === 'dark' ||
+    value === 'custom'
+  );
 }

@@ -6281,6 +6281,53 @@
   flex: 0 0 auto;
 }
 
+.abyss-documents .abyss-reader-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--size-4-1);
+  padding: var(--size-2-1) var(--size-4-2);
+  border-bottom: var(--border-width) solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+
+.abyss-documents .abyss-reader-toolbar-navigation {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--size-2-1);
+}
+
+.abyss-documents .abyss-reader-toolbar-button {
+  flex: 0 0 auto;
+}
+
+.abyss-documents .abyss-reader-toolbar-page-field {
+  width: calc(3ch + var(--size-4-3));
+  min-width: 0;
+  height: var(--input-height);
+  padding-inline: var(--size-4-1);
+  text-align: end;
+}
+
+.abyss-documents .abyss-reader-toolbar-page-field::-webkit-inner-spin-button,
+.abyss-documents .abyss-reader-toolbar-page-field::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.abyss-documents .abyss-reader-toolbar-page-total {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.abyss-documents .abyss-reader-toolbar-spacer {
+  min-width: var(--size-4-2);
+  flex: 1 1 auto;
+}
+
 .abyss-documents [data-region='document'] {
   position: relative;
   min-width: 0;
@@ -6291,7 +6338,31 @@
 
 /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires this public class name. */
 .abyss-documents .pdfViewerContainer {
+  --abyss-reader-background: var(--background-primary);
+  --abyss-reader-foreground: var(--text-normal);
+  --abyss-reader-brightness: 1;
+  --abyss-reader-contrast: 1;
+  --abyss-reader-image-dim: 0;
+
   position: absolute;
   inset: 0;
+  background: var(--abyss-reader-background);
   overflow: auto;
+}
+
+/* PDF.js paints mixed text, vectors, and images into the same owned canvas. */
+/* stylelint-disable-next-line selector-class-pattern, selector-max-type -- PDF.js requires these public classes and canvas target. */
+.abyss-documents .pdfViewer .page .canvasWrapper canvas {
+  filter: brightness(var(--abyss-reader-brightness)) contrast(var(--abyss-reader-contrast));
+  opacity: calc(1 - var(--abyss-reader-image-dim));
+}
+
+@media (width <= 600px) {
+  .abyss-documents .abyss-reader-toolbar-desktop-profile {
+    display: none;
+  }
+
+  .abyss-documents .abyss-reader-toolbar {
+    padding-inline: var(--size-4-1);
+  }
 }
