@@ -47,6 +47,7 @@ export default defineConfig(
             'dependency-cruiser.config.cjs',
             'stylelint.config.mjs',
             'release-check.mjs',
+            'scripts/*.mjs',
           ],
         },
         tsconfigRootDir: import.meta.dirname,
@@ -149,7 +150,13 @@ export default defineConfig(
     // tests/e2e/*.mts run under Node via the wdio CLI; the spec files also run under
     // Node (only the `executeObsidian` callback bodies they send get serialized into
     // the real Obsidian process), so the same reasoning applies to all of tests/e2e/.
-    files: ['*.cjs', 'release-check.mjs', 'tests/e2e/**/*.ts', 'tests/e2e/**/*.mts'],
+    files: [
+      '*.cjs',
+      'release-check.mjs',
+      'scripts/*.mjs',
+      'tests/e2e/**/*.ts',
+      'tests/e2e/**/*.mts',
+    ],
     languageOptions: {
       globals: { ...globals.node },
     },

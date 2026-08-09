@@ -1,6 +1,8 @@
 import esbuild from 'esbuild';
+import { execFileSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
+import { gzipSync } from 'node:zlib';
 import process from 'process';
 
 // Shared with release-check.mjs, which re-checks the same threshold against an
@@ -21,6 +23,33 @@ if you want to view the source, please visit the github repository of this plugi
 const args = process.argv.slice(2);
 const prod = args.includes('production');
 const analyze = args.includes('analyze');
+
+const buildStylesPlugin = {
+  name: 'build-styles',
+  setup(build) {
+    build.onStart(() => {
+      execFileSync('pnpm', ['run', 'build:styles'], { stdio: 'inherit' });
+    });
+  },
+};
+
+const gzipBase64Plugin = {
+  name: 'gzip-base64',
+  setup(build) {
+    build.onResolve({ filter: /^pdfjs-dist\/build\/pdf\.worker\.mjs\?gzip-base64$/ }, async () => ({
+      namespace: 'gzip-base64',
+      path: await import.meta.resolve('pdfjs-dist/build/pdf.worker.mjs'),
+    }));
+    build.onLoad({ filter: /.*/, namespace: 'gzip-base64' }, ({ path }) => {
+      const workerSource = readFileSync(new URL(path));
+      const compressedWorker = gzipSync(workerSource, { level: 9 });
+      return {
+        contents: `export default ${JSON.stringify(compressedWorker.toString('base64'))};`,
+        loader: 'js',
+      };
+    });
+  },
+};
 
 // Obsidian strips inline source maps from dev builds unless main.js ends with
 // this exact marker comment: https://forum.obsidian.md/t/source-map-trimming-in-dev-builds/87612
@@ -66,7 +95,7 @@ const context = await esbuild.context({
   outfile: 'main.js',
   minify: prod,
   metafile: prod || analyze,
-  plugins: [nosourcemapPlugin],
+  plugins: [buildStylesPlugin, gzipBase64Plugin, nosourcemapPlugin],
 });
 
 if (prod) {

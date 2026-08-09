@@ -393,6 +393,8 @@ git commit -m "feat: define document core contracts"
 - Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
 - Modify: `esbuild.config.mjs`
+- Modify: `src/main.ts`
+- Modify: `src/main.test.ts`
 - Create: `src/adapters/pdf/pdf-worker-payload.d.ts`
 - Create: `src/adapters/pdf/pdf-runtime.ts`
 - Create: `src/adapters/pdf/pdf-runtime.test.ts`
@@ -406,6 +408,7 @@ git commit -m "feat: define document core contracts"
 - Produces: `PdfRuntimeLoader.load(): Promise<PdfRuntime>`, `PdfRuntimeLoader.dispose(): void`.
 - `PdfRuntime` exposes `pdfjsLib`, `pdfjsViewer`, and matching `version` only inside `src/adapters/pdf/`.
 - Consumes: `pdfjs-dist@6.2.108`, `fflate@0.8.3`, `postcss@8.5.26`, `postcss-prefix-selector@2.1.1`.
+- The composition root owns one `PdfRuntimeLoader` so the runtime is packaged, but plugin activation does not call `load()`; Task 5 registers disposal when it wires the PDF view.
 
 **Required sources:**
 
@@ -550,7 +553,7 @@ Expected: PASS; analysis shows PDF runtime in `main.js`, worker source compresse
 - [ ] **Step 7: Commit**
 
 ```bash
-git add package.json pnpm-lock.yaml esbuild.config.mjs scripts/build-styles.mjs src/adapters/pdf src/styles/reader.css styles.css stylelint.config.mjs
+git add package.json pnpm-lock.yaml esbuild.config.mjs scripts/build-styles.mjs src/adapters/pdf src/main.ts src/main.test.ts src/styles/reader.css styles.css stylelint.config.mjs
 git commit -m "build: package lazy PDF.js runtime"
 ```
 
