@@ -118,7 +118,7 @@ Each service depends on contracts, not concrete adapters. Background work is can
 
 The PDF adapter wraps PDF.js behind Document Core and may use a separate writer implementation for portable operations not exposed by PDF.js's public editor API. Updating PDF.js should require adapter tests and bundle changes, not UI changes.
 
-PDF.js and its worker are separate lazy-loaded assets. They must not enter the plugin startup bundle, whose configured budget is 512 KiB. Worker and library versions must always match.
+PDF.js must remain lazy at runtime and its worker version must always match the library. Obsidian's Community installer distributes only `main.js`, `manifest.json`, and optional `styles.css`, so an independently shipped worker chunk is not reliable. The release therefore embeds the exact worker build as a compressed build-time payload inside `main.js`, creates its Blob Worker only when a PDF view opens, and revokes it on plugin unload. The release-size budget may rise above the template's 512 KiB only to accommodate this self-contained local runtime; a separate activation benchmark must prove that no PDF code, decompression, worker creation, or document I/O runs during ordinary plugin startup.
 
 Future adapters must pass the same contract suite. The draft W3C EPUB Annotations representation in `META-INF/annotations.json` is a candidate, not a settled dependency; write support requires maturity and interoperability validation. FB2 annotation writes remain unavailable while other readers cannot be expected to preserve them.
 
