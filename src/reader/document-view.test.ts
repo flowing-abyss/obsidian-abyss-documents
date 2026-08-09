@@ -12,6 +12,16 @@ import {
   type ReaderViewController,
 } from './document-view.js';
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function viewFixture(controller: ReaderViewController, path = 'Books/Guide.pdf') {
   const app = App.createConfigured__({ files: { [path]: '' } });
   const source = app.vault.getAbstractFileByPath(path);
@@ -72,6 +82,36 @@ describe('AbyssDocumentView', () => {
     await vi.waitFor(() => {
       expect(reader.open).toHaveBeenCalledTimes(2);
     });
+    expect(fixture.view.contentEl.querySelector('[data-action="retry"]')).toBeNull();
+  });
+
+  it('silences a stale same-file rejection after a newer open wins', async () => {
+    const first = deferred<undefined>();
+    const second = deferred<undefined>();
+    const reader = controller();
+    reader.open
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const fixture = viewFixture(reader.reader);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const firstOpen = fixture.view.onLoadFile(fixture.file);
+    await vi.waitFor(() => {
+      expect(reader.open).toHaveBeenCalledOnce();
+    });
+    const secondOpen = fixture.view.onLoadFile(fixture.file);
+    await vi.waitFor(() => {
+      expect(reader.open).toHaveBeenCalledTimes(2);
+    });
+
+    second.resolve(undefined);
+    await secondOpen;
+    first.reject(new DOMException('Superseded', 'AbortError'));
+    await firstOpen;
+
+    expect(notice).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
     expect(fixture.view.contentEl.querySelector('[data-action="retry"]')).toBeNull();
   });
 

@@ -13,6 +13,7 @@ export interface AbyssDocumentViewServices {
 
 export class AbyssDocumentView extends FileView {
   private readonly controller: ReaderViewController;
+  private loadGeneration = 0;
 
   constructor(leaf: WorkspaceLeaf, services: AbyssDocumentViewServices) {
     super(leaf);
@@ -22,7 +23,8 @@ export class AbyssDocumentView extends FileView {
       if (!(target instanceof Element) || target.closest('[data-action="retry"]') === null) return;
       const file = this.file;
       if (file !== null) {
-        this.openAtBoundary(file).catch((cause: unknown) => {
+        const generation = ++this.loadGeneration;
+        this.openAtBoundary(file, generation).catch((cause: unknown) => {
           console.error('[abyss-documents] Failed to handle PDF retry', {
             path: file.path,
             cause,
@@ -41,11 +43,13 @@ export class AbyssDocumentView extends FileView {
   }
 
   override async onLoadFile(file: TFile): Promise<void> {
+    const generation = ++this.loadGeneration;
     await super.onLoadFile(file);
-    await this.openAtBoundary(file);
+    await this.openAtBoundary(file, generation);
   }
 
   override async onUnloadFile(file: TFile): Promise<void> {
+    ++this.loadGeneration;
     try {
       await this.controller.close();
     } finally {
@@ -54,12 +58,13 @@ export class AbyssDocumentView extends FileView {
     }
   }
 
-  private async openAtBoundary(file: TFile): Promise<void> {
+  private async openAtBoundary(file: TFile, generation: number): Promise<void> {
+    if (generation !== this.loadGeneration) return;
     this.clearOpenFailure();
     try {
       await this.controller.open(file, this.contentEl);
     } catch (cause) {
-      if (this.file !== file) return;
+      if (generation !== this.loadGeneration || this.file !== file) return;
       const reason = cause instanceof Error ? cause.message : 'Unknown failure.';
       new Notice(`Could not open ${file.name}: ${reason}`);
       console.error('[abyss-documents] Failed to open PDF', { path: file.path, cause });

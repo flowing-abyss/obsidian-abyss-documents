@@ -15,7 +15,6 @@ const ANNOTATION_MODE_ENABLE_FORMS = 2;
 const MAX_CANVAS_PIXELS = 16_777_216;
 
 type PdfEventBus = InstanceType<PdfRuntime['pdfjsViewer']['EventBus']>;
-type PdfFindController = InstanceType<PdfRuntime['pdfjsViewer']['PDFFindController']>;
 type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
 type PdfViewer = InstanceType<PdfRuntime['pdfjsViewer']['PDFViewer']>;
 type PdfEventListener = (event: unknown) => void;
@@ -24,8 +23,9 @@ interface ClearablePdfViewer {
   setDocument(document: PDFDocumentProxy | null): void;
 }
 
-interface ClearableFindController {
-  setDocument(document: PDFDocumentProxy | null): void;
+interface RetryablePdfPageView {
+  reset(): void;
+  draw(): Promise<void>;
 }
 
 function record(event: unknown): Record<string, unknown> | null {
@@ -52,7 +52,6 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly events = new TypedEventSource<ViewportEvent>();
   private readonly listeners = new Map<string, PdfEventListener>();
   private eventBus: PdfEventBus | null = null;
-  private findController: PdfFindController | null = null;
   private linkService: PdfLinkService | null = null;
   private viewer: PdfViewer | null = null;
   private root: HTMLDivElement | null = null;
@@ -92,7 +91,6 @@ export class PdfDocumentViewport implements DocumentViewport {
       eventBus,
       linkService,
     });
-    this.findController = findController;
     const pageColors = resolvedPageColors(host);
     const viewer = new this.pdfjsViewer.PDFViewer({
       container: root,
@@ -114,7 +112,6 @@ export class PdfDocumentViewport implements DocumentViewport {
 
     linkService.setViewer(viewer);
     linkService.setDocument(this.pdf);
-    findController.setDocument(this.pdf);
     viewer.setDocument(this.pdf);
   }
 
@@ -230,11 +227,6 @@ export class PdfDocumentViewport implements DocumentViewport {
         (this.viewer as unknown as ClearablePdfViewer).setDocument(null);
       });
     }
-    if (this.findController !== null) {
-      attempt(() => {
-        (this.findController as unknown as ClearableFindController).setDocument(null);
-      });
-    }
     attempt(() => {
       this.linkService?.setDocument(null);
     });
@@ -245,7 +237,6 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.failedPages.clear();
     this.events.clear();
     this.eventBus = null;
-    this.findController = null;
     this.linkService = null;
     this.viewer = null;
     this.viewerElement = null;
@@ -338,21 +329,45 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private readonly onRootClick = (event: MouseEvent): void => {
     const target = event.target;
-    if (!(target instanceof Element) || target.closest('[data-action="retry-page"]') === null) {
-      return;
-    }
+    if (!(target instanceof Element)) return;
+    const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
+    if (retry === null) return;
     const page = target.closest<HTMLElement>('[data-page-number]');
     const pageNumber = positiveInteger(Number(page?.dataset['pageNumber']));
-    if (pageNumber === null || this.viewer === null) return;
-    page?.querySelector('[data-render-error]')?.remove();
-    this.failedPages.delete(pageNumber);
+    if (page === null || pageNumber === null || this.viewer === null) return;
+    this.retryPage(this.viewer, page, pageNumber, retry);
+  };
+
+  private retryPage(
+    viewer: PdfViewer,
+    page: HTMLElement,
+    pageNumber: number,
+    retry: HTMLButtonElement,
+  ): void {
+    const surface = page.querySelector<HTMLElement>('[data-render-error]');
+    const pageView = viewer.getPageView(pageNumber - 1) as RetryablePdfPageView | undefined;
+    if (pageView === undefined) return;
     try {
-      this.viewer.currentPageNumber = pageNumber;
-      this.viewer.update();
+      pageView.reset();
+      if (surface !== null && !page.contains(surface)) page.append(surface);
+      retry.disabled = true;
+      const redraw = pageView.draw();
+      void redraw
+        .then(() => {
+          if (this.destroyPromise !== null) return;
+          this.failedPages.delete(pageNumber);
+          page.querySelector('[data-render-error]')?.remove();
+        })
+        .catch((cause: unknown) => {
+          if (this.destroyPromise !== null) return;
+          retry.disabled = false;
+          this.handleRenderError(pageNumber, cause);
+        });
     } catch (cause) {
+      retry.disabled = false;
       this.handleRenderError(pageNumber, cause);
     }
-  };
+  }
 
   private pageElement(pageNumber: number): HTMLElement | null {
     return (

@@ -7,6 +7,22 @@ import { createPdfDocumentViewport, PdfDocumentViewport } from './pdf-viewport.j
 
 type Listener = (event: unknown) => void;
 
+interface FakePageView {
+  draw: ReturnType<typeof vi.fn<() => Promise<void>>>;
+  renderingState: 'FINISHED' | 'INITIAL' | 'RUNNING';
+  reset: ReturnType<typeof vi.fn<() => void>>;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 class FakeEventBus {
   readonly dispatched: Array<{ name: string; data: Record<string, unknown> }> = [];
   readonly listeners = new Map<string, Set<Listener>>();
@@ -111,6 +127,8 @@ function viewerRuntime() {
     readonly focus = vi.fn();
     readonly update = vi.fn();
     readonly documents: Array<PDFDocumentProxy | null> = [];
+    readonly findDocumentsBeforeViewerOwnership: Array<Array<PDFDocumentProxy | null>> = [];
+    readonly pageViews: FakePageView[] = [];
     currentPageNumber = 1;
     currentScale = 1;
     currentScaleValue = 'auto';
@@ -136,15 +154,36 @@ function viewerRuntime() {
     }
 
     setDocument(pdfDocument: PDFDocumentProxy | null): void {
+      this.findDocumentsBeforeViewerOwnership.push([...this.options.findController.documents]);
       this.documents.push(pdfDocument);
       this.options.viewer.replaceChildren();
-      if (pdfDocument === null) return;
+      this.pageViews.length = 0;
+      if (pdfDocument === null) {
+        this.options.findController.setDocument(null);
+        return;
+      }
       for (let pageNumber = 1; pageNumber <= Math.min(3, pdfDocument.numPages); pageNumber += 1) {
         const page = createDiv();
         page.className = 'page';
         page.dataset['pageNumber'] = String(pageNumber);
         this.options.viewer.append(page);
+        const pageView: FakePageView = {
+          draw: vi.fn(async () => {
+            pageView.renderingState = 'RUNNING';
+          }),
+          renderingState: 'FINISHED',
+          reset: vi.fn(() => {
+            pageView.renderingState = 'INITIAL';
+            page.replaceChildren();
+          }),
+        };
+        this.pageViews.push(pageView);
       }
+      this.options.findController.setDocument(pdfDocument);
+    }
+
+    getPageView(pageIndex: number) {
+      return this.pageViews[pageIndex];
     }
   }
 
@@ -184,6 +223,7 @@ describe('PdfDocumentViewport', () => {
     });
     expect(fixture.runtime.state.linkService?.viewer).toBe(viewer);
     expect(viewer.documents).toEqual([fixture.documentProxy]);
+    expect(viewer.findDocumentsBeforeViewerOwnership).toEqual([[]]);
     expect(fixture.host.querySelectorAll('.page')).toHaveLength(3);
   });
 
@@ -306,7 +346,7 @@ describe('PdfDocumentViewport', () => {
     });
   });
 
-  it('keeps a render error page-local, logs it once, and retries without escaping callbacks', async () => {
+  it('keeps a render error page-local and resets the failed page before a contained redraw', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
     const viewer = fixture.runtime.state.viewer;
@@ -330,9 +370,57 @@ describe('PdfDocumentViewport', () => {
     const retry = fixture.host.querySelector<HTMLButtonElement>(
       '[data-page-number="2"] [data-action="retry-page"]',
     );
+    const pageView = viewer.getPageView(1);
+    if (pageView === undefined) throw new Error('Expected a fake page view.');
+    const redraw = deferred<void>();
+    pageView.draw.mockReturnValueOnce(redraw.promise);
     expect(retry?.textContent).toBe('Retry page');
     expect(() => retry?.click()).not.toThrow();
-    expect(viewer.update).toHaveBeenCalledOnce();
+    expect(pageView.reset).toHaveBeenCalledOnce();
+    expect(pageView.renderingState).toBe('INITIAL');
+    expect(pageView.draw).toHaveBeenCalledOnce();
+    expect(fixture.host.querySelector('[data-page-number="2"] [data-render-error]')).not.toBeNull();
+
+    redraw.resolve();
+    await vi.waitFor(() => {
+      expect(fixture.host.querySelector('[data-page-number="2"] [data-render-error]')).toBeNull();
+    });
+    expect(viewer.update).not.toHaveBeenCalled();
+  });
+
+  it('contains a rejected page redraw and leaves retry available', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    eventBus.dispatch('pagerendered', { pageNumber: 2, error: new Error('canvas failed') });
+    const pageView = viewer.getPageView(1);
+    const retry = fixture.host.querySelector<HTMLButtonElement>(
+      '[data-page-number="2"] [data-action="retry-page"]',
+    );
+    if (pageView === undefined || retry === null) throw new Error('Expected page retry controls.');
+    const redrawCause = new Error('redraw failed');
+    pageView.draw.mockRejectedValueOnce(redrawCause);
+
+    expect(() => {
+      retry.click();
+    }).not.toThrow();
+
+    await vi.waitFor(() => {
+      expect(retry.disabled).toBe(false);
+    });
+    expect(fixture.host.querySelector('[data-page-number="2"] [data-render-error]')).not.toBeNull();
+    expect(events[events.length - 1]).toEqual({
+      type: 'render-error',
+      pageIndex: 1,
+      cause: redrawCause,
+    });
+    expect(log).toHaveBeenCalledOnce();
   });
 
   it('detaches listeners, cancels work, and clears viewer resources exactly once', async () => {
@@ -351,6 +439,7 @@ describe('PdfDocumentViewport', () => {
     expect(events).toEqual([]);
     expect(viewer.cleanup).toHaveBeenCalledOnce();
     expect(viewer.documents).toEqual([fixture.documentProxy, null]);
+    expect(viewer.findDocumentsBeforeViewerOwnership).toEqual([[], [fixture.documentProxy]]);
     expect(fixture.runtime.state.findController?.documents).toEqual([fixture.documentProxy, null]);
     expect(fixture.runtime.state.linkService?.documents).toEqual([fixture.documentProxy, null]);
     expect(fixture.host.children).toHaveLength(0);

@@ -78,4 +78,33 @@ describe('PDF.js style build', () => {
     expect(wrapperVariables).toBeDefined();
     expect(() => assertNoRelativeUrls(output)).not.toThrow();
   });
+
+  it('keeps the PDF.js viewer container absolute inside a bounded scrolling document host', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const declarations = (selector) => {
+      const values = new Map();
+      root.walkRules(selector, (rule) => {
+        if (rule.selector !== selector) return;
+        rule.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
+      });
+      return values;
+    };
+
+    expect(Object.fromEntries(declarations('.abyss-documents'))).toMatchObject({
+      position: 'relative',
+      height: '100%',
+      overflow: 'hidden',
+    });
+    expect(
+      Object.fromEntries(declarations(".abyss-documents [data-region='document']")),
+    ).toMatchObject({
+      position: 'relative',
+      overflow: 'hidden',
+    });
+    expect(Object.fromEntries(declarations('.abyss-documents .pdfViewerContainer'))).toMatchObject({
+      position: 'absolute',
+      inset: '0',
+      overflow: 'auto',
+    });
+  });
 });
