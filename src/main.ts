@@ -1,18 +1,15 @@
 import { Plugin } from 'obsidian';
-import { DEFAULT_SETTINGS, type PluginSettings } from './settings.js';
-import { mergeSettings } from './utils/merge-settings.js';
+import { PluginDataStore, type PluginDataV1 } from './plugin-data.js';
 
-export default class ExamplePlugin extends Plugin {
-  override settings!: PluginSettings;
+export const PLUGIN_ID = 'abyss-documents';
+
+export default class AbyssDocumentsPlugin extends Plugin {
+  data!: PluginDataV1;
 
   override async onload(): Promise<void> {
-    const saved = (await this.loadData()) as Partial<PluginSettings> | null;
-    this.settings = mergeSettings(DEFAULT_SETTINGS, saved);
+    const store = new PluginDataStore(this);
+    this.data = await store.load();
   }
 
   override onunload(): void {}
-
-  async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
-  }
 }

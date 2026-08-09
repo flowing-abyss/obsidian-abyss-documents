@@ -1,8 +1,8 @@
 {
-  "id": "your-id-here",
-  "name": "Your Title Here",
+  "id": "abyss-documents",
+  "name": "Abyss Documents",
   "version": "0.1.0",
-  "minAppVersion": "1.0.3",
+  "minAppVersion": "1.7.2",
   "description": "Describe what this does in one sentence.",
   "author": "Your Name",
   "isDesktopOnly": false
