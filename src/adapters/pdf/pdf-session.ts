@@ -78,6 +78,14 @@ export class PdfDocumentSession implements DocumentSession {
       viewport = await this.viewportFactory(this.pdf, this.pdfjsViewer, this.search);
     } catch (cause) {
       if (this.closePromise !== null) throw this.cancelled(cause);
+      if (cause instanceof DocumentOpenError) throw cause;
+      if (isPdfAbortFailure(cause)) {
+        throw new DocumentCancelledError(
+          this.file.path,
+          'Creating this PDF view was cancelled.',
+          cause,
+        );
+      }
       throw new DocumentOpenError(
         this.file.path,
         'Could not create this PDF view. Try reopening the document.',

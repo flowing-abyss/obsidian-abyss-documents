@@ -3,6 +3,7 @@ import { App, TFile as MockTFile } from 'obsidian-test-mocks/obsidian';
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentViewport } from '../../document-core/document.js';
+import { DocumentPasswordError } from '../../document-core/errors.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfDocumentSession, type PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
@@ -199,6 +200,28 @@ describe('PdfDocumentSession', () => {
     await expect(session.createViewport()).rejects.toMatchObject({
       name: 'DocumentOpenError',
       path: 'Books/Guide.pdf',
+      cause,
+    });
+  });
+
+  it('preserves an owned viewport factory failure unchanged', async () => {
+    const cause = new DocumentPasswordError(
+      'Books/Guide.pdf',
+      'This PDF requires a password. Try again and enter the password.',
+    );
+    const { session, viewportFactory } = sessionFixture();
+    viewportFactory.mockRejectedValue(cause);
+
+    await expect(session.createViewport()).rejects.toBe(cause);
+  });
+
+  it('maps a PDF.js viewport factory abort to an owned cancellation', async () => {
+    const cause = Object.assign(new Error('viewer worker stopped'), { name: 'AbortException' });
+    const { session, viewportFactory } = sessionFixture();
+    viewportFactory.mockRejectedValue(cause);
+
+    await expect(session.createViewport()).rejects.toMatchObject({
+      name: 'DocumentCancelledError',
       cause,
     });
   });
