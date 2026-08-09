@@ -34,8 +34,10 @@ function viewFixture(controller: ReaderViewController, path = 'Books/Guide.pdf')
 function controller() {
   const open = vi.fn(async () => undefined);
   const close = vi.fn(async () => undefined);
-  const reader: ReaderViewController = { open, close };
-  return { close, open, reader };
+  const showOutline = vi.fn();
+  const searchDocument = vi.fn();
+  const reader: ReaderViewController = { open, close, searchDocument, showOutline };
+  return { close, open, reader, searchDocument, showOutline };
 }
 
 describe('AbyssDocumentView', () => {
@@ -123,6 +125,17 @@ describe('AbyssDocumentView', () => {
     await fixture.view.onUnloadFile(fixture.file);
 
     expect(reader.close).toHaveBeenCalledOnce();
+  });
+
+  it('forwards outline and document-search commands to its reader controller', () => {
+    const reader = controller();
+    const fixture = viewFixture(reader.reader);
+
+    fixture.view.showOutline();
+    fixture.view.searchDocument();
+
+    expect(reader.showOutline).toHaveBeenCalledOnce();
+    expect(reader.searchDocument).toHaveBeenCalledOnce();
   });
 
   it('ignores unrelated clicks and presents a safe reason for a non-error failure', async () => {

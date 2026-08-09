@@ -6281,6 +6281,15 @@
   flex: 0 0 auto;
 }
 
+.abyss-documents .abyss-reader-body {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
 .abyss-documents .abyss-reader-toolbar {
   display: flex;
   min-width: 0;
@@ -6336,6 +6345,156 @@
   overflow: hidden;
 }
 
+.abyss-documents .abyss-reader-sidebar {
+  display: flex;
+  width: min(22rem, 36%);
+  min-width: 15rem;
+  min-height: 0;
+  flex: 0 0 auto;
+  flex-direction: column;
+  border-right: var(--border-width) solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+
+.abyss-documents .abyss-reader-sidebar[hidden],
+.abyss-documents .abyss-reader-sidebar-panel[hidden] {
+  display: none;
+}
+
+.abyss-documents .abyss-reader-sidebar-header,
+.abyss-documents .abyss-reader-sidebar-tabs,
+.abyss-documents .abyss-reader-search-controls {
+  display: flex;
+  align-items: center;
+}
+
+.abyss-documents .abyss-reader-sidebar-header {
+  min-height: var(--input-height);
+  justify-content: space-between;
+  gap: var(--size-4-1);
+  padding: var(--size-2-1) var(--size-4-2);
+  border-bottom: var(--border-width) solid var(--background-modifier-border);
+}
+
+.abyss-documents .abyss-reader-sidebar-tabs {
+  gap: var(--size-2-1);
+}
+
+.abyss-documents .abyss-reader-sidebar-tab {
+  padding: var(--size-2-1) var(--size-4-2);
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.abyss-documents .abyss-reader-sidebar-tab[aria-selected='true'] {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.abyss-documents .abyss-reader-sidebar-panels,
+.abyss-documents .abyss-reader-outline,
+.abyss-documents .abyss-reader-search {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.abyss-documents .abyss-reader-outline,
+.abyss-documents .abyss-reader-search {
+  overflow: auto;
+}
+
+.abyss-documents .abyss-reader-outline-tree,
+.abyss-documents .abyss-reader-outline-tree [role='group'] {
+  margin: 0;
+  padding: var(--size-4-1);
+  list-style: none;
+}
+
+.abyss-documents .abyss-reader-outline-tree [role='group'] {
+  padding-block: 0;
+  padding-inline-start: var(--size-4-4);
+}
+
+.abyss-documents .abyss-reader-outline-row {
+  width: 100%;
+  padding: var(--size-2-1) var(--size-4-1);
+  border: 0;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-normal);
+  text-align: start;
+}
+
+.abyss-documents .abyss-reader-outline-row:hover,
+.abyss-documents .abyss-reader-outline-row:focus-visible,
+.abyss-documents .abyss-reader-outline-row[aria-current='location'] {
+  background: var(--background-modifier-hover);
+}
+
+.abyss-documents .abyss-reader-outline-row[aria-disabled='true'] {
+  color: var(--text-faint);
+}
+
+.abyss-documents .abyss-reader-search-controls {
+  gap: var(--size-2-1);
+  padding: var(--size-4-2);
+}
+
+.abyss-documents .abyss-reader-search-input {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.abyss-documents .abyss-reader-search-count {
+  min-height: var(--line-height-normal);
+  padding-inline: var(--size-4-2);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.abyss-documents .abyss-reader-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-1);
+  padding: var(--size-4-2);
+}
+
+.abyss-documents .abyss-reader-search-result {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: var(--size-2-1);
+  padding: var(--size-4-2);
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-normal);
+  text-align: start;
+}
+
+.abyss-documents .abyss-reader-search-result:hover,
+.abyss-documents .abyss-reader-search-result[aria-current='true'] {
+  border-color: var(--background-modifier-border);
+  background: var(--background-modifier-hover);
+}
+
+.abyss-documents .abyss-reader-search-page {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.abyss-documents .abyss-reader-search-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.abyss-documents .abyss-reader-sidebar-empty {
+  padding: var(--size-4-2);
+  color: var(--text-muted);
+}
+
 /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires this public class name. */
 .abyss-documents .pdfViewerContainer {
   --abyss-reader-background: var(--background-primary);
@@ -6358,6 +6517,16 @@
 }
 
 @media (width <= 600px) {
+  .abyss-documents .abyss-reader-sidebar {
+    position: absolute;
+    z-index: var(--layer-modal);
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: min(22rem, 90%);
+    max-width: 90%;
+    box-shadow: var(--shadow-l);
+  }
+
   .abyss-documents .abyss-reader-toolbar-desktop-profile {
     display: none;
   }

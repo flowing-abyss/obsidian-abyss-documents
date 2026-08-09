@@ -5,6 +5,8 @@ export const DOCUMENT_VIEW_TYPE = 'abyss-document-view';
 export interface ReaderViewController {
   open(file: TFile, host: HTMLElement): Promise<void>;
   close(): Promise<void>;
+  showOutline(): void;
+  searchDocument(): void;
 }
 
 export interface AbyssDocumentViewServices {
@@ -56,6 +58,14 @@ export class AbyssDocumentView extends FileView {
       this.clearOpenFailure();
       await super.onUnloadFile(file);
     }
+  }
+
+  showOutline(): void {
+    this.controller.showOutline();
+  }
+
+  searchDocument(): void {
+    this.controller.searchDocument();
   }
 
   private async openAtBoundary(file: TFile, generation: number): Promise<void> {

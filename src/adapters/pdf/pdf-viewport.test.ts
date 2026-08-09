@@ -440,6 +440,10 @@ describe('PdfDocumentViewport', () => {
         ({ name, data }) => name === 'find' && data['query'] === 'needle',
       ),
     ).toBe(true);
+    const find = fixture.runtime.state.eventBus?.dispatched.find(
+      ({ name, data }) => name === 'find' && data['query'] === 'needle',
+    );
+    expect(find?.data['highlightAll']).toBe(false);
   });
 
   it('supports find-again directions and contains asynchronous search failures', async () => {
@@ -465,6 +469,42 @@ describe('PdfDocumentViewport', () => {
     await vi.waitFor(() => {
       expect(log).toHaveBeenCalledOnce();
     });
+  });
+
+  it('aborts prior extraction for each query and clears public find matches for empty input', async () => {
+    const fixture = await mountedViewport(3);
+    const signals: AbortSignal[] = [];
+    vi.spyOn(fixture.search, 'search').mockImplementation(async (query, signal, emit) => {
+      signals.push(signal);
+      if (query.length === 0) {
+        const empty = { query, hits: [], complete: true } as const;
+        emit(empty);
+        return empty;
+      }
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            reject(new DOMException('Cancelled', 'AbortError'));
+          },
+          { once: true },
+        );
+      });
+      return { query, hits: [], complete: true };
+    });
+
+    fixture.viewport.search('first');
+    fixture.viewport.search('second');
+    fixture.viewport.search('');
+
+    expect(signals).toHaveLength(3);
+    expect(signals.slice(0, 2).every((signal) => signal.aborted)).toBe(true);
+    expect(signals[2]?.aborted).toBe(false);
+    const findEvents = fixture.runtime.state.eventBus?.dispatched.filter(
+      ({ name }) => name === 'find',
+    );
+    expect(findEvents?.[findEvents.length - 1]?.data['query']).toBe('');
+    await fixture.viewport.destroy();
   });
 
   it('keeps a render error page-local and resets the failed page before a contained redraw', async () => {

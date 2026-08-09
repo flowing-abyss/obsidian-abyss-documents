@@ -45,6 +45,26 @@ export default class AbyssDocumentsPlugin extends Plugin {
     };
     this.registerView(DOCUMENT_VIEW_TYPE, (leaf) => new AbyssDocumentView(leaf, services));
     this.registerExtensions(['pdf'], DOCUMENT_VIEW_TYPE);
+    this.addCommand({
+      id: 'show-outline',
+      name: 'Show document outline',
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(AbyssDocumentView);
+        if (view === null) return false;
+        if (!checking) view.showOutline();
+        return true;
+      },
+    });
+    this.addCommand({
+      id: 'search-document',
+      name: 'Search document',
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(AbyssDocumentView);
+        if (view === null) return false;
+        if (!checking) view.searchDocument();
+        return true;
+      },
+    });
     this.register(() => {
       this.runtimeLoader.dispose();
     });

@@ -485,7 +485,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       query,
       caseSensitive: false,
       entireWord: false,
-      highlightAll: true,
+      highlightAll: false,
       findPrevious,
       matchDiacritics: true,
     });

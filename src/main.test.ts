@@ -1,4 +1,4 @@
-import type { PluginManifest, TFile } from 'obsidian';
+import type { Command, PluginManifest, TFile } from 'obsidian';
 import { App, Menu, TFile as MockTFile, WorkspaceLeaf } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
@@ -21,6 +21,19 @@ const manifest: PluginManifest = {
 function createPlugin(): AbyssDocumentsPlugin {
   const app = App.createConfigured__();
   return new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+}
+
+function registeredCommands(plugin: AbyssDocumentsPlugin): Map<string, Command> {
+  return (plugin as unknown as { commands__: Map<string, Command> }).commands__;
+}
+
+function commandCheck(
+  commands: Map<string, Command>,
+  id: string,
+): NonNullable<Command['checkCallback']> {
+  const callback = commands.get(id)?.checkCallback;
+  if (callback === undefined) throw new Error(`Expected the ${id} command.`);
+  return callback;
 }
 
 function pdfFile(app: App, path = 'Books/Guide.pdf'): TFile {
@@ -151,6 +164,50 @@ describe('AbyssDocumentsPlugin', () => {
     if (cleanup === undefined) throw new Error('Expected runtime cleanup registration.');
     cleanup();
     expect(disposeRuntime).toHaveBeenCalledOnce();
+  });
+
+  it('registers outline and document-search commands without default hotkeys or name prefixes', async () => {
+    const app = App.createConfigured__();
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    await plugin.onload();
+    const commands = registeredCommands(plugin);
+
+    expect([...commands.keys()]).toEqual(['show-outline', 'search-document']);
+    expect([...commands.values()].map(({ name }) => name)).toEqual([
+      'Show document outline',
+      'Search document',
+    ]);
+    for (const command of commands.values()) {
+      expect(command).not.toHaveProperty('hotkeys');
+      expect(command.name).not.toContain('Abyss Documents');
+    }
+  });
+
+  it('routes commands only to the active document view', async () => {
+    const app = App.createConfigured__();
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const showOutline = vi.fn();
+    const searchDocument = vi.fn();
+    const activeView = { searchDocument, showOutline } as unknown as AbyssDocumentView;
+    const active = vi.spyOn(app.workspace, 'getActiveViewOfType').mockReturnValue(activeView);
+    await plugin.onload();
+    const commands = registeredCommands(plugin);
+    const outline = commandCheck(commands, 'show-outline');
+    const search = commandCheck(commands, 'search-document');
+
+    expect(outline(true)).toBe(true);
+    expect(search(true)).toBe(true);
+    expect(showOutline).not.toHaveBeenCalled();
+    expect(searchDocument).not.toHaveBeenCalled();
+
+    expect(outline(false)).toBe(true);
+    expect(search(false)).toBe(true);
+    expect(showOutline).toHaveBeenCalledOnce();
+    expect(searchDocument).toHaveBeenCalledOnce();
+
+    active.mockReturnValue(null);
+    expect(outline(false)).toBe(false);
+    expect(search(false)).toBe(false);
   });
 
   it('restores and saves per-document profiles through the loaded plugin data store', async () => {

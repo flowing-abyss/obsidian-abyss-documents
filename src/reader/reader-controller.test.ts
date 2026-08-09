@@ -14,6 +14,7 @@ import {
   type ReaderProfileState,
   type ShellFactory,
 } from './reader-controller.js';
+import type { ReaderShellIntent } from './reader-shell.js';
 import { ReaderShell } from './reader-shell.js';
 import { BUILTIN_PROFILES } from './reading-profiles.js';
 import type { ReaderToolbarIntent } from './toolbar.js';
@@ -33,6 +34,9 @@ function viewport(pageCount = 3) {
   const mount = vi.fn(async () => undefined);
   const destroy = vi.fn(async () => undefined);
   const goTo = vi.fn(async () => undefined);
+  const focus = vi.fn();
+  const search = vi.fn();
+  const searchAgain = vi.fn();
   const setScale = vi.fn();
   const setReadingColors = vi.fn();
   let listener: Parameters<DocumentViewport['onEvent']>[0] | null = null;
@@ -43,13 +47,13 @@ function viewport(pageCount = 3) {
     goTo,
     setScale,
     setReadingColors,
-    search: vi.fn(),
-    searchAgain: vi.fn(),
+    search,
+    searchAgain,
     onEvent: vi.fn((nextListener: Parameters<DocumentViewport['onEvent']>[0]) => {
       listener = nextListener;
       return unsubscribe;
     }),
-    focus: vi.fn(),
+    focus,
     destroy,
   };
   return {
@@ -57,8 +61,11 @@ function viewport(pageCount = 3) {
     emit(event: Parameters<NonNullable<typeof listener>>[0]) {
       listener?.(event);
     },
+    focus,
     goTo,
     mount,
+    search,
+    searchAgain,
     setReadingColors,
     setScale,
     unsubscribe,
@@ -122,13 +129,19 @@ function profileState(options?: {
 }
 
 function capturingShellFactory() {
-  let sendIntent: ((intent: ReaderToolbarIntent) => void) | null = null;
+  let sendIntent: ((intent: ReaderShellIntent) => void) | null = null;
+  let createdShell: ReaderShell | null = null;
   const createShell: ShellFactory = (host, onIntent) => {
     sendIntent = onIntent;
-    return new ReaderShell(host, onIntent);
+    createdShell = new ReaderShell(host, onIntent);
+    return createdShell;
   };
   return {
     createShell,
+    get created(): ReaderShell {
+      if (createdShell === null) throw new Error('Expected the reader shell to be created.');
+      return createdShell;
+    },
     send(intent: ReaderToolbarIntent) {
       if (sendIntent === null) throw new Error('Expected the reader shell to be created.');
       sendIntent(intent);
@@ -460,6 +473,153 @@ describe('ReaderController', () => {
     expect(createdViewport.goTo).toHaveBeenNthCalledWith(2, { pageIndex: 2 });
     expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, { pageIndex: 2 });
     expect(createdViewport.setScale).toHaveBeenCalledWith('page-fit');
+  });
+
+  it('opens the lazy outline from the toolbar but never for deep navigation', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(3);
+    const createdSession = session(pdf.path, createdViewport);
+    createdSession.value.getOutline = vi.fn(async () => [
+      { id: 'chapter', label: 'Chapter', target: { pageIndex: 1 }, children: [] },
+    ]);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'go-to-page', pageIndex: 1 });
+    expect(shell.created.sidebar).toBeNull();
+
+    shell.send({ type: 'toggle-sidebar' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.outlinePanel.root.textContent).toContain('Chapter');
+    });
+    expect(shell.created.sidebar?.activeTab).toBe('outline');
+    shell.created.sidebar?.outlinePanel.root
+      .querySelector<HTMLElement>('[data-outline-id="chapter"]')
+      ?.click();
+    expect(createdViewport.goTo).toHaveBeenLastCalledWith({ pageIndex: 1 });
+    shell.send({ type: 'toggle-sidebar' });
+    expect(shell.created.sidebar?.isOpen).toBe(false);
+  });
+
+  it('contains an outline-loading failure at one visible and diagnostic boundary', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const cause = new Error('destination table is damaged');
+    createdSession.value.getOutline = vi.fn(async () => {
+      throw cause;
+    });
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+
+    controller.showOutline();
+
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledWith(
+        'Could not load document outline: destination table is damaged',
+        undefined,
+      );
+    });
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to load PDF outline', {
+      path: pdf.path,
+      cause,
+    });
+    expect(shell.created.sidebar?.outlinePanel.root.textContent).toContain('No outline available.');
+  });
+
+  it('keeps document search query, selected PDF match, and target page synchronized', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(3);
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    const OwnerKeyboardEvent = (
+      shell.created.root.win as Window & {
+        KeyboardEvent: typeof KeyboardEvent;
+      }
+    ).KeyboardEvent;
+    const OwnerEvent = (shell.created.root.win as Window & { Event: typeof Event }).Event;
+    shell.created.documentHost.dispatchEvent(
+      new OwnerKeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        metaKey: true,
+        key: 'f',
+      }),
+    );
+    const input = shell.created.sidebar?.searchPanel.input;
+    if (input === undefined) throw new Error('Expected document search input.');
+    input.value = 'needle';
+    input.dispatchEvent(new OwnerEvent('input', { bubbles: true }));
+    createdViewport.emit({
+      type: 'search-results',
+      results: {
+        query: 'needle',
+        complete: true,
+        hits: [
+          { id: 'first', pageIndex: 0, matchIndex: 0, preview: 'First needle' },
+          { id: 'second', pageIndex: 2, matchIndex: 0, preview: 'Second needle' },
+        ],
+      },
+    });
+    shell.created.sidebar?.searchPanel.root
+      .querySelectorAll<HTMLButtonElement>('[data-search-result]')[1]
+      ?.click();
+
+    expect(createdViewport.search).toHaveBeenCalledWith('needle');
+    expect(createdViewport.searchAgain).toHaveBeenCalledWith('next');
+    expect(createdViewport.goTo).toHaveBeenLastCalledWith({ pageIndex: 2 });
+
+    shell.created.sidebar?.searchPanel.root
+      .querySelector<HTMLButtonElement>('[data-action="previous-result"]')
+      ?.click();
+    expect(createdViewport.searchAgain).toHaveBeenLastCalledWith('previous');
+    expect(createdViewport.goTo).toHaveBeenLastCalledWith({ pageIndex: 0 });
+
+    input.dispatchEvent(new OwnerKeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+    expect(createdViewport.search).toHaveBeenLastCalledWith('');
+    input.dispatchEvent(new OwnerKeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+    expect(shell.created.sidebar?.isOpen).toBe(false);
+    expect(createdViewport.focus).toHaveBeenCalledOnce();
+  });
+
+  it('ignores reader commands and render errors when no interactive action is needed', async () => {
+    const controller = new ReaderController(new DocumentAdapterRegistry([]));
+    controller.showOutline();
+    controller.searchDocument();
+
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const activeController = new ReaderController(new DocumentAdapterRegistry([adapter.value]));
+    const host = createDiv();
+    await activeController.open(pdf, host);
+    createdViewport.emit({ type: 'render-error', pageIndex: 0, cause: new Error('render') });
+    activeController.searchDocument();
+    expect(host.querySelector('[data-sidebar-panel="search"]')).not.toBeNull();
+    await activeController.close();
+    expect(createdViewport.destroy).toHaveBeenCalledOnce();
   });
 
   it('reports a failed remembered-profile write without changing the active rendering', async () => {
