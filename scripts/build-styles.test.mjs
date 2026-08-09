@@ -107,4 +107,24 @@ describe('PDF.js style build', () => {
       overflow: 'auto',
     });
   });
+
+  it('ships scoped settings, stored-width docking, safe-area mobile, and reduced motion', async () => {
+    const output = await readFile('styles.css', 'utf8');
+    const root = postcss.parse(output);
+    const selectors = [];
+    root.walkRules((rule) => selectors.push(rule.selector));
+
+    expect(selectors).toContain('.abyss-documents-settings');
+    expect(output).toContain('width: var(--abyss-reader-sidebar-width)');
+    expect(output).toContain('env(safe-area-inset-bottom)');
+    const reducedMotion = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' &&
+        node.name === 'media' &&
+        node.params === '(prefers-reduced-motion: reduce)',
+    );
+    expect(reducedMotion?.toString()).toContain('scroll-behavior: auto');
+    expect(reducedMotion?.toString()).toContain('transition: none');
+    expect(() => assertScopedSelectors(output)).not.toThrow();
+  });
 });

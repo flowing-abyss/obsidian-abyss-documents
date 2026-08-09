@@ -49,6 +49,7 @@ const SCALE_CHOICES: readonly ScaleChoice[] = [
 
 export class ReaderToolbar {
   readonly root: HTMLElement;
+  readonly sidebarButton: HTMLButtonElement;
 
   private readonly cleanups: Array<() => void> = [];
   private readonly menus = new Set<Menu>();
@@ -71,9 +72,9 @@ export class ReaderToolbar {
     this.root = host;
     this.root.addClass('abyss-reader-toolbar');
 
-    const sidebar = this.iconButton('sidebar', 'Toggle sidebar', 'panel-left');
-    sidebar.setAttribute('aria-pressed', 'false');
-    this.listen(sidebar, 'click', () => {
+    this.sidebarButton = this.iconButton('sidebar', 'Toggle sidebar', 'panel-left');
+    this.sidebarButton.setAttribute('aria-pressed', 'false');
+    this.listen(this.sidebarButton, 'click', () => {
       this.onIntent({ type: 'toggle-sidebar' });
     });
 

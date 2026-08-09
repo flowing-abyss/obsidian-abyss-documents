@@ -6,6 +6,8 @@ import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
 import { PluginDataStore, type PluginDataV1 } from './plugin-data.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
 import { ReaderController, type ReaderProfileState } from './reader/reader-controller.js';
+import { ReaderShell } from './reader/reader-shell.js';
+import { AbyssDocumentsSettingTab } from './settings-tab.js';
 
 export const PLUGIN_ID = 'abyss-documents';
 
@@ -41,8 +43,24 @@ export default class AbyssDocumentsPlugin extends Plugin {
       },
     };
     const services = {
-      createController: () => new ReaderController(registry, undefined, profileState),
+      createController: () =>
+        new ReaderController(
+          registry,
+          (host, onIntent) =>
+            new ReaderShell(host, onIntent, {
+              sidebarWidth: store.snapshot.view.sidebarWidth,
+            }),
+          profileState,
+        ),
     };
+    this.addSettingTab(
+      new AbyssDocumentsSettingTab(this.app, this, store, () => {
+        this.data = store.snapshot;
+        for (const leaf of this.app.workspace.getLeavesOfType(DOCUMENT_VIEW_TYPE)) {
+          if (leaf.view instanceof AbyssDocumentView) leaf.view.refreshReadingSettings();
+        }
+      }),
+    );
     this.registerView(DOCUMENT_VIEW_TYPE, (leaf) => new AbyssDocumentView(leaf, services));
     this.registerExtensions(['pdf'], DOCUMENT_VIEW_TYPE);
     this.addCommand({

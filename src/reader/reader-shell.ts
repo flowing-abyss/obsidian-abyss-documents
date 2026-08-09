@@ -1,3 +1,4 @@
+import { FocusReturn, PoliteAnnouncer } from './a11y.js';
 import type { ObsidianTheme } from './reading-profiles.js';
 import { ReaderSidebar, type ReaderSidebarCallbacks, type ReaderSidebarTab } from './sidebar.js';
 import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
@@ -5,18 +6,37 @@ import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
 export type ReaderShellIntent =
   ReaderToolbarIntent | { readonly type: 'open-sidebar'; readonly tab: ReaderSidebarTab };
 
+export interface ReaderShellOptions {
+  readonly sidebarWidth?: number;
+}
+
+const DEFAULT_SIDEBAR_WIDTH = 320;
+const MINIMUM_SIDEBAR_WIDTH = 240;
+const MAXIMUM_SIDEBAR_WIDTH = 480;
+
 export class ReaderShell {
   readonly root: HTMLElement;
   readonly documentHost: HTMLElement;
   readonly toolbar: ReaderToolbar;
 
   private readonly cleanups: Array<() => void> = [];
+  private readonly announcer: PoliteAnnouncer;
   private readonly body: HTMLElement;
+  private readonly focusReturn = new FocusReturn();
   private sidebarValue: ReaderSidebar | null = null;
   private destroyed = false;
 
-  constructor(host: HTMLElement, onIntent: (intent: ReaderShellIntent) => void = () => undefined) {
+  constructor(
+    host: HTMLElement,
+    onIntent: (intent: ReaderShellIntent) => void = () => undefined,
+    options: ReaderShellOptions = {},
+  ) {
     this.root = host.createDiv({ cls: 'abyss-documents' });
+    this.root.style.setProperty(
+      '--abyss-reader-sidebar-width',
+      `${boundedSidebarWidth(options.sidebarWidth)}px`,
+    );
+    this.announcer = new PoliteAnnouncer(this.root);
 
     const toolbarHost = this.root.createDiv({
       attr: {
@@ -80,15 +100,19 @@ export class ReaderShell {
   }
 
   openSidebar(tab: ReaderSidebarTab, callbacks: ReaderSidebarCallbacks): ReaderSidebar {
+    if (this.sidebarValue?.isOpen !== true) this.captureSidebarInvoker();
     this.sidebarValue ??= new ReaderSidebar(this.body, {
       ...callbacks,
       onClose: () => {
         this.setSidebarPressed(false);
+        this.focusReturn.restore();
+        this.announce('Document sidebar closed');
         callbacks.onClose();
       },
     });
     this.sidebarValue.open(tab);
     this.setSidebarPressed(true);
+    this.announce(`${tab === 'outline' ? 'Outline' : 'Search'} sidebar opened`);
     return this.sidebarValue;
   }
 
@@ -97,12 +121,18 @@ export class ReaderShell {
     this.setSidebarPressed(false);
   }
 
+  announce(message: string): void {
+    this.announcer.announce(message);
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const cleanup of [...this.cleanups]) cleanup();
     this.sidebarValue?.destroy();
     this.sidebarValue = null;
+    this.focusReturn.clear();
+    this.announcer.destroy();
     this.toolbar.destroy();
     this.root.remove();
   }
@@ -112,4 +142,18 @@ export class ReaderShell {
       .querySelector('[data-control="sidebar"]')
       ?.setAttribute('aria-pressed', String(pressed));
   }
+
+  private captureSidebarInvoker(): void {
+    const active = this.root.doc.activeElement;
+    const invoker =
+      active !== null && this.root.contains(active) && 'focus' in active
+        ? (active as HTMLElement)
+        : this.toolbar.sidebarButton;
+    this.focusReturn.capture(invoker);
+  }
+}
+
+function boundedSidebarWidth(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_SIDEBAR_WIDTH;
+  return Math.min(MAXIMUM_SIDEBAR_WIDTH, Math.max(MINIMUM_SIDEBAR_WIDTH, Math.round(value)));
 }

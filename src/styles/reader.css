@@ -1,4 +1,6 @@
 .abyss-documents {
+  --abyss-reader-sidebar-width: 20rem;
+
   position: relative;
   display: flex;
   width: 100%;
@@ -40,6 +42,8 @@
 }
 
 .abyss-documents .abyss-reader-toolbar-button {
+  width: var(--input-height);
+  min-height: var(--input-height);
   flex: 0 0 auto;
 }
 
@@ -79,7 +83,8 @@
 
 .abyss-documents .abyss-reader-sidebar {
   display: flex;
-  width: min(22rem, 36%);
+  width: var(--abyss-reader-sidebar-width);
+  max-width: 36%;
   min-width: 15rem;
   min-height: 0;
   flex: 0 0 auto;
@@ -113,11 +118,18 @@
 }
 
 .abyss-documents .abyss-reader-sidebar-tab {
+  min-height: var(--input-height);
   padding: var(--size-2-1) var(--size-4-2);
   border: 0;
   border-radius: var(--radius-s);
   background: transparent;
   color: var(--text-muted);
+}
+
+.abyss-documents .abyss-reader-sidebar-close,
+.abyss-documents .abyss-reader-search-button {
+  width: var(--input-height);
+  min-height: var(--input-height);
 }
 
 .abyss-documents .abyss-reader-sidebar-tab[aria-selected='true'] {
@@ -212,6 +224,17 @@
   background: var(--background-modifier-hover);
 }
 
+.abyss-documents .abyss-reader-toolbar-button:focus-visible,
+.abyss-documents .abyss-reader-toolbar-page-field:focus-visible,
+.abyss-documents .abyss-reader-sidebar-tab:focus-visible,
+.abyss-documents .abyss-reader-sidebar-close:focus-visible,
+.abyss-documents .abyss-reader-outline-row:focus-visible,
+.abyss-documents .abyss-reader-search-input:focus-visible,
+.abyss-documents .abyss-reader-search-result:focus-visible {
+  outline: var(--border-width) solid var(--interactive-accent);
+  outline-offset: var(--size-2-1);
+}
+
 .abyss-documents .abyss-reader-search-page {
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
@@ -225,6 +248,17 @@
 .abyss-documents .abyss-reader-sidebar-empty {
   padding: var(--size-4-2);
   color: var(--text-muted);
+}
+
+.abyss-documents .abyss-reader-announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires this public class name. */
@@ -254,8 +288,11 @@
     z-index: var(--layer-modal);
     inset-block: 0;
     inset-inline-start: 0;
-    width: min(22rem, 90%);
+    box-sizing: border-box;
+    width: min(var(--abyss-reader-sidebar-width), 90%);
     max-width: 90%;
+    padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
+    padding-inline-start: env(safe-area-inset-left);
     box-shadow: var(--shadow-l);
   }
 
@@ -265,5 +302,13 @@
 
   .abyss-documents .abyss-reader-toolbar {
     padding-inline: var(--size-4-1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .abyss-documents,
+  .abyss-documents * {
+    scroll-behavior: auto !important;
+    transition: none !important;
   }
 }

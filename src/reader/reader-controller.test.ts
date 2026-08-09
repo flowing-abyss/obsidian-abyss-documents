@@ -451,6 +451,28 @@ describe('ReaderController', () => {
     expect(profiles.updateProfile).not.toHaveBeenCalled();
   });
 
+  it('reapplies bounded custom appearance settings to an active custom profile', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const profiles = profileState({ defaultProfile: 'custom' });
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      undefined,
+      profiles.value,
+    );
+    await controller.open(pdf, createDiv());
+    (profiles.value.reading.custom as { brightness: number }).brightness = 9;
+
+    controller.refreshReadingSettings();
+
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(
+      expect.objectContaining({ brightness: 1.5 }),
+    );
+  });
+
   it('routes navigation and scale intents and follows viewport page events', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -554,7 +576,9 @@ describe('ReaderController', () => {
       new DocumentAdapterRegistry([adapter.value]),
       shell.createShell,
     );
-    await controller.open(pdf, createDiv());
+    const host = createDiv();
+    host.doc.body.append(host);
+    await controller.open(pdf, host);
     const OwnerKeyboardEvent = (
       shell.created.root.win as Window & {
         KeyboardEvent: typeof KeyboardEvent;
@@ -609,9 +633,13 @@ describe('ReaderController', () => {
 
     input.dispatchEvent(new OwnerKeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
     expect(createdViewport.search).toHaveBeenLastCalledWith('');
+    const restoreFocus = vi.spyOn(shell.created.toolbar.sidebarButton, 'focus');
     input.dispatchEvent(new OwnerKeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
     expect(shell.created.sidebar?.isOpen).toBe(false);
-    expect(createdViewport.focus).toHaveBeenCalledOnce();
+    expect(createdViewport.focus).not.toHaveBeenCalled();
+    expect(restoreFocus).toHaveBeenCalledOnce();
+    await controller.close();
+    host.remove();
   });
 
   it('loads the outline once when its tab is selected after Search opened first', async () => {

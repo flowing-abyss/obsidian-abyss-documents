@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 const STYLE_INPUT_PATHS = [
   resolve('node_modules/pdfjs-dist/web/pdf_viewer.css'),
   resolve('src/styles/reader.css'),
+  resolve('src/styles/settings.css'),
 ];
 
 function runBuildStyles() {

@@ -1,0 +1,29 @@
+.abyss-documents-settings {
+  container-type: inline-size;
+}
+
+.abyss-documents-settings .abyss-documents-settings-group {
+  border-bottom: var(--border-width) solid var(--background-modifier-border);
+}
+
+.abyss-documents-settings .abyss-documents-settings-heading {
+  margin: 0;
+}
+
+.abyss-documents-settings .abyss-documents-settings-heading .setting-item-control {
+  min-width: var(--input-height);
+}
+
+.abyss-documents-settings .abyss-documents-settings-section[hidden] {
+  display: none;
+}
+
+.abyss-documents-settings .abyss-documents-settings-section {
+  padding-inline-start: var(--size-4-4);
+}
+
+@container (width <= 500px) {
+  .abyss-documents-settings .abyss-documents-settings-section {
+    padding-inline-start: 0;
+  }
+}

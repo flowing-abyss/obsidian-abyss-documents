@@ -73,6 +73,24 @@ export class ReaderController {
     this.openSidebar('search');
   }
 
+  refreshReadingSettings(): void {
+    const viewport = this.viewport;
+    const shell = this.shell;
+    if (viewport === null || shell === null) return;
+    this.profileService.setCustom(this.profileState.reading.custom);
+    try {
+      viewport.setReadingColors(
+        this.profileService.resolve(this.currentProfile, shell.obsidianTheme),
+      );
+      shell.toolbar.setProfile(this.currentProfile);
+    } catch (cause) {
+      console.error('[abyss-documents] Failed to refresh PDF reading settings', {
+        profile: this.currentProfile,
+        cause,
+      });
+    }
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.queue.then(operation, operation);
     this.queue = result.then(
@@ -255,9 +273,7 @@ export class ReaderController {
     const viewport = this.viewport;
     if (shell === null || session === null || viewport === null) return;
     const callbacks: ReaderSidebarCallbacks = {
-      onClose: () => {
-        if (this.shell === shell && this.viewport === viewport) viewport.focus();
-      },
+      onClose: () => undefined,
       onTabChange: (nextTab) => {
         if (nextTab === 'outline' && this.session === session && this.shell === shell)
           this.loadOutline(session, shell);
@@ -424,6 +440,7 @@ export class ReaderController {
     );
     shell.toolbar.setCurrentPage(this.currentPageIndex);
     shell.sidebar?.outlinePanel.setCurrentPage(this.currentPageIndex);
+    shell.announce(`Page ${this.currentPageIndex + 1} of ${viewport.pageCount}`);
   }
 
   private handleSearchResults(

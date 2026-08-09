@@ -49,12 +49,12 @@ export class ReadingProfileService {
 
   resolve(profile: ReadingProfileId, obsidianTheme: ObsidianTheme): ResolvedReadingColors {
     if (profile === 'auto') return BUILTIN_PROFILES[obsidianTheme];
-    if (profile === 'custom') return bounded(this.custom);
+    if (profile === 'custom') return normalizeCustomReadingColors(this.custom);
     return BUILTIN_PROFILES[profile];
   }
 }
 
-function bounded(colors: ResolvedReadingColors): ResolvedReadingColors {
+export function normalizeCustomReadingColors(colors: ResolvedReadingColors): ResolvedReadingColors {
   return {
     background: colors.background,
     foreground: colors.foreground,

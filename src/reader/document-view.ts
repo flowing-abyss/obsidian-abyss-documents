@@ -1,4 +1,5 @@
 import { FileView, Notice, type TFile, type WorkspaceLeaf } from 'obsidian';
+import { ownerWindow } from './owner-dom.js';
 
 export const DOCUMENT_VIEW_TYPE = 'abyss-document-view';
 
@@ -7,6 +8,7 @@ export interface ReaderViewController {
   close(): Promise<void>;
   showOutline(): void;
   searchDocument(): void;
+  refreshReadingSettings(): void;
 }
 
 export interface AbyssDocumentViewServices {
@@ -22,7 +24,11 @@ export class AbyssDocumentView extends FileView {
     this.controller = services.createController();
     this.registerDomEvent(this.contentEl, 'click', (event) => {
       const target = event.target;
-      if (!(target instanceof Element) || target.closest('[data-action="retry"]') === null) return;
+      if (
+        !(target instanceof ownerWindow(this.contentEl).Element) ||
+        target.closest('[data-action="retry"]') === null
+      )
+        return;
       const file = this.file;
       if (file !== null) {
         const generation = ++this.loadGeneration;
@@ -68,6 +74,10 @@ export class AbyssDocumentView extends FileView {
     this.controller.searchDocument();
   }
 
+  refreshReadingSettings(): void {
+    this.controller.refreshReadingSettings();
+  }
+
   private async openAtBoundary(file: TFile, generation: number): Promise<void> {
     if (generation !== this.loadGeneration) return;
     this.clearOpenFailure();
@@ -85,13 +95,14 @@ export class AbyssDocumentView extends FileView {
   private renderOpenFailure(reason: string): void {
     const documentHost =
       this.contentEl.querySelector<HTMLElement>('[data-region="document"]') ?? this.contentEl;
-    const surface = createDiv();
+    const owner = ownerWindow(this.contentEl);
+    const surface = owner.createDiv();
     surface.dataset['readerError'] = 'open';
     surface.setAttribute('role', 'alert');
 
-    const message = createEl('p');
+    const message = owner.createEl('p');
     message.textContent = reason;
-    const retry = createEl('button');
+    const retry = owner.createEl('button');
     retry.type = 'button';
     retry.dataset['action'] = 'retry';
     retry.textContent = 'Retry';

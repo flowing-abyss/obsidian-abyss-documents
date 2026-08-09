@@ -8,6 +8,7 @@ import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1 } from './plugin-data.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
 import { BUILTIN_PROFILES } from './reader/reading-profiles.js';
+import { AbyssDocumentsSettingTab } from './settings-tab.js';
 
 const manifest: PluginManifest = {
   id: 'abyss-documents',
@@ -182,6 +183,37 @@ describe('AbyssDocumentsPlugin', () => {
       expect(command).not.toHaveProperty('hotkeys');
       expect(command.name).not.toContain('Abyss Documents');
     }
+  });
+
+  it('registers one native settings tab', async () => {
+    const app = App.createConfigured__();
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const registerView = vi.spyOn(plugin, 'registerView');
+
+    await plugin.onload();
+
+    const settingTabs = (plugin as unknown as { settingTabs__: unknown[] }).settingTabs__;
+    expect(settingTabs).toHaveLength(1);
+    expect(settingTabs[0]).toBeInstanceOf(AbyssDocumentsSettingTab);
+    const creator = registerView.mock.calls.find(([type]) => type === DOCUMENT_VIEW_TYPE)?.[1];
+    if (creator === undefined) throw new Error('Expected the document view creator.');
+    const view = creator(WorkspaceLeaf.create2__(app).asOriginalType3__());
+    if (!(view instanceof AbyssDocumentView)) throw new Error('Expected an Abyss document view.');
+    const refresh = vi.spyOn(view, 'refreshReadingSettings').mockImplementation(() => undefined);
+    vi.spyOn(app.workspace, 'getLeavesOfType').mockReturnValue([
+      { view: {} },
+      { view },
+    ] as unknown as WorkspaceLeaf[]);
+    const onSettingsChanged = (
+      settingTabs[0] as {
+        onSettingsChanged(settings: PluginDataV1['settings']): void | Promise<void>;
+      }
+    ).onSettingsChanged.bind(settingTabs[0]);
+
+    await onSettingsChanged(plugin.data.settings);
+
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(plugin.data).toBe(DEFAULT_DATA);
   });
 
   it('routes commands only to the active document view', async () => {

@@ -36,8 +36,15 @@ function controller() {
   const close = vi.fn(async () => undefined);
   const showOutline = vi.fn();
   const searchDocument = vi.fn();
-  const reader: ReaderViewController = { open, close, searchDocument, showOutline };
-  return { close, open, reader, searchDocument, showOutline };
+  const refreshReadingSettings = vi.fn();
+  const reader: ReaderViewController = {
+    open,
+    close,
+    refreshReadingSettings,
+    searchDocument,
+    showOutline,
+  };
+  return { close, open, reader, refreshReadingSettings, searchDocument, showOutline };
 }
 
 describe('AbyssDocumentView', () => {
@@ -133,9 +140,11 @@ describe('AbyssDocumentView', () => {
 
     fixture.view.showOutline();
     fixture.view.searchDocument();
+    fixture.view.refreshReadingSettings();
 
     expect(reader.showOutline).toHaveBeenCalledOnce();
     expect(reader.searchDocument).toHaveBeenCalledOnce();
+    expect(reader.refreshReadingSettings).toHaveBeenCalledOnce();
   });
 
   it('ignores unrelated clicks and presents a safe reason for a non-error failure', async () => {

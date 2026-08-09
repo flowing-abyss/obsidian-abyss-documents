@@ -51,4 +51,55 @@ describe('ReaderShell', () => {
 
     expect(onThemeChange).not.toHaveBeenCalled();
   });
+
+  it('returns focus to the invoking toolbar control after the sidebar closes', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const shell = new ReaderShell(host, (intent) => {
+      if (intent.type !== 'toggle-sidebar') return;
+      shell.openSidebar('outline', {
+        onClose: () => undefined,
+        onOutlineNavigate: () => undefined,
+        onSearchNavigate: () => undefined,
+        onSearchQuery: () => undefined,
+        onTabChange: () => undefined,
+      });
+    });
+    const toggle = shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]');
+    if (toggle === null) throw new Error('Expected the sidebar toggle.');
+    toggle.focus();
+    toggle.click();
+    const close = shell.sidebar?.root.querySelector<HTMLButtonElement>(
+      '[data-action="close-sidebar"]',
+    );
+    if (close === undefined || close === null)
+      throw new Error('Expected the sidebar close button.');
+    close.focus();
+
+    close.click();
+
+    expect(shell.root.doc.activeElement).toBe(toggle);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('announces reader changes through one polite live region', async () => {
+    const shell = new ReaderShell(createDiv());
+
+    shell.announce('Page 2 of 3');
+    await new Promise((resolve) => shell.root.win.setTimeout(resolve, 0));
+
+    const regions = shell.root.querySelectorAll('[role="status"][aria-live="polite"]');
+    expect(regions).toHaveLength(1);
+    expect(regions[0]?.textContent).toBe('Page 2 of 3');
+    shell.destroy();
+  });
+
+  it('applies a bounded stored desktop sidebar width without opening it', () => {
+    const shell = new ReaderShell(createDiv(), () => undefined, { sidebarWidth: 900 });
+
+    expect(shell.sidebar).toBeNull();
+    expect(shell.root.style.getPropertyValue('--abyss-reader-sidebar-width')).toBe('480px');
+    shell.destroy();
+  });
 });
