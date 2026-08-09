@@ -16,6 +16,14 @@ interface NumericSettingOptions {
   readonly minimum: number;
 }
 
+interface RenderState {
+  readonly expandedSectionIds: ReadonlySet<string>;
+  readonly focusedControlIndex: number;
+}
+
+const FOCUSABLE_CONTROL_SELECTOR =
+  'button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
 const PROFILE_OPTIONS: Readonly<Record<ReadingProfileId, string>> = {
   auto: 'Auto',
   light: 'Light',
@@ -25,6 +33,7 @@ const PROFILE_OPTIONS: Readonly<Record<ReadingProfileId, string>> = {
 };
 
 export class AbyssDocumentsSettingTab extends PluginSettingTab {
+  private latestFailedGeneration = 0;
   private latestSettledGeneration = 0;
   private pendingUpdates = 0;
   private updateGeneration = 0;
@@ -48,17 +57,29 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     this.render();
   }
 
-  render(): void {
+  render(state?: RenderState): void {
     this.containerEl.empty();
     this.containerEl.addClass('abyss-documents-settings');
-    const reading = this.collapsibleSection('Reading appearance', 'reading-appearance');
+    const reading = this.collapsibleSection(
+      'Reading appearance',
+      'reading-appearance',
+      state?.expandedSectionIds,
+    );
     this.renderReadingAppearance(reading.body);
-    const advanced = this.collapsibleSection('Advanced', 'advanced');
+    const advanced = this.collapsibleSection('Advanced', 'advanced', state?.expandedSectionIds);
     this.renderAdvanced(advanced.body);
+    if (state !== undefined && state.focusedControlIndex >= 0) {
+      this.focusableControls()[state.focusedControlIndex]?.focus();
+    }
   }
 
-  private collapsibleSection(title: string, id: string): CollapsibleSection {
+  private collapsibleSection(
+    title: string,
+    id: string,
+    expandedSectionIds?: ReadonlySet<string>,
+  ): CollapsibleSection {
     const bodyId = `abyss-documents-settings-${id}`;
+    const initiallyExpanded = expandedSectionIds?.has(bodyId) ?? false;
     const section = this.containerEl.createDiv({ cls: 'abyss-documents-settings-group' });
     const body = section.createDiv({ cls: 'abyss-documents-settings-section' });
     const heading = new Setting(section)
@@ -67,8 +88,8 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       .setClass('abyss-documents-settings-heading')
       .addExtraButton((button) => {
         button
-          .setIcon('chevron-right')
-          .setTooltip(`Show ${title.toLowerCase()}`)
+          .setIcon(initiallyExpanded ? 'chevron-down' : 'chevron-right')
+          .setTooltip(`${initiallyExpanded ? 'Hide' : 'Show'} ${title.toLowerCase()}`)
           .onClick(() => {
             const expanded = body.hidden;
             body.hidden = !expanded;
@@ -77,11 +98,11 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
             button.setTooltip(`${expanded ? 'Hide' : 'Show'} ${title.toLowerCase()}`);
           });
         button.extraSettingsEl.setAttribute('aria-controls', bodyId);
-        button.extraSettingsEl.setAttribute('aria-expanded', 'false');
+        button.extraSettingsEl.setAttribute('aria-expanded', String(initiallyExpanded));
       });
     section.prepend(heading.settingEl);
     body.id = bodyId;
-    body.hidden = true;
+    body.hidden = !initiallyExpanded;
     return { body };
   }
 
@@ -193,6 +214,7 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       .update((data) => ({ ...data, settings: mutator(data.settings) }))
       .then(() => this.onSettingsChanged(this.store.snapshot.settings))
       .catch((cause: unknown) => {
+        this.latestFailedGeneration = Math.max(this.latestFailedGeneration, generation);
         const reason = cause instanceof Error ? cause.message : String(cause);
         new Notice(`Could not save document settings: ${reason}`);
         console.error('[abyss-documents] Failed to save document settings', { cause });
@@ -200,10 +222,32 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       .finally(() => {
         this.pendingUpdates -= 1;
         this.latestSettledGeneration = Math.max(this.latestSettledGeneration, generation);
-        if (this.pendingUpdates === 0 && this.latestSettledGeneration === this.updateGeneration) {
-          this.render();
+        if (
+          this.pendingUpdates === 0 &&
+          this.latestSettledGeneration === this.updateGeneration &&
+          this.latestFailedGeneration === this.updateGeneration
+        ) {
+          this.render(this.captureRenderState());
         }
       });
+  }
+
+  private captureRenderState(): RenderState {
+    const expandedSectionIds = new Set<string>();
+    const sections = Array.from(
+      this.containerEl.querySelectorAll<HTMLElement>('.abyss-documents-settings-section'),
+    );
+    for (const section of sections) {
+      if (!section.hidden) expandedSectionIds.add(section.id);
+    }
+    const activeElement = this.containerEl.doc.activeElement;
+    const controls = this.focusableControls();
+    const focusedControlIndex = controls.findIndex((control) => control === activeElement);
+    return { expandedSectionIds, focusedControlIndex };
+  }
+
+  private focusableControls(): HTMLElement[] {
+    return Array.from(this.containerEl.querySelectorAll<HTMLElement>(FOCUSABLE_CONTROL_SELECTOR));
   }
 }
 

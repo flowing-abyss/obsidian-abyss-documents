@@ -92,6 +92,38 @@ function deferred<T = void>() {
   return { promise, reject, resolve };
 }
 
+function requiredControl<Component>(controls: Map<string, Component>, name: string): Component {
+  const control = controls.get(name);
+  if (control === undefined) throw new Error(`Expected ${name} control.`);
+  return control;
+}
+
+function sectionControls(
+  controls: CapturedControls,
+  tab: AbyssDocumentsSettingTab,
+  title: string,
+): {
+  readonly body: HTMLElement;
+  readonly expander: ExtraButtonComponent & { simulateClick__(): void };
+} {
+  const expander = requiredControl(controls.expanders, title);
+  const bodyId = expander.extraSettingsEl.getAttribute('aria-controls');
+  if (bodyId === null) throw new Error(`Expected ${title} section body.`);
+  const body = tab.containerEl.querySelector<HTMLElement>(`#${bodyId}`);
+  if (body === null) throw new Error(`Expected ${title} section body.`);
+  return { body, expander };
+}
+
+function expandSection(
+  controls: CapturedControls,
+  tab: AbyssDocumentsSettingTab,
+  title: string,
+): ReturnType<typeof sectionControls> {
+  const section = sectionControls(controls, tab, title);
+  section.expander.simulateClick__();
+  return section;
+}
+
 describe('AbyssDocumentsSettingTab', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -183,6 +215,32 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(onSettingsChange).toHaveBeenLastCalledWith(store.snapshot.settings);
   });
 
+  it('keeps an expanded section and its controls stable after successful writes', async () => {
+    const controls = captureControls();
+    const { onSettingsChange, store, tab } = fixture();
+    tab.render();
+    const { body, expander } = expandSection(controls, tab, 'Reading appearance');
+    const toggle = requiredControl(controls.toggles, 'Remember profile per document');
+    const slider = requiredControl(controls.sliders, 'Brightness');
+
+    toggle.setValue(true);
+    slider.setValue(1.25);
+    await vi.waitFor(() => {
+      expect(onSettingsChange).toHaveBeenCalledTimes(2);
+    });
+
+    expect(store.snapshot.settings.reading).toMatchObject({
+      rememberPerDocument: true,
+      custom: { brightness: 1.25 },
+    });
+    expect(body.hidden).toBe(false);
+    expect(expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
+    expect(requiredControl(controls.toggles, 'Remember profile per document').toggleEl).toBe(
+      toggle.toggleEl,
+    );
+    expect(requiredControl(controls.sliders, 'Brightness').sliderEl).toBe(slider.sliderEl);
+  });
+
   it('contains a failed settings write at one visible and diagnostic boundary', async () => {
     const controls = captureControls();
     const { onSettingsChange, persistence, store, tab } = fixture();
@@ -237,7 +295,10 @@ describe('AbyssDocumentsSettingTab', () => {
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     tab.render();
+    const expander = controls.expanders.get('Reading appearance');
+    expander?.simulateClick__();
     const originalBrightness = controls.sliders.get('Brightness');
+    const originalContrast = controls.sliders.get('Contrast');
 
     originalBrightness?.setValue(9);
     controls.sliders.get('Contrast')?.setValue(-2);
@@ -253,8 +314,9 @@ describe('AbyssDocumentsSettingTab', () => {
     });
 
     expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1, contrast: 0.5 });
-    expect(controls.sliders.get('Brightness')?.getValue()).toBe(1);
-    expect(controls.sliders.get('Contrast')?.getValue()).toBe(0.5);
+    expect(controls.sliders.get('Brightness')?.sliderEl).toBe(originalBrightness?.sliderEl);
+    expect(controls.sliders.get('Contrast')?.sliderEl).toBe(originalContrast?.sliderEl);
+    expect(expander?.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
     expect(notice).toHaveBeenCalledTimes(1);
   });
 
@@ -267,25 +329,37 @@ describe('AbyssDocumentsSettingTab', () => {
     persistence.saveData.mockImplementationOnce(() => second.promise);
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    tab.containerEl.doc.body.append(tab.containerEl);
     tab.render();
-    const originalBrightness = controls.sliders.get('Brightness');
+    const { body } = expandSection(controls, tab, 'Reading appearance');
+    const originalBrightness = requiredControl(controls.sliders, 'Brightness');
+    const originalContrast = requiredControl(controls.sliders, 'Contrast');
 
-    originalBrightness?.setValue(9);
-    controls.sliders.get('Contrast')?.setValue(-2);
+    originalBrightness.setValue(9);
+    originalContrast.setValue(-2);
     first.resolve();
     await vi.waitFor(() => {
       expect(persistence.saveData).toHaveBeenCalledTimes(2);
     });
 
-    expect(controls.sliders.get('Brightness')).toBe(originalBrightness);
+    expect(requiredControl(controls.sliders, 'Brightness')).toBe(originalBrightness);
+    originalContrast.sliderEl.focus();
     second.reject(new Error('second failed'));
     await vi.waitFor(() => {
-      expect(notice).toHaveBeenCalledTimes(1);
+      expect(requiredControl(controls.sliders, 'Brightness')).not.toBe(originalBrightness);
     });
 
+    const restored = sectionControls(controls, tab, 'Reading appearance');
     expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1.5, contrast: 1 });
-    expect(controls.sliders.get('Brightness')?.getValue()).toBe(1.5);
-    expect(controls.sliders.get('Contrast')?.getValue()).toBe(1);
+    expect(body.isConnected).toBe(false);
+    expect(restored.body.hidden).toBe(false);
+    expect(restored.expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
+    expect(requiredControl(controls.sliders, 'Brightness').getValue()).toBe(1.5);
+    expect(requiredControl(controls.sliders, 'Contrast').getValue()).toBe(1);
+    expect(tab.containerEl.doc.activeElement).toBe(
+      requiredControl(controls.sliders, 'Contrast').sliderEl,
+    );
     expect(onSettingsChange).toHaveBeenCalledOnce();
+    expect(notice).toHaveBeenCalledTimes(1);
   });
 });
