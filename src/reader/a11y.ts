@@ -1,5 +1,7 @@
 import { ownerWindow } from './owner-dom.js';
 
+const ANNOUNCEMENT_DELAY_MS = 150;
+
 export class FocusReturn {
   private invoker: HTMLElement | null = null;
 
@@ -10,7 +12,7 @@ export class FocusReturn {
   restore(): void {
     const invoker = this.invoker;
     this.invoker = null;
-    if (invoker === null || !invoker.doc.contains(invoker) || invoker.hidden) return;
+    if (invoker === null || !invoker.doc.contains(invoker) || isHidden(invoker)) return;
     invoker.focus();
   }
 
@@ -22,6 +24,8 @@ export class FocusReturn {
 export class PoliteAnnouncer {
   readonly root: HTMLElement;
 
+  private deliveredMessage: string | null = null;
+  private pendingMessage: string | null = null;
   private timer: number | null = null;
   private destroyed = false;
 
@@ -36,19 +40,47 @@ export class PoliteAnnouncer {
 
   announce(message: string): void {
     if (this.destroyed) return;
-    if (this.timer !== null) this.host.win.clearTimeout(this.timer);
-    this.root.textContent = '';
+    if (message === this.pendingMessage) return;
+    if (this.timer === null && message === this.deliveredMessage) return;
+    this.pendingMessage = message;
+    if (this.timer !== null) return;
     this.timer = this.host.win.setTimeout(() => {
       this.timer = null;
-      if (!this.destroyed) this.root.textContent = message;
-    }, 0);
+      const pendingMessage = this.pendingMessage;
+      this.pendingMessage = null;
+      if (this.destroyed || pendingMessage === null || pendingMessage === this.deliveredMessage) {
+        return;
+      }
+      this.root.textContent = pendingMessage;
+      this.deliveredMessage = pendingMessage;
+    }, ANNOUNCEMENT_DELAY_MS);
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.timer !== null) this.host.win.clearTimeout(this.timer);
+    this.pendingMessage = null;
     this.timer = null;
     this.root.remove();
   }
+}
+
+function isHidden(element: HTMLElement): boolean {
+  const win = ownerWindow(element);
+  let current: HTMLElement | null = element;
+  while (current !== null) {
+    const style = win.getComputedStyle(current);
+    if (
+      current.hidden ||
+      current.getAttribute('aria-hidden') === 'true' ||
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.visibility === 'collapse'
+    ) {
+      return true;
+    }
+    current = current.parentElement;
+  }
+  return false;
 }

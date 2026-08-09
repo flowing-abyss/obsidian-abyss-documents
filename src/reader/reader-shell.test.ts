@@ -83,16 +83,18 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
-  it('announces reader changes through one polite live region', async () => {
+  it('announces reader changes through one polite live region', () => {
+    vi.useFakeTimers();
     const shell = new ReaderShell(createDiv());
 
     shell.announce('Page 2 of 3');
-    await new Promise((resolve) => shell.root.win.setTimeout(resolve, 0));
+    vi.advanceTimersByTime(200);
 
     const regions = shell.root.querySelectorAll('[role="status"][aria-live="polite"]');
     expect(regions).toHaveLength(1);
     expect(regions[0]?.textContent).toBe('Page 2 of 3');
     shell.destroy();
+    vi.useRealTimers();
   });
 
   it('applies a bounded stored desktop sidebar width without opening it', () => {

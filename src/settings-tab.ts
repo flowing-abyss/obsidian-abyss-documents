@@ -25,6 +25,10 @@ const PROFILE_OPTIONS: Readonly<Record<ReadingProfileId, string>> = {
 };
 
 export class AbyssDocumentsSettingTab extends PluginSettingTab {
+  private latestSettledGeneration = 0;
+  private pendingUpdates = 0;
+  private updateGeneration = 0;
+
   constructor(
     app: App,
     plugin: Plugin,
@@ -183,6 +187,8 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
   }
 
   private updateSettings(mutator: (settings: PluginSettings) => PluginSettings): void {
+    const generation = ++this.updateGeneration;
+    this.pendingUpdates += 1;
     void this.store
       .update((data) => ({ ...data, settings: mutator(data.settings) }))
       .then(() => this.onSettingsChanged(this.store.snapshot.settings))
@@ -190,7 +196,13 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
         const reason = cause instanceof Error ? cause.message : String(cause);
         new Notice(`Could not save document settings: ${reason}`);
         console.error('[abyss-documents] Failed to save document settings', { cause });
-        this.render();
+      })
+      .finally(() => {
+        this.pendingUpdates -= 1;
+        this.latestSettledGeneration = Math.max(this.latestSettledGeneration, generation);
+        if (this.pendingUpdates === 0 && this.latestSettledGeneration === this.updateGeneration) {
+          this.render();
+        }
       });
   }
 }

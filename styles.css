@@ -6361,6 +6361,19 @@
   background: var(--background-primary);
 }
 
+.abyss-documents .abyss-reader-sidebar.is-mobile {
+  position: absolute;
+  z-index: var(--layer-modal);
+  inset-block: 0;
+  inset-inline-start: 0;
+  box-sizing: border-box;
+  width: min(var(--abyss-reader-sidebar-width), 90%);
+  max-width: 90%;
+  padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
+  padding-inline-start: env(safe-area-inset-left);
+  box-shadow: var(--shadow-l);
+}
+
 .abyss-documents .abyss-reader-sidebar[hidden],
 .abyss-documents .abyss-reader-sidebar-panel[hidden] {
   display: none;

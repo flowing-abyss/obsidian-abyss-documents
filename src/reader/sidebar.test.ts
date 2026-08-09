@@ -81,6 +81,7 @@ describe('ReaderSidebar', () => {
 
     sidebar.close();
 
+    expect(sidebar.root.classList.contains('is-mobile')).toBe(true);
     expect(sidebar.root.hidden).toBe(true);
     expect(sidebar.root.getAttribute('aria-hidden')).toBe('true');
     expect(handlers.onClose).toHaveBeenCalledOnce();

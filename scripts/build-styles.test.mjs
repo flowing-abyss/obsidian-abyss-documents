@@ -115,6 +115,7 @@ describe('PDF.js style build', () => {
     root.walkRules((rule) => selectors.push(rule.selector));
 
     expect(selectors).toContain('.abyss-documents-settings');
+    expect(selectors).toContain('.abyss-documents .abyss-reader-sidebar.is-mobile');
     expect(output).toContain('width: var(--abyss-reader-sidebar-width)');
     expect(output).toContain('env(safe-area-inset-bottom)');
     const reducedMotion = root.nodes.find(

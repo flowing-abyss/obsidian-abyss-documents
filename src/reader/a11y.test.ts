@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FocusReturn, PoliteAnnouncer } from './a11y.js';
 
 describe('FocusReturn', () => {
@@ -44,15 +44,75 @@ describe('FocusReturn', () => {
     expect(toggleButton.doc.activeElement).not.toBe(toggleButton);
     toggleButton.remove();
   });
+
+  it.each([
+    [
+      'hidden ancestor',
+      (ancestor: HTMLElement) => {
+        ancestor.hidden = true;
+      },
+    ],
+    [
+      'aria-hidden ancestor',
+      (ancestor: HTMLElement) => {
+        ancestor.setAttribute('aria-hidden', 'true');
+      },
+    ],
+    [
+      'display-none ancestor',
+      (ancestor: HTMLElement) => {
+        ancestor.setCssProps({ display: 'none' });
+      },
+    ],
+    [
+      'visibility-hidden ancestor',
+      (ancestor: HTMLElement) => {
+        ancestor.setCssProps({ visibility: 'hidden' });
+      },
+    ],
+  ])('does not focus a target inside a %s', (_name, hide) => {
+    const ancestor = createDiv();
+    const button = createEl('button');
+    ancestor.append(button);
+    ancestor.doc.body.append(ancestor);
+    const focus = vi.spyOn(button, 'focus');
+    hide(ancestor);
+    const focusReturn = new FocusReturn();
+    focusReturn.capture(button);
+
+    focusReturn.restore();
+
+    expect(focus).not.toHaveBeenCalled();
+    ancestor.remove();
+  });
+
+  it('focuses a connected target whose ancestor chain is visible', () => {
+    const ancestor = createDiv();
+    const button = createEl('button');
+    ancestor.append(button);
+    ancestor.doc.body.append(ancestor);
+    const focusReturn = new FocusReturn();
+    focusReturn.capture(button);
+
+    focusReturn.restore();
+
+    expect(button.doc.activeElement).toBe(button);
+    ancestor.remove();
+  });
 });
 
 describe('PoliteAnnouncer', () => {
-  it('creates an owner-document polite live region and removes it on destroy', async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('creates an owner-document polite live region and removes it on destroy', () => {
+    vi.useFakeTimers();
     const host = createDiv();
     const announcer = new PoliteAnnouncer(host);
 
     announcer.announce('Page 2 of 10');
-    await new Promise((resolve) => host.win.setTimeout(resolve, 0));
+    vi.advanceTimersByTime(200);
 
     const region = host.querySelector('[role="status"]');
     expect(region?.getAttribute('aria-live')).toBe('polite');
@@ -65,17 +125,36 @@ describe('PoliteAnnouncer', () => {
     expect(host.contains(region)).toBe(false);
   });
 
-  it('replaces a pending announcement and cancels it during destruction', async () => {
+  it('coalesces rapid page events, deduplicates repeats, and later delivers a distinct message', () => {
+    vi.useFakeTimers();
     const host = createDiv();
     const announcer = new PoliteAnnouncer(host);
-    announcer.announce('Old message');
-    announcer.announce('Current message');
-    await new Promise((resolve) => host.win.setTimeout(resolve, 0));
-    expect(announcer.root.textContent).toBe('Current message');
+    for (let page = 1; page <= 20; page += 1) {
+      announcer.announce(`Page ${page} of 20`);
+    }
+    announcer.announce('Page 20 of 20');
+
+    vi.advanceTimersByTime(149);
+    expect(announcer.root.textContent).toBe('');
+    vi.advanceTimersByTime(1);
+    expect(announcer.root.textContent).toBe('Page 20 of 20');
+    expect(vi.getTimerCount()).toBe(0);
+
+    announcer.announce('Page 20 of 20');
+    expect(vi.getTimerCount()).toBe(0);
+    announcer.announce('Search sidebar opened');
+    vi.advanceTimersByTime(150);
+    expect(announcer.root.textContent).toBe('Search sidebar opened');
+  });
+
+  it('cancels a pending announcement during destruction', () => {
+    vi.useFakeTimers();
+    const host = createDiv();
+    const announcer = new PoliteAnnouncer(host);
 
     announcer.announce('Never shown');
     announcer.destroy();
-    await new Promise((resolve) => host.win.setTimeout(resolve, 0));
+    vi.runAllTimers();
     expect(announcer.root.textContent).toBe('');
   });
 });

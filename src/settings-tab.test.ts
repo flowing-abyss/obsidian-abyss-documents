@@ -82,6 +82,16 @@ function captureSettingComponent<Component>(
   });
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (cause?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 describe('AbyssDocumentsSettingTab', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -215,5 +225,67 @@ describe('AbyssDocumentsSettingTab', () => {
       );
     });
     expect(store.snapshot.settings.debugLogging).toBe(true);
+  });
+
+  it('does not rerender a stale failed write over a newer successful write', async () => {
+    const controls = captureControls();
+    const { onSettingsChange, persistence, store, tab } = fixture();
+    const first = deferred();
+    const second = deferred();
+    persistence.saveData.mockImplementationOnce(() => first.promise);
+    persistence.saveData.mockImplementationOnce(() => second.promise);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    tab.render();
+    const originalBrightness = controls.sliders.get('Brightness');
+
+    originalBrightness?.setValue(9);
+    controls.sliders.get('Contrast')?.setValue(-2);
+    first.reject(new Error('first failed'));
+    await vi.waitFor(() => {
+      expect(persistence.saveData).toHaveBeenCalledTimes(2);
+    });
+
+    expect(controls.sliders.get('Brightness')).toBe(originalBrightness);
+    second.resolve();
+    await vi.waitFor(() => {
+      expect(onSettingsChange).toHaveBeenCalledOnce();
+    });
+
+    expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1, contrast: 0.5 });
+    expect(controls.sliders.get('Brightness')?.getValue()).toBe(1);
+    expect(controls.sliders.get('Contrast')?.getValue()).toBe(0.5);
+    expect(notice).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the committed first write after the newer write fails', async () => {
+    const controls = captureControls();
+    const { onSettingsChange, persistence, store, tab } = fixture();
+    const first = deferred();
+    const second = deferred();
+    persistence.saveData.mockImplementationOnce(() => first.promise);
+    persistence.saveData.mockImplementationOnce(() => second.promise);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    tab.render();
+    const originalBrightness = controls.sliders.get('Brightness');
+
+    originalBrightness?.setValue(9);
+    controls.sliders.get('Contrast')?.setValue(-2);
+    first.resolve();
+    await vi.waitFor(() => {
+      expect(persistence.saveData).toHaveBeenCalledTimes(2);
+    });
+
+    expect(controls.sliders.get('Brightness')).toBe(originalBrightness);
+    second.reject(new Error('second failed'));
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledTimes(1);
+    });
+
+    expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1.5, contrast: 1 });
+    expect(controls.sliders.get('Brightness')?.getValue()).toBe(1.5);
+    expect(controls.sliders.get('Contrast')?.getValue()).toBe(1);
+    expect(onSettingsChange).toHaveBeenCalledOnce();
   });
 });
