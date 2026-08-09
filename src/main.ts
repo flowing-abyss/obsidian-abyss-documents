@@ -1,6 +1,11 @@
 import { Plugin } from 'obsidian';
+import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
+import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
+import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
 import { PluginDataStore, type PluginDataV1 } from './plugin-data.js';
+import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
+import { ReaderController } from './reader/reader-controller.js';
 
 export const PLUGIN_ID = 'abyss-documents';
 
@@ -11,6 +16,15 @@ export default class AbyssDocumentsPlugin extends Plugin {
   override async onload(): Promise<void> {
     const store = new PluginDataStore(this);
     this.data = await store.load();
+    const registry = new DocumentAdapterRegistry([
+      new PdfDocumentAdapter(this.app.vault, this.runtimeLoader, createPdfDocumentViewport),
+    ]);
+    const services = { createController: () => new ReaderController(registry) };
+    this.registerView(DOCUMENT_VIEW_TYPE, (leaf) => new AbyssDocumentView(leaf, services));
+    this.registerExtensions(['pdf'], DOCUMENT_VIEW_TYPE);
+    this.register(() => {
+      this.runtimeLoader.dispose();
+    });
   }
 
   override onunload(): void {}
