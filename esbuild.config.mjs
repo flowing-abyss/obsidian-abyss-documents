@@ -1,9 +1,9 @@
 import esbuild from 'esbuild';
-import { execFileSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
 import { gzipSync } from 'node:zlib';
 import process from 'process';
+import { createBuildStylesPlugin } from './scripts/build-styles-plugin.mjs';
 
 // Shared with release-check.mjs, which re-checks the same threshold against an
 // already-built main.js — both read this key so the two checks can't drift apart.
@@ -24,14 +24,7 @@ const args = process.argv.slice(2);
 const prod = args.includes('production');
 const analyze = args.includes('analyze');
 
-const buildStylesPlugin = {
-  name: 'build-styles',
-  setup(build) {
-    build.onStart(() => {
-      execFileSync('pnpm', ['run', 'build:styles'], { stdio: 'inherit' });
-    });
-  },
-};
+const buildStylesPlugin = createBuildStylesPlugin();
 
 const gzipBase64Plugin = {
   name: 'gzip-base64',

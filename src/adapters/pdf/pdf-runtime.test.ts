@@ -126,6 +126,27 @@ describe('PdfRuntimeLoader', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:pdf-worker');
   });
 
+  it('rejects when dispose wins after the worker URL is installed but before load settles', async () => {
+    const activeUrls = new Set<string>();
+    const revokeObjectURL = vi.fn((url: string) => activeUrls.delete(url));
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => {
+        activeUrls.add('blob:pdf-worker');
+        queueMicrotask(() => {
+          loader.dispose();
+        });
+        return 'blob:pdf-worker';
+      }),
+      revokeObjectURL,
+    });
+    const loader = new PdfRuntimeLoader(async () => runtimeDependencies());
+
+    await expect(loader.load()).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(activeUrls).toHaveLength(0);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:pdf-worker');
+  });
+
   it('does not let a stale failed load erase an immediate reload', async () => {
     const { activeUrls } = stubWorkerUrls();
     const firstImports = deferred<ReturnType<typeof runtimeDependencies>>();

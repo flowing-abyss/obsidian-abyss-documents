@@ -1,5 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import { dirname, extname, resolve } from 'node:path';
 import process from 'node:process';
+import { pathToFileURL } from 'node:url';
 import postcss from 'postcss';
 import prefixSelector from 'postcss-prefix-selector';
 import { format, resolveConfig } from 'prettier';
@@ -12,40 +14,28 @@ const SCOPE_SELECTOR = '.abyss-documents';
 const PDFJS_STYLES_PATH = 'node_modules/pdfjs-dist/web/pdf_viewer.css';
 const READER_STYLES_PATH = 'src/styles/reader.css';
 const OUTPUT_PATH = 'styles.css';
+const URL_PATTERN = /url\(([^)]*)\)/giu;
 
-const [pdfjsStyles, readerStyles] = await Promise.all([
-  readFile(PDFJS_STYLES_PATH, 'utf8'),
-  readFile(READER_STYLES_PATH, 'utf8'),
-]);
-const prefixed = await postcss([
-  prefixSelector({
-    prefix: SCOPE_SELECTOR,
-  }),
-]).process(pdfjsStyles, { from: PDFJS_STYLES_PATH });
-const prettierConfig = (await resolveConfig(OUTPUT_PATH)) ?? {};
-const output = await format(
-  `${GENERATED_HEADER}${prefixed.css.trimEnd()}\n\n${readerStyles.trim()}\n`,
-  {
-    ...prettierConfig,
-    filepath: OUTPUT_PATH,
-  },
-);
+export async function prefixPdfStyles(pdfjsStyles, assetBasePath = dirname(PDFJS_STYLES_PATH)) {
+  const prefixed = await postcss([
+    prefixSelector({
+      prefix: SCOPE_SELECTOR,
+      transform(_prefix, selector, prefixedSelector, _filePath, rule) {
+        return isNestedRule(rule) ? selector : prefixedSelector;
+      },
+    }),
+  ]).process(pdfjsStyles, { from: PDFJS_STYLES_PATH });
+  const inlined = await postcss([inlineAssetsPlugin(assetBasePath)]).process(prefixed.css, {
+    from: PDFJS_STYLES_PATH,
+  });
 
-assertScopedSelectors(output);
-
-if (process.argv.includes('--check')) {
-  const current = await readFile(OUTPUT_PATH, 'utf8').catch(() => '');
-  if (current !== output) {
-    throw new Error('styles.css is stale; run pnpm build:styles and commit the result.');
-  }
-} else {
-  await writeFile(OUTPUT_PATH, output);
+  return inlined.css;
 }
 
-function assertScopedSelectors(css) {
+export function assertScopedSelectors(css) {
   const root = postcss.parse(css);
   root.walkRules((rule) => {
-    if (isKeyframeStep(rule)) return;
+    if (isKeyframeStep(rule) || isNestedRule(rule)) return;
     for (const selector of rule.selectors) {
       if (!selector.trimStart().startsWith(SCOPE_SELECTOR)) {
         throw rule.error(`Unscoped selector: ${selector}`);
@@ -54,11 +44,132 @@ function assertScopedSelectors(css) {
   });
 }
 
-function isKeyframeStep(rule) {
+export function assertNoRelativeUrls(css) {
+  const root = postcss.parse(css);
+  root.walkDecls((declaration) => {
+    for (const assetUrl of assetUrls(declaration.value)) {
+      if (isRelativeAssetUrl(assetUrl)) {
+        throw declaration.error(`Unresolved relative asset URL: ${assetUrl}`);
+      }
+    }
+  });
+}
+
+export async function buildStyles(check = false) {
+  const [pdfjsStyles, readerStyles] = await Promise.all([
+    readFile(PDFJS_STYLES_PATH, 'utf8'),
+    readFile(READER_STYLES_PATH, 'utf8'),
+  ]);
+  const prefixed = await prefixPdfStyles(pdfjsStyles);
+  const prettierConfig = (await resolveConfig(OUTPUT_PATH)) ?? {};
+  const output = await format(
+    `${GENERATED_HEADER}${prefixed.trimEnd()}\n\n${readerStyles.trim()}\n`,
+    {
+      ...prettierConfig,
+      filepath: OUTPUT_PATH,
+    },
+  );
+
+  assertScopedSelectors(output);
+  assertNoRelativeUrls(output);
+
+  if (check) {
+    const current = await readFile(OUTPUT_PATH, 'utf8').catch(() => '');
+    if (current !== output) {
+      throw new Error('styles.css is stale; run pnpm build:styles and commit the result.');
+    }
+  } else {
+    await writeFile(OUTPUT_PATH, output);
+  }
+}
+
+function inlineAssetsPlugin(assetBasePath) {
+  return {
+    postcssPlugin: 'inline-pdfjs-assets',
+    async Declaration(declaration) {
+      declaration.value = await inlineRelativeUrls(declaration.value, assetBasePath);
+    },
+  };
+}
+
+async function inlineRelativeUrls(value, assetBasePath) {
+  const matches = [...value.matchAll(URL_PATTERN)];
+  let output = '';
+  let offset = 0;
+
+  for (const match of matches) {
+    const assetUrl = matchedAssetUrl(match);
+    if (!isRelativeAssetUrl(assetUrl) || match.index === undefined) continue;
+
+    const assetPath = resolve(assetBasePath, assetUrl.split(/[?#]/u, 1)[0]);
+    const asset = await readFile(assetPath);
+    const dataUrl = `url(data:${assetMimeType(assetPath)};base64,${asset.toString('base64')})`;
+    output += value.slice(offset, match.index) + dataUrl;
+    offset = match.index + match[0].length;
+  }
+
+  return output + value.slice(offset);
+}
+
+function assetUrls(value) {
+  return [...value.matchAll(URL_PATTERN)].map(matchedAssetUrl);
+}
+
+function matchedAssetUrl(match) {
+  const value = (match[1] ?? '').trim();
+  const quote = value[0];
+  if ((quote === '"' || quote === "'") && value.endsWith(quote)) {
+    return value.slice(1, -1).trim();
+  }
+  if (quote === '"' || quote === "'") return value.slice(1).trim();
+  return value;
+}
+
+function isRelativeAssetUrl(assetUrl) {
+  return (
+    assetUrl.length > 0 &&
+    !assetUrl.startsWith('#') &&
+    !assetUrl.startsWith('/') &&
+    !/^[a-z][a-z\d+.-]*:/iu.test(assetUrl)
+  );
+}
+
+function assetMimeType(assetPath) {
+  switch (extname(assetPath).toLowerCase()) {
+    case '.gif':
+      return 'image/gif';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.png':
+      return 'image/png';
+    case '.svg':
+      return 'image/svg+xml';
+    case '.webp':
+      return 'image/webp';
+    default:
+      throw new Error(`Unsupported PDF.js asset type: ${assetPath}`);
+  }
+}
+
+function isNestedRule(rule) {
   let parent = rule.parent;
   while (parent) {
-    if (parent.type === 'atrule' && /(?:^|-)keyframes$/i.test(parent.name)) return true;
+    if (parent.type === 'rule') return true;
     parent = parent.parent;
   }
   return false;
+}
+
+function isKeyframeStep(rule) {
+  let parent = rule.parent;
+  while (parent) {
+    if (parent.type === 'atrule' && /(?:^|-)keyframes$/iu.test(parent.name)) return true;
+    parent = parent.parent;
+  }
+  return false;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await buildStyles(process.argv.includes('--check'));
 }

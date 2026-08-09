@@ -45,8 +45,13 @@ export class PdfRuntimeLoader {
   load(): Promise<PdfRuntime> {
     if (this.loadPromise !== null) return this.loadPromise;
 
+    const generation = this.generation;
     const pending = this.loadOnce();
-    const guarded = pending.catch((error: unknown) => {
+    const settled = pending.then((runtime) => {
+      if (generation !== this.generation) throw new DOMException('Disposed', 'AbortError');
+      return runtime;
+    });
+    const guarded = settled.catch((error: unknown) => {
       if (this.loadPromise === guarded) this.loadPromise = null;
       throw error;
     });

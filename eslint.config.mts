@@ -47,7 +47,6 @@ export default defineConfig(
             'dependency-cruiser.config.cjs',
             'stylelint.config.mjs',
             'release-check.mjs',
-            'scripts/*.mjs',
           ],
         },
         tsconfigRootDir: import.meta.dirname,
