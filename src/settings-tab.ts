@@ -10,19 +10,35 @@ interface CollapsibleSection {
   readonly body: HTMLElement;
 }
 
-interface NumericSettingOptions {
-  readonly change: (value: number) => Partial<ResolvedReadingColors>;
+type SettingFieldId =
+  | 'debugLogging'
+  | 'reading.custom.background'
+  | 'reading.custom.brightness'
+  | 'reading.custom.contrast'
+  | 'reading.custom.foreground'
+  | 'reading.custom.imageDim'
+  | 'reading.defaultProfile'
+  | 'reading.rememberPerDocument';
+
+interface CustomReadingSettingOptions<Value> {
+  readonly change: (value: Value) => Partial<ResolvedReadingColors>;
+  readonly field: SettingFieldId;
+  readonly read: (colors: ResolvedReadingColors) => Value;
+}
+
+interface NumericSettingOptions extends CustomReadingSettingOptions<number> {
   readonly maximum: number;
   readonly minimum: number;
 }
 
-interface RenderState {
-  readonly expandedSectionIds: ReadonlySet<string>;
-  readonly focusedControlIndex: number;
+interface FieldSynchronization {
+  readonly field: SettingFieldId;
+  readonly synchronize: (settings: PluginSettings) => void;
 }
 
-const FOCUSABLE_CONTROL_SELECTOR =
-  'button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+interface FailedFieldSynchronization extends FieldSynchronization {
+  readonly generation: number;
+}
 
 const PROFILE_OPTIONS: Readonly<Record<ReadingProfileId, string>> = {
   auto: 'Auto',
@@ -33,7 +49,9 @@ const PROFILE_OPTIONS: Readonly<Record<ReadingProfileId, string>> = {
 };
 
 export class AbyssDocumentsSettingTab extends PluginSettingTab {
-  private latestFailedGeneration = 0;
+  private readonly failedFields = new Map<SettingFieldId, FailedFieldSynchronization>();
+  private readonly latestFieldGenerations = new Map<SettingFieldId, number>();
+  private readonly synchronizingFields = new Set<SettingFieldId>();
   private latestSettledGeneration = 0;
   private pendingUpdates = 0;
   private updateGeneration = 0;
@@ -57,29 +75,17 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     this.render();
   }
 
-  render(state?: RenderState): void {
+  render(): void {
     this.containerEl.empty();
     this.containerEl.addClass('abyss-documents-settings');
-    const reading = this.collapsibleSection(
-      'Reading appearance',
-      'reading-appearance',
-      state?.expandedSectionIds,
-    );
+    const reading = this.collapsibleSection('Reading appearance', 'reading-appearance');
     this.renderReadingAppearance(reading.body);
-    const advanced = this.collapsibleSection('Advanced', 'advanced', state?.expandedSectionIds);
+    const advanced = this.collapsibleSection('Advanced', 'advanced');
     this.renderAdvanced(advanced.body);
-    if (state !== undefined && state.focusedControlIndex >= 0) {
-      this.focusableControls()[state.focusedControlIndex]?.focus();
-    }
   }
 
-  private collapsibleSection(
-    title: string,
-    id: string,
-    expandedSectionIds?: ReadonlySet<string>,
-  ): CollapsibleSection {
+  private collapsibleSection(title: string, id: string): CollapsibleSection {
     const bodyId = `abyss-documents-settings-${id}`;
-    const initiallyExpanded = expandedSectionIds?.has(bodyId) ?? false;
     const section = this.containerEl.createDiv({ cls: 'abyss-documents-settings-group' });
     const body = section.createDiv({ cls: 'abyss-documents-settings-section' });
     const heading = new Setting(section)
@@ -88,8 +94,8 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       .setClass('abyss-documents-settings-heading')
       .addExtraButton((button) => {
         button
-          .setIcon(initiallyExpanded ? 'chevron-down' : 'chevron-right')
-          .setTooltip(`${initiallyExpanded ? 'Hide' : 'Show'} ${title.toLowerCase()}`)
+          .setIcon('chevron-right')
+          .setTooltip(`Show ${title.toLowerCase()}`)
           .onClick(() => {
             const expanded = body.hidden;
             body.hidden = !expanded;
@@ -98,11 +104,11 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
             button.setTooltip(`${expanded ? 'Hide' : 'Show'} ${title.toLowerCase()}`);
           });
         button.extraSettingsEl.setAttribute('aria-controls', bodyId);
-        button.extraSettingsEl.setAttribute('aria-expanded', String(initiallyExpanded));
+        button.extraSettingsEl.setAttribute('aria-expanded', 'false');
       });
     section.prepend(heading.settingEl);
     body.id = bodyId;
-    body.hidden = !initiallyExpanded;
+    body.hidden = true;
     return { body };
   }
 
@@ -117,10 +123,18 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
           .setValue(reading.defaultProfile)
           .onChange((value) => {
             if (!isReadingProfileId(value)) return;
-            this.updateSettings((settings) => ({
-              ...settings,
-              reading: { ...settings.reading, defaultProfile: value },
-            }));
+            this.updateSettings(
+              (settings) => ({
+                ...settings,
+                reading: { ...settings.reading, defaultProfile: value },
+              }),
+              {
+                field: 'reading.defaultProfile',
+                synchronize: (settings) => {
+                  dropdown.setValue(settings.reading.defaultProfile);
+                },
+              },
+            );
           });
       });
     new Setting(container)
@@ -128,32 +142,50 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       .setDesc('Restores the last profile selected for each PDF.')
       .addToggle((toggle) => {
         toggle.setValue(reading.rememberPerDocument).onChange((value) => {
-          this.updateSettings((settings) => ({
-            ...settings,
-            reading: { ...settings.reading, rememberPerDocument: value },
-          }));
+          this.updateSettings(
+            (settings) => ({
+              ...settings,
+              reading: { ...settings.reading, rememberPerDocument: value },
+            }),
+            {
+              field: 'reading.rememberPerDocument',
+              synchronize: (settings) => {
+                toggle.setValue(settings.reading.rememberPerDocument);
+              },
+            },
+          );
         });
       });
-    this.colorSetting(container, 'Foreground', reading.custom.foreground, (value) => ({
-      foreground: value,
-    }));
-    this.colorSetting(container, 'Page tint', reading.custom.background, (value) => ({
-      background: value,
-    }));
+    this.colorSetting(container, 'Foreground', reading.custom.foreground, {
+      change: (value) => ({ foreground: value }),
+      field: 'reading.custom.foreground',
+      read: (colors) => colors.foreground,
+    });
+    this.colorSetting(container, 'Page tint', reading.custom.background, {
+      change: (value) => ({ background: value }),
+      field: 'reading.custom.background',
+      read: (colors) => colors.background,
+    });
     this.numericSetting(container, 'Brightness', reading.custom.brightness, {
       change: (value) => ({ brightness: value }),
+      field: 'reading.custom.brightness',
       maximum: 1.5,
       minimum: 0.5,
+      read: (colors) => colors.brightness,
     });
     this.numericSetting(container, 'Contrast', reading.custom.contrast, {
       change: (value) => ({ contrast: value }),
+      field: 'reading.custom.contrast',
       maximum: 1.5,
       minimum: 0.5,
+      read: (colors) => colors.contrast,
     });
     this.numericSetting(container, 'Image dim', reading.custom.imageDim, {
       change: (value) => ({ imageDim: value }),
+      field: 'reading.custom.imageDim',
       maximum: 0.8,
       minimum: 0,
+      read: (colors) => colors.imageDim,
     });
   }
 
@@ -163,7 +195,12 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       .setDesc('Writes additional reader diagnostics to the developer console.')
       .addToggle((toggle) => {
         toggle.setValue(this.store.snapshot.settings.debugLogging).onChange((debugLogging) => {
-          this.updateSettings((settings) => ({ ...settings, debugLogging }));
+          this.updateSettings((settings) => ({ ...settings, debugLogging }), {
+            field: 'debugLogging',
+            synchronize: (settings) => {
+              toggle.setValue(settings.debugLogging);
+            },
+          });
         });
       });
   }
@@ -172,11 +209,16 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     container: HTMLElement,
     name: string,
     value: string,
-    change: (value: string) => Partial<ResolvedReadingColors>,
+    options: CustomReadingSettingOptions<string>,
   ): void {
     new Setting(container).setName(name).addColorPicker((picker) => {
       picker.setValue(value).onChange((next) => {
-        this.updateCustomReading(change(next));
+        this.updateCustomReading(options.change(next), {
+          field: options.field,
+          synchronize: (settings) => {
+            picker.setValue(options.read(settings.reading.custom));
+          },
+        });
       });
     });
   }
@@ -192,29 +234,48 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
         .setLimits(options.minimum, options.maximum, 0.05)
         .setValue(value)
         .onChange((next) => {
-          this.updateCustomReading(options.change(next));
+          this.updateCustomReading(options.change(next), {
+            field: options.field,
+            synchronize: (settings) => {
+              slider.setValue(options.read(settings.reading.custom));
+            },
+          });
         });
     });
   }
 
-  private updateCustomReading(change: Partial<ResolvedReadingColors>): void {
-    this.updateSettings((settings) => ({
-      ...settings,
-      reading: {
-        ...settings.reading,
-        custom: normalizeCustomReadingColors({ ...settings.reading.custom, ...change }),
-      },
-    }));
+  private updateCustomReading(
+    change: Partial<ResolvedReadingColors>,
+    synchronization: FieldSynchronization,
+  ): void {
+    this.updateSettings(
+      (settings) => ({
+        ...settings,
+        reading: {
+          ...settings.reading,
+          custom: normalizeCustomReadingColors({ ...settings.reading.custom, ...change }),
+        },
+      }),
+      synchronization,
+    );
   }
 
-  private updateSettings(mutator: (settings: PluginSettings) => PluginSettings): void {
+  private updateSettings(
+    mutator: (settings: PluginSettings) => PluginSettings,
+    synchronization: FieldSynchronization,
+  ): void {
+    if (this.synchronizingFields.has(synchronization.field)) return;
     const generation = ++this.updateGeneration;
     this.pendingUpdates += 1;
+    this.latestFieldGenerations.set(synchronization.field, generation);
     void this.store
       .update((data) => ({ ...data, settings: mutator(data.settings) }))
       .then(() => this.onSettingsChanged(this.store.snapshot.settings))
       .catch((cause: unknown) => {
-        this.latestFailedGeneration = Math.max(this.latestFailedGeneration, generation);
+        const previousFailure = this.failedFields.get(synchronization.field);
+        if (previousFailure === undefined || previousFailure.generation < generation) {
+          this.failedFields.set(synchronization.field, { ...synchronization, generation });
+        }
         const reason = cause instanceof Error ? cause.message : String(cause);
         new Notice(`Could not save document settings: ${reason}`);
         console.error('[abyss-documents] Failed to save document settings', { cause });
@@ -222,32 +283,25 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       .finally(() => {
         this.pendingUpdates -= 1;
         this.latestSettledGeneration = Math.max(this.latestSettledGeneration, generation);
-        if (
-          this.pendingUpdates === 0 &&
-          this.latestSettledGeneration === this.updateGeneration &&
-          this.latestFailedGeneration === this.updateGeneration
-        ) {
-          this.render(this.captureRenderState());
+        if (this.pendingUpdates === 0 && this.latestSettledGeneration === this.updateGeneration) {
+          this.synchronizeFailedFields();
         }
       });
   }
 
-  private captureRenderState(): RenderState {
-    const expandedSectionIds = new Set<string>();
-    const sections = Array.from(
-      this.containerEl.querySelectorAll<HTMLElement>('.abyss-documents-settings-section'),
-    );
-    for (const section of sections) {
-      if (!section.hidden) expandedSectionIds.add(section.id);
+  private synchronizeFailedFields(): void {
+    const settings = this.store.snapshot.settings;
+    for (const [field, failure] of this.failedFields) {
+      if (this.latestFieldGenerations.get(field) === failure.generation) {
+        this.synchronizingFields.add(field);
+        try {
+          failure.synchronize(settings);
+        } finally {
+          this.synchronizingFields.delete(field);
+        }
+      }
     }
-    const activeElement = this.containerEl.doc.activeElement;
-    const controls = this.focusableControls();
-    const focusedControlIndex = controls.findIndex((control) => control === activeElement);
-    return { expandedSectionIds, focusedControlIndex };
-  }
-
-  private focusableControls(): HTMLElement[] {
-    return Array.from(this.containerEl.querySelectorAll<HTMLElement>(FOCUSABLE_CONTROL_SELECTOR));
+    this.failedFields.clear();
   }
 }
 

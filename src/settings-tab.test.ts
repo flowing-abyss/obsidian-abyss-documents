@@ -259,7 +259,27 @@ describe('AbyssDocumentsSettingTab', () => {
       cause,
     });
     expect(store.snapshot.settings.debugLogging).toBe(false);
+    expect(requiredControl(controls.toggles, 'Debug logging').getValue()).toBe(false);
     expect(onSettingsChange).not.toHaveBeenCalled();
+  });
+
+  it('restores a failed color field in its existing control', async () => {
+    const controls = captureControls();
+    const { persistence, store, tab } = fixture();
+    persistence.saveData.mockRejectedValueOnce(new Error('color failed'));
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    tab.render();
+    const foreground = requiredControl(controls.colors, 'Foreground');
+
+    foreground.setValue('#112233');
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledTimes(1);
+    });
+
+    expect(store.snapshot.settings.reading.custom.foreground).toBe('#dddddd');
+    expect(requiredControl(controls.colors, 'Foreground')).toBe(foreground);
+    expect(foreground.getValue()).toBe('#dddddd');
   });
 
   it('handles a non-error save rejection with the default live-update callback', async () => {
@@ -295,29 +315,59 @@ describe('AbyssDocumentsSettingTab', () => {
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     tab.render();
-    const expander = controls.expanders.get('Reading appearance');
-    expander?.simulateClick__();
-    const originalBrightness = controls.sliders.get('Brightness');
-    const originalContrast = controls.sliders.get('Contrast');
+    const { expander } = expandSection(controls, tab, 'Reading appearance');
+    const originalBrightness = requiredControl(controls.sliders, 'Brightness');
+    const originalContrast = requiredControl(controls.sliders, 'Contrast');
 
-    originalBrightness?.setValue(9);
-    controls.sliders.get('Contrast')?.setValue(-2);
+    originalBrightness.setValue(9);
+    originalContrast.setValue(0.75);
     first.reject(new Error('first failed'));
     await vi.waitFor(() => {
       expect(persistence.saveData).toHaveBeenCalledTimes(2);
     });
 
-    expect(controls.sliders.get('Brightness')).toBe(originalBrightness);
+    expect(requiredControl(controls.sliders, 'Brightness')).toBe(originalBrightness);
     second.resolve();
     await vi.waitFor(() => {
       expect(onSettingsChange).toHaveBeenCalledOnce();
     });
 
-    expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1, contrast: 0.5 });
-    expect(controls.sliders.get('Brightness')?.sliderEl).toBe(originalBrightness?.sliderEl);
-    expect(controls.sliders.get('Contrast')?.sliderEl).toBe(originalContrast?.sliderEl);
-    expect(expander?.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
+    expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1, contrast: 0.75 });
+    expect(requiredControl(controls.sliders, 'Brightness').sliderEl).toBe(
+      originalBrightness.sliderEl,
+    );
+    expect(requiredControl(controls.sliders, 'Contrast').sliderEl).toBe(originalContrast.sliderEl);
+    expect(originalBrightness.getValue()).toBe(1);
+    expect(originalContrast.getValue()).toBe(0.75);
+    expect(expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
     expect(notice).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not roll back a failed field after a newer same-field write succeeds', async () => {
+    const controls = captureControls();
+    const { onSettingsChange, persistence, store, tab } = fixture();
+    const first = deferred();
+    const second = deferred();
+    persistence.saveData.mockImplementationOnce(() => first.promise);
+    persistence.saveData.mockImplementationOnce(() => second.promise);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    tab.render();
+    const brightness = requiredControl(controls.sliders, 'Brightness');
+
+    brightness.setValue(9);
+    brightness.setValue(1.25);
+    first.reject(new Error('first failed'));
+    await vi.waitFor(() => {
+      expect(persistence.saveData).toHaveBeenCalledTimes(2);
+    });
+    second.resolve();
+    await vi.waitFor(() => {
+      expect(onSettingsChange).toHaveBeenCalledOnce();
+    });
+
+    expect(store.snapshot.settings.reading.custom.brightness).toBe(1.25);
+    expect(requiredControl(controls.sliders, 'Brightness').sliderEl).toBe(brightness.sliderEl);
+    expect(brightness.getValue()).toBe(1.25);
   });
 
   it('renders the committed first write after the newer write fails', async () => {
@@ -335,7 +385,7 @@ describe('AbyssDocumentsSettingTab', () => {
     const originalBrightness = requiredControl(controls.sliders, 'Brightness');
     const originalContrast = requiredControl(controls.sliders, 'Contrast');
 
-    originalBrightness.setValue(9);
+    originalBrightness.setValue(1.25);
     originalContrast.setValue(-2);
     first.resolve();
     await vi.waitFor(() => {
@@ -346,20 +396,17 @@ describe('AbyssDocumentsSettingTab', () => {
     originalContrast.sliderEl.focus();
     second.reject(new Error('second failed'));
     await vi.waitFor(() => {
-      expect(requiredControl(controls.sliders, 'Brightness')).not.toBe(originalBrightness);
+      expect(notice).toHaveBeenCalledTimes(1);
     });
 
-    const restored = sectionControls(controls, tab, 'Reading appearance');
-    expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1.5, contrast: 1 });
-    expect(body.isConnected).toBe(false);
-    expect(restored.body.hidden).toBe(false);
-    expect(restored.expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
-    expect(requiredControl(controls.sliders, 'Brightness').getValue()).toBe(1.5);
-    expect(requiredControl(controls.sliders, 'Contrast').getValue()).toBe(1);
-    expect(tab.containerEl.doc.activeElement).toBe(
-      requiredControl(controls.sliders, 'Contrast').sliderEl,
-    );
+    expect(store.snapshot.settings.reading.custom).toMatchObject({ brightness: 1.25, contrast: 1 });
+    expect(body.isConnected).toBe(true);
+    expect(body.hidden).toBe(false);
+    expect(requiredControl(controls.sliders, 'Brightness')).toBe(originalBrightness);
+    expect(requiredControl(controls.sliders, 'Contrast')).toBe(originalContrast);
+    expect(originalBrightness.getValue()).toBe(1.25);
+    expect(originalContrast.getValue()).toBe(1);
+    expect(tab.containerEl.doc.activeElement).toBe(originalContrast.sliderEl);
     expect(onSettingsChange).toHaveBeenCalledOnce();
-    expect(notice).toHaveBeenCalledTimes(1);
   });
 });
