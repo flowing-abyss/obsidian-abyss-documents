@@ -35,7 +35,7 @@ The first complete adapter is PDF. The architecture must permit later EPUB and F
 - In-document search.
 - Standard highlight, underline, strikeout, text, ink/stylus, and comment annotations where supported by the writer.
 - Annotation colors, comments, transparent saving, conflict protection, and external-reader round trips.
-- Single sidebar with outline, annotations, and search.
+- A user-invoked sidebar with outline, annotations, and search, hidden on initial document open.
 - Reading appearance profiles.
 - Desktop and Android behavior, with platform capability boundaries suitable for later iOS/iPadOS support.
 
@@ -171,13 +171,17 @@ The Obsidian tab header already identifies the document, so the toolbar does not
 
 ### 6.2 Single sidebar
 
-There is one space-efficient sidebar with three tabs:
+There is one space-efficient sidebar, but it is hidden by default. A newly opened document initially shows the PDF reading surface and compact toolbar only. When explicitly opened, the sidebar contains three tabs:
 
 - **Outline** shows the document outline and current location.
 - **Annotations** shows virtualized annotation cards and annotation search.
 - **Search** searches document text and navigates result snippets.
 
+The sidebar opens only after an explicit user action: its toolbar toggle, a command such as **Show annotations**, or a direct search action such as `Ctrl`/`Cmd+F`. The triggering action selects the relevant tab. The presence of an outline, annotations, tags, links, or search index never opens it automatically, and following a deep link can navigate to an annotation without forcing the panel open.
+
 The two search surfaces have explicit scopes rather than silently mixing result types: the Annotations field searches annotation quotes, comments, links, tags, colors, and meanings; the Search tab searches the document text layer. They share query, cancellation, highlighting, and navigation infrastructure internally. The sidebar can collapse using the normal Obsidian view affordance. It is not split into competing left and right rails. On phones it becomes a native-feeling overlay or sheet instead of permanently shrinking the page; selecting a destination returns focus to the document. Tablets may use the docked layout when space allows.
+
+The plugin remembers the selected tab and desktop width for the next explicit opening, but not an always-open preference that changes the product-wide default. Restoring the exact same live Obsidian workspace leaf may preserve an already-open panel as session continuity; opening a new document view starts with it closed.
 
 ### 6.3 Annotation sidebar
 
@@ -264,7 +268,7 @@ Controls do not duplicate routine toolbar actions. Settings define defaults and 
 
 ### 6.9 Reading interaction and responsive behavior
 
-Continuous scroll is the default. The current page changes when the viewport's reading anchor enters a new page, not on small boundary flicker. The plugin restores document position, zoom mode, and sidebar state without announcing the restoration.
+Continuous scroll is the default. The current page changes when the viewport's reading anchor enters a new page, not on small boundary flicker. The plugin restores document position, zoom mode, selected sidebar tab, and sidebar width without announcing the restoration. Sidebar visibility follows the closed-by-default rule in section 6.2 rather than silently carrying an open workflow into a newly opened document.
 
 Pinch zoom and platform-standard trackpad gestures work directly. `Ctrl`/`Cmd` plus wheel follows the user's platform convention; fit width, fit page, and numeric zoom live in overflow and commands rather than occupying permanent toolbar space. Temporary zoom feedback disappears automatically.
 
@@ -361,7 +365,7 @@ Logs include operation, adapter, document fingerprint, page/annotation identifie
 - Run the real-Obsidian desktop matrix and Android suite.
 - Drive a running Obsidian instance through its CLI for plugin reload, DOM inspection, screenshots, console errors, and theme switching.
 - Cover Light and Dark Obsidian themes, every built-in reading profile, narrow/mobile layouts, zoom levels, and long annotation lists.
-- Exercise keyboard navigation and focus return, page entry, annotation Up/Down synchronization, selection without mutation, `[[` suggestions and documented exclusion fallbacks, Link/Tag actions, color filters, collapsed tags and related notes, drag/drop plus touch/keyboard insertion, `Ctrl/Cmd+S`, responsive sidebar/editor states, reading gestures, reduced motion, accessibility announcements, and OCR states.
+- Exercise the PDF-only initial state, every explicit sidebar trigger, no automatic opening from document metadata or deep links, keyboard navigation and focus return, page entry, annotation Up/Down synchronization, selection without mutation, `[[` suggestions and documented exclusion fallbacks, Link/Tag actions, color filters, collapsed tags and related notes, drag/drop plus touch/keyboard insertion, `Ctrl/Cmd+S`, responsive sidebar/editor states, reading gestures, reduced motion, accessibility announcements, and OCR states.
 - Capture screenshots for popup positioning, canvas/text-layer alignment, focus styles, menu clipping, and annotation contrast.
 
 ### 11.4 Development vault
@@ -377,7 +381,7 @@ A generated `dev-documents-vault/` contains deterministic PDF fixtures, long doc
 - Own Document Core with replaceable format adapters.
 - PDF is first; EPUB follows; FB2 write support waits for interoperability.
 - Standard in-document data is authoritative; there are no durable annotation sidecars, while a lifecycle-bound journal protects pending edits.
-- One sidebar with Outline, Annotations, and Search; tags and related notes are collapsed subsections rather than additional rails.
+- One user-invoked sidebar with Outline, Annotations, and Search, hidden on new document views; tags and related notes are collapsed subsections rather than additional rails.
 - Calm, icon-first English UI with editable page navigation, contextual tools, and no unavailable phase placeholders.
 - Comments, Link and Tag actions, `[[` autocomplete, supported Obsidian metadata/link behavior, and an honest exclusion fallback without private APIs.
 - Search across PDF text and annotation content.
