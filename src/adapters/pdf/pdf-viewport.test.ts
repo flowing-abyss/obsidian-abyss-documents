@@ -39,7 +39,7 @@ class FakeEventBus {
 
   dispatch(name: string, data: Record<string, unknown>): void {
     this.dispatched.push({ name, data });
-    for (const listener of this.listeners.get(name) ?? []) listener(data);
+    for (const listener of [...(this.listeners.get(name) ?? [])]) listener(data);
   }
 }
 
@@ -128,6 +128,7 @@ function viewerRuntime() {
     readonly update = vi.fn();
     readonly documents: Array<PDFDocumentProxy | null> = [];
     readonly findDocumentsBeforeViewerOwnership: Array<Array<PDFDocumentProxy | null>> = [];
+    readonly pageColorsAtSetDocument: Array<object | null> = [];
     readonly pageViews: FakePageView[] = [];
     currentPageNumber = 1;
     currentScale = 1;
@@ -156,9 +157,13 @@ function viewerRuntime() {
     setDocument(pdfDocument: PDFDocumentProxy | null): void {
       this.findDocumentsBeforeViewerOwnership.push([...this.options.findController.documents]);
       this.documents.push(pdfDocument);
+      this.pageColorsAtSetDocument.push(this.pageColors === null ? null : { ...this.pageColors });
       this.options.viewer.replaceChildren();
       this.pageViews.length = 0;
       if (pdfDocument === null) {
+        this.currentPageNumber = 1;
+        this.currentScale = 1;
+        this.currentScaleValue = 'auto';
         this.options.findController.setDocument(null);
         return;
       }
@@ -286,19 +291,135 @@ describe('PdfDocumentViewport', () => {
       imageDim: 0.1,
     };
 
+    fixture.runtime.state.eventBus?.dispatch('pagesinit', {});
     fixture.viewport.setReadingColors(colors);
 
     expect(viewer.pageColors).toEqual({ background: '#f4ecd8', foreground: '#2d281f' });
+    expect(viewer.pageColorsAtSetDocument[viewer.pageColorsAtSetDocument.length - 1]).toEqual({
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+    });
+    fixture.runtime.state.eventBus?.dispatch('pagesinit', {});
     const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
     expect(root?.style.getPropertyValue('--abyss-reader-brightness')).toBe('0.95');
-    viewer.update.mockImplementationOnce(() => {
-      throw new Error('redraw failed');
+    const redrawFailure = new Error('redraw failed');
+    vi.spyOn(viewer, 'setDocument').mockImplementationOnce(() => {
+      throw redrawFailure;
     });
 
     expect(() => {
       fixture.viewport.setReadingColors(colors);
     }).not.toThrow();
-    expect(events[events.length - 1]).toMatchObject({ type: 'render-error', pageIndex: 0 });
+    expect(events[events.length - 1]).toEqual({
+      type: 'render-error',
+      pageIndex: 0,
+      cause: redrawFailure,
+    });
+  });
+
+  it('rebuilds public page views with new colors while preserving page and preset scale', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    eventBus.dispatch('pagesinit', {});
+    viewer.currentPageNumber = 3;
+    viewer.currentScaleValue = 'page-fit';
+    const colors = {
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+      brightness: 0.95,
+      contrast: 1.05,
+      imageDim: 0.1,
+    };
+
+    fixture.viewport.setReadingColors(colors);
+
+    expect(viewer.documents).toEqual([fixture.documentProxy, null, fixture.documentProxy]);
+    expect(viewer.pageColorsAtSetDocument[viewer.pageColorsAtSetDocument.length - 1]).toEqual({
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+    });
+    expect(fixture.runtime.state.findController?.documents).toEqual([
+      fixture.documentProxy,
+      null,
+      fixture.documentProxy,
+    ]);
+    expect(fixture.runtime.state.linkService?.documents).toEqual([fixture.documentProxy]);
+    eventBus.dispatch('pagesinit', {});
+    expect(viewer.currentPageNumber).toBe(3);
+    expect(viewer.currentScaleValue).toBe('page-fit');
+  });
+
+  it('waits for initial pages before rebinding the profile selected during mount', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    const colors = {
+      background: '#202020',
+      foreground: '#e6e1d8',
+      brightness: 0.86,
+      contrast: 0.95,
+      imageDim: 0.18,
+    };
+
+    fixture.viewport.setReadingColors(colors);
+
+    expect(viewer.documents).toEqual([fixture.documentProxy]);
+    eventBus.dispatch('pagesinit', {});
+    expect(viewer.documents).toEqual([fixture.documentProxy, null, fixture.documentProxy]);
+    expect(viewer.pageColorsAtSetDocument[viewer.pageColorsAtSetDocument.length - 1]).toEqual({
+      background: '#202020',
+      foreground: '#e6e1d8',
+    });
+    eventBus.dispatch('pagesinit', {});
+    expect(viewer.currentScaleValue).toBe('page-width');
+  });
+
+  it('coalesces racing Auto theme colors so the latest rebuild wins', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    eventBus.dispatch('pagesinit', {});
+    viewer.currentPageNumber = 2;
+    viewer.currentScale = 1.5;
+    viewer.currentScaleValue = '1.5';
+    const autoLight = {
+      background: '#f7f7f5',
+      foreground: '#202020',
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    };
+    const autoDark = {
+      background: '#202020',
+      foreground: '#e6e1d8',
+      brightness: 0.86,
+      contrast: 0.95,
+      imageDim: 0.18,
+    };
+
+    fixture.viewport.setReadingColors(autoLight);
+    fixture.viewport.setReadingColors(autoDark);
+
+    expect(eventBus.listeners.get('pagesinit')).toHaveLength(2);
+    expect(viewer.documents).toEqual([fixture.documentProxy, null, fixture.documentProxy]);
+    eventBus.dispatch('pagesinit', {});
+    expect(viewer.pageColorsAtSetDocument[viewer.pageColorsAtSetDocument.length - 1]).toEqual({
+      background: '#202020',
+      foreground: '#e6e1d8',
+    });
+    eventBus.dispatch('pagesinit', {});
+    expect(viewer.currentPageNumber).toBe(2);
+    expect(viewer.currentScale).toBe(1.5);
   });
 
   it('emits owned search results while dispatching visible highlighting through PDF.js', async () => {
@@ -431,6 +552,14 @@ describe('PdfDocumentViewport', () => {
       throw new Error('Expected viewer components.');
     const events: ViewportEvent[] = [];
     fixture.viewport.onEvent((event) => events.push(event));
+    fixture.viewport.setReadingColors({
+      background: '#202020',
+      foreground: '#e6e1d8',
+      brightness: 0.86,
+      contrast: 0.95,
+      imageDim: 0.18,
+    });
+    expect(eventBus.listeners.get('pagesinit')).toHaveLength(2);
 
     await fixture.viewport.destroy();
     await fixture.viewport.destroy();
@@ -442,6 +571,7 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.findDocumentsBeforeViewerOwnership).toEqual([[], [fixture.documentProxy]]);
     expect(fixture.runtime.state.findController?.documents).toEqual([fixture.documentProxy, null]);
     expect(fixture.runtime.state.linkService?.documents).toEqual([fixture.documentProxy, null]);
+    expect(eventBus.listeners.get('pagesinit')).toHaveLength(0);
     expect(fixture.host.children).toHaveLength(0);
   });
 

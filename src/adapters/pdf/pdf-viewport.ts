@@ -19,8 +19,17 @@ type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
 type PdfViewer = InstanceType<PdfRuntime['pdfjsViewer']['PDFViewer']>;
 type PdfEventListener = (event: unknown) => void;
 
-interface ClearablePdfViewer {
+interface RebindablePdfViewer {
   setDocument(document: PDFDocumentProxy | null): void;
+}
+
+type PreservedScale =
+  | { readonly type: 'preset'; readonly value: 'page-width' | 'page-fit' }
+  | { readonly type: 'numeric'; readonly value: number };
+
+interface PreservedViewState {
+  readonly pageNumber: number;
+  readonly scale: PreservedScale;
 }
 
 interface RetryablePdfPageView {
@@ -60,6 +69,13 @@ export class PdfDocumentViewport implements DocumentViewport {
   private searchAbort: AbortController | null = null;
   private lastQuery = '';
   private readonly failedPages = new Set<number>();
+  private pagesInitialized = false;
+  private colorRequestRevision = 0;
+  private colorRebindRevision = 0;
+  private colorRebindActive = false;
+  private requestedPageColors: { background: string; foreground: string } | null = null;
+  private preservedViewState: PreservedViewState | null = null;
+  private pendingPagesInit: PdfEventListener | null = null;
 
   constructor(
     private readonly pdf: PDFDocumentProxy,
@@ -132,7 +148,6 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   setReadingColors(colors: ResolvedReadingColors): void {
-    const viewer = this.requireMounted(this.viewer);
     const root = this.requireMounted(this.root);
     root.setCssProps({
       '--abyss-reader-background': colors.background,
@@ -141,13 +156,24 @@ export class PdfDocumentViewport implements DocumentViewport {
       '--abyss-reader-contrast': String(colors.contrast),
       '--abyss-reader-image-dim': String(colors.imageDim),
     });
-    viewer.pageColors = { background: colors.background, foreground: colors.foreground };
-    try {
-      viewer.cleanup();
-      viewer.update();
-    } catch (cause) {
-      this.handleRenderError(viewer.currentPageNumber, cause);
+    this.requestedPageColors = {
+      background: colors.background,
+      foreground: colors.foreground,
+    };
+    this.colorRequestRevision += 1;
+    if (!this.pagesInitialized) {
+      this.replacePendingPagesInit(() => {
+        this.startColorRebind();
+      });
+      return;
     }
+    if (this.colorRebindActive) {
+      this.replacePendingPagesInit(() => {
+        this.finishColorRebind();
+      });
+      return;
+    }
+    this.startColorRebind();
   }
 
   search(query: string): void {
@@ -204,6 +230,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.searchAbort?.abort();
     this.searchAbort = null;
     const eventBus = this.eventBus;
+    this.clearPendingPagesInit();
+    this.colorRebindActive = false;
+    this.requestedPageColors = null;
+    this.preservedViewState = null;
     if (eventBus !== null) {
       for (const [name, listener] of this.listeners) {
         attempt(() => {
@@ -224,7 +254,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     });
     if (this.viewer !== null) {
       attempt(() => {
-        (this.viewer as unknown as ClearablePdfViewer).setDocument(null);
+        (this.viewer as unknown as RebindablePdfViewer).setDocument(null);
       });
     }
     attempt(() => {
@@ -246,6 +276,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private bindEvents(): void {
     this.bind('pagesinit', () => {
+      this.pagesInitialized = true;
       if (this.viewer !== null) this.viewer.currentScaleValue = 'page-width';
     });
     this.bind('pagechanging', (event) => {
@@ -325,6 +356,78 @@ export class PdfDocumentViewport implements DocumentViewport {
     retry.textContent = 'Retry page';
     surface.append(message, retry);
     page.append(surface);
+  }
+
+  private startColorRebind(): void {
+    const viewer = this.requireMounted(this.viewer);
+    const pageColors = this.requireMounted(this.requestedPageColors);
+    this.preservedViewState ??= this.captureViewState(viewer);
+    this.colorRebindActive = true;
+    this.colorRebindRevision = this.colorRequestRevision;
+    viewer.pageColors = pageColors;
+    this.replacePendingPagesInit(() => {
+      this.finishColorRebind();
+    });
+    try {
+      const rebindableViewer = viewer as unknown as RebindablePdfViewer;
+      rebindableViewer.setDocument(null);
+      rebindableViewer.setDocument(this.pdf);
+    } catch (cause) {
+      const pageNumber = this.preservedViewState.pageNumber;
+      this.clearPendingPagesInit();
+      this.colorRebindActive = false;
+      this.preservedViewState = null;
+      this.handleRenderError(pageNumber, cause);
+    }
+  }
+
+  private replacePendingPagesInit(listener: PdfEventListener): void {
+    const eventBus = this.requireMounted(this.eventBus);
+    this.clearPendingPagesInit();
+    this.pendingPagesInit = listener;
+    eventBus.on('pagesinit', listener);
+  }
+
+  private clearPendingPagesInit(): void {
+    if (this.pendingPagesInit === null) return;
+    this.eventBus?.off('pagesinit', this.pendingPagesInit);
+    this.pendingPagesInit = null;
+  }
+
+  private finishColorRebind(): void {
+    this.clearPendingPagesInit();
+    this.colorRebindActive = false;
+    if (this.destroyPromise !== null) {
+      this.preservedViewState = null;
+      return;
+    }
+    if (this.colorRebindRevision !== this.colorRequestRevision) {
+      this.startColorRebind();
+      return;
+    }
+    const viewer = this.requireMounted(this.viewer);
+    const state = this.requireMounted(this.preservedViewState);
+    this.preservedViewState = null;
+    try {
+      if (state.scale.type === 'preset') viewer.currentScaleValue = state.scale.value;
+      else viewer.currentScale = state.scale.value;
+      viewer.currentPageNumber = state.pageNumber;
+    } catch (cause) {
+      this.handleRenderError(state.pageNumber, cause);
+    }
+  }
+
+  private captureViewState(viewer: PdfViewer): PreservedViewState {
+    const scaleValue = viewer.currentScaleValue;
+    let scale: PreservedScale;
+    if (!this.pagesInitialized) {
+      scale = { type: 'preset', value: 'page-width' };
+    } else if (scaleValue === 'page-width' || scaleValue === 'page-fit') {
+      scale = { type: 'preset', value: scaleValue };
+    } else {
+      scale = { type: 'numeric', value: viewer.currentScale };
+    }
+    return { pageNumber: viewer.currentPageNumber, scale };
   }
 
   private readonly onRootClick = (event: MouseEvent): void => {

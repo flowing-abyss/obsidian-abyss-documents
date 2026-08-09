@@ -126,9 +126,17 @@ export class ReaderController {
     const unsubscribeViewport = viewport.onEvent((event) => {
       this.handleViewportEvent(viewport, shell, event);
     });
-    shell.onThemeChange((theme) => {
-      this.handleThemeChange(viewport, shell, theme);
-    });
+    try {
+      shell.onThemeChange((theme) => {
+        this.handleThemeChange(viewport, shell, theme);
+      });
+    } catch (cause) {
+      this.reportPartialCleanupFailure(
+        session.descriptor.path,
+        this.tryCleanup(unsubscribeViewport),
+      );
+      throw cause;
+    }
     this.session = session;
     this.viewport = viewport;
     this.unsubscribeViewport = unsubscribeViewport;

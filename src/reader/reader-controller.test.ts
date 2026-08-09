@@ -548,6 +548,25 @@ describe('ReaderController', () => {
     expect(createdSession.close).toHaveBeenCalledOnce();
   });
 
+  it('unsubscribes once and tears down resources when theme observation setup fails', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const cause = new Error('theme observation failed');
+    vi.spyOn(ReaderShell.prototype, 'onThemeChange').mockImplementationOnce(() => {
+      throw cause;
+    });
+    const controller = new ReaderController(new DocumentAdapterRegistry([adapter.value]));
+
+    await expect(controller.open(pdf, createDiv())).rejects.toMatchObject({ cause });
+
+    expect(createdViewport.unsubscribe).toHaveBeenCalledOnce();
+    expect(createdViewport.destroy).toHaveBeenCalledOnce();
+    expect(createdSession.close).toHaveBeenCalledOnce();
+  });
+
   it('shows one actionable failure when page navigation rejects', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');

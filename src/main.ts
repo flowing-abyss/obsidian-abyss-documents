@@ -5,7 +5,7 @@ import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
 import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
 import { PluginDataStore, type PluginDataV1 } from './plugin-data.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
-import { ReaderController } from './reader/reader-controller.js';
+import { ReaderController, type ReaderProfileState } from './reader/reader-controller.js';
 
 export const PLUGIN_ID = 'abyss-documents';
 
@@ -19,7 +19,30 @@ export default class AbyssDocumentsPlugin extends Plugin {
     const registry = new DocumentAdapterRegistry([
       new PdfDocumentAdapter(this.app.vault, this.runtimeLoader, createPdfDocumentViewport),
     ]);
-    const services = { createController: () => new ReaderController(registry) };
+    const profileState: ReaderProfileState = {
+      get reading() {
+        return store.snapshot.settings.reading;
+      },
+      get profileByFingerprint() {
+        return store.snapshot.view.profileByFingerprint;
+      },
+      updateProfileForFingerprint: async (fingerprint, profile) => {
+        await store.update((data) => ({
+          ...data,
+          view: {
+            ...data.view,
+            profileByFingerprint: {
+              ...data.view.profileByFingerprint,
+              [fingerprint]: profile,
+            },
+          },
+        }));
+        this.data = store.snapshot;
+      },
+    };
+    const services = {
+      createController: () => new ReaderController(registry, undefined, profileState),
+    };
     this.registerView(DOCUMENT_VIEW_TYPE, (leaf) => new AbyssDocumentView(leaf, services));
     this.registerExtensions(['pdf'], DOCUMENT_VIEW_TYPE);
     this.register(() => {
