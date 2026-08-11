@@ -108,11 +108,13 @@ export class PdfDocumentViewport implements DocumentViewport {
   private resizeObserver: ResizeObserver | null = null;
   private resizeFrame: number | null = null;
   private pendingLocation: DocumentLocation | null = null;
+  private latestLocation: DocumentLocation | null = null;
   private requestedLayout: ReaderLayout = { pages: 'single', scrolling: 'continuous' };
   private requestedScale: ScaleRequest = 'page-width';
   private scaleRequestRevision = 0;
   private explicitScaleRequest = false;
   private applyingScale: ScaleRequest | null = null;
+  private applyingLayout = false;
 
   constructor(
     private readonly pdf: PDFDocumentProxy,
@@ -176,6 +178,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   async goTo(location: DocumentLocation): Promise<void> {
     this.requireMounted(this.linkService);
+    this.latestLocation = { ...location };
     if (!this.pagesInitialized || this.colorRebindActive) {
       this.pendingLocation = { ...location };
       return;
@@ -437,11 +440,16 @@ export class PdfDocumentViewport implements DocumentViewport {
   private onPageChanging(event: unknown): void {
     const pageNumber = positiveInteger(record(event)?.['pageNumber']);
     if (pageNumber === null) return;
-    this.events.emit({ type: 'page-change', pageIndex: pageNumber - 1 });
+    const pageIndex = pageNumber - 1;
+    if (this.latestLocation?.pageIndex !== pageIndex) {
+      this.latestLocation = { pageIndex };
+    }
+    this.events.emit({ type: 'page-change', pageIndex });
     if (this.viewer !== null) this.refitPageHeight(this.viewer);
   }
 
   private onScaleChanging(event: unknown): void {
+    if (this.applyingLayout) return;
     const data = record(event);
     if (data === null) return;
     const eventScale = this.scaleFromEvent(data);
@@ -563,8 +571,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.preservedViewState = null;
     try {
       this.applyLayout(viewer, this.requestedLayout);
-      viewer.currentPageNumber = state.pageNumber;
-      this.flushPendingLocation();
+      const location = this.pendingLocation ?? this.locationForRebind(state);
+      this.pendingLocation = null;
+      this.latestLocation = { ...location };
+      this.navigateTo(location);
       const scale = this.explicitScaleRequest ? this.requestedScale : this.scaleFromState(state);
       this.applyScale(viewer, scale, this.scaleRequestRevision);
     } catch (cause) {
@@ -645,15 +655,20 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private applyLayout(viewer: PdfViewer, layout: ReaderLayout): void {
     const pageNumber = viewer.currentPageNumber;
-    viewer.spreadMode =
-      layout.pages === 'facing'
-        ? this.pdfjsViewer.SpreadMode.ODD
-        : this.pdfjsViewer.SpreadMode.NONE;
-    viewer.scrollMode =
-      layout.scrolling === 'page-by-page'
-        ? this.pdfjsViewer.ScrollMode.PAGE
-        : this.pdfjsViewer.ScrollMode.VERTICAL;
-    viewer.currentPageNumber = pageNumber;
+    this.applyingLayout = true;
+    try {
+      viewer.spreadMode =
+        layout.pages === 'facing'
+          ? this.pdfjsViewer.SpreadMode.ODD
+          : this.pdfjsViewer.SpreadMode.NONE;
+      viewer.scrollMode =
+        layout.scrolling === 'page-by-page'
+          ? this.pdfjsViewer.ScrollMode.PAGE
+          : this.pdfjsViewer.ScrollMode.VERTICAL;
+      viewer.currentPageNumber = pageNumber;
+    } finally {
+      this.applyingLayout = false;
+    }
   }
 
   private preservedScale(scale: ScaleRequest): PreservedScale {
@@ -664,6 +679,12 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private scaleFromState(state: PreservedViewState): ScaleRequest {
     return state.scale.value;
+  }
+
+  private locationForRebind(state: PreservedViewState): DocumentLocation {
+    return this.latestLocation === null
+      ? { pageIndex: state.pageNumber - 1 }
+      : { ...this.latestLocation };
   }
 
   private navigateTo(location: DocumentLocation): void {
@@ -691,6 +712,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private clearPendingInteractions(): void {
     this.pendingLocation = null;
+    this.latestLocation = null;
   }
 
   private readonly onResize = (): void => {

@@ -71,9 +71,14 @@ function pdf(pageCount = 700): PDFDocumentProxy {
   } as unknown as PDFDocumentProxy;
 }
 
-function viewerRuntime(
-  findOptions: { findDelay?: number; findState?: number; suppressFindState?: boolean } = {},
-) {
+interface ViewerRuntimeOptions {
+  readonly findDelay?: number;
+  readonly findState?: number;
+  readonly layoutScaleChange?: { readonly presetValue?: string; readonly scale: number };
+  readonly suppressFindState?: boolean;
+}
+
+function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
   const state: {
     eventBus?: FakeEventBus;
     findController?: InstanceType<typeof FakeFindController>;
@@ -191,8 +196,8 @@ function viewerRuntime(
     currentScaleValue = 'auto';
     pagesRotation = 0;
     pageColors: object | null;
-    scrollMode = 0;
-    spreadMode = 0;
+    private currentScrollMode = 0;
+    private currentSpreadMode = 0;
 
     constructor(
       readonly options: {
@@ -213,6 +218,26 @@ function viewerRuntime(
       state.viewer = this;
     }
 
+    get scrollMode(): number {
+      return this.currentScrollMode;
+    }
+
+    set scrollMode(mode: number) {
+      if (this.currentScrollMode === mode) return;
+      this.currentScrollMode = mode;
+      this.dispatchLayoutScaleChange();
+    }
+
+    get spreadMode(): number {
+      return this.currentSpreadMode;
+    }
+
+    set spreadMode(mode: number) {
+      if (this.currentSpreadMode === mode) return;
+      this.currentSpreadMode = mode;
+      this.dispatchLayoutScaleChange();
+    }
+
     setDocument(pdfDocument: PDFDocumentProxy | null): void {
       this.findDocumentsBeforeViewerOwnership.push([...this.options.findController.documents]);
       this.documents.push(pdfDocument);
@@ -223,8 +248,8 @@ function viewerRuntime(
         this.currentPageNumber = 1;
         this.currentScale = 1;
         this.currentScaleValue = 'auto';
-        this.scrollMode = 0;
-        this.spreadMode = 0;
+        this.currentScrollMode = 0;
+        this.currentSpreadMode = 0;
         this.options.findController.setDocument(null);
         return;
       }
@@ -251,6 +276,17 @@ function viewerRuntime(
     getPageView(pageIndex: number) {
       return this.pageViews[pageIndex];
     }
+
+    private dispatchLayoutScaleChange(): void {
+      const event = findOptions.layoutScaleChange;
+      if (event === undefined || this.documents[this.documents.length - 1] === null) return;
+      this.currentScale = event.scale;
+      this.currentScaleValue = event.presetValue ?? String(event.scale);
+      this.options.eventBus.dispatch('scalechanging', {
+        scale: event.scale,
+        presetValue: event.presetValue,
+      });
+    }
   }
 
   const module = {
@@ -265,10 +301,7 @@ function viewerRuntime(
   return { module, state };
 }
 
-async function mountedViewport(
-  pageCount = 700,
-  options: { findDelay?: number; findState?: number; suppressFindState?: boolean } = {},
-) {
+async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = {}) {
   const documentProxy = pdf(pageCount);
   const runtime = viewerRuntime(options);
   const search = new PdfTextSearch(documentProxy);
@@ -433,6 +466,34 @@ describe('PdfDocumentViewport', () => {
     });
     expect(getPage).toHaveBeenLastCalledWith(2);
     expect(getViewport).toHaveBeenLastCalledWith({ scale: 4 / 3, rotation: 180 });
+  });
+
+  it('keeps a deferred Fit-height request through synchronous layout scale events', async () => {
+    const fixture = await mountedViewport(3, {
+      layoutScaleChange: { scale: 0.75, presetValue: 'page-width' },
+    });
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    const page = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockReturnValue(page.promise);
+    Object.defineProperty(viewer.options.container, 'clientHeight', {
+      configurable: true,
+      value: 1_005,
+    });
+    eventBus.dispatch('pagesinit', {});
+
+    fixture.viewport.setScale('page-height');
+    fixture.viewport.setLayout({ pages: 'facing', scrolling: 'page-by-page' });
+    page.resolve({
+      rotate: 0,
+      getViewport: vi.fn(() => ({ width: 800, height: 800 })),
+    } as unknown as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+
+    await vi.waitFor(() => {
+      expect(viewer.currentScale).toBeCloseTo(1.25, 5);
+    });
   });
 
   it('steps fit and numeric scales with PDF.js rounding and clamps at public bounds', async () => {
@@ -740,14 +801,41 @@ describe('PdfDocumentViewport', () => {
     });
 
     await fixture.viewport.goTo({ pageIndex: 2, x: 12, y: 34 });
-    await fixture.viewport.goTo({ pageIndex: 3 });
+    await fixture.viewport.goTo({ pageIndex: 3, x: 56, y: 78 });
 
     expect(linkService.positions).toEqual([]);
     expect(linkService.pages).toEqual([]);
     eventBus.dispatch('pagesinit', {});
-    expect(linkService.positions).toEqual([]);
-    expect(linkService.pages).toEqual([4]);
+    expect(linkService.positions).toEqual([[4, 56, 78]]);
+    expect(linkService.pages).toEqual([]);
     expect(viewer.currentPageNumber).toBe(4);
+  });
+
+  it('restores an applied full logical location after a reading-color rebind', async () => {
+    const fixture = await mountedViewport(4);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || linkService === undefined || viewer === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    eventBus.dispatch('pagesinit', {});
+    await fixture.viewport.goTo({ pageIndex: 2, x: 12, y: 34 });
+    viewer.currentPageNumber = 1;
+
+    fixture.viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+      brightness: 0.95,
+      contrast: 1.05,
+      imageDim: 0.1,
+    });
+    eventBus.dispatch('pagesinit', {});
+
+    expect(linkService.positions).toEqual([
+      [3, 12, 34],
+      [3, 12, 34],
+    ]);
   });
 
   it('restores the latest layout after a reading-color document rebind resets PDF.js', async () => {
