@@ -16,6 +16,8 @@ const SIDEBAR_TABS: ReadonlyArray<{ readonly id: ReaderSidebarTab; readonly labe
   { id: 'search', label: 'Search' },
 ];
 
+const SIDEBAR_INSTANCE_COUNTS = new WeakMap<Document, number>();
+
 export interface ReaderSidebarCallbacks {
   readonly onClose: () => void;
   readonly onTabChange: (tab: ReaderSidebarTab) => void;
@@ -39,6 +41,7 @@ export class ReaderSidebar {
 
   private readonly tabButtons = new Map<ReaderSidebarTab, HTMLButtonElement>();
   private readonly panelHost: HTMLElement;
+  private readonly idPrefix: string;
 
   constructor(
     host: HTMLElement,
@@ -46,6 +49,7 @@ export class ReaderSidebar {
     options: ReaderSidebarOptions = {},
   ) {
     const owner = ownerWindow(host);
+    this.idPrefix = nextSidebarIdPrefix(host.doc);
     this.root = owner.createEl('aside');
     this.root.className = 'abyss-reader-sidebar';
     if (options.mobile ?? Platform.isMobile) this.root.addClass('is-mobile');
@@ -110,8 +114,8 @@ export class ReaderSidebar {
     button.dataset['sidebarTab'] = tab;
     button.dataset['tab'] = tab;
     button.setAttribute('role', 'tab');
-    button.id = `abyss-reader-sidebar-tab-${tab}`;
-    button.setAttribute('aria-controls', `abyss-reader-sidebar-panel-${tab}`);
+    button.id = this.tabId(tab);
+    button.setAttribute('aria-controls', this.panelId(tab));
     button.textContent = label;
     button.addEventListener('click', () => {
       this.selectTab(tab, false, true);
@@ -162,15 +166,15 @@ export class ReaderSidebar {
     this.outlinePanel.root.hidden = tab !== 'outline';
     this.annotationsPanel.hidden = tab !== 'annotations';
     this.searchPanel.root.hidden = tab !== 'search';
-    this.outlinePanel.root.id = 'abyss-reader-sidebar-panel-outline';
+    this.outlinePanel.root.id = this.panelId('outline');
     this.outlinePanel.root.setAttribute('role', 'tabpanel');
-    this.outlinePanel.root.setAttribute('aria-labelledby', 'abyss-reader-sidebar-tab-outline');
-    this.annotationsPanel.id = 'abyss-reader-sidebar-panel-annotations';
+    this.outlinePanel.root.setAttribute('aria-labelledby', this.tabId('outline'));
+    this.annotationsPanel.id = this.panelId('annotations');
     this.annotationsPanel.setAttribute('role', 'tabpanel');
-    this.annotationsPanel.setAttribute('aria-labelledby', 'abyss-reader-sidebar-tab-annotations');
-    this.searchPanel.root.id = 'abyss-reader-sidebar-panel-search';
+    this.annotationsPanel.setAttribute('aria-labelledby', this.tabId('annotations'));
+    this.searchPanel.root.id = this.panelId('search');
     this.searchPanel.root.setAttribute('role', 'tabpanel');
-    this.searchPanel.root.setAttribute('aria-labelledby', 'abyss-reader-sidebar-tab-search');
+    this.searchPanel.root.setAttribute('aria-labelledby', this.tabId('search'));
   }
 
   private selectTab(tab: ReaderSidebarTab, focusTab: boolean, focusPanel: boolean): void {
@@ -188,4 +192,18 @@ export class ReaderSidebar {
     if (key === 'ArrowRight' || key === 'ArrowDown') return (index + 1) % SIDEBAR_TABS.length;
     return null;
   }
+
+  private tabId(tab: ReaderSidebarTab): string {
+    return `${this.idPrefix}-tab-${tab}`;
+  }
+
+  private panelId(tab: ReaderSidebarTab): string {
+    return `${this.idPrefix}-panel-${tab}`;
+  }
+}
+
+function nextSidebarIdPrefix(doc: Document): string {
+  const instance = (SIDEBAR_INSTANCE_COUNTS.get(doc) ?? 0) + 1;
+  SIDEBAR_INSTANCE_COUNTS.set(doc, instance);
+  return `abyss-reader-sidebar-${instance}`;
 }

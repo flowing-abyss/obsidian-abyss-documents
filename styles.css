@@ -6296,6 +6296,7 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--size-4-1);
   padding: var(--size-2-1) var(--size-4-2);
   border-bottom: var(--border-width) solid var(--background-modifier-border);
@@ -6602,14 +6603,15 @@
   }
 
   .abyss-documents .abyss-reader-toolbar {
-    flex-wrap: wrap;
     padding-inline: var(--size-4-1);
   }
 
   .abyss-documents .abyss-reader-toolbar-spacer {
     display: none;
   }
+}
 
+@media (width <= 600px), (pointer: coarse) {
   .abyss-documents .abyss-reader-toolbar-button,
   .abyss-documents .abyss-reader-toolbar-zoom-button,
   .abyss-documents .abyss-reader-sidebar-close,

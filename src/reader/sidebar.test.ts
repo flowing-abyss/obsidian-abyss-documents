@@ -79,6 +79,28 @@ describe('ReaderSidebar', () => {
     host.remove();
   });
 
+  it('keeps tab and panel relationships unique when two reader sidebars share a document', () => {
+    const host = createDiv();
+    const first = new ReaderSidebar(host, callbacks());
+    const second = new ReaderSidebar(host, callbacks());
+    const tabs = [first, second].flatMap((sidebar) =>
+      Array.from(sidebar.root.querySelectorAll<HTMLButtonElement>('[role="tab"]')),
+    );
+    const panels = [first, second].flatMap((sidebar) =>
+      Array.from(sidebar.root.querySelectorAll<HTMLElement>('[role="tabpanel"]')),
+    );
+
+    expect(new Set(tabs.map((tab) => tab.id)).size).toBe(6);
+    expect(new Set(panels.map((panel) => panel.id)).size).toBe(6);
+    for (const tab of tabs) {
+      const panel = host.querySelector<HTMLElement>(`#${tab.getAttribute('aria-controls')}`);
+      expect(panel?.getAttribute('aria-labelledby')).toBe(tab.id);
+    }
+
+    first.destroy();
+    second.destroy();
+  });
+
   it('opens document search only for a view-local Ctrl/Cmd+F and focuses its field', () => {
     const host = createDiv();
     host.doc.body.append(host);

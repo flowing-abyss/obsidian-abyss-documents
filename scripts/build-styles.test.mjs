@@ -12,6 +12,13 @@ function mobileDeclarations(mobile, selector) {
   return Object.fromEntries(values);
 }
 
+function topLevelDeclarations(root, selector) {
+  const rule = root.nodes.find((node) => node.type === 'rule' && node.selectors.includes(selector));
+  const values = new Map();
+  rule?.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
+  return Object.fromEntries(values);
+}
+
 describe('PDF.js style build', () => {
   it('prefixes outer rules without changing native nested selectors', async () => {
     const output = await prefixPdfStyles(`
@@ -146,38 +153,47 @@ describe('PDF.js style build', () => {
 
   it('provides 44px-equivalent touch targets in the responsive reader layout', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
-    const mobile = root.nodes.find(
+    const touch = root.nodes.find(
       (node) =>
-        node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
+        node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
     );
     expect(
-      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar-button'),
+      mobileDeclarations(touch, '.abyss-documents .abyss-reader-toolbar-button'),
     ).toMatchObject({
       width: '2.75rem',
       'min-width': '2.75rem',
       'min-height': '2.75rem',
     });
-    expect(mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar')).toMatchObject({
-      'flex-wrap': 'wrap',
-    });
-    expect(
-      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar-spacer'),
-    ).toMatchObject({
-      display: 'none',
-    });
-    expect(
-      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-sidebar-close'),
-    ).toMatchObject({
-      width: '2.75rem',
-      'min-width': '2.75rem',
-      'min-height': '2.75rem',
-    });
-    expect(mobileDeclarations(mobile, '.abyss-documents .abyss-reader-search-input')).toMatchObject(
+    expect(mobileDeclarations(touch, '.abyss-documents .abyss-reader-sidebar-close')).toMatchObject(
       {
+        width: '2.75rem',
+        'min-width': '2.75rem',
         'min-height': '2.75rem',
       },
     );
-    expect(mobileDeclarations(mobile, ".abyss-documents [data-action='retry']")).toMatchObject({
+    expect(mobileDeclarations(touch, '.abyss-documents .abyss-reader-search-input')).toMatchObject({
+      'min-height': '2.75rem',
+    });
+    expect(mobileDeclarations(touch, ".abyss-documents [data-action='retry']")).toMatchObject({
+      'min-height': '2.75rem',
+    });
+  });
+
+  it('wraps a narrow reader leaf independently of viewport width and keeps coarse pointers 44px above 600px', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const coarsePointer = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
+    );
+
+    expect(topLevelDeclarations(root, '.abyss-documents .abyss-reader-toolbar')).toMatchObject({
+      'flex-wrap': 'wrap',
+    });
+    expect(
+      mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
+    ).toMatchObject({
+      width: '2.75rem',
+      'min-width': '2.75rem',
       'min-height': '2.75rem',
     });
   });
@@ -188,11 +204,15 @@ describe('PDF.js style build', () => {
       (node) =>
         node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
     );
+    const touch = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
+    );
     expect(mobileDeclarations(mobile, '.abyss-documents .abyss-reader-sidebar')).toMatchObject({
       'inset-inline-start': '0',
     });
     expect(
-      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
+      mobileDeclarations(touch, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
     ).toMatchObject({
       width: '2.75rem',
       'min-width': '2.75rem',
