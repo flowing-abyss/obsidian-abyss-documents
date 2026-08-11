@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { PDF_FIXTURE_NAMES } from '../tests/fixtures/pdf-fixture-names.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -84,7 +85,10 @@ async function main(): Promise<void> {
     const raw =
       device === 'desktop'
         ? await measureDesktop(repoRoot)
-        : await readAndroidSamples(process.env['ABYSS_BENCHMARK_RAW_INPUT']);
+        : await readAndroidSamples(
+            process.env['ABYSS_BENCHMARK_RAW_INPUT'],
+            await currentFixtureHashes(repoRoot),
+          );
     const evaluation = evaluateReaderBudget({
       activationMs: raw.samples.activationMs,
       available: true,
@@ -253,27 +257,40 @@ async function registeredVaultName(expectedPath: string): Promise<string> {
   throw new Error(`Development vault is not registered at ${expectedPath}. Run pnpm dev:vault.`);
 }
 
-async function readAndroidSamples(input: string | undefined): Promise<MeasuredSamples> {
+async function readAndroidSamples(
+  input: string | undefined,
+  expectedFixtureHashes: Readonly<Record<string, string>>,
+): Promise<MeasuredSamples> {
   if (input === undefined) {
     throw new Error(
       'Android reference device did not provide ABYSS_BENCHMARK_RAW_INPUT; Appium measurements are unavailable.',
     );
   }
-  return parseMeasuredSamples(JSON.parse(await readFile(path.resolve(input), 'utf8')));
+  return parseMeasuredSamples(
+    JSON.parse(await readFile(path.resolve(input), 'utf8')),
+    expectedFixtureHashes,
+  );
 }
 
-export function parseMeasuredSamples(input: unknown): MeasuredSamples {
+export function parseMeasuredSamples(
+  input: unknown,
+  expectedFixtureHashes?: Readonly<Record<string, string>>,
+): MeasuredSamples {
   const root = requiredRecord(input, 'Android benchmark input');
   const environment = requiredRecord(root['environment'], 'environment');
-  const fixtureHashesInput = requiredRecord(root['fixtureHashes'], 'fixtureHashes');
-  const fixtureHashes = Object.fromEntries(
-    Object.entries(fixtureHashesInput).map(([name, hash]) => {
-      if (typeof hash !== 'string' || hash.length === 0) {
-        throw new Error(`fixtureHashes.${name} must be a non-empty string.`);
+  requireNonEmptyString(environment['device'], 'environment.device');
+  requireNonEmptyString(environment['os'], 'environment.os');
+  const fixtureHashes = validatedFixtureHashes(root['fixtureHashes'], 'fixtureHashes');
+  if (expectedFixtureHashes !== undefined) {
+    const expected = validatedFixtureHashes(expectedFixtureHashes, 'current fixture metadata');
+    for (const name of PDF_FIXTURE_NAMES) {
+      if (fixtureHashes[name]?.toLocaleLowerCase() !== expected[name]?.toLocaleLowerCase()) {
+        throw new Error(
+          `fixtureHashes.${name} does not match the current fixture metadata. Regenerate or remeasure the portable Android sample.`,
+        );
       }
-      return [name, hash];
-    }),
-  );
+    }
+  }
   const iterationCount = root['iterationCount'];
   if (!Number.isInteger(iterationCount) || (iterationCount as number) < 5) {
     throw new Error('iterationCount must be an integer of at least five.');
@@ -314,6 +331,59 @@ export function parseMeasuredSamples(input: unknown): MeasuredSamples {
     samples,
     versions: { obsidian: version('obsidian'), pdfjs: version('pdfjs'), plugin: version('plugin') },
   };
+}
+
+async function currentFixtureHashes(repoRoot: string): Promise<Record<string, string>> {
+  const manifest = requiredRecord(
+    JSON.parse(
+      await readFile(
+        path.join(repoRoot, 'dev-documents-vault', 'Documents', 'fixtures.v1.json'),
+        'utf8',
+      ),
+    ),
+    'current fixture manifest',
+  );
+  const files = manifest['files'];
+  if (!Array.isArray(files)) throw new Error('current fixture manifest.files must be an array.');
+  return Object.fromEntries(
+    files.map((entry, index) => {
+      const record = requiredRecord(entry, `current fixture manifest.files[${index}]`);
+      return [
+        requireNonEmptyString(record['name'], `current fixture manifest.files[${index}].name`),
+        requireNonEmptyString(record['sha256'], `current fixture manifest.files[${index}].sha256`),
+      ];
+    }),
+  );
+}
+
+function validatedFixtureHashes(value: unknown, label: string): Record<string, string> {
+  const input = requiredRecord(value, label);
+  const actualNames = Object.keys(input).sort((left, right) => left.localeCompare(right));
+  const expectedNames = [...PDF_FIXTURE_NAMES].sort((left, right) => left.localeCompare(right));
+  if (
+    actualNames.length !== expectedNames.length ||
+    actualNames.some((name, index) => name !== expectedNames[index])
+  ) {
+    throw new Error(
+      `${label} must contain every expected fixture name exactly once: ${expectedNames.join(', ')}.`,
+    );
+  }
+  return Object.fromEntries(
+    actualNames.map((name) => {
+      const hash = input[name];
+      if (typeof hash !== 'string' || !/^[A-Fa-f\d]{64}$/u.test(hash)) {
+        throw new Error(`${label}.${name} must be a 64-character SHA-256 hexadecimal digest.`);
+      }
+      return [name, hash];
+    }),
+  );
+}
+
+function requireNonEmptyString(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`${name} must be a non-empty string.`);
+  }
+  return value;
 }
 
 function requiredRecord(value: unknown, name: string): Record<string, unknown> {

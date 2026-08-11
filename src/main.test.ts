@@ -328,6 +328,107 @@ describe('AbyssDocumentsPlugin', () => {
     expect(log).not.toHaveBeenCalled();
   });
 
+  it('restores the original core PDF state when an in-flight handoff fulfills after cleanup', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf', page: 4 } });
+    const applyViewState = leaf.setViewState.bind(leaf);
+    let settleHandoff: (() => void) | undefined;
+    const pendingHandoff = new Promise<void>((resolve) => {
+      settleHandoff = resolve;
+    });
+    const setViewState = vi.spyOn(leaf, 'setViewState').mockImplementation(async (state) => {
+      if (state.type === DOCUMENT_VIEW_TYPE) await pendingHandoff;
+      await applyViewState(state);
+    });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledOnce();
+    });
+    const cleanups = (plugin as unknown as { cleanups__: Array<() => unknown> }).cleanups__;
+    for (const cleanup of [...cleanups].reverse()) cleanup();
+    settleHandoff?.();
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledTimes(2);
+    });
+    expect(leaf.getViewState()).toEqual({
+      type: 'pdf',
+      state: { file: 'Books/Guide.pdf', page: 4 },
+    });
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('does not replace a newer leaf state when a stale handoff fulfills after cleanup', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '', 'Notes/Newer.md': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const applyViewState = leaf.setViewState.bind(leaf);
+    let settleHandoff: (() => void) | undefined;
+    const pendingHandoff = new Promise<void>((resolve) => {
+      settleHandoff = resolve;
+    });
+    const setViewState = vi.spyOn(leaf, 'setViewState').mockReturnValue(pendingHandoff);
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledOnce();
+    });
+    const cleanups = (plugin as unknown as { cleanups__: Array<() => unknown> }).cleanups__;
+    for (const cleanup of [...cleanups].reverse()) cleanup();
+    await applyViewState({ type: 'markdown', state: { file: 'Notes/Newer.md' } });
+    settleHandoff?.();
+    await pendingHandoff;
+    await Promise.resolve();
+
+    expect(leaf.getViewState()).toEqual({
+      type: 'markdown',
+      state: { file: 'Notes/Newer.md' },
+    });
+    expect(setViewState).toHaveBeenCalledOnce();
+  });
+
+  it('contains a failed stale-state restore without logging after cleanup', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const applyViewState = leaf.setViewState.bind(leaf);
+    let settleHandoff: (() => void) | undefined;
+    const pendingHandoff = new Promise<void>((resolve) => {
+      settleHandoff = resolve;
+    });
+    const setViewState = vi
+      .spyOn(leaf, 'setViewState')
+      .mockImplementationOnce(async (state) => {
+        await pendingHandoff;
+        await applyViewState(state);
+      })
+      .mockRejectedValueOnce(new Error('leaf unavailable during restore'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledOnce();
+    });
+    const cleanups = (plugin as unknown as { cleanups__: Array<() => unknown> }).cleanups__;
+    for (const cleanup of [...cleanups].reverse()) cleanup();
+    settleHandoff?.();
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledTimes(2);
+    });
+    await Promise.resolve();
+
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it('ignores non-PDF view states and missing or non-PDF file paths', async () => {
     const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
     const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);

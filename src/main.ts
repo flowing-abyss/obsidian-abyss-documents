@@ -61,14 +61,21 @@ class CorePdfLeafHandoff {
     const viewState = leaf.getViewState();
     const filePath = corePdfPath(leaf);
     if (viewState.type !== 'pdf' || filePath === undefined) return;
+    const originalViewState = { ...viewState, state: { ...viewState.state } };
+    const handoffViewState = {
+      ...viewState,
+      state: { ...viewState.state, file: filePath },
+      type: DOCUMENT_VIEW_TYPE,
+    };
     markReaderPerformance('pdf-handoff-start');
     this.handoffsInFlight.add(leaf);
     const lifecycleGeneration = this.lifecycleGeneration;
     void leaf
-      .setViewState({
-        ...viewState,
-        state: { ...viewState.state, file: filePath },
-        type: DOCUMENT_VIEW_TYPE,
+      .setViewState(handoffViewState)
+      .then(async () => {
+        if (lifecycleGeneration === this.lifecycleGeneration) return;
+        if (!isCompletedHandoffState(leaf.getViewState(), filePath)) return;
+        await leaf.setViewState(originalViewState);
       })
       .catch((error: unknown) => {
         if (!this.active || lifecycleGeneration !== this.lifecycleGeneration) return;
@@ -81,6 +88,13 @@ class CorePdfLeafHandoff {
         if (lifecycleGeneration === this.lifecycleGeneration) this.handoffsInFlight.delete(leaf);
       });
   }
+}
+
+function isCompletedHandoffState(
+  viewState: ReturnType<WorkspaceLeaf['getViewState']>,
+  expectedFile: string,
+): boolean {
+  return viewState.type === DOCUMENT_VIEW_TYPE && viewState.state?.['file'] === expectedFile;
 }
 
 function corePdfPath(leaf: WorkspaceLeaf): string | undefined {

@@ -94,9 +94,16 @@ describe('reader benchmark summaries', () => {
   });
 
   it('validates the complete Android sample schema instead of trusting parsed JSON', () => {
+    const fixtureHashes = {
+      'invalid.pdf': 'a'.repeat(64),
+      'outline-20-pages.pdf': 'b'.repeat(64),
+      'raster-heavy-24-pages.pdf': 'c'.repeat(64),
+      'text-12-pages.pdf': 'd'.repeat(64),
+      'text-700-pages.pdf': 'e'.repeat(64),
+    };
     const valid = {
-      environment: { device: 'Pixel reference' },
-      fixtureHashes: { 'text-12-pages.pdf': 'abc123' },
+      environment: { device: 'Pixel reference', os: 'Android 16' },
+      fixtureHashes,
       iterationCount: 5,
       samples: {
         activationMs: [1, 2, 3, 4, 5],
@@ -107,7 +114,7 @@ describe('reader benchmark summaries', () => {
       versions: { obsidian: '1.13.4', pdfjs: '6.2.108', plugin: '0.1.0' },
     };
 
-    expect(parseMeasuredSamples(valid)).toEqual(valid);
+    expect(parseMeasuredSamples(valid, fixtureHashes)).toEqual(valid);
     expect(() =>
       parseMeasuredSamples({
         ...valid,
@@ -121,5 +128,101 @@ describe('reader benchmark summaries', () => {
       }),
     ).toThrow('versions.pdfjs');
     expect(() => parseMeasuredSamples(null)).toThrow('object');
+  });
+
+  it.each([
+    {
+      name: 'an empty environment',
+      mutate: (valid: Record<string, unknown>) => ({ ...valid, environment: {} }),
+      message: 'environment.device',
+    },
+    {
+      name: 'a missing operating system',
+      mutate: (valid: Record<string, unknown>) => ({
+        ...valid,
+        environment: { device: 'Pixel reference', os: '   ' },
+      }),
+      message: 'environment.os',
+    },
+    {
+      name: 'an empty fixture map',
+      mutate: (valid: Record<string, unknown>) => ({ ...valid, fixtureHashes: {} }),
+      message: 'fixtureHashes',
+    },
+    {
+      name: 'an unexpected fixture name',
+      mutate: (valid: Record<string, unknown>) => ({
+        ...valid,
+        fixtureHashes: {
+          'invalid.pdf': 'a'.repeat(64),
+          'outline-20-pages.pdf': 'b'.repeat(64),
+          'raster-heavy-24-pages.pdf': 'c'.repeat(64),
+          'text-12-pages.pdf': 'd'.repeat(64),
+          'wrong.pdf': 'e'.repeat(64),
+        },
+      }),
+      message: 'fixture name',
+    },
+    {
+      name: 'a malformed SHA-256',
+      mutate: (valid: Record<string, unknown>) => ({
+        ...valid,
+        fixtureHashes: {
+          'invalid.pdf': 'not-a-sha',
+          'outline-20-pages.pdf': 'b'.repeat(64),
+          'raster-heavy-24-pages.pdf': 'c'.repeat(64),
+          'text-12-pages.pdf': 'd'.repeat(64),
+          'text-700-pages.pdf': 'e'.repeat(64),
+        },
+      }),
+      message: 'SHA-256',
+    },
+  ])('rejects Android input with $name', ({ mutate, message }) => {
+    const valid: Record<string, unknown> = {
+      environment: { device: 'Pixel reference', os: 'Android 16' },
+      fixtureHashes: {
+        'invalid.pdf': 'a'.repeat(64),
+        'outline-20-pages.pdf': 'b'.repeat(64),
+        'raster-heavy-24-pages.pdf': 'c'.repeat(64),
+        'text-12-pages.pdf': 'd'.repeat(64),
+        'text-700-pages.pdf': 'e'.repeat(64),
+      },
+      iterationCount: 5,
+      samples: {
+        activationMs: [1, 2, 3, 4, 5],
+        coldFirstUsablePageMs: [101, 102, 103, 104, 105],
+        warmFirstUsablePageMs: [51, 52, 53, 54, 55],
+        pdfWorkDuringActivation: [0, 0, 0, 0, 0],
+      },
+      versions: { obsidian: '1.13.4', pdfjs: '6.2.108', plugin: '0.1.0' },
+    };
+
+    expect(() => parseMeasuredSamples(mutate(valid))).toThrow(message);
+  });
+
+  it('rejects portable Android samples measured against a different fixture revision', () => {
+    const fixtureHashes = {
+      'invalid.pdf': 'a'.repeat(64),
+      'outline-20-pages.pdf': 'b'.repeat(64),
+      'raster-heavy-24-pages.pdf': 'c'.repeat(64),
+      'text-12-pages.pdf': 'd'.repeat(64),
+      'text-700-pages.pdf': 'e'.repeat(64),
+    };
+    const input = {
+      environment: { device: 'Pixel reference', os: 'Android 16' },
+      fixtureHashes,
+      iterationCount: 5,
+      samples: {
+        activationMs: [1, 2, 3, 4, 5],
+        coldFirstUsablePageMs: [101, 102, 103, 104, 105],
+        warmFirstUsablePageMs: [51, 52, 53, 54, 55],
+        pdfWorkDuringActivation: [0, 0, 0, 0, 0],
+      },
+      versions: { obsidian: '1.13.4', pdfjs: '6.2.108', plugin: '0.1.0' },
+    };
+
+    expect(() =>
+      parseMeasuredSamples(input, { ...fixtureHashes, 'text-12-pages.pdf': 'f'.repeat(64) }),
+    ).toThrow('current fixture metadata');
   });
 });

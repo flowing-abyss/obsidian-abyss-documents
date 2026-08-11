@@ -62,7 +62,32 @@ describe('stageCommunityPackage', () => {
       assertLocalOnlyBundle('const electron = require("electron");');
     }).toThrow('external module');
     expect(() => {
-      assertLocalOnlyBundle('obsidian.requestUrl("https://example.com")');
-    }).toThrow('Obsidian requestUrl');
+      assertLocalOnlyBundle(
+        'var import_obsidian = require("obsidian"); (0, import_obsidian.requestUrl)("https://example.com");',
+      );
+    }).toThrow('Obsidian external transport');
+  });
+
+  it.each([
+    'var import_obsidian = require("obsidian"); (0, import_obsidian.request)("https://example.com");',
+    'var import_obsidian = require("obsidian"); import_obsidian.requestUrl("https://example.com");',
+    'var import_obsidian = require("obsidian"); import_obsidian["request"]("https://example.com");',
+    "var import_obsidian = require('obsidian'); import_obsidian['requestUrl']('https://example.com');",
+    'var $obsidian = require("obsidian"); $obsidian.request("https://example.com");',
+  ])('rejects an Obsidian transport referenced through the packaged module alias', (source) => {
+    expect(() => {
+      assertLocalOnlyBundle(source);
+    }).toThrow('Obsidian external transport');
+  });
+
+  it.each([
+    'const client = { request() {} }; client.request();',
+    'const client = { requestUrl() {} }; client.requestUrl();',
+    'var import_obsidian = require("obsidian"); import_obsidian.FileView;',
+    'const message = "request requestUrl";',
+  ])('allows unrelated request-shaped identifiers: $source', (source) => {
+    expect(() => {
+      assertLocalOnlyBundle(source);
+    }).not.toThrow();
   });
 });

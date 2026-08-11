@@ -10,6 +10,9 @@ const RELEASE_FILES = ['main.js', 'manifest.json', 'styles.css'] as const;
 const NODE_NETWORK_TRANSPORT =
   /(?:require|import)\s*\(\s*['"](?:node:)?(?:dgram|dns|http|http2|https|net|tls|undici)['"]\s*\)/u;
 const EXTERNAL_REQUIRE = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/gu;
+const OBSIDIAN_REQUIRE_ALIAS =
+  /(?<![\w$])([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*['"]obsidian['"]\s*\)/gu;
+const OBSIDIAN_TRANSPORT_PROPERTY = 'request(?:Url)?';
 
 export function assertLocalOnlyBundle(source: string): void {
   const match = NODE_NETWORK_TRANSPORT.exec(source);
@@ -26,10 +29,19 @@ export function assertLocalOnlyBundle(source: string): void {
       );
     }
   }
-  if (/\brequestUrl\b/u.test(source)) {
-    throw new Error(
-      'Obsidian requestUrl is forbidden in the local-only Community package because its Node transport is outside renderer interception.',
+  for (const assignment of source.matchAll(OBSIDIAN_REQUIRE_ALIAS)) {
+    const alias = assignment[1];
+    if (alias === undefined) continue;
+    const escapedAlias = alias.replaceAll(/[$()*+.?[\]^{|}]/gu, '\\$&');
+    const transportReference = new RegExp(
+      `(?<![\\w$])${escapedAlias}(?:\\s*\\.\\s*${OBSIDIAN_TRANSPORT_PROPERTY}\\b|\\s*\\[\\s*['"]${OBSIDIAN_TRANSPORT_PROPERTY}['"]\\s*\\])`,
+      'u',
     );
+    if (transportReference.test(source)) {
+      throw new Error(
+        'Obsidian external transport request/requestUrl is forbidden in the local-only Community package because its Node transport is outside renderer interception.',
+      );
+    }
   }
 }
 

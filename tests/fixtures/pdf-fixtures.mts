@@ -13,8 +13,10 @@ import {
   type PDFPage,
   type PDFRef,
 } from 'pdf-lib';
+import { PDF_FIXTURE_NAMES } from './pdf-fixture-names.mjs';
 
 export const FIXTURE_MANIFEST_FILE = 'fixtures.v1.json';
+export { PDF_FIXTURE_NAMES } from './pdf-fixture-names.mjs';
 const FIXED_DATE = new Date('2026-01-01T00:00:00.000Z');
 const PAGE_SIZE: [number, number] = [612, 792];
 const INVALID_BYTES = Buffer.from('ABYSS-DOCUMENTS INVALID PDF FIXTURE v1\n', 'utf8');
@@ -43,21 +45,26 @@ interface OutlineEntry {
 export async function generatePdfFixtures(outputDirectory: string): Promise<PdfFixtureManifest> {
   await mkdir(outputDirectory, { recursive: true });
   const generated = await Promise.all([
-    fixture('text-12-pages.pdf', 12, 'Known search matches on pages 2, 7, and 11.', textFixture()),
-    fixture('outline-20-pages.pdf', 20, 'Two-level linked outline dictionaries.', outlineFixture()),
+    fixture(PDF_FIXTURE_NAMES[0], 12, 'Known search matches on pages 2, 7, and 11.', textFixture()),
+    fixture(PDF_FIXTURE_NAMES[1], 20, 'Two-level linked outline dictionaries.', outlineFixture()),
     fixture(
-      'text-700-pages.pdf',
+      PDF_FIXTURE_NAMES[2],
       700,
       'Long page-numbered text with repeated search terms.',
       longTextFixture(),
     ),
     fixture(
-      'raster-heavy-24-pages.pdf',
+      PDF_FIXTURE_NAMES[3],
       24,
       'One deterministic raster image embedded once and reused on every page.',
       rasterFixture(),
     ),
-    fixture('invalid.pdf', null, 'Deterministic invalid bytes for retry coverage.', INVALID_BYTES),
+    fixture(
+      PDF_FIXTURE_NAMES[4],
+      null,
+      'Deterministic invalid bytes for retry coverage.',
+      INVALID_BYTES,
+    ),
   ]);
   const files: PdfFixtureMetadata[] = [];
   for (const entry of generated) {
