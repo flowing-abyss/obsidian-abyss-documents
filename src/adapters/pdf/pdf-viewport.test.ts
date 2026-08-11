@@ -350,6 +350,73 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.focus).toHaveBeenCalledOnce();
   });
 
+  it('recomputes fit presets when the document host resizes and disconnects on destroy', async () => {
+    let resize: (() => void) | undefined;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    let scheduledFrame: FrameRequestCallback | undefined;
+    const requestFrame = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback: FrameRequestCallback) => {
+        scheduledFrame = callback;
+        return 17;
+      });
+    const cancelFrame = vi
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation(() => undefined);
+    class FakeResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resize = () => {
+          callback([], this as unknown as ResizeObserver);
+        };
+      }
+
+      readonly observe = observe;
+      readonly disconnect = disconnect;
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    try {
+      const fixture = await mountedViewport(4);
+      const eventBus = fixture.runtime.state.eventBus;
+      const viewer = fixture.runtime.state.viewer;
+      if (eventBus === undefined || viewer === undefined || resize === undefined) {
+        throw new Error('Expected viewer components and a resize observer.');
+      }
+      let currentScaleValue = 'page-width';
+      const assignScale = vi.fn((value: string) => {
+        currentScaleValue = value;
+      });
+      Object.defineProperty(viewer, 'currentScaleValue', {
+        configurable: true,
+        get: () => currentScaleValue,
+        set: assignScale,
+      });
+      eventBus.dispatch('pagesinit', {});
+      assignScale.mockClear();
+
+      resize();
+      resize();
+
+      expect(observe).toHaveBeenCalledWith(viewer.options.container);
+      expect(requestFrame).toHaveBeenCalledOnce();
+      expect(assignScale).not.toHaveBeenCalled();
+      scheduledFrame?.(0);
+      expect(assignScale).toHaveBeenCalledWith('page-width');
+      currentScaleValue = 'page-fit';
+      assignScale.mockClear();
+      resize();
+      scheduledFrame?.(1);
+      expect(assignScale).toHaveBeenCalledWith('page-fit');
+      resize();
+      await fixture.viewport.destroy();
+      expect(disconnect).toHaveBeenCalledOnce();
+      expect(cancelFrame).toHaveBeenCalledWith(17);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
   it('applies reading colors and turns a synchronous redraw failure into a page error', async () => {
     const fixture = await mountedViewport(3);
     const viewer = fixture.runtime.state.viewer;
@@ -493,6 +560,34 @@ describe('PdfDocumentViewport', () => {
     eventBus.dispatch('pagesinit', {});
     expect(viewer.currentPageNumber).toBe(2);
     expect(viewer.currentScale).toBe(1.5);
+  });
+
+  it('queues a scale selected while reading colors are rebinding', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    eventBus.dispatch('pagesinit', {});
+    viewer.currentPageNumber = 2;
+    viewer.currentScale = 1.5;
+    viewer.currentScaleValue = '1.5';
+
+    fixture.viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+      brightness: 0.95,
+      contrast: 1.05,
+      imageDim: 0.1,
+    });
+    const scaleDuringRebind = viewer.currentScale;
+    fixture.viewport.setScale(1.75);
+
+    expect(viewer.currentScale).toBe(scaleDuringRebind);
+    eventBus.dispatch('pagesinit', {});
+    expect(viewer.currentScale).toBe(1.75);
+    expect(viewer.currentPageNumber).toBe(2);
   });
 
   it('emits owned search results while dispatching visible highlighting through PDF.js', async () => {

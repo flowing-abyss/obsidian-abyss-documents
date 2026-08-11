@@ -18,6 +18,7 @@ export interface AbyssDocumentViewServices {
 export class AbyssDocumentView extends FileView {
   private readonly controller: ReaderViewController;
   private loadGeneration = 0;
+  private lastOpenFailureNoticeKey: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, services: AbyssDocumentViewServices) {
     super(leaf);
@@ -66,6 +67,7 @@ export class AbyssDocumentView extends FileView {
     try {
       await this.controller.close();
     } finally {
+      this.lastOpenFailureNoticeKey = null;
       this.clearOpenFailure();
       await super.onUnloadFile(file);
     }
@@ -88,10 +90,15 @@ export class AbyssDocumentView extends FileView {
     this.clearOpenFailure();
     try {
       await this.controller.open(file, this.contentEl);
+      this.lastOpenFailureNoticeKey = null;
     } catch (cause) {
       if (generation !== this.loadGeneration || this.file !== file) return;
       const reason = cause instanceof Error ? cause.message : 'Unknown failure.';
-      new Notice(`Could not open ${file.name}: ${reason}`);
+      const noticeKey = `${file.path}\u0000${reason}`;
+      if (noticeKey !== this.lastOpenFailureNoticeKey) {
+        new Notice(`Could not open ${file.name}: ${reason}`);
+        this.lastOpenFailureNoticeKey = noticeKey;
+      }
       console.error('[abyss-documents] Failed to open PDF', { path: file.path, cause });
       this.renderOpenFailure(reason);
     }

@@ -94,6 +94,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   private requestedPageColors: { background: string; foreground: string } | null = null;
   private preservedViewState: PreservedViewState | null = null;
   private pendingPagesInit: PdfEventListener | null = null;
+  private resizeObserver: ResizeObserver | null = null;
+  private resizeFrame: number | null = null;
 
   constructor(
     private readonly pdf: PDFDocumentProxy,
@@ -145,6 +147,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.viewer = viewer;
     this.bindEvents();
     root.addEventListener('click', this.onRootClick);
+    if (typeof ResizeObserver === 'function') {
+      this.resizeObserver = new ResizeObserver(this.onResize);
+      this.resizeObserver.observe(root);
+    }
 
     linkService.setViewer(viewer);
     linkService.setDocument(this.pdf);
@@ -163,6 +169,16 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   setScale(scale: number | 'page-width' | 'page-fit'): void {
     const viewer = this.requireMounted(this.viewer);
+    if (this.colorRebindActive && this.preservedViewState !== null) {
+      this.preservedViewState = {
+        ...this.preservedViewState,
+        scale:
+          typeof scale === 'number'
+            ? { type: 'numeric', value: scale }
+            : { type: 'preset', value: scale },
+      };
+      return;
+    }
     if (typeof scale === 'number') viewer.currentScale = scale;
     else viewer.currentScaleValue = scale;
   }
@@ -288,6 +304,9 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.colorRebindActive = false;
     this.requestedPageColors = null;
     this.preservedViewState = null;
+    attempt(() => {
+      this.disconnectResizeObserver();
+    });
     if (eventBus !== null) {
       for (const [name, listener] of this.listeners) {
         attempt(() => {
@@ -495,6 +514,26 @@ export class PdfDocumentViewport implements DocumentViewport {
       scale = { type: 'numeric', value: viewer.currentScale };
     }
     return { pageNumber: viewer.currentPageNumber, scale };
+  }
+
+  private readonly onResize = (): void => {
+    if (this.resizeFrame !== null || this.destroyPromise !== null) return;
+    this.resizeFrame = window.requestAnimationFrame(() => {
+      this.resizeFrame = null;
+      if (!this.pagesInitialized || this.colorRebindActive || this.destroyPromise !== null) return;
+      const viewer = this.viewer;
+      if (viewer === null) return;
+      const scale = viewer.currentScaleValue;
+      if (scale === 'page-width' || scale === 'page-fit') viewer.currentScaleValue = scale;
+    });
+  };
+
+  private disconnectResizeObserver(): void {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    if (this.resizeFrame === null) return;
+    window.cancelAnimationFrame(this.resizeFrame);
+    this.resizeFrame = null;
   }
 
   private readonly onRootClick = (event: MouseEvent): void => {

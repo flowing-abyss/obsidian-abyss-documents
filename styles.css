@@ -6489,6 +6489,7 @@
 .abyss-documents .abyss-reader-search-result {
   display: flex;
   width: 100%;
+  height: auto;
   flex-direction: column;
   gap: var(--size-2-1);
   padding: var(--size-4-2);
@@ -6497,6 +6498,7 @@
   background: transparent;
   color: var(--text-normal);
   text-align: start;
+  white-space: normal;
 }
 
 .abyss-documents .abyss-reader-search-result:hover,
@@ -6505,6 +6507,8 @@
   background: var(--background-modifier-hover);
 }
 
+.abyss-documents .abyss-reader-toolbar-page-field:focus,
+.abyss-documents .abyss-reader-search-input:focus,
 .abyss-documents .abyss-reader-toolbar-button:focus-visible,
 .abyss-documents .abyss-reader-toolbar-page-field:focus-visible,
 .abyss-documents .abyss-reader-sidebar-tab:focus-visible,
@@ -6556,6 +6560,12 @@
   overflow: auto;
 }
 
+/* Obsidian uses border-box globally; PDF.js page, canvas, and text geometry assumes content-box. */
+/* stylelint-disable-next-line selector-class-pattern -- PDF.js requires this public class name. */
+.abyss-documents .pdfViewer .page {
+  box-sizing: content-box;
+}
+
 /* PDF.js paints mixed text, vectors, and images into the same owned canvas. */
 /* stylelint-disable-next-line selector-class-pattern, selector-max-type -- PDF.js requires these public classes and canvas target. */
 .abyss-documents .pdfViewer .page .canvasWrapper canvas {
@@ -6583,6 +6593,21 @@
 
   .abyss-documents .abyss-reader-toolbar {
     padding-inline: var(--size-4-1);
+  }
+
+  .abyss-documents .abyss-reader-toolbar-button,
+  .abyss-documents .abyss-reader-sidebar-close,
+  .abyss-documents .abyss-reader-search-button {
+    width: 2.75rem;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .abyss-documents .abyss-reader-toolbar-page-field,
+  .abyss-documents .abyss-reader-sidebar-tab,
+  .abyss-documents .abyss-reader-search-input,
+  .abyss-documents [data-action='retry'] {
+    min-height: 2.75rem;
   }
 }
 

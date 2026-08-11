@@ -95,6 +95,24 @@ describe('AbyssDocumentView', () => {
     expect(fixture.view.contentEl.querySelector('[data-action="retry"]')).toBeNull();
   });
 
+  it('does not stack duplicate notices when retry repeats the same open failure', async () => {
+    const cause = new DocumentOpenError('Books/Guide.pdf', 'The PDF is damaged.');
+    const reader = controller();
+    reader.open.mockRejectedValue(cause);
+    const fixture = viewFixture(reader.reader);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await fixture.view.onLoadFile(fixture.file);
+    fixture.view.contentEl.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click();
+    await vi.waitFor(() => {
+      expect(reader.open).toHaveBeenCalledTimes(2);
+    });
+
+    expect(notice).toHaveBeenCalledOnce();
+    expect(fixture.view.contentEl.querySelectorAll('[data-reader-error="open"]')).toHaveLength(1);
+  });
+
   it('silences a stale same-file rejection after a newer open wins', async () => {
     const first = deferred<undefined>();
     const second = deferred<undefined>();

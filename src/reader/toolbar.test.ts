@@ -168,6 +168,7 @@ describe('ReaderToolbar', () => {
     overflow.click();
     entries.find((entry) => entry.title === 'Fit width')?.click();
     entries.find((entry) => entry.title === '125%')?.click();
+    entries.find((entry) => entry.title === '175%')?.click();
 
     expect(setUseNativeMenu).toHaveBeenCalledTimes(2);
     expect(setUseNativeMenu).toHaveBeenNthCalledWith(1, false);
@@ -176,6 +177,7 @@ describe('ReaderToolbar', () => {
       { type: 'set-profile', profile: 'dark' },
       { type: 'set-scale', scale: 'page-width' },
       { type: 'set-scale', scale: 1.25 },
+      { type: 'set-scale', scale: 1.75 },
     ]);
   });
 

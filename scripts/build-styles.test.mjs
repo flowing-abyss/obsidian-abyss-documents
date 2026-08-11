@@ -108,6 +108,75 @@ describe('PDF.js style build', () => {
     });
   });
 
+  it('lets search result buttons grow beyond the host button height to show their preview', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const declarations = new Map();
+    root.walkRules('.abyss-documents .abyss-reader-search-result', (rule) => {
+      if (rule.selector !== '.abyss-documents .abyss-reader-search-result') return;
+      rule.walkDecls((declaration) => declarations.set(declaration.prop, declaration.value));
+    });
+
+    expect(Object.fromEntries(declarations)).toMatchObject({
+      height: 'auto',
+      'white-space': 'normal',
+    });
+  });
+
+  it('keeps PDF.js page geometry in content-box so canvas and text layers align', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const declarations = new Map();
+    root.walkRules('.abyss-documents .pdfViewer .page', (rule) => {
+      if (rule.selector !== '.abyss-documents .pdfViewer .page') return;
+      rule.walkDecls((declaration) => declarations.set(declaration.prop, declaration.value));
+    });
+
+    expect(Object.fromEntries(declarations)).toMatchObject({
+      'box-sizing': 'content-box',
+    });
+  });
+
+  it('provides 44px-equivalent touch targets in the responsive reader layout', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const mobile = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
+    );
+    const declarations = (selector) => {
+      const values = new Map();
+      mobile?.walkRules((rule) => {
+        if (!rule.selectors.includes(selector)) return;
+        rule.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
+      });
+      return Object.fromEntries(values);
+    };
+
+    expect(declarations('.abyss-documents .abyss-reader-toolbar-button')).toMatchObject({
+      width: '2.75rem',
+      'min-width': '2.75rem',
+      'min-height': '2.75rem',
+    });
+    expect(declarations('.abyss-documents .abyss-reader-sidebar-close')).toMatchObject({
+      width: '2.75rem',
+      'min-width': '2.75rem',
+      'min-height': '2.75rem',
+    });
+    expect(declarations('.abyss-documents .abyss-reader-search-input')).toMatchObject({
+      'min-height': '2.75rem',
+    });
+    expect(declarations(".abyss-documents [data-action='retry']")).toMatchObject({
+      'min-height': '2.75rem',
+    });
+  });
+
+  it('keeps focused text inputs visibly outlined for pointer and programmatic focus', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const selectors = [];
+    root.walkRules((rule) => selectors.push(...rule.selectors));
+
+    expect(selectors).toContain('.abyss-documents .abyss-reader-toolbar-page-field:focus');
+    expect(selectors).toContain('.abyss-documents .abyss-reader-search-input:focus');
+  });
+
   it('ships scoped settings, stored-width docking, safe-area mobile, and reduced motion', async () => {
     const output = await readFile('styles.css', 'utf8');
     const root = postcss.parse(output);
