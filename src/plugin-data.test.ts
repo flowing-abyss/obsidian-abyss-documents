@@ -7,6 +7,39 @@ import {
 } from './plugin-data.js';
 import { DEFAULT_SETTINGS } from './settings.js';
 
+const RELEASED_V1_DEFAULT_DATA: PluginDataV1 = {
+  schemaVersion: 1,
+  settings: {
+    reading: {
+      defaultProfile: 'auto',
+      rememberPerDocument: false,
+      custom: {
+        background: '#202020',
+        foreground: '#dddddd',
+        brightness: 1,
+        contrast: 1,
+        imageDim: 0,
+      },
+    },
+    debugLogging: false,
+  },
+  view: {
+    sidebar: { open: false },
+    selectedTab: 'outline',
+    sidebarWidth: 320,
+    profileByFingerprint: {},
+  },
+};
+
+function loadWithReleasedV1Behavior(saved: unknown): PluginDataV1 {
+  return typeof saved === 'object' &&
+    saved !== null &&
+    'schemaVersion' in saved &&
+    saved.schemaVersion === 1
+    ? (saved as PluginDataV1)
+    : RELEASED_V1_DEFAULT_DATA;
+}
+
 function createStore() {
   const persistence = {
     loadData: vi.fn().mockResolvedValue(null),
@@ -130,18 +163,26 @@ describe('PluginDataStore', () => {
     );
   });
 
-  it('documents V2 rollback as V1 defaults without touching external PDF bytes', () => {
-    const originalPdfBytes = new Uint8Array([37, 80, 68, 70]);
-    const currentV1Load = (saved: unknown): PluginDataV1 | null =>
-      typeof saved === 'object' &&
-      saved !== null &&
-      'schemaVersion' in saved &&
-      saved.schemaVersion === 1
-        ? (saved as PluginDataV1)
-        : null;
+  it('rolls a persisted V2 snapshot back to released V1 defaults without PDF writes', async () => {
+    const pdfBytes = new Uint8Array([37, 80, 68, 70]);
+    const pdfVault = { modifyBinary: vi.fn() };
+    const persistence = {
+      loadData: vi.fn().mockResolvedValue(null),
+      pdfVault,
+      saveData: vi.fn().mockResolvedValue(undefined),
+    };
+    const store = new PluginDataStore(persistence);
+    await store.load();
+    await store.update((data) => ({
+      ...data,
+      view: { ...data.view, selectedTab: 'search' },
+    }));
+    const persistedV2: unknown = persistence.saveData.mock.calls[0]?.[0] as unknown;
 
-    expect(currentV1Load(DEFAULT_DATA)).toBeNull();
-    expect(originalPdfBytes).toEqual(new Uint8Array([37, 80, 68, 70]));
+    expect(persistedV2).toMatchObject({ schemaVersion: 2, view: { selectedTab: 'search' } });
+    expect(loadWithReleasedV1Behavior(persistedV2)).toEqual(RELEASED_V1_DEFAULT_DATA);
+    expect(pdfVault.modifyBinary).not.toHaveBeenCalled();
+    expect(pdfBytes).toEqual(new Uint8Array([37, 80, 68, 70]));
   });
 
   it('preserves valid V2 layout and annotation fields', () => {
