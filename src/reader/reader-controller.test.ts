@@ -8,7 +8,7 @@ import type {
   DocumentViewport,
 } from '../document-core/document.js';
 import { DocumentOpenError } from '../document-core/errors.js';
-import type { ReadingProfileId } from '../document-core/reading.js';
+import type { ReaderLayout, ReadingProfileId } from '../document-core/reading.js';
 import {
   beginPluginActivation,
   endPluginActivation,
@@ -394,6 +394,25 @@ describe('ReaderController', () => {
       resolved(BUILTIN_PROFILES.light),
     );
     expect(shell.created.root.getAttribute('data-reading-profile')).toBe('light');
+  });
+
+  it('keeps the chosen layout reflected in the toolbar without creating a second reader setting surface', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    const layout: ReaderLayout = { pages: 'facing', scrolling: 'page-by-page' };
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'set-layout', layout });
+
+    const layoutButton = shell.created.root.querySelector('[data-control="layout"]');
+    expect(layoutButton?.getAttribute('aria-label')).toBe('Layout: Facing, page by page');
   });
 
   it('uses the global default and leaves the fingerprint map untouched when remembering is off', async () => {

@@ -112,9 +112,10 @@ export class ReaderShell {
         callbacks.onClose();
       },
     });
+    this.body.insertBefore(this.sidebarValue.root, this.documentHost);
     this.sidebarValue.open(tab);
     this.setSidebarPressed(true);
-    this.announce(`${tab === 'outline' ? 'Outline' : 'Search'} sidebar opened`);
+    this.announce(`${sidebarLabel(tab)} sidebar opened`);
     return this.sidebarValue;
   }
 
@@ -158,4 +159,10 @@ export class ReaderShell {
 function boundedSidebarWidth(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) return DEFAULT_SIDEBAR_WIDTH;
   return Math.min(MAXIMUM_SIDEBAR_WIDTH, Math.max(MINIMUM_SIDEBAR_WIDTH, Math.round(value)));
+}
+
+function sidebarLabel(tab: ReaderSidebarTab): string {
+  if (tab === 'outline') return 'Outline';
+  if (tab === 'annotations') return 'Annotations';
+  return 'Search';
 }

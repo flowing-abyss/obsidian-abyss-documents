@@ -48,6 +48,37 @@ describe('ReaderSidebar', () => {
     expect(shell.sidebar?.isOpen).toBe(true);
   });
 
+  it('uses a fixed, roving tab order for Outline, Annotations, and Search', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const sidebar = new ReaderSidebar(host, callbacks());
+    const tabs = Array.from(sidebar.root.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const OwnerKeyboardEvent = (
+      sidebar.root.win as Window & {
+        KeyboardEvent: typeof KeyboardEvent;
+      }
+    ).KeyboardEvent;
+
+    expect(sidebar.tabLabels).toEqual(['Outline', 'Annotations', 'Search']);
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['Outline', 'Annotations', 'Search']);
+    tabs[0]?.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'End' }));
+
+    expect(sidebar.activeTab).toBe('search');
+    expect(sidebar.root.doc.activeElement).toBe(tabs[2]);
+    tabs[2]?.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'Home' }));
+    expect(sidebar.activeTab).toBe('outline');
+    tabs[0]?.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(sidebar.activeTab).toBe('annotations');
+    tabs[1]?.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
+    expect(sidebar.activeTab).toBe('search');
+    tabs[2]?.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowLeft' }));
+    expect(sidebar.activeTab).toBe('annotations');
+    tabs[1]?.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowUp' }));
+    expect(sidebar.activeTab).toBe('outline');
+    sidebar.destroy();
+    host.remove();
+  });
+
   it('opens document search only for a view-local Ctrl/Cmd+F and focuses its field', () => {
     const host = createDiv();
     host.doc.body.append(host);
@@ -80,7 +111,7 @@ describe('ReaderSidebar', () => {
     expect(shortcut.defaultPrevented).toBe(true);
     expect(shell.sidebar?.activeTab).toBe('search');
     expect(shell.root.doc.activeElement).toBe(shell.sidebar?.searchPanel.input);
-    expect(shell.sidebar?.root.textContent).not.toMatch(/annotation/iu);
+    expect(shell.sidebar?.root.textContent).toMatch(/annotations/iu);
   });
 
   it('removes a closed mobile overlay from focus and returns focus through its owner callback', () => {

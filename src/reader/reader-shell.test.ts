@@ -15,6 +15,24 @@ describe('ReaderShell', () => {
     shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
   });
 
+  it('inserts the lazy sidebar before the PDF document when it is first opened', () => {
+    const shell = new ReaderShell(createDiv());
+
+    shell.openSidebar('outline', {
+      onClose: () => undefined,
+      onOutlineNavigate: () => undefined,
+      onSearchNavigate: () => undefined,
+      onSearchQuery: () => undefined,
+      onTabChange: () => undefined,
+    });
+
+    const body = shell.root.querySelector('.abyss-reader-body');
+    expect(
+      Array.from(body?.children ?? []).map((node) => (node as HTMLElement).dataset['region']),
+    ).toEqual(['sidebar', 'document']);
+    shell.destroy();
+  });
+
   it('removes only its owned reader root when destroyed', () => {
     const host = createDiv();
     const sibling = createDiv();

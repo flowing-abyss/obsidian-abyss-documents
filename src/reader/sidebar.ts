@@ -8,7 +8,13 @@ import {
   type SearchPanelCallbacks,
 } from './search-panel.js';
 
-export type ReaderSidebarTab = 'outline' | 'search';
+export type ReaderSidebarTab = 'outline' | 'annotations' | 'search';
+
+const SIDEBAR_TABS: ReadonlyArray<{ readonly id: ReaderSidebarTab; readonly label: string }> = [
+  { id: 'outline', label: 'Outline' },
+  { id: 'annotations', label: 'Annotations' },
+  { id: 'search', label: 'Search' },
+];
 
 export interface ReaderSidebarCallbacks {
   readonly onClose: () => void;
@@ -26,6 +32,7 @@ export class ReaderSidebar {
   readonly root: HTMLElement;
   readonly outlinePanel: OutlinePanel;
   readonly searchPanel: SearchPanel;
+  readonly annotationsPanel: HTMLElement;
 
   activeTab: ReaderSidebarTab = 'outline';
   isOpen = false;
@@ -54,6 +61,12 @@ export class ReaderSidebar {
     host.append(this.root);
 
     this.outlinePanel = new OutlinePanel(this.panelHost, callbacks.onOutlineNavigate);
+    this.annotationsPanel = owner.createEl('section');
+    this.annotationsPanel.className = 'abyss-reader-annotations';
+    this.annotationsPanel.dataset['sidebarPanel'] = 'annotations';
+    this.annotationsPanel.setAttribute('aria-label', 'Annotations');
+    this.annotationsPanel.textContent = 'Annotations will appear here.';
+    this.panelHost.append(this.annotationsPanel);
     const searchCallbacks: SearchPanelCallbacks = {
       onClose: () => {
         this.close();
@@ -63,6 +76,10 @@ export class ReaderSidebar {
     };
     this.searchPanel = new SearchPanel(this.panelHost, searchCallbacks);
     this.activateTab('outline');
+  }
+
+  get tabLabels(): readonly string[] {
+    return SIDEBAR_TABS.map((tab) => tab.label);
   }
 
   open(tab: ReaderSidebarTab): void {
@@ -93,11 +110,20 @@ export class ReaderSidebar {
     button.dataset['sidebarTab'] = tab;
     button.dataset['tab'] = tab;
     button.setAttribute('role', 'tab');
+    button.id = `abyss-reader-sidebar-tab-${tab}`;
+    button.setAttribute('aria-controls', `abyss-reader-sidebar-panel-${tab}`);
     button.textContent = label;
     button.addEventListener('click', () => {
-      this.activateTab(tab);
-      if (tab === 'search') this.searchPanel.focus();
-      this.callbacks.onTabChange(tab);
+      this.selectTab(tab, false, true);
+    });
+    button.addEventListener('keydown', (event) => {
+      const index = SIDEBAR_TABS.findIndex((candidate) => candidate.id === tab);
+      const nextIndex = this.tabTargetIndex(event.key, index);
+      if (nextIndex === null) return;
+      event.preventDefault();
+      const next = SIDEBAR_TABS[nextIndex];
+      if (next === undefined) return;
+      this.selectTab(next.id, true, false);
     });
     this.tabButtons.set(tab, button);
     return button;
@@ -111,7 +137,7 @@ export class ReaderSidebar {
     tabs.className = 'abyss-reader-sidebar-tabs';
     tabs.setAttribute('role', 'tablist');
     tabs.setAttribute('aria-label', 'Document sidebar');
-    tabs.append(this.tabButton('outline', 'Outline'), this.tabButton('search', 'Search'));
+    for (const tab of SIDEBAR_TABS) tabs.append(this.tabButton(tab.id, tab.label));
     const close = owner.createEl('button');
     close.type = 'button';
     close.className = 'clickable-icon abyss-reader-sidebar-close';
@@ -134,6 +160,32 @@ export class ReaderSidebar {
       button.tabIndex = active ? 0 : -1;
     }
     this.outlinePanel.root.hidden = tab !== 'outline';
+    this.annotationsPanel.hidden = tab !== 'annotations';
     this.searchPanel.root.hidden = tab !== 'search';
+    this.outlinePanel.root.id = 'abyss-reader-sidebar-panel-outline';
+    this.outlinePanel.root.setAttribute('role', 'tabpanel');
+    this.outlinePanel.root.setAttribute('aria-labelledby', 'abyss-reader-sidebar-tab-outline');
+    this.annotationsPanel.id = 'abyss-reader-sidebar-panel-annotations';
+    this.annotationsPanel.setAttribute('role', 'tabpanel');
+    this.annotationsPanel.setAttribute('aria-labelledby', 'abyss-reader-sidebar-tab-annotations');
+    this.searchPanel.root.id = 'abyss-reader-sidebar-panel-search';
+    this.searchPanel.root.setAttribute('role', 'tabpanel');
+    this.searchPanel.root.setAttribute('aria-labelledby', 'abyss-reader-sidebar-tab-search');
+  }
+
+  private selectTab(tab: ReaderSidebarTab, focusTab: boolean, focusPanel: boolean): void {
+    this.activateTab(tab);
+    if (focusTab) this.tabButtons.get(tab)?.focus();
+    if (focusPanel && tab === 'search') this.searchPanel.focus();
+    this.callbacks.onTabChange(tab);
+  }
+
+  private tabTargetIndex(key: string, index: number): number | null {
+    if (key === 'Home') return 0;
+    if (key === 'End') return SIDEBAR_TABS.length - 1;
+    if (key === 'ArrowLeft' || key === 'ArrowUp')
+      return (index - 1 + SIDEBAR_TABS.length) % SIDEBAR_TABS.length;
+    if (key === 'ArrowRight' || key === 'ArrowDown') return (index + 1) % SIDEBAR_TABS.length;
+    return null;
   }
 }

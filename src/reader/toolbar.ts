@@ -1,27 +1,30 @@
-import { Menu, Platform, setIcon, type IconName } from 'obsidian';
-import type { ReaderScale, ReadingProfileId } from '../document-core/reading.js';
+import { Menu, setIcon, type IconName } from 'obsidian';
+import {
+  DEFAULT_READER_LAYOUT,
+  type ReaderLayout,
+  type ReaderScale,
+  type ReadingProfileId,
+} from '../document-core/reading.js';
 
 export type ReaderToolbarIntent =
   | { readonly type: 'toggle-sidebar' }
   | { readonly type: 'go-to-page'; readonly pageIndex: number }
   | { readonly type: 'previous-page' }
   | { readonly type: 'next-page' }
+  | { readonly type: 'zoom-step'; readonly direction: -1 | 1 }
   | {
       readonly type: 'set-scale';
       readonly scale: ReaderScale;
     }
-  | { readonly type: 'set-profile'; readonly profile: ReadingProfileId };
-
-interface ReaderToolbarOptions {
-  readonly mobile?: boolean;
-}
+  | { readonly type: 'set-profile'; readonly profile: ReadingProfileId }
+  | { readonly type: 'set-layout'; readonly layout: ReaderLayout };
 
 interface ProfileChoice {
   readonly id: ReadingProfileId;
   readonly label: string;
 }
 
-interface ScaleChoice {
+interface FitChoice {
   readonly label: string;
   readonly value: ReaderScale;
 }
@@ -35,16 +38,10 @@ const PROFILE_CHOICES: readonly ProfileChoice[] = [
   { id: 'custom', label: 'Custom' },
 ];
 
-const SCALE_CHOICES: readonly ScaleChoice[] = [
+const FIT_CHOICES: readonly FitChoice[] = [
   { label: 'Fit width', value: 'page-width' },
   { label: 'Fit page', value: 'page-fit' },
-  { label: '50%', value: 0.5 },
-  { label: '75%', value: 0.75 },
-  { label: '100%', value: 1 },
-  { label: '125%', value: 1.25 },
-  { label: '150%', value: 1.5 },
-  { label: '175%', value: 1.75 },
-  { label: '200%', value: 2 },
+  { label: 'Fit height', value: 'page-height' },
 ];
 
 export class ReaderToolbar {
@@ -57,17 +54,18 @@ export class ReaderToolbar {
   private readonly pageTotal: HTMLElement;
   private readonly previousButton: HTMLButtonElement;
   private readonly nextButton: HTMLButtonElement;
-  private readonly profileButton: HTMLButtonElement | null;
+  private readonly profileButton: HTMLButtonElement;
+  private readonly layoutButton: HTMLButtonElement;
   private pageCount = 0;
   private currentPageIndex = 0;
   private currentProfile: ReadingProfileId = 'default';
   private currentScale: ReaderScale = 'page-width';
+  private currentLayout: ReaderLayout = DEFAULT_READER_LAYOUT;
   private destroyed = false;
 
   constructor(
     host: HTMLElement,
     private readonly onIntent: (intent: ReaderToolbarIntent) => void,
-    options: ReaderToolbarOptions = {},
   ) {
     this.root = host;
     this.root.addClass('abyss-reader-toolbar');
@@ -114,25 +112,56 @@ export class ReaderToolbar {
     });
 
     this.root.createDiv({ cls: 'abyss-reader-toolbar-spacer' });
-    const selection = this.iconButton('selection', 'Selection mode', 'mouse-pointer-2');
-    selection.setAttribute('aria-pressed', 'true');
+    this.createZoomControls();
 
-    const mobile = options.mobile ?? Platform.isMobile;
-    this.profileButton = mobile
-      ? null
-      : this.iconButton('profile', 'Reading profile: Default', 'sun-moon');
-    if (this.profileButton !== null) {
-      this.profileButton.addClass('abyss-reader-toolbar-desktop-profile');
-      this.listen(this.profileButton, 'click', (event) => {
-        this.showProfileMenu(event);
-      });
-    }
+    this.layoutButton = this.iconButton(
+      'layout',
+      layoutLabel(this.currentLayout),
+      layoutIcon(this.currentLayout),
+    );
+    this.listen(this.layoutButton, 'click', (event) => {
+      this.showLayoutMenu(event);
+    });
 
-    const overflow = this.iconButton('overflow', 'More options', 'more-horizontal');
-    this.listen(overflow, 'click', (event) => {
-      this.showOverflowMenu(event);
+    this.profileButton = this.iconButton('profile', 'Reading profile: Default', 'sun-moon');
+    this.listen(this.profileButton, 'click', (event) => {
+      this.showProfileMenu(event);
     });
     this.refreshPageState();
+  }
+
+  private createZoomControls(): void {
+    const zoom = this.root.createDiv({ cls: 'abyss-reader-toolbar-zoom' });
+    const zoomOut = this.iconButton('zoom-out', 'Zoom out', 'minus', zoom);
+    zoomOut.addClass('abyss-reader-toolbar-zoom-button');
+    this.listen(zoomOut, 'click', () => {
+      this.onIntent({ type: 'zoom-step', direction: -1 });
+    });
+    const fit = this.iconButton('fit', 'Fit width', 'maximize-2', zoom);
+    fit.addClass('abyss-reader-toolbar-zoom-button');
+    this.listen(fit, 'click', () => {
+      this.onIntent({ type: 'set-scale', scale: 'page-width' });
+    });
+    this.listen(fit, 'keydown', (event) => {
+      if (event.key !== 'F10' || !event.shiftKey) return;
+      event.preventDefault();
+      this.showFitMenuAtButton(fit);
+    });
+    this.listen(fit, 'contextmenu', (event) => {
+      event.preventDefault();
+      this.showFitMenu(event);
+    });
+    const zoomIn = this.iconButton('zoom-in', 'Zoom in', 'plus', zoom);
+    zoomIn.addClass('abyss-reader-toolbar-zoom-button');
+    this.listen(zoomIn, 'click', () => {
+      this.onIntent({ type: 'zoom-step', direction: 1 });
+    });
+    const fitMenu = this.iconButton('fit-menu', 'Fit options', 'chevron-down', zoom);
+    fitMenu.addClass('abyss-reader-toolbar-zoom-button');
+    fitMenu.setAttribute('aria-haspopup', 'menu');
+    this.listen(fitMenu, 'click', (event) => {
+      this.showFitMenu(event);
+    });
   }
 
   setPageCount(pageCount: number): void {
@@ -148,15 +177,22 @@ export class ReaderToolbar {
 
   setProfile(profile: ReadingProfileId): void {
     this.currentProfile = profile;
-    if (this.profileButton !== null) {
-      const label = `Reading profile: ${profileLabel(profile)}`;
-      this.profileButton.setAttribute('aria-label', label);
-      this.profileButton.title = label;
-    }
+    const label = `Reading profile: ${profileLabel(profile)}`;
+    this.profileButton.setAttribute('aria-label', label);
+    this.profileButton.title = label;
   }
 
   setScale(scale: ReaderScale): void {
     this.currentScale = scale;
+  }
+
+  setLayout(layout: ReaderLayout): void {
+    this.currentLayout = layout;
+    const label = layoutLabel(layout);
+    this.layoutButton.setAttribute('aria-label', label);
+    this.layoutButton.title = label;
+    this.layoutButton.dataset['layoutIcon'] = layoutIcon(layout);
+    setIcon(this.layoutButton, layoutIcon(layout));
   }
 
   destroy(): void {
@@ -245,9 +281,21 @@ export class ReaderToolbar {
     menu.showAtMouseEvent(event);
   }
 
-  private showOverflowMenu(event: MouseEvent): void {
+  private showFitMenu(event: MouseEvent): void {
     const menu = this.createMenu();
-    for (const choice of SCALE_CHOICES) {
+    this.addFitChoices(menu);
+    menu.showAtMouseEvent(event);
+  }
+
+  private showFitMenuAtButton(button: HTMLButtonElement): void {
+    const menu = this.createMenu();
+    this.addFitChoices(menu);
+    const bounds = button.getBoundingClientRect();
+    menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, this.root.doc);
+  }
+
+  private addFitChoices(menu: Menu): void {
+    for (const choice of FIT_CHOICES) {
       menu.addItem((item) => {
         item
           .setTitle(choice.label)
@@ -257,8 +305,32 @@ export class ReaderToolbar {
           });
       });
     }
-    menu.addSeparator();
-    this.addProfileChoices(menu);
+  }
+
+  private showLayoutMenu(event: MouseEvent): void {
+    const menu = this.createMenu();
+    menu.addItem((item) => item.setTitle('Pages').setDisabled(true));
+    for (const pages of ['single', 'facing'] as const) {
+      menu.addItem((item) => {
+        item
+          .setTitle(pages === 'single' ? 'Single' : 'Facing')
+          .setChecked(pages === this.currentLayout.pages)
+          .onClick(() => {
+            this.onIntent({ type: 'set-layout', layout: { ...this.currentLayout, pages } });
+          });
+      });
+    }
+    menu.addItem((item) => item.setTitle('Scrolling').setDisabled(true));
+    for (const scrolling of ['continuous', 'page-by-page'] as const) {
+      menu.addItem((item) => {
+        item
+          .setTitle(scrolling === 'continuous' ? 'Continuous' : 'Page by page')
+          .setChecked(scrolling === this.currentLayout.scrolling)
+          .onClick(() => {
+            this.onIntent({ type: 'set-layout', layout: { ...this.currentLayout, scrolling } });
+          });
+      });
+    }
     menu.showAtMouseEvent(event);
   }
 
@@ -279,7 +351,6 @@ export class ReaderToolbar {
     const menu = new Menu();
     menu.setUseNativeMenu(false);
     this.menus.add(menu);
-    menu.setParentElement(this.root);
     menu.onHide(() => {
       this.menus.delete(menu);
     });
@@ -289,4 +360,14 @@ export class ReaderToolbar {
 
 function profileLabel(profile: ReadingProfileId): string {
   return PROFILE_CHOICES.find((choice) => choice.id === profile)?.label ?? 'Default';
+}
+
+function layoutLabel(layout: ReaderLayout): string {
+  const pages = layout.pages === 'facing' ? 'Facing' : 'Single';
+  const scrolling = layout.scrolling === 'page-by-page' ? 'page by page' : 'continuous';
+  return `Layout: ${pages}, ${scrolling}`;
+}
+
+function layoutIcon(layout: ReaderLayout): IconName {
+  return layout.pages === 'facing' ? 'columns-2' : 'rectangle-horizontal';
 }

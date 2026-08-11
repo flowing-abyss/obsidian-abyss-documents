@@ -8,7 +8,12 @@ import type {
   ViewportEvent,
 } from '../document-core/document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../document-core/errors.js';
-import type { ReaderScale, ReadingProfileId } from '../document-core/reading.js';
+import {
+  DEFAULT_READER_LAYOUT,
+  type ReaderLayout,
+  type ReaderScale,
+  type ReadingProfileId,
+} from '../document-core/reading.js';
 import { markReaderPerformance, markReaderPerformanceOnce } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
@@ -41,6 +46,8 @@ export class ReaderController {
   private unsubscribeViewport: (() => void) | null = null;
   private currentPageIndex = 0;
   private currentProfile: ReadingProfileId = 'default';
+  private currentScale: ReaderScale = 'page-width';
+  private currentLayout: ReaderLayout = DEFAULT_READER_LAYOUT;
   private outlineLoadedFor: DocumentSession | null = null;
   private outlineLoadingFor: DocumentSession | null = null;
   private currentSearchQuery = '';
@@ -158,6 +165,7 @@ export class ReaderController {
     shell.toolbar.setPageCount(viewport.pageCount);
     shell.toolbar.setCurrentPage(this.currentPageIndex);
     shell.toolbar.setProfile(this.currentProfile);
+    shell.toolbar.setLayout(this.currentLayout);
     shell.root.dataset['readingProfile'] = this.currentProfile;
     const unsubscribeViewport = viewport.onEvent((event) => {
       this.handleViewportEvent(viewport, shell, event);
@@ -258,6 +266,12 @@ export class ReaderController {
         return;
       case 'set-scale':
         this.setScale(intent.scale);
+        return;
+      case 'zoom-step':
+        this.setScale(steppedScale(this.currentScale, intent.direction));
+        return;
+      case 'set-layout':
+        this.setLayout(intent.layout);
         return;
       case 'set-profile':
         this.setProfile(intent.profile);
@@ -373,11 +387,17 @@ export class ReaderController {
     if (viewport === null || shell === null) return;
     try {
       viewport.setScale(scale);
+      this.currentScale = scale;
       shell.toolbar.setScale(scale);
     } catch (cause) {
       new Notice(`Could not change zoom: ${this.reason(cause)}`);
       console.error('[abyss-documents] Failed to change PDF scale', { scale, cause });
     }
+  }
+
+  private setLayout(layout: ReaderLayout): void {
+    this.currentLayout = layout;
+    this.shell?.toolbar.setLayout(layout);
   }
 
   private setProfile(profile: ReadingProfileId): void {
@@ -424,6 +444,7 @@ export class ReaderController {
         this.handlePageChange(viewport, shell, event.pageIndex);
         return;
       case 'scale-change':
+        this.currentScale = event.scale;
         shell.toolbar.setScale(event.scale);
         return;
       case 'search-results':
@@ -542,4 +563,9 @@ function isReadingProfileId(value: unknown): value is ReadingProfileId {
     value === 'dark' ||
     value === 'custom'
   );
+}
+
+function steppedScale(current: ReaderScale, direction: -1 | 1): number {
+  const numeric = typeof current === 'number' ? current : 1;
+  return Math.min(10, Math.max(0.1, Math.round((numeric + direction * 0.1) * 100) / 100));
 }

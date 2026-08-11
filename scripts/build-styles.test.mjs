@@ -3,6 +3,15 @@ import postcss from 'postcss';
 import { describe, expect, it } from 'vitest';
 import { assertNoRelativeUrls, assertScopedSelectors, prefixPdfStyles } from './build-styles.mjs';
 
+function mobileDeclarations(mobile, selector) {
+  const values = new Map();
+  mobile?.walkRules((rule) => {
+    if (!rule.selectors.includes(selector)) return;
+    rule.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
+  });
+  return Object.fromEntries(values);
+}
+
 describe('PDF.js style build', () => {
   it('prefixes outer rules without changing native nested selectors', async () => {
     const output = await prefixPdfStyles(`
@@ -141,29 +150,52 @@ describe('PDF.js style build', () => {
       (node) =>
         node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
     );
-    const declarations = (selector) => {
-      const values = new Map();
-      mobile?.walkRules((rule) => {
-        if (!rule.selectors.includes(selector)) return;
-        rule.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
-      });
-      return Object.fromEntries(values);
-    };
+    expect(
+      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar-button'),
+    ).toMatchObject({
+      width: '2.75rem',
+      'min-width': '2.75rem',
+      'min-height': '2.75rem',
+    });
+    expect(mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar')).toMatchObject({
+      'flex-wrap': 'wrap',
+    });
+    expect(
+      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar-spacer'),
+    ).toMatchObject({
+      display: 'none',
+    });
+    expect(
+      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-sidebar-close'),
+    ).toMatchObject({
+      width: '2.75rem',
+      'min-width': '2.75rem',
+      'min-height': '2.75rem',
+    });
+    expect(mobileDeclarations(mobile, '.abyss-documents .abyss-reader-search-input')).toMatchObject(
+      {
+        'min-height': '2.75rem',
+      },
+    );
+    expect(mobileDeclarations(mobile, ".abyss-documents [data-action='retry']")).toMatchObject({
+      'min-height': '2.75rem',
+    });
+  });
 
-    expect(declarations('.abyss-documents .abyss-reader-toolbar-button')).toMatchObject({
+  it('keeps the sidebar as a left mobile overlay and gives direct zoom controls 44px targets', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const mobile = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
+    );
+    expect(mobileDeclarations(mobile, '.abyss-documents .abyss-reader-sidebar')).toMatchObject({
+      'inset-inline-start': '0',
+    });
+    expect(
+      mobileDeclarations(mobile, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
+    ).toMatchObject({
       width: '2.75rem',
       'min-width': '2.75rem',
-      'min-height': '2.75rem',
-    });
-    expect(declarations('.abyss-documents .abyss-reader-sidebar-close')).toMatchObject({
-      width: '2.75rem',
-      'min-width': '2.75rem',
-      'min-height': '2.75rem',
-    });
-    expect(declarations('.abyss-documents .abyss-reader-search-input')).toMatchObject({
-      'min-height': '2.75rem',
-    });
-    expect(declarations(".abyss-documents [data-action='retry']")).toMatchObject({
       'min-height': '2.75rem',
     });
   });

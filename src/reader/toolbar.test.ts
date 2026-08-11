@@ -1,10 +1,12 @@
 import { Menu } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
+import type { ReaderLayout } from '../document-core/reading.js';
 import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
 
 interface CapturedMenuItem {
   checked: boolean | null;
   click: () => void;
+  disabled: boolean;
   title: string;
 }
 
@@ -14,7 +16,12 @@ function captureMenuItems(): CapturedMenuItem[] {
     this: Menu,
     callback: Parameters<Menu['addItem']>[0],
   ) {
-    const entry: CapturedMenuItem = { checked: null, click: () => undefined, title: '' };
+    const entry: CapturedMenuItem = {
+      checked: null,
+      click: () => undefined,
+      disabled: false,
+      title: '',
+    };
     const item = {
       onClick(handler: () => void) {
         entry.click = handler;
@@ -22,6 +29,10 @@ function captureMenuItems(): CapturedMenuItem[] {
       },
       setChecked(checked: boolean | null) {
         entry.checked = checked;
+        return item;
+      },
+      setDisabled(disabled: boolean) {
+        entry.disabled = disabled;
         return item;
       },
       setIcon() {
@@ -39,13 +50,13 @@ function captureMenuItems(): CapturedMenuItem[] {
   return entries;
 }
 
-function fixture(options?: { mobile?: boolean }) {
+function fixture() {
   const host = createDiv();
   const intents: ReaderToolbarIntent[] = [];
   const onIntent = vi.fn((intent: ReaderToolbarIntent) => {
     intents.push(intent);
   });
-  const toolbar = new ReaderToolbar(host, onIntent, options);
+  const toolbar = new ReaderToolbar(host, onIntent);
   return { host, intents, onIntent, toolbar };
 }
 
@@ -117,25 +128,104 @@ describe('ReaderToolbar', () => {
     toolbar.setPageCount(702);
 
     const buttons = Array.from(host.querySelectorAll<HTMLButtonElement>('[data-toolbar-control]'));
-    expect(buttons.map((button) => button.getAttribute('aria-label'))).toEqual([
-      'Toggle sidebar',
-      'Previous page',
-      'Next page',
-      'Selection mode',
-      'Reading profile: Default',
-      'More options',
-    ]);
+    expect(buttons.map((button) => button.getAttribute('aria-label'))).toEqual(
+      expect.arrayContaining([
+        'Toggle sidebar',
+        'Previous page',
+        'Next page',
+        'Zoom out',
+        'Fit width',
+        'Zoom in',
+        'Layout: Single, continuous',
+        'Reading profile: Default',
+      ]),
+    );
     expect(buttons.every((button) => button.title === button.getAttribute('aria-label'))).toBe(
       true,
     );
     expect(buttons.every((button) => button.textContent.trim() === '')).toBe(true);
-    expect(host.querySelector('[data-control="selection"]')?.getAttribute('aria-pressed')).toBe(
-      'true',
-    );
+    expect(host.querySelector('[data-control="selection"]')).toBeNull();
+    expect(host.querySelector('[data-control="overflow"]')).toBeNull();
     expect(host.querySelector('[data-control="sidebar"]')?.getAttribute('aria-pressed')).toBe(
       'false',
     );
     expect(host.querySelector('[data-control="page-total"]')?.textContent).toBe('/ 702');
+  });
+
+  it('keeps direct minus, Fit width, and plus controls adjacent while exposing Fit choices to keyboards and touch', () => {
+    const entries = captureMenuItems();
+    const { host, intents } = fixture();
+    const controls = Array.from(host.querySelectorAll<HTMLElement>('[data-control]'));
+    const minus = host.querySelector<HTMLButtonElement>('[data-control="zoom-out"]');
+    const fit = host.querySelector<HTMLButtonElement>('[data-control="fit"]');
+    const plus = host.querySelector<HTMLButtonElement>('[data-control="zoom-in"]');
+    const fitMenu = host.querySelector<HTMLButtonElement>('[data-control="fit-menu"]');
+    if (minus === null || fit === null || plus === null || fitMenu === null)
+      throw new Error('Expected direct zoom controls.');
+    const OwnerKeyboardEvent = (fit.win as Window & { KeyboardEvent: typeof KeyboardEvent })
+      .KeyboardEvent;
+    const OwnerMouseEvent = (fit.win as Window & { MouseEvent: typeof MouseEvent }).MouseEvent;
+
+    expect(controls.indexOf(minus)).toBeLessThan(controls.indexOf(fit));
+    expect(controls.indexOf(fit)).toBeLessThan(controls.indexOf(plus));
+    expect(fit.getAttribute('aria-haspopup')).toBeNull();
+    expect(fitMenu.getAttribute('aria-haspopup')).toBe('menu');
+    minus.click();
+    fit.click();
+    plus.click();
+    fit.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'F10', shiftKey: true }));
+    fit.dispatchEvent(new OwnerMouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    fitMenu.click();
+
+    expect(intents.slice(0, 3)).toEqual([
+      { type: 'zoom-step', direction: -1 },
+      { type: 'set-scale', scale: 'page-width' },
+      { type: 'zoom-step', direction: 1 },
+    ]);
+    expect(entries.map((entry) => entry.title)).toEqual([
+      'Fit width',
+      'Fit page',
+      'Fit height',
+      'Fit width',
+      'Fit page',
+      'Fit height',
+      'Fit width',
+      'Fit page',
+      'Fit height',
+    ]);
+    expect(entries.every((entry) => entry.checked !== null)).toBe(true);
+  });
+
+  it('presents two compact layout groups with the current choice checked and no duplicated scale or profile menu', () => {
+    const entries = captureMenuItems();
+    const { host, intents, toolbar } = fixture();
+    const layout: ReaderLayout = { pages: 'facing', scrolling: 'page-by-page' };
+    toolbar.setLayout(layout);
+    const button = host.querySelector<HTMLButtonElement>('[data-control="layout"]');
+    if (button === null) throw new Error('Expected the layout control.');
+
+    expect(button.getAttribute('aria-label')).toBe('Layout: Facing, page by page');
+    expect(button.dataset['layoutIcon']).toBe('columns-2');
+    button.click();
+
+    expect(entries.map((entry) => entry.title)).toEqual([
+      'Pages',
+      'Single',
+      'Facing',
+      'Scrolling',
+      'Continuous',
+      'Page by page',
+    ]);
+    expect(entries.find((entry) => entry.title === 'Facing')?.checked).toBe(true);
+    expect(entries.find((entry) => entry.title === 'Page by page')?.checked).toBe(true);
+    expect(entries.find((entry) => entry.title === 'Pages')?.disabled).toBe(true);
+    expect(entries.find((entry) => entry.title === 'Scrolling')?.disabled).toBe(true);
+    entries.find((entry) => entry.title === 'Single')?.click();
+    entries.find((entry) => entry.title === 'Continuous')?.click();
+    expect(intents).toEqual([
+      { type: 'set-layout', layout: { pages: 'single', scrolling: 'page-by-page' } },
+      { type: 'set-layout', layout: { pages: 'facing', scrolling: 'continuous' } },
+    ]);
   });
 
   it('emits navigation intents and disables unavailable page steps', () => {
@@ -154,43 +244,32 @@ describe('ReaderToolbar', () => {
     expect(intents).toEqual([{ type: 'next-page' }, { type: 'previous-page' }]);
   });
 
-  it('uses Obsidian DOM menus so reader controls stay testable and theme-aware', () => {
+  it('uses one direct profile menu so Default and Follow Obsidian remain distinct', () => {
     const entries = captureMenuItems();
     const setUseNativeMenu = vi.spyOn(Menu.prototype, 'setUseNativeMenu');
     const { host, intents } = fixture();
     const profile = host.querySelector<HTMLButtonElement>('[data-control="profile"]');
-    const overflow = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
-    if (profile === null || overflow === null) throw new Error('Expected toolbar menus.');
+    if (profile === null) throw new Error('Expected profile menu.');
 
     profile.click();
     expect(entries.map((entry) => entry.title)).toContain('Follow Obsidian');
     expect(entries.map((entry) => entry.title)).not.toContain('Auto');
     entries.find((entry) => entry.title === 'Dark')?.click();
-    entries.length = 0;
-    overflow.click();
-    entries.find((entry) => entry.title === 'Fit width')?.click();
-    entries.find((entry) => entry.title === '125%')?.click();
-    entries.find((entry) => entry.title === '175%')?.click();
+    expect(entries.find((entry) => entry.title === 'Default')?.checked).toBe(true);
+    expect(entries.find((entry) => entry.title === 'Follow Obsidian')?.checked).toBe(false);
 
-    expect(setUseNativeMenu).toHaveBeenCalledTimes(2);
+    expect(setUseNativeMenu).toHaveBeenCalledTimes(1);
     expect(setUseNativeMenu).toHaveBeenNthCalledWith(1, false);
-    expect(setUseNativeMenu).toHaveBeenNthCalledWith(2, false);
-    expect(intents).toEqual([
-      { type: 'set-profile', profile: 'dark' },
-      { type: 'set-scale', scale: 'page-width' },
-      { type: 'set-scale', scale: 1.25 },
-      { type: 'set-scale', scale: 1.75 },
-    ]);
+    expect(intents).toEqual([{ type: 'set-profile', profile: 'dark' }]);
   });
 
-  it('moves reading profiles into overflow on mobile', () => {
+  it('keeps the profile menu available without adding an overflow duplicate', () => {
     const entries = captureMenuItems();
-    const { host, intents } = fixture({ mobile: true });
-    expect(host.querySelector('[data-control="profile"]')).toBeNull();
-    const overflow = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
-    if (overflow === null) throw new Error('Expected the overflow button.');
+    const { host, intents } = fixture();
+    const profile = host.querySelector<HTMLButtonElement>('[data-control="profile"]');
+    if (profile === null) throw new Error('Expected the profile button.');
 
-    overflow.click();
+    profile.click();
     entries.find((entry) => entry.title === 'Sepia')?.click();
 
     expect(intents).toContainEqual({ type: 'set-profile', profile: 'sepia' });
