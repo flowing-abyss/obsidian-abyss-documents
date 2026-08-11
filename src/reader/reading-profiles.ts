@@ -1,8 +1,12 @@
-import type { ReadingProfileId, ResolvedReadingColors } from '../document-core/reading.js';
+import type {
+  ReadingProfileId,
+  ResolvedReadingColors,
+  ResolvedReadingProfile,
+} from '../document-core/reading.js';
 
 export type ObsidianTheme = 'dark' | 'light';
 
-type BuiltinProfileId = Exclude<ReadingProfileId, 'auto' | 'custom'>;
+type BuiltinProfileId = Exclude<ReadingProfileId, 'custom' | 'default' | 'follow-obsidian'>;
 
 const DEFAULT_CUSTOM_PROFILE: ResolvedReadingColors = {
   background: '#202020',
@@ -47,11 +51,36 @@ export class ReadingProfileService {
     this.custom = custom;
   }
 
-  resolve(profile: ReadingProfileId, obsidianTheme: ObsidianTheme): ResolvedReadingColors {
-    if (profile === 'auto') return BUILTIN_PROFILES[obsidianTheme];
-    if (profile === 'custom') return normalizeCustomReadingColors(this.custom);
-    return BUILTIN_PROFILES[profile];
+  resolve(profile: ReadingProfileId, obsidianTheme: ObsidianTheme): ResolvedReadingProfile {
+    return resolveReadingProfile(profile, obsidianTheme, this.custom);
   }
+}
+
+export function resolveReadingProfile(
+  profile: ReadingProfileId,
+  obsidianTheme: ObsidianTheme,
+  custom: ResolvedReadingColors = DEFAULT_CUSTOM_PROFILE,
+): ResolvedReadingProfile {
+  if (profile === 'default') {
+    return { pageColors: null, brightness: 1, contrast: 1, imageDim: 0 };
+  }
+  const colors = colorsFor(profile, obsidianTheme, custom);
+  return {
+    pageColors: { background: colors.background, foreground: colors.foreground },
+    brightness: colors.brightness,
+    contrast: colors.contrast,
+    imageDim: colors.imageDim,
+  };
+}
+
+function colorsFor(
+  profile: Exclude<ReadingProfileId, 'default'>,
+  obsidianTheme: ObsidianTheme,
+  custom: ResolvedReadingColors,
+): ResolvedReadingColors {
+  if (profile === 'follow-obsidian') return BUILTIN_PROFILES[obsidianTheme];
+  if (profile === 'custom') return normalizeCustomReadingColors(custom);
+  return BUILTIN_PROFILES[profile];
 }
 
 export function normalizeCustomReadingColors(colors: ResolvedReadingColors): ResolvedReadingColors {

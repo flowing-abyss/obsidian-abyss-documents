@@ -457,6 +457,25 @@ describe('PdfDocumentViewport', () => {
     });
   });
 
+  it('keeps authored PDF page colors when the Default profile supplies null pageColors', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined)
+      throw new Error('Expected viewer components.');
+    eventBus.dispatch('pagesinit', {});
+
+    fixture.viewport.setReadingColors({
+      pageColors: null,
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
+
+    expect(viewer.pageColors).toBeNull();
+    expect(viewer.documents).toEqual([fixture.documentProxy, null, fixture.documentProxy]);
+  });
+
   it('rebuilds public page views with new colors while preserving page and preset scale', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
@@ -521,7 +540,7 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.currentScaleValue).toBe('page-width');
   });
 
-  it('coalesces racing Auto theme colors so the latest rebuild wins', async () => {
+  it('coalesces racing Follow Obsidian theme colors so the latest rebuild wins', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
     const viewer = fixture.runtime.state.viewer;

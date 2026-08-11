@@ -2,7 +2,7 @@ import { Notice, PluginSettingTab, Setting, type App, type Plugin } from 'obsidi
 import type { ReadingProfileId, ResolvedReadingColors } from './document-core/reading.js';
 import type { PluginDataStore } from './plugin-data.js';
 import { normalizeCustomReadingColors } from './reader/reading-profiles.js';
-import type { PluginSettings } from './settings.js';
+import type { AnnotationPaletteEntry, PluginSettings } from './settings.js';
 
 type SettingsChanged = (settings: PluginSettings) => void | Promise<void>;
 
@@ -18,7 +18,10 @@ type SettingFieldId =
   | 'reading.custom.foreground'
   | 'reading.custom.imageDim'
   | 'reading.defaultProfile'
-  | 'reading.rememberPerDocument';
+  | 'reading.rememberPerDocument'
+  | 'annotations.author'
+  | 'annotations.markdownTemplate'
+  | `annotations.palette.${number}.meaning`;
 
 interface CustomReadingSettingOptions<Value> {
   readonly change: (value: Value) => Partial<ResolvedReadingColors>;
@@ -41,7 +44,8 @@ interface FailedFieldSynchronization extends FieldSynchronization {
 }
 
 const PROFILE_OPTIONS: Readonly<Record<ReadingProfileId, string>> = {
-  auto: 'Auto',
+  default: 'Default',
+  'follow-obsidian': 'Follow Obsidian',
   light: 'Light',
   sepia: 'Sepia',
   dark: 'Dark',
@@ -80,6 +84,8 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     this.containerEl.addClass('abyss-documents-settings');
     const reading = this.collapsibleSection('Reading appearance', 'reading-appearance');
     this.renderReadingAppearance(reading.body);
+    const annotations = this.collapsibleSection('Annotations', 'annotations');
+    this.renderAnnotations(annotations.body);
     const advanced = this.collapsibleSection('Advanced', 'advanced');
     this.renderAdvanced(advanced.body);
   }
@@ -205,6 +211,77 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       });
   }
 
+  private renderAnnotations(container: HTMLElement): void {
+    const { annotations } = this.store.snapshot.settings;
+    const palette: readonly AnnotationPaletteEntry[] = annotations.palette;
+    new Setting(container)
+      .setName('Annotation author')
+      .setDesc('Stored as the author for new PDF annotations.')
+      .addText((text) => {
+        text.setValue(annotations.author).onChange((author) => {
+          this.updateSettings(
+            (settings) => ({ ...settings, annotations: { ...settings.annotations, author } }),
+            {
+              field: 'annotations.author',
+              synchronize: (settings) => {
+                text.setValue(settings.annotations.author);
+              },
+            },
+          );
+        });
+      });
+    for (const [index, entry] of palette.entries()) {
+      new Setting(container)
+        .setName(`${entry.name} meaning`)
+        .setDesc(`${entry.color} annotation palette color.`)
+        .addText((text) => {
+          text.setValue(entry.meaning).onChange((meaning) => {
+            this.updateSettings((settings) => this.withPaletteMeaning(settings, index, meaning), {
+              field: `annotations.palette.${index}.meaning`,
+              synchronize: (settings) => {
+                text.setValue(settings.annotations.palette[index]?.meaning ?? '');
+              },
+            });
+          });
+        });
+    }
+    new Setting(container)
+      .setName('Annotation transfer template')
+      .setDesc('Used when exporting annotation text.')
+      .addTextArea((text) => {
+        text.setValue(annotations.markdownTemplate).onChange((markdownTemplate) => {
+          this.updateSettings(
+            (settings) => ({
+              ...settings,
+              annotations: { ...settings.annotations, markdownTemplate },
+            }),
+            {
+              field: 'annotations.markdownTemplate',
+              synchronize: (settings) => {
+                text.setValue(settings.annotations.markdownTemplate);
+              },
+            },
+          );
+        });
+      });
+  }
+
+  private withPaletteMeaning(
+    settings: PluginSettings,
+    index: number,
+    meaning: string,
+  ): PluginSettings {
+    return {
+      ...settings,
+      annotations: {
+        ...settings.annotations,
+        palette: settings.annotations.palette.map((paletteEntry, paletteIndex) =>
+          paletteIndex === index ? { ...paletteEntry, meaning } : paletteEntry,
+        ),
+      },
+    };
+  }
+
   private colorSetting(
     container: HTMLElement,
     name: string,
@@ -307,7 +384,8 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
 
 function isReadingProfileId(value: string): value is ReadingProfileId {
   return (
-    value === 'auto' ||
+    value === 'default' ||
+    value === 'follow-obsidian' ||
     value === 'light' ||
     value === 'sepia' ||
     value === 'dark' ||

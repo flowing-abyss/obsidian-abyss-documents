@@ -1,5 +1,5 @@
 import { Menu, Platform, setIcon, type IconName } from 'obsidian';
-import type { ReadingProfileId } from '../document-core/reading.js';
+import type { ReaderScale, ReadingProfileId } from '../document-core/reading.js';
 
 export type ReaderToolbarIntent =
   | { readonly type: 'toggle-sidebar' }
@@ -11,8 +11,6 @@ export type ReaderToolbarIntent =
       readonly scale: ReaderScale;
     }
   | { readonly type: 'set-profile'; readonly profile: ReadingProfileId };
-
-export type ReaderScale = number | 'page-width' | 'page-fit';
 
 interface ReaderToolbarOptions {
   readonly mobile?: boolean;
@@ -29,7 +27,8 @@ interface ScaleChoice {
 }
 
 const PROFILE_CHOICES: readonly ProfileChoice[] = [
-  { id: 'auto', label: 'Auto' },
+  { id: 'default', label: 'Default' },
+  { id: 'follow-obsidian', label: 'Follow Obsidian' },
   { id: 'light', label: 'Light' },
   { id: 'sepia', label: 'Sepia' },
   { id: 'dark', label: 'Dark' },
@@ -61,7 +60,7 @@ export class ReaderToolbar {
   private readonly profileButton: HTMLButtonElement | null;
   private pageCount = 0;
   private currentPageIndex = 0;
-  private currentProfile: ReadingProfileId = 'auto';
+  private currentProfile: ReadingProfileId = 'default';
   private currentScale: ReaderScale = 'page-width';
   private destroyed = false;
 
@@ -121,7 +120,7 @@ export class ReaderToolbar {
     const mobile = options.mobile ?? Platform.isMobile;
     this.profileButton = mobile
       ? null
-      : this.iconButton('profile', 'Reading profile: Auto', 'sun-moon');
+      : this.iconButton('profile', 'Reading profile: Default', 'sun-moon');
     if (this.profileButton !== null) {
       this.profileButton.addClass('abyss-reader-toolbar-desktop-profile');
       this.listen(this.profileButton, 'click', (event) => {
@@ -289,5 +288,5 @@ export class ReaderToolbar {
 }
 
 function profileLabel(profile: ReadingProfileId): string {
-  return PROFILE_CHOICES.find((choice) => choice.id === profile)?.label ?? 'Auto';
+  return PROFILE_CHOICES.find((choice) => choice.id === profile)?.label ?? 'Default';
 }

@@ -122,7 +122,7 @@ describe('ReaderToolbar', () => {
       'Previous page',
       'Next page',
       'Selection mode',
-      'Reading profile: Auto',
+      'Reading profile: Default',
       'More options',
     ]);
     expect(buttons.every((button) => button.title === button.getAttribute('aria-label'))).toBe(
@@ -163,6 +163,8 @@ describe('ReaderToolbar', () => {
     if (profile === null || overflow === null) throw new Error('Expected toolbar menus.');
 
     profile.click();
+    expect(entries.map((entry) => entry.title)).toContain('Follow Obsidian');
+    expect(entries.map((entry) => entry.title)).not.toContain('Auto');
     entries.find((entry) => entry.title === 'Dark')?.click();
     entries.length = 0;
     overflow.click();

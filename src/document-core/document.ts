@@ -1,5 +1,5 @@
 import type { TFile } from 'obsidian';
-import type { ResolvedReadingColors } from './reading.js';
+import type { ReaderScale, ReadingAppearance } from './reading.js';
 
 export type DocumentCapability =
   'outline' | 'text-search' | 'existing-annotations' | 'annotation-write' | 'ocr';
@@ -39,7 +39,7 @@ export interface SearchResultSet {
 
 export type ViewportEvent =
   | { readonly type: 'page-change'; readonly pageIndex: number }
-  | { readonly type: 'scale-change'; readonly scale: number | 'page-width' | 'page-fit' }
+  | { readonly type: 'scale-change'; readonly scale: ReaderScale }
   | { readonly type: 'search-results'; readonly results: SearchResultSet }
   | { readonly type: 'render-error'; readonly pageIndex: number; readonly cause: unknown };
 
@@ -47,8 +47,8 @@ export interface DocumentViewport {
   readonly pageCount: number;
   mount(host: HTMLElement): Promise<void>;
   goTo(location: DocumentLocation): Promise<void>;
-  setScale(scale: number | 'page-width' | 'page-fit'): void;
-  setReadingColors(colors: ResolvedReadingColors): void;
+  setScale(scale: ReaderScale): void;
+  setReadingColors(appearance: ReadingAppearance): void;
   search(query: string): void;
   searchAgain(direction: 'next' | 'previous'): void;
   selectSearchHit(hit: SearchHit, query: string): Promise<void>;

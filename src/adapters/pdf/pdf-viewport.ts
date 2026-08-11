@@ -6,7 +6,11 @@ import type {
   ViewportEvent,
 } from '../../document-core/document.js';
 import { TypedEventSource } from '../../document-core/events.js';
-import type { ResolvedReadingColors } from '../../document-core/reading.js';
+import type {
+  ReaderScale,
+  ReadingAppearance,
+  ResolvedReadingProfile,
+} from '../../document-core/reading.js';
 import {
   incrementReaderCounter,
   markReaderPerformance,
@@ -27,14 +31,14 @@ type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
 type PdfViewer = InstanceType<PdfRuntime['pdfjsViewer']['PDFViewer']>;
 type PdfFindController = InstanceType<PdfRuntime['pdfjsViewer']['PDFFindController']>;
 type PdfEventListener = (event: unknown) => void;
-type ScaleRequest = number | 'page-width' | 'page-fit';
+type ScaleRequest = ReaderScale;
 
 interface RebindablePdfViewer {
   setDocument(document: PDFDocumentProxy | null): void;
 }
 
 type PreservedScale =
-  | { readonly type: 'preset'; readonly value: 'page-width' | 'page-fit' }
+  | { readonly type: 'preset'; readonly value: 'page-width' | 'page-fit' | 'page-height' }
   | { readonly type: 'numeric'; readonly value: number };
 
 interface PreservedViewState {
@@ -185,19 +189,24 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.applyScale(viewer, scale);
   }
 
-  setReadingColors(colors: ResolvedReadingColors): void {
+  setReadingColors(appearance: ReadingAppearance): void {
     const root = this.requireMounted(this.root);
+    const profile = readingProfile(appearance);
+    if (profile.pageColors === null) {
+      root.style.removeProperty('--abyss-reader-background');
+      root.style.removeProperty('--abyss-reader-foreground');
+    } else {
+      root.setCssProps({
+        '--abyss-reader-background': profile.pageColors.background,
+        '--abyss-reader-foreground': profile.pageColors.foreground,
+      });
+    }
     root.setCssProps({
-      '--abyss-reader-background': colors.background,
-      '--abyss-reader-foreground': colors.foreground,
-      '--abyss-reader-brightness': String(colors.brightness),
-      '--abyss-reader-contrast': String(colors.contrast),
-      '--abyss-reader-image-dim': String(colors.imageDim),
+      '--abyss-reader-brightness': String(profile.brightness),
+      '--abyss-reader-contrast': String(profile.contrast),
+      '--abyss-reader-image-dim': String(profile.imageDim),
     });
-    this.requestedPageColors = {
-      background: colors.background,
-      foreground: colors.foreground,
-    };
+    this.requestedPageColors = profile.pageColors;
     this.colorRequestRevision += 1;
     if (!this.pagesInitialized) {
       this.replacePendingPagesInit(() => {
@@ -453,7 +462,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private startColorRebind(): void {
     const viewer = this.requireMounted(this.viewer);
-    const pageColors = this.requireMounted(this.requestedPageColors);
+    const pageColors = this.requestedPageColors;
     this.preservedViewState ??= this.captureViewState(viewer);
     this.colorRebindActive = true;
     this.colorRebindRevision = this.colorRequestRevision;
@@ -516,7 +525,11 @@ export class PdfDocumentViewport implements DocumentViewport {
     let scale: PreservedScale;
     if (!this.pagesInitialized) {
       scale = { type: 'preset', value: 'page-width' };
-    } else if (scaleValue === 'page-width' || scaleValue === 'page-fit') {
+    } else if (
+      scaleValue === 'page-width' ||
+      scaleValue === 'page-fit' ||
+      scaleValue === 'page-height'
+    ) {
       scale = { type: 'preset', value: scaleValue };
     } else {
       scale = { type: 'numeric', value: viewer.currentScale };
@@ -571,7 +584,9 @@ export class PdfDocumentViewport implements DocumentViewport {
       const viewer = this.viewer;
       if (viewer === null) return;
       const scale = viewer.currentScaleValue;
-      if (scale === 'page-width' || scale === 'page-fit') viewer.currentScaleValue = scale;
+      if (scale === 'page-width' || scale === 'page-fit' || scale === 'page-height') {
+        viewer.currentScaleValue = scale;
+      }
     });
   };
 
@@ -703,6 +718,16 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (value === null) throw new DOMException('PDF viewport is not mounted.', 'InvalidStateError');
     return value;
   }
+}
+
+function readingProfile(appearance: ReadingAppearance): ResolvedReadingProfile {
+  if ('pageColors' in appearance) return appearance;
+  return {
+    pageColors: { background: appearance.background, foreground: appearance.foreground },
+    brightness: appearance.brightness,
+    contrast: appearance.contrast,
+    imageDim: appearance.imageDim,
+  };
 }
 
 export const createPdfDocumentViewport: PdfViewportFactory = (pdf, pdfjsViewer, textSearch) =>

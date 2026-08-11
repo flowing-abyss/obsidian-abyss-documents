@@ -33,7 +33,7 @@ export class ReaderShell {
   ) {
     this.root = host.createDiv({ cls: 'abyss-documents' });
     this.root.dataset['abyssDocument'] = '';
-    this.root.dataset['readingProfile'] = 'auto';
+    this.root.dataset['readingProfile'] = 'default';
     this.root.style.setProperty(
       '--abyss-reader-sidebar-width',
       `${boundedSidebarWidth(options.sidebarWidth)}px`,

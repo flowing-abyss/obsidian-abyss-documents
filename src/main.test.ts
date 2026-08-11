@@ -1,11 +1,11 @@
 import type { Command, PluginManifest, TFile } from 'obsidian';
-import { App, Menu, TFile as MockTFile, WorkspaceLeaf } from 'obsidian-test-mocks/obsidian';
+import { App, Menu, TFile as MockTFile, Notice, WorkspaceLeaf } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import type { DocumentSession, DocumentViewport } from './document-core/document.js';
 import AbyssDocumentsPlugin from './main.js';
-import { DEFAULT_DATA, type PluginDataV1 } from './plugin-data.js';
+import { DEFAULT_DATA, type PluginDataV1, type PluginDataV2 } from './plugin-data.js';
 import { readerPerformanceSnapshot } from './reader-performance.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
 import { BUILTIN_PROFILES } from './reader/reading-profiles.js';
@@ -74,6 +74,15 @@ function documentSession(fingerprint: string) {
   return { session, setReadingColors };
 }
 
+function resolved(colors: (typeof BUILTIN_PROFILES)[keyof typeof BUILTIN_PROFILES]) {
+  return {
+    pageColors: { background: colors.background, foreground: colors.foreground },
+    brightness: colors.brightness,
+    contrast: colors.contrast,
+    imageDim: colors.imageDim,
+  };
+}
+
 function capturedMenuItems() {
   const entries: Array<{ click: () => void; title: string }> = [];
   vi.spyOn(Menu.prototype, 'addItem').mockImplementation(function (
@@ -105,7 +114,7 @@ function capturedMenuItems() {
 }
 
 async function loadedReader(
-  data: PluginDataV1,
+  data: PluginDataV1 | PluginDataV2,
   createdSession: ReturnType<typeof documentSession>,
 ) {
   const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
@@ -133,7 +142,7 @@ describe('AbyssDocumentsPlugin', () => {
     const plugin = createPlugin();
     await plugin.onload();
 
-    expect(plugin.data.settings.reading.defaultProfile).toBe('auto');
+    expect(plugin.data.settings.reading.defaultProfile).toBe('default');
     expect(plugin.data.view.sidebar.open).toBe(false);
     expect(plugin).toHaveProperty('runtimeLoader', expect.any(PdfRuntimeLoader));
     expect(loadRuntime).not.toHaveBeenCalled();
@@ -490,7 +499,7 @@ describe('AbyssDocumentsPlugin', () => {
     ] as unknown as WorkspaceLeaf[]);
     const onSettingsChanged = (
       settingTabs[0] as {
-        onSettingsChanged(settings: PluginDataV1['settings']): void | Promise<void>;
+        onSettingsChanged(settings: PluginDataV2['settings']): void | Promise<void>;
       }
     ).onSettingsChanged.bind(settingTabs[0]);
 
@@ -498,6 +507,47 @@ describe('AbyssDocumentsPlugin', () => {
 
     expect(refresh).toHaveBeenCalledOnce();
     expect(plugin.data).toBe(DEFAULT_DATA);
+  });
+
+  it('reports malformed recognized settings once while retaining valid V1 fields', async () => {
+    const plugin = createPlugin();
+    vi.spyOn(plugin, 'loadData').mockResolvedValue({
+      schemaVersion: 1,
+      settings: {
+        reading: { defaultProfile: 'bad', rememberPerDocument: false, custom: null },
+        debugLogging: false,
+      },
+      view: {
+        sidebar: { open: false },
+        selectedTab: 'outline',
+        sidebarWidth: 320,
+        profileByFingerprint: { valid: 'dark', invalid: 'bad' },
+      },
+    });
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await plugin.onload();
+
+    expect(plugin.data.view.profileByFingerprint).toEqual({ valid: 'dark' });
+    expect(notice).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledOnce();
+    expect(log.mock.calls[0]?.[0]).toBe('[abyss-documents] Failed to migrate some plugin settings');
+    const details = log.mock.calls[0]?.[1] as { readonly paths?: readonly string[] } | undefined;
+    expect(details?.paths).toContain('settings.reading.defaultProfile');
+  });
+
+  it('loads absent data silently with V2 defaults', async () => {
+    const plugin = createPlugin();
+    vi.spyOn(plugin, 'loadData').mockResolvedValue(null);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await plugin.onload();
+
+    expect(plugin.data).toBe(DEFAULT_DATA);
+    expect(notice).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
   });
 
   it('routes commands only to the active document view', async () => {
@@ -529,7 +579,7 @@ describe('AbyssDocumentsPlugin', () => {
 
   it('restores and saves per-document profiles through the loaded plugin data store', async () => {
     const fingerprint = 'stable-fingerprint';
-    const data: PluginDataV1 = {
+    const data: PluginDataV2 = {
       ...DEFAULT_DATA,
       settings: {
         ...DEFAULT_DATA.settings,
@@ -544,7 +594,7 @@ describe('AbyssDocumentsPlugin', () => {
     const entries = capturedMenuItems();
     const reader = await loadedReader(data, session);
 
-    expect(session.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.dark);
+    expect(session.setReadingColors).toHaveBeenLastCalledWith(resolved(BUILTIN_PROFILES.dark));
     const profile = reader.view.contentEl.querySelector<HTMLButtonElement>(
       '[data-control="profile"]',
     );
@@ -564,7 +614,7 @@ describe('AbyssDocumentsPlugin', () => {
 
   it('uses the global profile and does not save when per-document memory is disabled', async () => {
     const fingerprint = 'stable-fingerprint';
-    const data: PluginDataV1 = {
+    const data: PluginDataV2 = {
       ...DEFAULT_DATA,
       settings: {
         ...DEFAULT_DATA.settings,
@@ -583,7 +633,7 @@ describe('AbyssDocumentsPlugin', () => {
     const entries = capturedMenuItems();
     const reader = await loadedReader(data, session);
 
-    expect(session.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.sepia);
+    expect(session.setReadingColors).toHaveBeenLastCalledWith(resolved(BUILTIN_PROFILES.sepia));
     const profile = reader.view.contentEl.querySelector<HTMLButtonElement>(
       '[data-control="profile"]',
     );

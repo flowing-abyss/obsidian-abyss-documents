@@ -35,6 +35,15 @@ function files(...paths: string[]): TFile[] {
   });
 }
 
+function resolved(colors: (typeof BUILTIN_PROFILES)[keyof typeof BUILTIN_PROFILES]) {
+  return {
+    pageColors: { background: colors.background, foreground: colors.foreground },
+    brightness: colors.brightness,
+    contrast: colors.contrast,
+    imageDim: colors.imageDim,
+  };
+}
+
 function viewport(pageCount = 3) {
   const mount = vi.fn(async () => undefined);
   const destroy = vi.fn(async () => undefined);
@@ -120,7 +129,7 @@ function profileState(options?: {
   });
   const value: ReaderProfileState = {
     reading: {
-      defaultProfile: options?.defaultProfile ?? 'auto',
+      defaultProfile: options?.defaultProfile ?? 'default',
       rememberPerDocument: options?.rememberPerDocument ?? false,
       custom: {
         background: '#101820',
@@ -357,7 +366,9 @@ describe('ReaderController', () => {
 
     await controller.open(pdf, createDiv());
 
-    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.dark);
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(
+      resolved(BUILTIN_PROFILES.dark),
+    );
     expect(profiles.updateProfile).not.toHaveBeenCalled();
   });
 
@@ -379,7 +390,9 @@ describe('ReaderController', () => {
     shell.send({ type: 'set-profile', profile: 'light' });
 
     expect(profiles.profiles[pdf.path]).toBe('light');
-    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.light);
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(
+      resolved(BUILTIN_PROFILES.light),
+    );
     expect(shell.created.root.getAttribute('data-reading-profile')).toBe('light');
   });
 
@@ -402,7 +415,9 @@ describe('ReaderController', () => {
     );
 
     await controller.open(pdf, createDiv());
-    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.sepia);
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(
+      resolved(BUILTIN_PROFILES.sepia),
+    );
     shell.send({ type: 'set-profile', profile: 'light' });
 
     expect(profiles.profiles).toEqual({ [pdf.path]: 'dark' });
@@ -428,10 +443,12 @@ describe('ReaderController', () => {
 
     await controller.open(pdf, createDiv());
 
-    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.sepia);
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(
+      resolved(BUILTIN_PROFILES.sepia),
+    );
   });
 
-  it('updates Auto for owner-document theme changes without rewriting stored profile state', async () => {
+  it('updates Follow Obsidian for owner-document theme changes without rewriting stored profile state', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const host = createDiv();
@@ -441,7 +458,7 @@ describe('ReaderController', () => {
     const createdSession = session(pdf.path, createdViewport);
     const adapter = adapterFor(pdf.path, createdSession);
     const profiles = profileState({
-      profiles: { [pdf.path]: 'auto' },
+      profiles: { [pdf.path]: 'follow-obsidian' },
       rememberPerDocument: true,
     });
     const controller = new ReaderController(
@@ -450,15 +467,31 @@ describe('ReaderController', () => {
       profiles.value,
     );
     await controller.open(pdf, host);
-    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.dark);
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith({
+      pageColors: {
+        background: BUILTIN_PROFILES.dark.background,
+        foreground: BUILTIN_PROFILES.dark.foreground,
+      },
+      brightness: BUILTIN_PROFILES.dark.brightness,
+      contrast: BUILTIN_PROFILES.dark.contrast,
+      imageDim: BUILTIN_PROFILES.dark.imageDim,
+    });
 
     host.doc.body.removeClass('theme-dark');
     host.doc.body.addClass('theme-light');
     await vi.waitFor(() => {
-      expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.light);
+      expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith({
+        pageColors: {
+          background: BUILTIN_PROFILES.light.background,
+          foreground: BUILTIN_PROFILES.light.foreground,
+        },
+        brightness: BUILTIN_PROFILES.light.brightness,
+        contrast: BUILTIN_PROFILES.light.contrast,
+        imageDim: BUILTIN_PROFILES.light.imageDim,
+      });
     });
 
-    expect(profiles.profiles[pdf.path]).toBe('auto');
+    expect(profiles.profiles[pdf.path]).toBe('follow-obsidian');
     expect(profiles.updateProfile).not.toHaveBeenCalled();
   });
 
@@ -781,7 +814,9 @@ describe('ReaderController', () => {
       );
     });
 
-    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.dark);
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(
+      resolved(BUILTIN_PROFILES.dark),
+    );
     expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to remember PDF reading profile', {
       fingerprint: pdf.path,
       profile: 'dark',
@@ -789,7 +824,7 @@ describe('ReaderController', () => {
     });
   });
 
-  it('recovers to Auto when persisted settings contain an unknown profile id', async () => {
+  it('falls back to Default when persisted settings contain an unknown profile id', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const createdViewport = viewport();
@@ -804,7 +839,12 @@ describe('ReaderController', () => {
 
     await controller.open(pdf, createDiv());
 
-    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.light);
+    expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith({
+      pageColors: null,
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
   });
 
   it('cleans the viewport event subscription with the active reader', async () => {

@@ -1,9 +1,9 @@
-import { FileView, Plugin, type WorkspaceLeaf } from 'obsidian';
+import { FileView, Notice, Plugin, type WorkspaceLeaf } from 'obsidian';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
 import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
-import { PluginDataStore, type PluginDataV1 } from './plugin-data.js';
+import { PluginDataStore, type MigrationDiagnostic, type PluginDataV2 } from './plugin-data.js';
 import {
   beginPluginActivation,
   endPluginActivation,
@@ -106,7 +106,7 @@ function corePdfPath(leaf: WorkspaceLeaf): string | undefined {
 }
 
 export default class AbyssDocumentsPlugin extends Plugin {
-  data!: PluginDataV1;
+  data!: PluginDataV2;
   protected readonly runtimeLoader = new PdfRuntimeLoader();
 
   override async onload(): Promise<void> {
@@ -121,6 +121,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
   private async loadPlugin(): Promise<void> {
     const store = new PluginDataStore(this);
     this.data = await store.load();
+    this.reportMigrationDiagnostics(store.migrationResult.diagnostics);
     const registry = new DocumentAdapterRegistry([
       new PdfDocumentAdapter(this.app.vault, this.runtimeLoader, createPdfDocumentViewport),
     ]);
@@ -192,6 +193,16 @@ export default class AbyssDocumentsPlugin extends Plugin {
     this.register(() => {
       this.runtimeLoader.dispose();
     });
+  }
+
+  private reportMigrationDiagnostics(diagnostics: readonly MigrationDiagnostic[]): void {
+    if (diagnostics.length === 0) return;
+    const paths = diagnostics.map(({ path }) => path);
+    console.error('[abyss-documents] Failed to migrate some plugin settings', {
+      paths,
+      diagnostics,
+    });
+    new Notice('Some abyss documents settings were reset to their defaults.');
   }
 
   override onunload(): void {}

@@ -4,6 +4,8 @@ import type {
   ExtraButtonComponent,
   PluginManifest,
   SliderComponent,
+  TextAreaComponent,
+  TextComponent,
   ToggleComponent,
 } from 'obsidian';
 import { Setting } from 'obsidian';
@@ -42,6 +44,8 @@ interface CapturedControls {
   readonly dropdowns: Map<string, DropdownComponent>;
   readonly expanders: Map<string, ExtraButtonComponent & { simulateClick__(): void }>;
   readonly sliders: Map<string, SliderComponent>;
+  readonly textAreas: Map<string, TextAreaComponent>;
+  readonly texts: Map<string, TextComponent>;
   readonly toggles: Map<string, ToggleComponent>;
 }
 
@@ -50,17 +54,27 @@ function captureControls(): CapturedControls {
   const dropdowns = new Map<string, DropdownComponent>();
   const expanders = new Map<string, ExtraButtonComponent & { simulateClick__(): void }>();
   const sliders = new Map<string, SliderComponent>();
+  const textAreas = new Map<string, TextAreaComponent>();
+  const texts = new Map<string, TextComponent>();
   const toggles = new Map<string, ToggleComponent>();
   captureSettingComponent('addColorPicker', colors);
   captureSettingComponent('addDropdown', dropdowns);
   captureSettingComponent('addExtraButton', expanders);
   captureSettingComponent('addSlider', sliders);
+  captureSettingComponent('addText', texts);
+  captureSettingComponent('addTextArea', textAreas);
   captureSettingComponent('addToggle', toggles);
-  return { colors, dropdowns, expanders, sliders, toggles };
+  return { colors, dropdowns, expanders, sliders, textAreas, texts, toggles };
 }
 
 type ComponentSettingMethod =
-  'addColorPicker' | 'addDropdown' | 'addExtraButton' | 'addSlider' | 'addToggle';
+  | 'addColorPicker'
+  | 'addDropdown'
+  | 'addExtraButton'
+  | 'addSlider'
+  | 'addText'
+  | 'addTextArea'
+  | 'addToggle';
 
 function captureSettingComponent<Component>(
   method: ComponentSettingMethod,
@@ -129,19 +143,20 @@ describe('AbyssDocumentsSettingTab', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders Reading appearance and Advanced collapsed without future sections', () => {
+  it('renders Reading appearance, Annotations, and Advanced collapsed', () => {
     const { tab } = fixture();
 
     tab.render();
 
     const expanders = Array.from(tab.containerEl.querySelectorAll<HTMLElement>('[aria-expanded]'));
-    expect(expanders).toHaveLength(2);
+    expect(expanders).toHaveLength(3);
     expect(expanders.every((element) => element.getAttribute('aria-expanded') === 'false')).toBe(
       true,
     );
     expect(tab.containerEl.textContent).toContain('Reading appearance');
+    expect(tab.containerEl.textContent).toContain('Annotations');
     expect(tab.containerEl.textContent).toContain('Advanced');
-    expect(tab.containerEl.textContent).not.toMatch(/annotation|ocr/iu);
+    expect(tab.containerEl.textContent).not.toMatch(/ocr/iu);
     expect(tab.containerEl.classList.contains('abyss-documents-settings')).toBe(true);
     expect(tab.getSettingDefinitions()).toEqual([]);
     (tab as unknown as { display(): void }).display();
@@ -180,8 +195,11 @@ describe('AbyssDocumentsSettingTab', () => {
     controls.colors.get('Foreground')?.setValue('#112233');
     controls.colors.get('Page tint')?.setValue('#fefefe');
     controls.toggles.get('Debug logging')?.setValue(true);
+    controls.texts.get('Annotation author')?.setValue('Ada');
+    controls.texts.get('Yellow meaning')?.setValue('Important');
+    controls.textAreas.get('Annotation transfer template')?.setValue('> {{quote}}');
     await vi.waitFor(() => {
-      expect(persistence.saveData).toHaveBeenCalledTimes(5);
+      expect(persistence.saveData).toHaveBeenCalledTimes(8);
     });
 
     expect(store.snapshot.settings).toMatchObject({
@@ -191,8 +209,16 @@ describe('AbyssDocumentsSettingTab', () => {
         rememberPerDocument: true,
         custom: { background: '#fefefe', foreground: '#112233' },
       },
+      annotations: {
+        author: 'Ada',
+        markdownTemplate: '> {{quote}}',
+      },
     });
-    expect(onSettingsChange).toHaveBeenCalledTimes(5);
+    expect(store.snapshot.settings.annotations.palette[0]).toMatchObject({
+      name: 'Yellow',
+      meaning: 'Important',
+    });
+    expect(onSettingsChange).toHaveBeenCalledTimes(8);
   });
 
   it('persists renderer-bounded custom appearance values and updates live readers', async () => {
@@ -280,6 +306,36 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(store.snapshot.settings.reading.custom.foreground).toBe('#dddddd');
     expect(requiredControl(controls.colors, 'Foreground')).toBe(foreground);
     expect(foreground.getValue()).toBe('#dddddd');
+  });
+
+  it('restores failed annotation fields through their existing controls', async () => {
+    const controls = captureControls();
+    const { persistence, store, tab } = fixture();
+    persistence.saveData.mockRejectedValue(new Error('disk full'));
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    tab.render();
+
+    requiredControl(controls.texts, 'Annotation author').setValue('Ada');
+    requiredControl(controls.texts, 'Yellow meaning').setValue('Important');
+    requiredControl(controls.textAreas, 'Annotation transfer template').setValue('> Quote');
+
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledTimes(3);
+    });
+    expect(store.snapshot.settings.annotations).toMatchObject({
+      author: '',
+      markdownTemplate: '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})',
+    });
+    expect(store.snapshot.settings.annotations.palette[0]).toMatchObject({
+      name: 'Yellow',
+      meaning: '',
+    });
+    expect(requiredControl(controls.texts, 'Annotation author').getValue()).toBe('');
+    expect(requiredControl(controls.texts, 'Yellow meaning').getValue()).toBe('');
+    expect(requiredControl(controls.textAreas, 'Annotation transfer template').getValue()).toBe(
+      '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})',
+    );
   });
 
   it('handles a non-error save rejection with the default live-update callback', async () => {

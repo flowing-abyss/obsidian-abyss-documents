@@ -8,7 +8,7 @@ import type {
   ViewportEvent,
 } from '../document-core/document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../document-core/errors.js';
-import type { ReadingProfileId } from '../document-core/reading.js';
+import type { ReaderScale, ReadingProfileId } from '../document-core/reading.js';
 import { markReaderPerformance, markReaderPerformanceOnce } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
@@ -40,7 +40,7 @@ export class ReaderController {
   private shell: ReaderShell | null = null;
   private unsubscribeViewport: (() => void) | null = null;
   private currentPageIndex = 0;
-  private currentProfile: ReadingProfileId = 'auto';
+  private currentProfile: ReadingProfileId = 'default';
   private outlineLoadedFor: DocumentSession | null = null;
   private outlineLoadingFor: DocumentSession | null = null;
   private currentSearchQuery = '';
@@ -367,7 +367,7 @@ export class ReaderController {
     });
   }
 
-  private setScale(scale: number | 'page-width' | 'page-fit'): void {
+  private setScale(scale: ReaderScale): void {
     const viewport = this.viewport;
     const shell = this.shell;
     if (viewport === null || shell === null) return;
@@ -460,11 +460,15 @@ export class ReaderController {
     shell: ReaderShell,
     theme: ObsidianTheme,
   ): void {
-    if (this.viewport !== viewport || this.shell !== shell || this.currentProfile !== 'auto')
+    if (
+      this.viewport !== viewport ||
+      this.shell !== shell ||
+      this.currentProfile !== 'follow-obsidian'
+    )
       return;
     this.profileService.setCustom(this.profileState.reading.custom);
     try {
-      viewport.setReadingColors(this.profileService.resolve('auto', theme));
+      viewport.setReadingColors(this.profileService.resolve('follow-obsidian', theme));
     } catch (cause) {
       console.error('[abyss-documents] Failed to update automatic PDF reading profile', {
         theme,
@@ -479,7 +483,7 @@ export class ReaderController {
       : undefined;
     if (isReadingProfileId(saved)) return saved;
     const fallback = this.profileState.reading.defaultProfile;
-    return isReadingProfileId(fallback) ? fallback : 'auto';
+    return isReadingProfileId(fallback) ? fallback : 'default';
   }
 
   private profilePersistenceFailure(
@@ -531,7 +535,8 @@ export class ReaderController {
 
 function isReadingProfileId(value: unknown): value is ReadingProfileId {
   return (
-    value === 'auto' ||
+    value === 'default' ||
+    value === 'follow-obsidian' ||
     value === 'light' ||
     value === 'sepia' ||
     value === 'dark' ||
