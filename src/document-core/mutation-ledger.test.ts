@@ -1,12 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   asAnnotationId,
   asGeneratedAnnotationId,
   asUtcTimestamp,
   type AnnotationMutation,
   type AnnotationMutationTarget,
+  type GeneratedAnnotationId,
 } from './annotations.js';
-import { StaleGenerationError } from './errors.js';
+import type { DocumentViewport } from './document.js';
+import {
+  type ActiveDocumentSaveAttempt,
+  type DocumentSaveAttempt,
+  type DocumentSaveService,
+  type EditableDocumentSession,
+  type VerifiedSaveResult,
+} from './editable-document.js';
+import { InvalidAnnotationMutationError, StaleGenerationError } from './errors.js';
 import { MutationLedger } from './mutation-ledger.js';
 
 const id = asAnnotationId('nm-1');
@@ -16,17 +25,301 @@ function comment(comment = '[[Concept]] #tag'): AnnotationMutation {
   return { kind: 'set-comment', target, comment };
 }
 
+const unavailable = {
+  available: false as const,
+  reason: { code: 'signed-document' as const, message: 'Editing would invalidate a signature.' },
+};
+
+const session: EditableDocumentSession = {
+  descriptor: {
+    path: 'Research/paper.pdf',
+    name: 'paper.pdf',
+    fingerprint: 'fixture',
+    pageCount: 1,
+  },
+  capabilities: new Set(),
+  editingCapabilities: {
+    mutation: unavailable,
+    create: {
+      highlight: unavailable,
+      underline: unavailable,
+      ink: unavailable,
+      'text-note': unavailable,
+      'free-text': unavailable,
+    },
+  },
+  getOutline: async () => [],
+  createViewport: async (): Promise<DocumentViewport> => {
+    throw new Error('This save-boundary fixture does not create a viewport.');
+  },
+  close: async () => undefined,
+  listAnnotations: async () => undefined,
+  applyMutation: async () => {
+    throw new Error('This save-boundary fixture does not apply mutations.');
+  },
+  captureGeneration: () => {
+    throw new Error('The test captures directly from its ledger.');
+  },
+  prepareSave: () => {
+    throw new Error('The test prepares directly from its ledger.');
+  },
+  resolveAnnotation: (reference) => ({
+    status: 'unresolved',
+    reason: 'external-delete',
+    reference,
+  }),
+};
+
+function verifiedResult(generation: number): VerifiedSaveResult {
+  return {
+    verified: true,
+    generation,
+    sha256: 'a'.repeat(64),
+    byteSize: 42,
+    committedAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
+  };
+}
+
+function runAttempt(
+  attempt: DocumentSaveAttempt<EditableDocumentSession>,
+  operation: (
+    active: ActiveDocumentSaveAttempt<EditableDocumentSession>,
+    result: VerifiedSaveResult,
+  ) => void,
+): Promise<VerifiedSaveResult> {
+  const result = verifiedResult(attempt.captured.generation);
+  return attempt.run(
+    {
+      save: async (active) => {
+        operation(active, result);
+        return result;
+      },
+    },
+    new AbortController().signal,
+  );
+}
+
 describe('MutationLedger', () => {
-  it('keeps edits made during save in the next generation when the captured save fails', () => {
-    const ledger = new MutationLedger();
+  it('binds save execution to one owner and invokes a service only once', async () => {
+    const ownedLedger = new MutationLedger(session);
+    ownedLedger.append(comment());
+    const captured = ownedLedger.capture();
+    const result: VerifiedSaveResult = {
+      verified: true,
+      generation: captured.generation,
+      sha256: 'a'.repeat(64),
+      byteSize: 42,
+      committedAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
+    };
+    const save = vi.fn(async (active: ActiveDocumentSaveAttempt<EditableDocumentSession>) => {
+      expect(active.session).toBe(session);
+      active.markWriting();
+      active.markVerifying();
+      active.commit(result);
+      return result;
+    });
+    const service: DocumentSaveService = { save };
+    const attempt = ownedLedger.prepareSave(captured);
+
+    const saved = await attempt.run(service, new AbortController().signal);
+    expect(saved).toStrictEqual(result);
+    expect(Object.isFrozen(saved)).toBe(true);
+    await expect(attempt.run(service, new AbortController().signal)).rejects.toThrow(
+      StaleGenerationError,
+    );
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(ownedLedger.state).toBe('committed');
+  });
+
+  it('rejects a prototype-preserving save-attempt copy before service work begins', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const captured = ledger.capture();
+    const attempt = ledger.prepareSave(captured);
+    const copied = Object.assign(
+      Object.create(Reflect.getPrototypeOf(attempt)),
+      attempt,
+    ) as DocumentSaveAttempt<EditableDocumentSession>;
+    const save = vi.fn();
+    const service = { save } as unknown as DocumentSaveService;
+
+    await expect(copied.run(service, new AbortController().signal)).rejects.toThrow(
+      StaleGenerationError,
+    );
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('records a service throw at the active stage without requiring an explicit fail call', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    const cause = new Error('writer rejected');
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            active.markWriting();
+            throw cause;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toBe(cause);
+    expect(ledger.lastFailure).toMatchObject({ stage: 'writing', cause });
+    expect(ledger.pending()).toEqual([comment()]);
+  });
+
+  it('fails a service completion that returns without committing its verified result', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    const result = verifiedResult(attempt.captured.generation);
+
+    await expect(
+      attempt.run({ save: async () => result }, new AbortController().signal),
+    ).rejects.toThrow(/without commit/u);
+    expect(ledger.lastFailure).toMatchObject({ stage: 'serializing' });
+    expect(ledger.pending()).toEqual([comment()]);
+  });
+
+  it('refuses an unverified generation and makes its active attempt stale', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    let retained: ActiveDocumentSaveAttempt<EditableDocumentSession> | null = null;
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            retained = active;
+            active.markWriting();
+            active.markVerifying();
+            active.commit(verifiedResult(active.captured.generation + 1));
+            return verifiedResult(active.captured.generation);
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/verified result/u);
+    expect(ledger.lastFailure).toMatchObject({ stage: 'verifying' });
+    expect(() => retained?.markWriting()).toThrow(StaleGenerationError);
+  });
+
+  it('retains mutations when a service throws after staging a verified commit', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    const result = verifiedResult(attempt.captured.generation);
+    const cause = new Error('post-verify failure');
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            active.markWriting();
+            active.markVerifying();
+            active.commit(result);
+            throw cause;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toBe(cause);
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.lastFailure).toMatchObject({ stage: 'verifying', cause });
+  });
+
+  it('keeps a staged commit active until the service result is reconciled', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    const committed = verifiedResult(attempt.captured.generation);
+    const returned = { ...committed, sha256: 'b'.repeat(64) };
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            active.markWriting();
+            active.markVerifying();
+            active.commit(committed);
+            expect(() => ledger.capture()).toThrow(/verifying/u);
+            return returned;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/verified result/u);
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+  });
+
+  it.each([
+    ['sha256', { sha256: 'not-a-sha256' }],
+    ['byteSize', { byteSize: -1 }],
+    ['committedAt', { committedAt: 'not-a-timestamp' }],
+  ] as const)(
+    'rejects an invalid verified-result %s before acknowledging mutations',
+    async (_, patch) => {
+      const ledger = new MutationLedger(session);
+      ledger.append(comment());
+      const attempt = ledger.prepareSave(ledger.capture());
+      const malformed = { ...verifiedResult(attempt.captured.generation), ...patch };
+
+      await expect(
+        attempt.run(
+          {
+            save: async (active) => {
+              active.markWriting();
+              active.markVerifying();
+              active.commit(malformed as VerifiedSaveResult);
+              return malformed as VerifiedSaveResult;
+            },
+          },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/verified result/u);
+      expect(ledger.pending()).toEqual([comment()]);
+      expect(ledger.committedGeneration).toBe(0);
+    },
+  );
+
+  it('rejects a changed owner path before service work begins', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    const save = vi.fn();
+    descriptor.path = 'Research/other.pdf';
+
+    await expect(attempt.run({ save }, new AbortController().signal)).rejects.toThrow(
+      /path changed/u,
+    );
+    expect(save).not.toHaveBeenCalled();
+    expect(ledger.pending()).toEqual([comment()]);
+  });
+
+  it('keeps edits made during save in the next generation when the captured save fails', async () => {
+    const ledger = new MutationLedger(session);
     const first = ledger.append(comment());
     const captured = ledger.capture();
+    const attempt = ledger.prepareSave(captured);
     const second = ledger.append({ kind: 'set-color', target, color: '#ffd400' });
 
     expect(captured.generation).toBe(first.generation);
     expect(second.generation).toBeGreaterThan(captured.generation);
 
-    ledger.fail(captured, new Error('write'));
+    const cause = new Error('write');
+    await expect(
+      runAttempt(attempt, (active) => {
+        active.fail(cause);
+        throw cause;
+      }),
+    ).rejects.toBe(cause);
 
     expect(ledger.state).toBe('dirty');
     expect(ledger.pending()).toEqual([first.mutation, second.mutation]);
@@ -37,62 +330,76 @@ describe('MutationLedger', () => {
     ['serializing', () => undefined],
     [
       'writing',
-      (ledger: MutationLedger, captured: ReturnType<MutationLedger['capture']>) => {
-        ledger.markWriting(captured);
+      (attempt: ActiveDocumentSaveAttempt<EditableDocumentSession>) => {
+        attempt.markWriting();
       },
     ],
     [
       'verifying',
-      (ledger: MutationLedger, captured: ReturnType<MutationLedger['capture']>) => {
-        ledger.markWriting(captured);
-        ledger.markVerifying(captured);
+      (attempt: ActiveDocumentSaveAttempt<EditableDocumentSession>) => {
+        attempt.markWriting();
+        attempt.markVerifying();
       },
     ],
-  ] as const)('retains the complete pending ledger after %s failure', (stage, advance) => {
-    const ledger = new MutationLedger();
+  ] as const)('retains the complete pending ledger after %s failure', async (stage, advance) => {
+    const ledger = new MutationLedger(session);
     const entry = ledger.append(comment(stage));
     const captured = ledger.capture();
-    advance(ledger, captured);
-
+    const attempt = ledger.prepareSave(captured);
     const cause = new Error(stage);
-    ledger.fail(captured, cause);
+    await expect(
+      runAttempt(attempt, (active) => {
+        advance(active);
+        active.fail(cause);
+        throw cause;
+      }),
+    ).rejects.toBe(cause);
 
     expect(ledger.pending()).toEqual([entry.mutation]);
     expect(ledger.lastFailure).toMatchObject({ stage, cause });
   });
 
-  it('commits only the captured generation and leaves concurrent edits dirty', () => {
-    const ledger = new MutationLedger();
+  it('commits only the captured generation and leaves concurrent edits dirty', async () => {
+    const ledger = new MutationLedger(session);
     ledger.append(comment('captured'));
     const captured = ledger.capture();
+    const attempt = ledger.prepareSave(captured);
     const next = ledger.append({ kind: 'set-color', target, color: '#00a2ff' });
 
-    ledger.markWriting(captured);
-    ledger.markVerifying(captured);
-    ledger.commit(captured);
+    await runAttempt(attempt, (active, result) => {
+      active.markWriting();
+      active.markVerifying();
+      active.commit(result);
+    });
 
     expect(ledger.state).toBe('dirty');
     expect(ledger.pending()).toEqual([next.mutation]);
     expect(ledger.committedGeneration).toBe(captured.generation);
   });
 
-  it('rejects stale async completions after failure and retry capture', () => {
-    const ledger = new MutationLedger();
+  it('rejects stale async completions after failure and retry capture', async () => {
+    const ledger = new MutationLedger(session);
     ledger.append(comment());
     const stale = ledger.capture();
-    ledger.fail(stale, new Error('serialize'));
+    const cause = new Error('serialize');
+    await expect(
+      runAttempt(ledger.prepareSave(stale), (active) => {
+        active.fail(cause);
+        throw cause;
+      }),
+    ).rejects.toBe(cause);
     const retry = ledger.capture();
 
     expect(retry.generation).toBe(stale.generation);
     expect(retry.captureId).not.toBe(stale.captureId);
     expect(() => {
-      ledger.markWriting(stale);
+      ledger.prepareSave(stale);
     }).toThrow(StaleGenerationError);
     expect(ledger.state).toBe('serializing');
   });
 
   it('rejects a second capture while serialization is active', () => {
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     ledger.append(comment());
     ledger.capture();
 
@@ -101,45 +408,135 @@ describe('MutationLedger', () => {
     }).toThrow(/serializing/u);
   });
 
-  it('can fail a clean capture without inventing a dirty generation', () => {
-    const ledger = new MutationLedger();
+  it('can fail a clean capture without inventing a dirty generation', async () => {
+    const ledger = new MutationLedger(session);
     const captured = ledger.capture();
+    const attempt = ledger.prepareSave(captured);
 
     expect(captured).toMatchObject({ generation: 0, mutations: [] });
-    ledger.fail(captured, new Error('clean serialization'));
+    const cause = new Error('clean serialization');
+    await expect(
+      runAttempt(attempt, (active) => {
+        active.fail(cause);
+        throw cause;
+      }),
+    ).rejects.toBe(cause);
 
     expect(ledger.state).toBe('committed');
     expect(ledger.pending()).toEqual([]);
   });
 
   it('rejects a same-numbered capture from another ledger', () => {
-    const first = new MutationLedger();
-    const second = new MutationLedger();
+    const first = new MutationLedger(session);
+    const second = new MutationLedger(session);
     first.append(comment('first'));
     second.append(comment('second'));
     const foreign = first.capture();
     second.capture();
 
     expect(() => {
-      second.markWriting(foreign);
+      second.prepareSave(foreign);
     }).toThrow(StaleGenerationError);
     expect(second.state).toBe('serializing');
   });
 
+  it('rejects a foreign capture before serializer or writer work begins', async () => {
+    const owner = new MutationLedger(session);
+    const foreignLedger = new MutationLedger(session);
+    owner.append(comment('owner'));
+    foreignLedger.append(comment('foreign'));
+    owner.capture();
+    const foreign = foreignLedger.capture();
+    const save = vi.fn();
+    const service = { save } as unknown as DocumentSaveService;
+
+    await expect(async () =>
+      owner.prepareSave(foreign).run(service, new AbortController().signal),
+    ).rejects.toThrow(StaleGenerationError);
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it('rejects a structurally copied capture with a forged generation', () => {
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     ledger.append(comment());
     const captured = ledger.capture();
     const forged = Object.freeze({ ...captured, generation: 999 });
 
     expect(() => {
-      ledger.markWriting(forged);
+      ledger.prepareSave(forged);
     }).toThrow(StaleGenerationError);
     expect(ledger.state).toBe('serializing');
   });
 
+  it('rejects a spread copy before serializer or writer work begins', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const captured = ledger.capture();
+    const spreadCopy = Object.freeze({ ...captured });
+    const save = vi.fn();
+    const service = { save } as unknown as DocumentSaveService;
+
+    await expect(async () =>
+      ledger.prepareSave(spreadCopy).run(service, new AbortController().signal),
+    ).rejects.toThrow(StaleGenerationError);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stale capture after a failed attempt and retry capture', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const stale = ledger.capture();
+    const cause = new Error('serialize');
+    await expect(
+      runAttempt(ledger.prepareSave(stale), (active) => {
+        active.fail(cause);
+        throw cause;
+      }),
+    ).rejects.toBe(cause);
+    ledger.capture();
+    const save = vi.fn();
+    const service = { save } as unknown as DocumentSaveService;
+
+    await expect(async () =>
+      ledger.prepareSave(stale).run(service, new AbortController().signal),
+    ).rejects.toThrow(StaleGenerationError);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('binds an opaque save attempt to its session and exact capture', () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const captured = ledger.capture();
+
+    const attempt = ledger.prepareSave(captured);
+
+    expect(attempt.session).toBe(session);
+    expect(attempt.session.descriptor.path).toBe('Research/paper.pdf');
+    expect(attempt.captured).toBe(captured);
+    expect(Object.isFrozen(attempt)).toBe(true);
+  });
+
+  it('allows only one prepared attempt and rejects reuse after failure', async () => {
+    const ledger = new MutationLedger(session);
+    ledger.append(comment());
+    const captured = ledger.capture();
+    const attempt = ledger.prepareSave(captured);
+
+    expect(() => {
+      ledger.prepareSave(captured);
+    }).toThrow(/prepare another save/u);
+    const cause = new Error('serialize');
+    await expect(
+      runAttempt(attempt, (active) => {
+        active.fail(cause);
+        throw cause;
+      }),
+    ).rejects.toBe(cause);
+    await expect(runAttempt(attempt, () => undefined)).rejects.toThrow(StaleGenerationError);
+  });
+
   it('journals the UUID promotion needed to edit a legacy annotation', () => {
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     const promoteTo = asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08');
 
     const entry = ledger.append({
@@ -155,7 +552,7 @@ describe('MutationLedger', () => {
 
   it('does not let callers mutate journaled entries or captured snapshots', () => {
     const input = comment('original');
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     const entry = ledger.append(input);
     const captured = ledger.capture();
 
@@ -181,7 +578,7 @@ describe('MutationLedger', () => {
         geometry: { kind: 'ink', paths: [[sourcePoint]] },
       },
     };
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
 
     ledger.append(input);
     const captured = ledger.capture();
@@ -208,7 +605,7 @@ describe('MutationLedger', () => {
   it('isolates create payloads with quadrilateral geometry', () => {
     const sourcePoint = { x: 10, y: 20 };
     const generated = asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08');
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     ledger.append({
       kind: 'create',
       id: generated,
@@ -249,11 +646,315 @@ describe('MutationLedger', () => {
     ]);
   });
 
+  it('refuses an invalid create type and geometry before journaling', () => {
+    const invalid = {
+      kind: 'create',
+      id: asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08'),
+      type: 'ink',
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      },
+      color: '#ffd400',
+      selectedText: null,
+      author: '',
+      createdAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
+      modifiedAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
+      comment: '',
+    } as unknown as AnnotationMutation;
+    const ledger = new MutationLedger(session);
+
+    expect(() => ledger.append(invalid)).toThrow(InvalidAnnotationMutationError);
+    expect(ledger.pending()).toEqual([]);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('refuses a forged generated id before journaling', () => {
+    const invalid = {
+      kind: 'create',
+      id: 'not-a-uuid' as GeneratedAnnotationId,
+      type: 'text-note',
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      },
+      color: null,
+      selectedText: null,
+      author: '',
+      createdAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
+      modifiedAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
+      comment: '',
+    } satisfies AnnotationMutation;
+    const ledger = new MutationLedger(session);
+
+    expect(() => ledger.append(invalid)).toThrow(InvalidAnnotationMutationError);
+    expect(ledger.pending()).toEqual([]);
+  });
+
+  it('accepts valid fixed-page and reflowable create variants', () => {
+    const ledger = new MutationLedger(session);
+    const timestamp = asUtcTimestamp('2026-08-11T10:00:00.000Z');
+    const generated = asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08');
+    const common = {
+      kind: 'create' as const,
+      id: generated,
+      color: null,
+      selectedText: null,
+      author: '',
+      createdAt: timestamp,
+      modifiedAt: timestamp,
+      comment: '',
+    };
+    const valid: readonly AnnotationMutation[] = [
+      {
+        ...common,
+        type: 'underline',
+        anchor: {
+          kind: 'reflowable-text',
+          selector: { exact: 'quote', prefix: '', suffix: '' },
+          progression: 0.5,
+        },
+      },
+      {
+        ...common,
+        type: 'ink',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'ink', paths: [[{ x: 1, y: 2 }]] },
+        },
+      },
+      {
+        ...common,
+        type: 'text-note',
+        anchor: {
+          kind: 'reflowable-text',
+          selector: { exact: 'note anchor', prefix: '', suffix: '' },
+          progression: null,
+        },
+      },
+      {
+        ...common,
+        type: 'free-text',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: {
+            kind: 'rectangle',
+            rectangle: { x: 1, y: 2, width: 30, height: 40 },
+          },
+        },
+      },
+    ];
+
+    for (const mutation of valid) ledger.append(mutation);
+
+    expect(ledger.pending()).toHaveLength(4);
+  });
+
+  it('refuses malformed fixed and reflowable create anchors before journaling', () => {
+    const timestamp = asUtcTimestamp('2026-08-11T10:00:00.000Z');
+    const common = {
+      kind: 'create' as const,
+      id: asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08'),
+      color: null,
+      selectedText: null,
+      author: '',
+      createdAt: timestamp,
+      modifiedAt: timestamp,
+      comment: '',
+    };
+    const invalid = [
+      {
+        ...common,
+        type: 'highlight',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'quadrilaterals', quadrilaterals: [] },
+        },
+      },
+      {
+        ...common,
+        type: 'ink',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'ink', paths: [] },
+        },
+      },
+      {
+        ...common,
+        type: 'free-text',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: {
+            kind: 'rectangle',
+            rectangle: { x: 1, y: 2, width: -1, height: 40 },
+          },
+        },
+      },
+      {
+        ...common,
+        type: 'text-note',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'point', point: { x: Number.POSITIVE_INFINITY, y: 2 } },
+        },
+      },
+      {
+        ...common,
+        type: 'underline',
+        anchor: {
+          kind: 'reflowable-text',
+          selector: { exact: '', prefix: '', suffix: '' },
+          progression: 2,
+        },
+      },
+      {
+        ...common,
+        type: 'text-note',
+        anchor: {
+          kind: 'reflowable-text',
+          selector: { exact: 'quote', prefix: '', suffix: '' },
+          progression: 2,
+        },
+      },
+    ] as unknown as readonly AnnotationMutation[];
+
+    for (const mutation of invalid) {
+      const ledger = new MutationLedger(session);
+      expect(() => ledger.append(mutation)).toThrow(InvalidAnnotationMutationError);
+      expect(ledger.pending()).toEqual([]);
+    }
+  });
+
+  it('rejects unknown discriminants and malformed selector fields before journaling', () => {
+    const malformed = [
+      { kind: 'unknown-mutation' },
+      {
+        kind: 'set-comment',
+        target: { kind: 'unknown-target', fingerprint: 'x', promoteTo: 'not-a-uuid' },
+        comment: '',
+      },
+      {
+        kind: 'set-geometry',
+        target,
+        anchor: {
+          kind: 'unknown-anchor',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'point', point: { x: 1, y: 2 } },
+          selector: { exact: 'quote', prefix: '', suffix: '' },
+        },
+      },
+      {
+        kind: 'set-geometry',
+        target,
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'unknown-geometry' },
+        },
+      },
+      {
+        kind: 'set-geometry',
+        target,
+        anchor: {
+          kind: 'reflowable-text',
+          selector: { exact: 'quote', prefix: 42, suffix: '' },
+          progression: 0.5,
+        },
+      },
+    ] as unknown as readonly AnnotationMutation[];
+
+    for (const mutation of malformed) {
+      const ledger = new MutationLedger(session);
+      expect(() => ledger.append(mutation)).toThrow(InvalidAnnotationMutationError);
+      expect(ledger.pending()).toEqual([]);
+      expect(ledger.state).toBe('committed');
+    }
+  });
+
+  it('rejects malformed mutation payload fields before journaling', () => {
+    const timestamp = asUtcTimestamp('2026-08-11T10:00:00.000Z');
+    const malformed = [
+      { kind: 'set-comment', target, comment: 42 },
+      { kind: 'set-color', target, color: 42 },
+      { kind: 'convert-type', target, type: 'ink' },
+      { kind: 'convert-type', target, type: { toString: () => 'underline' } },
+      { kind: 'set-metadata', target, metadata: { author: 42, modifiedAt: timestamp } },
+      {
+        kind: 'set-geometry',
+        target,
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: { toString: () => 'page-points-top-left' },
+          geometry: { kind: 'point', point: { x: 1, y: 2 } },
+        },
+      },
+      {
+        kind: 'create',
+        id: asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08'),
+        type: { toString: () => 'text-note' },
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'point', point: { x: 1, y: 2 } },
+        },
+        color: null,
+        selectedText: null,
+        author: '',
+        createdAt: timestamp,
+        modifiedAt: timestamp,
+        comment: '',
+      },
+      {
+        kind: 'create',
+        id: asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08'),
+        type: 'text-note',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'point', point: { x: 1, y: 2 } },
+        },
+        color: 42,
+        selectedText: false,
+        author: 42,
+        createdAt: timestamp,
+        modifiedAt: timestamp,
+        comment: 42,
+      },
+    ] as unknown as readonly AnnotationMutation[];
+
+    for (const mutation of malformed) {
+      const ledger = new MutationLedger(session);
+      expect(() => ledger.append(mutation)).toThrow(InvalidAnnotationMutationError);
+      expect(ledger.pending()).toEqual([]);
+    }
+  });
+
   it('isolates point, rectangle, and reflowable anchors', () => {
     const point = { x: 5, y: 6 };
     const rectangle = { x: 1, y: 2, width: 30, height: 40 };
     const selector = { exact: 'quoted text', prefix: 'before ', suffix: ' after' };
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     ledger.append({
       kind: 'set-geometry',
       target,
@@ -296,7 +997,7 @@ describe('MutationLedger', () => {
       author: 'Ada',
       modifiedAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
     };
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     ledger.append({ kind: 'set-metadata', target, metadata });
     const captured = ledger.capture();
     metadata.author = 'Changed';
@@ -314,7 +1015,7 @@ describe('MutationLedger', () => {
   });
 
   it('captures conversion and deletion targets without collapsing their identity', () => {
-    const ledger = new MutationLedger();
+    const ledger = new MutationLedger(session);
     const conversion = ledger.append({
       kind: 'convert-type',
       target,
@@ -329,31 +1030,41 @@ describe('MutationLedger', () => {
     ]);
   });
 
-  it('enforces the serialization, write, verification, commit order', () => {
-    const ledger = new MutationLedger();
+  it('enforces the serialization, write, verification, commit order', async () => {
+    const ledger = new MutationLedger(session);
     ledger.append(comment());
     const captured = ledger.capture();
+    const attempt = ledger.prepareSave(captured);
+    const cause = new Error('invalid transition checks complete');
 
-    expect(() => {
-      ledger.markVerifying(captured);
-    }).toThrow(/serializing/u);
-    expect(() => {
-      ledger.commit(captured);
-    }).toThrow(/serializing/u);
-    ledger.markWriting(captured);
-    expect(() => {
-      ledger.commit(captured);
-    }).toThrow(/writing/u);
+    await expect(
+      runAttempt(attempt, (active, result) => {
+        expect(() => {
+          active.markVerifying();
+        }).toThrow(/serializing/u);
+        expect(() => {
+          active.commit(result);
+        }).toThrow(/serializing/u);
+        active.markWriting();
+        expect(() => {
+          active.commit(result);
+        }).toThrow(/writing/u);
+        active.fail(cause);
+        throw cause;
+      }),
+    ).rejects.toBe(cause);
   });
 
-  it('reaches committed after a fully verified generation with no later edits', () => {
-    const ledger = new MutationLedger();
+  it('reaches committed after a fully verified generation with no later edits', async () => {
+    const ledger = new MutationLedger(session);
     ledger.append(comment());
     const captured = ledger.capture();
-    ledger.markWriting(captured);
-    ledger.markVerifying(captured);
-
-    ledger.commit(captured);
+    const attempt = ledger.prepareSave(captured);
+    await runAttempt(attempt, (active, result) => {
+      active.markWriting();
+      active.markVerifying();
+      active.commit(result);
+    });
 
     expect(ledger.state).toBe('committed');
     expect(ledger.pending()).toEqual([]);

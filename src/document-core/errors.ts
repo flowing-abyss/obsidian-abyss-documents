@@ -48,3 +48,13 @@ export class LedgerTransitionError extends Error {
     this.name = new.target.name;
   }
 }
+
+export class InvalidAnnotationMutationError extends Error {
+  constructor(
+    readonly mutationKind: string,
+    readonly reason: string,
+  ) {
+    super(`Cannot journal ${mutationKind}: ${reason}`);
+    this.name = new.target.name;
+  }
+}

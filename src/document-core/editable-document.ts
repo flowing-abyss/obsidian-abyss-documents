@@ -1,18 +1,26 @@
 import type {
+  AnnotationCapability,
   AnnotationIdentity,
   AnnotationMutation,
   AnnotationResolution,
   AnnotationSink,
   StableAnnotationIdentity,
   UtcTimestamp,
+  WritableAnnotationType,
 } from './annotations.js';
 import type { DocumentSession } from './document.js';
+import type {
+  CapturedGeneration,
+  DocumentSaveService as CoreDocumentSaveService,
+  DocumentSaveAttempt,
+} from './mutation-ledger.js';
 
-export interface CapturedGeneration {
-  readonly captureId: number;
-  readonly generation: number;
-  readonly mutations: readonly AnnotationMutation[];
-}
+export type {
+  ActiveDocumentSaveAttempt,
+  CapturedGeneration,
+  DocumentSaveAttempt,
+  VerifiedSaveResult,
+} from './mutation-ledger.js';
 
 export interface MutationReceipt {
   readonly generation: number;
@@ -21,25 +29,18 @@ export interface MutationReceipt {
   readonly journaledAt: UtcTimestamp;
 }
 
-export interface VerifiedSaveResult {
-  readonly verified: true;
-  readonly generation: number;
-  readonly sha256: string;
-  readonly byteSize: number;
-  readonly committedAt: UtcTimestamp;
+export interface DocumentEditingCapabilities {
+  readonly mutation: AnnotationCapability;
+  readonly create: Readonly<Record<WritableAnnotationType, AnnotationCapability>>;
 }
 
 export interface EditableDocumentSession extends DocumentSession {
+  readonly editingCapabilities: DocumentEditingCapabilities;
   listAnnotations(signal: AbortSignal, sink: AnnotationSink): Promise<void>;
   applyMutation(mutation: AnnotationMutation): Promise<MutationReceipt>;
   captureGeneration(): CapturedGeneration;
+  prepareSave(captured: CapturedGeneration): DocumentSaveAttempt<EditableDocumentSession>;
   resolveAnnotation(reference: AnnotationIdentity): AnnotationResolution;
 }
 
-export interface DocumentSaveService {
-  save(
-    session: EditableDocumentSession,
-    captured: CapturedGeneration,
-    signal: AbortSignal,
-  ): Promise<VerifiedSaveResult>;
-}
+export type DocumentSaveService = CoreDocumentSaveService<EditableDocumentSession>;
