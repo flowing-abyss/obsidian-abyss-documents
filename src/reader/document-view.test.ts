@@ -101,12 +101,12 @@ describe('AbyssDocumentView', () => {
     reader.open.mockRejectedValue(cause);
     const fixture = viewFixture(reader.reader);
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     await fixture.view.onLoadFile(fixture.file);
     fixture.view.contentEl.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click();
     await vi.waitFor(() => {
-      expect(reader.open).toHaveBeenCalledTimes(2);
+      expect(log).toHaveBeenCalledTimes(2);
     });
 
     expect(notice).toHaveBeenCalledOnce();

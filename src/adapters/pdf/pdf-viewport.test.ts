@@ -323,7 +323,7 @@ describe('PdfDocumentViewport', () => {
     ]);
   });
 
-  it('delegates navigation, scale, focus, and initial fit through public viewer methods', async () => {
+  it('delegates navigation and focus while applying the latest initial scale', async () => {
     const fixture = await mountedViewport(4);
     const eventBus = fixture.runtime.state.eventBus;
     const viewer = fixture.runtime.state.viewer;
@@ -345,8 +345,8 @@ describe('PdfDocumentViewport', () => {
       [2, 12, 0],
       [1, 0, 24],
     ]);
-    expect(viewer.currentScale).toBe(1.75);
-    expect(viewer.currentScaleValue).toBe('page-width');
+    expect(viewer.currentScale).toBe(1);
+    expect(viewer.currentScaleValue).toBe('page-fit');
     expect(viewer.focus).toHaveBeenCalledOnce();
   });
 
@@ -588,6 +588,58 @@ describe('PdfDocumentViewport', () => {
     eventBus.dispatch('pagesinit', {});
     expect(viewer.currentScale).toBe(1.75);
     expect(viewer.currentPageNumber).toBe(2);
+  });
+
+  it('queues navigation while reading colors are rebinding and applies the latest destination', async () => {
+    const fixture = await mountedViewport(4);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || viewer === undefined || linkService === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    eventBus.dispatch('pagesinit', {});
+    viewer.currentPageNumber = 2;
+    fixture.viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+      brightness: 0.95,
+      contrast: 1.05,
+      imageDim: 0.1,
+    });
+
+    await fixture.viewport.goTo({ pageIndex: 2, x: 12, y: 34 });
+    await fixture.viewport.goTo({ pageIndex: 3 });
+
+    expect(linkService.positions).toEqual([]);
+    expect(linkService.pages).toEqual([]);
+    eventBus.dispatch('pagesinit', {});
+    expect(linkService.positions).toEqual([]);
+    expect(linkService.pages).toEqual([4]);
+    expect(viewer.currentPageNumber).toBe(4);
+  });
+
+  it('queues a scale selected before initial pages are ready', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) {
+      throw new Error('Expected viewer components.');
+    }
+    fixture.viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+      brightness: 0.95,
+      contrast: 1.05,
+      imageDim: 0.1,
+    });
+
+    fixture.viewport.setScale(1.75);
+
+    expect(viewer.currentScale).toBe(1);
+    eventBus.dispatch('pagesinit', {});
+    eventBus.dispatch('pagesinit', {});
+    expect(viewer.currentScale).toBe(1.75);
   });
 
   it('emits owned search results while dispatching visible highlighting through PDF.js', async () => {

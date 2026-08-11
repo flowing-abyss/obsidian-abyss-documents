@@ -27,6 +27,7 @@ type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
 type PdfViewer = InstanceType<PdfRuntime['pdfjsViewer']['PDFViewer']>;
 type PdfFindController = InstanceType<PdfRuntime['pdfjsViewer']['PDFFindController']>;
 type PdfEventListener = (event: unknown) => void;
+type ScaleRequest = number | 'page-width' | 'page-fit';
 
 interface RebindablePdfViewer {
   setDocument(document: PDFDocumentProxy | null): void;
@@ -96,6 +97,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   private pendingPagesInit: PdfEventListener | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeFrame: number | null = null;
+  private pendingLocation: DocumentLocation | null = null;
+  private pendingScale: ScaleRequest | null = null;
 
   constructor(
     private readonly pdf: PDFDocumentProxy,
@@ -158,29 +161,28 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   async goTo(location: DocumentLocation): Promise<void> {
-    const linkService = this.requireMounted(this.linkService);
-    const pageNumber = location.pageIndex + 1;
-    if (location.x === undefined && location.y === undefined) {
-      linkService.goToPage(pageNumber);
+    this.requireMounted(this.linkService);
+    if (this.colorRebindActive) {
+      this.pendingLocation = { ...location };
       return;
     }
-    linkService.goToXY(pageNumber, location.x ?? 0, location.y ?? 0);
+    this.navigateTo(location);
   }
 
-  setScale(scale: number | 'page-width' | 'page-fit'): void {
+  setScale(scale: ScaleRequest): void {
     const viewer = this.requireMounted(this.viewer);
+    if (!this.pagesInitialized) {
+      this.pendingScale = scale;
+      return;
+    }
     if (this.colorRebindActive && this.preservedViewState !== null) {
       this.preservedViewState = {
         ...this.preservedViewState,
-        scale:
-          typeof scale === 'number'
-            ? { type: 'numeric', value: scale }
-            : { type: 'preset', value: scale },
+        scale: this.preservedScale(scale),
       };
       return;
     }
-    if (typeof scale === 'number') viewer.currentScale = scale;
-    else viewer.currentScaleValue = scale;
+    this.applyScale(viewer, scale);
   }
 
   setReadingColors(colors: ResolvedReadingColors): void {
@@ -304,6 +306,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.colorRebindActive = false;
     this.requestedPageColors = null;
     this.preservedViewState = null;
+    this.clearPendingInteractions();
     attempt(() => {
       this.disconnectResizeObserver();
     });
@@ -351,7 +354,11 @@ export class PdfDocumentViewport implements DocumentViewport {
   private bindEvents(): void {
     this.bind('pagesinit', () => {
       this.pagesInitialized = true;
-      if (this.viewer !== null) this.viewer.currentScaleValue = 'page-width';
+      if (this.viewer !== null) {
+        this.applyScale(this.viewer, this.pendingScale ?? 'page-width');
+        this.pendingScale = null;
+      }
+      this.flushPendingLocation();
     });
     this.bind('pagechanging', (event) => {
       this.onPageChanging(event);
@@ -498,6 +505,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       if (state.scale.type === 'preset') viewer.currentScaleValue = state.scale.value;
       else viewer.currentScale = state.scale.value;
       viewer.currentPageNumber = state.pageNumber;
+      this.flushPendingLocation();
     } catch (cause) {
       this.handleRenderError(state.pageNumber, cause);
     }
@@ -514,6 +522,45 @@ export class PdfDocumentViewport implements DocumentViewport {
       scale = { type: 'numeric', value: viewer.currentScale };
     }
     return { pageNumber: viewer.currentPageNumber, scale };
+  }
+
+  private applyScale(viewer: PdfViewer, scale: ScaleRequest): void {
+    if (typeof scale === 'number') viewer.currentScale = scale;
+    else viewer.currentScaleValue = scale;
+  }
+
+  private preservedScale(scale: ScaleRequest): PreservedScale {
+    return typeof scale === 'number'
+      ? { type: 'numeric', value: scale }
+      : { type: 'preset', value: scale };
+  }
+
+  private navigateTo(location: DocumentLocation): void {
+    const linkService = this.requireMounted(this.linkService);
+    const pageNumber = location.pageIndex + 1;
+    if (location.x === undefined && location.y === undefined) {
+      linkService.goToPage(pageNumber);
+      return;
+    }
+    linkService.goToXY(pageNumber, location.x ?? 0, location.y ?? 0);
+  }
+
+  private flushPendingLocation(): void {
+    if (
+      this.pendingLocation === null ||
+      !this.pagesInitialized ||
+      this.colorRebindActive ||
+      this.pendingPagesInit !== null
+    )
+      return;
+    const location = this.pendingLocation;
+    this.pendingLocation = null;
+    this.navigateTo(location);
+  }
+
+  private clearPendingInteractions(): void {
+    this.pendingLocation = null;
+    this.pendingScale = null;
   }
 
   private readonly onResize = (): void => {
