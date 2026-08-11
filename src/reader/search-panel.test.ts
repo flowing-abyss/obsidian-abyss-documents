@@ -33,6 +33,7 @@ describe('SearchPanel', () => {
   it('accepts ordered partial results, rejects stale updates, and limits long result DOM', () => {
     const handlers = callbacks();
     const panel = new SearchPanel(createDiv(), handlers);
+    expect(panel.input.hasAttribute('data-document-search')).toBe(true);
     enterQuery(panel, 'needle');
 
     panel.setResults(results('needle', 75, false));

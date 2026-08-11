@@ -1,5 +1,11 @@
 import type * as PdfjsLibModule from 'pdfjs-dist/build/pdf.mjs';
 import type * as PdfjsViewerModule from 'pdfjs-dist/web/pdf_viewer.mjs';
+import {
+  incrementReaderCounter,
+  markReaderPerformance,
+  setReaderCounter,
+  setReaderPdfjsVersion,
+} from '../../reader-performance.js';
 
 const PDFJS_VERSION = '6.2.108';
 
@@ -44,6 +50,7 @@ export class PdfRuntimeLoader {
 
   load(): Promise<PdfRuntime> {
     if (this.loadPromise !== null) return this.loadPromise;
+    incrementReaderCounter('pdfRuntimeLoads');
 
     const generation = this.generation;
     const pending = this.loadOnce();
@@ -63,20 +70,33 @@ export class PdfRuntimeLoader {
 
   dispose(): void {
     this.generation += 1;
-    if (this.workerUrl !== null) URL.revokeObjectURL(this.workerUrl);
+    if (this.workerUrl !== null) {
+      URL.revokeObjectURL(this.workerUrl);
+      markReaderPerformance('worker-revoked');
+    }
     this.workerUrl = null;
+    setReaderCounter('workerUrlsActive', 0);
     this.loadPromise = null;
   }
 
   private async loadOnce(): Promise<PdfRuntime> {
     const generation = this.generation;
+    incrementReaderCounter('pdfImports');
+    markReaderPerformance('pdf-imports-start');
     const { gunzipSync, workerPayload, pdfjsLib, pdfjsViewer } = await this.importDependencies();
+    markReaderPerformance('pdf-imports-end');
     const compressed = Uint8Array.from(atob(workerPayload.default), (character) =>
       character.charCodeAt(0),
     );
+    incrementReaderCounter('gzipDecodes');
+    markReaderPerformance('gzip-decode-start');
     const workerSource = gunzipSync(compressed);
+    markReaderPerformance('gzip-decode-end');
     const workerBytes = workerSource.slice().buffer;
     const workerUrl = URL.createObjectURL(new Blob([workerBytes], { type: 'text/javascript' }));
+    incrementReaderCounter('blobsCreated');
+    setReaderCounter('workerUrlsActive', 1);
+    markReaderPerformance('blob-created');
 
     try {
       if (generation !== this.generation) throw new DOMException('Disposed', 'AbortError');
@@ -85,6 +105,7 @@ export class PdfRuntimeLoader {
       }
       this.workerUrl = workerUrl;
       pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+      setReaderPdfjsVersion(pdfjsLib.version);
       return {
         pdfjsLib: pdfjsLib as PdfjsLib,
         pdfjsViewer: pdfjsViewer as PdfjsViewer,

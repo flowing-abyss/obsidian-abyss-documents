@@ -1,9 +1,10 @@
 import esbuild from 'esbuild';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
 import { gzipSync } from 'node:zlib';
 import process from 'process';
 import { createBuildStylesPlugin } from './scripts/build-styles-plugin.mjs';
+import { createPdfjsViewerPlugin } from './scripts/pdfjs-viewer-plugin.mjs';
 
 // Shared with release-check.mjs, which re-checks the same threshold against an
 // already-built main.js — both read this key so the two checks can't drift apart.
@@ -25,6 +26,7 @@ const prod = args.includes('production');
 const analyze = args.includes('analyze');
 
 const buildStylesPlugin = createBuildStylesPlugin();
+const pdfjsViewerPlugin = createPdfjsViewerPlugin();
 
 const gzipBase64Plugin = {
   name: 'gzip-base64',
@@ -88,11 +90,13 @@ const context = await esbuild.context({
   outfile: 'main.js',
   minify: prod,
   metafile: prod || analyze,
-  plugins: [buildStylesPlugin, gzipBase64Plugin, nosourcemapPlugin],
+  plugins: [buildStylesPlugin, pdfjsViewerPlugin, gzipBase64Plugin, nosourcemapPlugin],
 });
 
 if (prod) {
   const result = await context.rebuild();
+  mkdirSync('artifacts', { recursive: true });
+  writeFileSync('artifacts/build-meta.json', `${JSON.stringify(result.metafile, null, 2)}\n`);
   if (analyze) {
     console.info(await esbuild.analyzeMetafile(result.metafile, { verbose: false }));
   }

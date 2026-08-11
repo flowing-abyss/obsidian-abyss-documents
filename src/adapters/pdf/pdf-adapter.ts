@@ -1,6 +1,7 @@
 import type { TFile, Vault } from 'obsidian';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import type { DocumentAdapter, DocumentSession } from '../../document-core/document.js';
+import { incrementReaderCounter, markReaderPerformance } from '../../reader-performance.js';
 import { mapPdfOpenFailure } from './pdf-mappers.js';
 import type { PdfRuntimeLoader } from './pdf-runtime.js';
 import { PdfDocumentSession, type PdfViewportFactory } from './pdf-session.js';
@@ -63,6 +64,8 @@ export class PdfDocumentAdapter implements DocumentAdapter {
       signal.throwIfAborted();
       const bytes = await this.vault.readBinary(file);
       signal.throwIfAborted();
+      incrementReaderCounter('workersStarted');
+      markReaderPerformance('worker-start');
       const loadingTask = runtime.pdfjsLib.getDocument({ data: bytes });
       const pdf = await waitForDocument(loadingTask, signal);
       if (signal.aborted) {

@@ -1,6 +1,11 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
 import type { ViewportEvent } from '../../document-core/document.js';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../../reader-performance.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfTextSearch } from './pdf-text-search.js';
 import { createPdfDocumentViewport, PdfDocumentViewport } from './pdf-viewport.js';
@@ -269,6 +274,8 @@ async function mountedViewport(
 
 describe('PdfDocumentViewport', () => {
   it('constructs the public PDF.js viewer stack with text, annotations, and bounded canvases', async () => {
+    beginPluginActivation();
+    endPluginActivation();
     const fixture = await mountedViewport();
     const viewer = fixture.runtime.state.viewer;
     if (viewer === undefined) throw new Error('Expected a fake viewer.');
@@ -285,6 +292,17 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.documents).toEqual([fixture.documentProxy]);
     expect(viewer.findDocumentsBeforeViewerOwnership).toEqual([[]]);
     expect(fixture.host.querySelectorAll('.page')).toHaveLength(3);
+    expect(
+      fixture.host.querySelector('.pdfViewerContainer')?.getAttribute('data-pinch-capable'),
+    ).toBe('true');
+    fixture.runtime.state.eventBus?.dispatch('textlayerrendered', { pageNumber: 1 });
+    fixture.runtime.state.eventBus?.dispatch('pagerendered', { pageNumber: 1 });
+    fixture.runtime.state.eventBus?.dispatch('textlayerrendered', { pageNumber: 2 });
+    fixture.runtime.state.eventBus?.dispatch('pagerendered', { pageNumber: 2 });
+    const marks = readerPerformanceSnapshot().marks.map(({ name }) => name);
+    expect(marks).toEqual(expect.arrayContaining(['first-text-layer', 'first-usable-page']));
+    expect(marks.filter((name) => name === 'text-layer')).toHaveLength(2);
+    expect(marks.filter((name) => name === 'usable-page')).toHaveLength(2);
   });
 
   it('maps only the supported PDF.js viewer events into core viewport events', async () => {

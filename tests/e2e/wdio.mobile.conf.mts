@@ -12,7 +12,7 @@ import { parseObsidianVersions } from 'wdio-obsidian-service';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const cacheDir = path.resolve(repoRoot, '.obsidian-cache');
-const vault = path.resolve(repoRoot, 'tests', 'vaults', 'minimal');
+const vault = path.resolve(repoRoot, 'dev-documents-vault');
 
 // Obsidian's Android app requires 1.8.10+; beta versions aren't published for Android.
 // "earliest" resolves to manifest.json's minAppVersion, which this template sets to
@@ -22,7 +22,7 @@ const ANDROID_MIN_VERSION = '1.8.10';
 const versionsSpec = (
   env['OBSIDIAN_MOBILE_VERSIONS'] ??
   env['OBSIDIAN_VERSIONS'] ??
-  'earliest/earliest latest/latest'
+  'earliest/earliest 1.13.4/1.13.4'
 ).replace(/\bearliest\b/g, ANDROID_MIN_VERSION);
 const versions = await parseObsidianVersions(versionsSpec, { cacheDir });
 
@@ -36,7 +36,7 @@ export const config: WebdriverIO.Config = {
 
   // Resolved relative to this config file's own directory (tests/e2e/), not the cwd
   // it's invoked from.
-  specs: ['./**/*.e2e.ts'],
+  specs: ['./reader.mobile.e2e.ts'],
 
   maxInstances: 1, // Parallel tests don't work under Appium.
   hostname: env['APPIUM_HOST'] ?? 'localhost',

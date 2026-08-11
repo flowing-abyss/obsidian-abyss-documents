@@ -7,6 +7,8 @@ describe('ReaderShell', () => {
 
     const shell = new ReaderShell(host);
 
+    expect(shell.root.hasAttribute('data-abyss-document')).toBe(true);
+    expect(shell.root.getAttribute('data-reading-profile')).toBe('auto');
     expect(shell.root.querySelector('[data-region="toolbar"]')).not.toBeNull();
     expect(shell.root.querySelector('[data-region="document"]')).toBe(shell.documentHost);
     expect(shell.root.querySelector('[data-region="sidebar"]')).toBeNull();

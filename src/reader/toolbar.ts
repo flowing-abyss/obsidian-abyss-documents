@@ -277,6 +277,7 @@ export class ReaderToolbar {
 
   private createMenu(): Menu {
     const menu = new Menu();
+    menu.setUseNativeMenu(false);
     this.menus.add(menu);
     menu.setParentElement(this.root);
     menu.onHide(() => {

@@ -8,13 +8,13 @@ const cacheDir = path.resolve(repoRoot, '.obsidian-cache');
 // lives in `capabilities`, not in separate vault folders. Add a second vault under
 // tests/vaults/ once there's real persistence/migration behavior worth fixturing
 // against; an empty "hostile" or "migration-v1" vault today would test nothing.
-const vault = path.resolve(repoRoot, 'tests', 'vaults', 'minimal');
+const vault = path.resolve(repoRoot, 'dev-documents-vault');
 
 // Test against both the oldest Obsidian version this plugin claims to support
 // (manifest.json's minAppVersion, via "earliest") and the newest stable release.
 // Override for a one-off run, e.g.: OBSIDIAN_VERSIONS="1.8.0/1.8.0" pnpm run test:e2e
 const desktopVersions = await parseObsidianVersions(
-  env['OBSIDIAN_VERSIONS'] ?? 'earliest/earliest latest/latest',
+  env['OBSIDIAN_VERSIONS'] ?? 'earliest/earliest 1.13.4/1.13.4',
   {
     cacheDir,
   },
@@ -32,7 +32,7 @@ export const config: WebdriverIO.Config = {
 
   // Resolved relative to this config file's own directory (tests/e2e/), not the cwd
   // it's invoked from.
-  specs: ['./**/*.e2e.ts'],
+  specs: ['./smoke.e2e.ts', './reader.e2e.ts'],
 
   maxInstances: Number(env['WDIO_MAX_INSTANCES'] ?? 2),
 
@@ -52,6 +52,7 @@ export const config: WebdriverIO.Config = {
   reporters: ['obsidian'],
 
   mochaOpts: {
+    grep: env['E2E_GREP'],
     ui: 'bdd',
     timeout: 60 * 1000,
   },

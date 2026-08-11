@@ -10,6 +10,11 @@ import type {
 import { DocumentOpenError } from '../document-core/errors.js';
 import type { ReadingProfileId } from '../document-core/reading.js';
 import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../reader-performance.js';
+import {
   ReaderController,
   type ReaderProfileState,
   type ShellFactory,
@@ -154,6 +159,8 @@ function capturingShellFactory() {
 
 describe('ReaderController', () => {
   it('mounts a session viewport into the shell document region', async () => {
+    beginPluginActivation();
+    endPluginActivation();
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const createdViewport = viewport();
@@ -168,6 +175,9 @@ describe('ReaderController', () => {
     expect(documentHost).not.toBeNull();
     expect(createdViewport.mount).toHaveBeenCalledWith(documentHost);
     expect(host.querySelector('[data-region="sidebar"]')).toBeNull();
+    expect(
+      readerPerformanceSnapshot().marks.filter(({ name }) => name === 'reader-intent'),
+    ).toHaveLength(1);
   });
 
   it('closes the previous viewport and session before loading another file', async () => {
@@ -370,6 +380,7 @@ describe('ReaderController', () => {
 
     expect(profiles.profiles[pdf.path]).toBe('light');
     expect(createdViewport.setReadingColors).toHaveBeenLastCalledWith(BUILTIN_PROFILES.light);
+    expect(shell.created.root.getAttribute('data-reading-profile')).toBe('light');
   });
 
   it('uses the global default and leaves the fingerprint map untouched when remembering is off', async () => {

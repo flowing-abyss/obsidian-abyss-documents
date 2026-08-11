@@ -222,6 +222,7 @@ export class SearchPanel {
     input.placeholder = 'Search document';
     input.setAttribute('aria-label', 'Search document');
     input.dataset['searchInput'] = '';
+    input.dataset['documentSearch'] = '';
     const previous = this.iconButton('Previous result', 'chevron-up');
     previous.dataset['action'] = 'previous-result';
     const next = this.iconButton('Next result', 'chevron-down');

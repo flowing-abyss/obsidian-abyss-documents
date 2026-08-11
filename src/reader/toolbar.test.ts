@@ -154,8 +154,9 @@ describe('ReaderToolbar', () => {
     expect(intents).toEqual([{ type: 'next-page' }, { type: 'previous-page' }]);
   });
 
-  it('emits profile and fit or zoom choices from native menus', () => {
+  it('uses Obsidian DOM menus so reader controls stay testable and theme-aware', () => {
     const entries = captureMenuItems();
+    const setUseNativeMenu = vi.spyOn(Menu.prototype, 'setUseNativeMenu');
     const { host, intents } = fixture();
     const profile = host.querySelector<HTMLButtonElement>('[data-control="profile"]');
     const overflow = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
@@ -168,6 +169,9 @@ describe('ReaderToolbar', () => {
     entries.find((entry) => entry.title === 'Fit width')?.click();
     entries.find((entry) => entry.title === '125%')?.click();
 
+    expect(setUseNativeMenu).toHaveBeenCalledTimes(2);
+    expect(setUseNativeMenu).toHaveBeenNthCalledWith(1, false);
+    expect(setUseNativeMenu).toHaveBeenNthCalledWith(2, false);
     expect(intents).toEqual([
       { type: 'set-profile', profile: 'dark' },
       { type: 'set-scale', scale: 'page-width' },

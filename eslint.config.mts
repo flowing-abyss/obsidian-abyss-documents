@@ -31,6 +31,7 @@ export default defineConfig(
     '.forge',
     '.opencode',
     '.pi',
+    'dev-documents-vault',
   ]),
   {
     languageOptions: {
@@ -138,6 +139,7 @@ export default defineConfig(
     rules: {
       'max-lines-per-function': 'off',
       'max-statements': 'off',
+      complexity: 'off',
       'sonarjs/cognitive-complexity': 'off',
       '@typescript-eslint/explicit-function-return-type': 'off',
     },
@@ -152,7 +154,9 @@ export default defineConfig(
     files: [
       '*.cjs',
       'release-check.mjs',
-      'scripts/*.mjs',
+      'scripts/*.{mjs,mts,ts}',
+      'tests/fixtures/**/*.{mts,ts}',
+      'tests/performance/**/*.ts',
       'tests/e2e/**/*.ts',
       'tests/e2e/**/*.mts',
     ],
@@ -161,6 +165,8 @@ export default defineConfig(
     },
     rules: {
       'obsidianmd/no-nodejs-modules': 'off',
+      'obsidianmd/hardcoded-config-path': 'off',
+      'obsidianmd/prefer-window-timers': 'off',
       'obsidianmd/rule-custom-message': 'off',
       'no-console': 'off',
       // Core no-undef can't see TS ambient global namespaces (e.g. `WebdriverIO.Config`)

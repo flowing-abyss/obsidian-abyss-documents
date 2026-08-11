@@ -91,6 +91,7 @@ export class ReaderSidebar {
     button.type = 'button';
     button.className = 'abyss-reader-sidebar-tab';
     button.dataset['sidebarTab'] = tab;
+    button.dataset['tab'] = tab;
     button.setAttribute('role', 'tab');
     button.textContent = label;
     button.addEventListener('click', () => {

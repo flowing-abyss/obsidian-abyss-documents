@@ -12,15 +12,21 @@ function callbacks(): ReaderSidebarCallbacks {
   };
 }
 
+function toggleSidebar(shell: ReaderShell, handlers: ReaderSidebarCallbacks): void {
+  const sidebar = shell.sidebar;
+  if (sidebar?.isOpen === true) {
+    shell.closeSidebar();
+    return;
+  }
+  shell.openSidebar(sidebar?.activeTab ?? 'outline', handlers);
+}
+
 describe('ReaderSidebar', () => {
   it('keeps sidebar DOM absent until an explicit open and remembers the selected tab', () => {
     const host = createDiv();
     const handlers = callbacks();
     const onIntent = (intent: ReaderShellIntent): void => {
-      if (intent.type === 'toggle-sidebar') {
-        if (shell.sidebar?.isOpen === true) shell.closeSidebar();
-        else shell.openSidebar(shell.sidebar?.activeTab ?? 'outline', handlers);
-      }
+      if (intent.type === 'toggle-sidebar') toggleSidebar(shell, handlers);
     };
     const shell = new ReaderShell(host, onIntent);
 
@@ -29,7 +35,11 @@ describe('ReaderSidebar', () => {
 
     shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
     expect(shell.sidebar?.activeTab).toBe('outline');
+    expect(shell.sidebar?.root.querySelector('[data-tab="outline"]')).not.toBeNull();
     shell.sidebar?.root.querySelector<HTMLButtonElement>('[data-sidebar-tab="search"]')?.click();
+    expect(
+      shell.sidebar?.root.querySelector('[data-tab="search"]')?.getAttribute('aria-selected'),
+    ).toBe('true');
     expect(handlers.onTabChange).toHaveBeenCalledWith('search');
     shell.closeSidebar();
     shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();

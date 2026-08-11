@@ -1,0 +1,43 @@
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { prepareSmokeVault, stageCommunityPackage } from './smoke-community-package.mjs';
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
+  );
+});
+
+describe('stageCommunityPackage', () => {
+  it('copies only the three files delivered by the Community installer', async () => {
+    const source = await mkdtemp(path.join(tmpdir(), 'abyss-package-source-'));
+    const destination = await mkdtemp(path.join(tmpdir(), 'abyss-package-destination-'));
+    temporaryDirectories.push(source, destination);
+    await Promise.all([
+      writeFile(path.join(source, 'main.js'), 'module.exports = {};\n'),
+      writeFile(path.join(source, 'manifest.json'), '{"id":"abyss-documents","version":"0.1.0"}'),
+      writeFile(path.join(source, 'styles.css'), '.abyss-documents {}\n'),
+      mkdir(path.join(source, 'node_modules')),
+      writeFile(path.join(source, 'secret-development-file.ts'), 'do not package'),
+    ]);
+
+    const staged = await stageCommunityPackage(source, destination);
+
+    expect(staged.version).toBe('0.1.0');
+    expect(await readdir(destination)).toEqual(['main.js', 'manifest.json', 'styles.css']);
+  });
+
+  it('prepares the minimum Obsidian vault configuration required by the real-app harness', async () => {
+    const vault = await mkdtemp(path.join(tmpdir(), 'abyss-package-vault-'));
+    temporaryDirectories.push(vault);
+
+    await prepareSmokeVault(vault);
+
+    expect(await readFile(path.join(vault, '.obsidian', 'app.json'), 'utf8')).toBe('{}\n');
+    expect(await readdir(path.join(vault, 'Documents'))).toContain('text-12-pages.pdf');
+  });
+});

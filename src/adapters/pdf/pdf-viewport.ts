@@ -7,6 +7,12 @@ import type {
 } from '../../document-core/document.js';
 import { TypedEventSource } from '../../document-core/events.js';
 import type { ResolvedReadingColors } from '../../document-core/reading.js';
+import {
+  incrementReaderCounter,
+  markReaderPerformance,
+  markReaderPerformanceOnce,
+  maximizeReaderCounter,
+} from '../../reader-performance.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import type { PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
@@ -103,6 +109,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
     const root = createDiv();
     root.className = 'pdfViewerContainer';
+    root.dataset['pinchCapable'] = 'true';
     root.tabIndex = 0;
     const viewerElement = createDiv();
     viewerElement.className = 'pdfViewer';
@@ -336,6 +343,11 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.bind('pagerendered', (event) => {
       this.onPageRendered(event);
     });
+    this.bind('textlayerrendered', () => {
+      incrementReaderCounter('firstTextLayers');
+      markReaderPerformanceOnce('first-text-layer');
+      markReaderPerformance('text-layer');
+    });
   }
 
   private bind(name: string, listener: PdfEventListener): void {
@@ -380,6 +392,13 @@ export class PdfDocumentViewport implements DocumentViewport {
     }
     this.failedPages.delete(pageNumber);
     this.pageElement(pageNumber)?.querySelector('[data-render-error]')?.remove();
+    incrementReaderCounter('firstUsablePages');
+    markReaderPerformanceOnce('first-usable-page');
+    markReaderPerformance('usable-page');
+    maximizeReaderCounter(
+      'maxRenderedPagesDuringLongNavigation',
+      this.viewerElement?.querySelectorAll('canvas').length ?? 0,
+    );
   }
 
   private handleRenderError(pageNumber: number, cause: unknown): void {

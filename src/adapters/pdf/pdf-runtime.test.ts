@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../../reader-performance.js';
 import { PdfRuntimeLoader } from './pdf-runtime.js';
 
 const PDFJS_VERSION = '6.2.108';
@@ -78,6 +83,8 @@ describe('PdfRuntimeLoader', () => {
   });
 
   it('creates one worker URL only on first load and revokes it on dispose', async () => {
+    beginPluginActivation();
+    endPluginActivation();
     const { createObjectURL, revokeObjectURL } = stubWorkerUrls();
     const importRuntime = vi.fn(async () => runtimeDependencies());
     const loader = new PdfRuntimeLoader(importRuntime);
@@ -90,12 +97,20 @@ describe('PdfRuntimeLoader', () => {
     expect(left.version).toBe(PDFJS_VERSION);
     expect(importRuntime).toHaveBeenCalledOnce();
     expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(readerPerformanceSnapshot().counters).toMatchObject({
+      blobsCreated: 1,
+      gzipDecodes: 1,
+      pdfImports: 1,
+      pdfRuntimeLoads: 1,
+      workerUrlsActive: 1,
+    });
 
     loader.dispose();
     loader.dispose();
 
     expect(revokeObjectURL).toHaveBeenCalledOnce();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:pdf-worker');
+    expect(readerPerformanceSnapshot().counters.workerUrlsActive).toBe(0);
   });
 
   it('clears a failed single-flight load so retry can load again', async () => {

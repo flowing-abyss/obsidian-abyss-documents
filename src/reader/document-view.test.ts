@@ -3,6 +3,7 @@ import {
   TFile as MockTFile,
   WorkspaceLeaf as MockWorkspaceLeaf,
   Notice,
+  Scope,
 } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { DocumentOpenError } from '../document-core/errors.js';
@@ -145,6 +146,19 @@ describe('AbyssDocumentView', () => {
     expect(reader.showOutline).toHaveBeenCalledOnce();
     expect(reader.searchDocument).toHaveBeenCalledOnce();
     expect(reader.refreshReadingSettings).toHaveBeenCalledOnce();
+  });
+
+  it('registers view-local Mod+F through the Obsidian scope', () => {
+    const reader = controller();
+    const register = vi.spyOn(Scope.prototype, 'register');
+
+    viewFixture(reader.reader);
+
+    expect(register).toHaveBeenCalledWith(['Mod'], 'f', expect.any(Function));
+    const callback = register.mock.calls[0]?.[2];
+    if (callback === undefined) throw new Error('Expected the scoped search callback.');
+    expect(callback(new KeyboardEvent('keydown'), {} as never)).toBe(false);
+    expect(reader.searchDocument).toHaveBeenCalledOnce();
   });
 
   it('ignores unrelated clicks and presents a safe reason for a non-error failure', async () => {

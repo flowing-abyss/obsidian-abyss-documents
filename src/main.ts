@@ -1,9 +1,14 @@
-import { Plugin } from 'obsidian';
+import { FileView, Plugin, type WorkspaceLeaf } from 'obsidian';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
 import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
 import { PluginDataStore, type PluginDataV1 } from './plugin-data.js';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  markReaderPerformance,
+} from './reader-performance.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
 import { ReaderController, type ReaderProfileState } from './reader/reader-controller.js';
 import { ReaderShell } from './reader/reader-shell.js';
@@ -11,11 +16,89 @@ import { AbyssDocumentsSettingTab } from './settings-tab.js';
 
 export const PLUGIN_ID = 'abyss-documents';
 
+class CorePdfLeafHandoff {
+  private active = true;
+  private readonly handoffsInFlight = new Set<WorkspaceLeaf>();
+  private timer: number | null = null;
+
+  constructor(private readonly plugin: AbyssDocumentsPlugin) {}
+
+  register(): void {
+    const workspace = this.plugin.app.workspace;
+    this.plugin.registerEvent(workspace.on('active-leaf-change', this.schedule));
+    this.plugin.registerEvent(workspace.on('file-open', this.schedule));
+    this.plugin.registerEvent(workspace.on('layout-change', this.schedule));
+    markReaderPerformance('pdf-handoff-ready');
+    workspace.onLayoutReady(this.schedule);
+    this.plugin.register(this.dispose);
+  }
+
+  private readonly dispose = (): void => {
+    markReaderPerformance('pdf-handoff-cleanup');
+    this.active = false;
+    if (this.timer !== null) window.clearTimeout(this.timer);
+    this.timer = null;
+    this.handoffsInFlight.clear();
+  };
+
+  private readonly schedule = (): void => {
+    if (!this.active || this.timer !== null) return;
+    markReaderPerformance('pdf-handoff-scheduled');
+    this.timer = window.setTimeout(this.scan, 0);
+  };
+
+  private readonly scan = (): void => {
+    this.timer = null;
+    if (!this.active) return;
+    markReaderPerformance('pdf-handoff-scan');
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType('pdf')) this.handoff(leaf);
+  };
+
+  private handoff(leaf: WorkspaceLeaf): void {
+    if (this.handoffsInFlight.has(leaf)) return;
+    const viewState = leaf.getViewState();
+    const filePath = corePdfPath(leaf);
+    if (viewState.type !== 'pdf' || filePath === undefined) return;
+    markReaderPerformance('pdf-handoff-start');
+    this.handoffsInFlight.add(leaf);
+    void leaf
+      .setViewState({
+        ...viewState,
+        state: { ...viewState.state, file: filePath },
+        type: DOCUMENT_VIEW_TYPE,
+      })
+      .catch((error: unknown) => {
+        console.error(`[${PLUGIN_ID}] Could not open PDF in the document reader`, {
+          cause: error,
+          path: filePath,
+        });
+      })
+      .finally(() => this.handoffsInFlight.delete(leaf));
+  }
+}
+
+function corePdfPath(leaf: WorkspaceLeaf): string | undefined {
+  const viewState = leaf.getViewState();
+  const stateFile =
+    typeof viewState.state?.['file'] === 'string' ? viewState.state['file'] : undefined;
+  const filePath = leaf.view instanceof FileView ? (leaf.view.file?.path ?? stateFile) : stateFile;
+  return filePath?.toLocaleLowerCase().endsWith('.pdf') === true ? filePath : undefined;
+}
+
 export default class AbyssDocumentsPlugin extends Plugin {
   data!: PluginDataV1;
   protected readonly runtimeLoader = new PdfRuntimeLoader();
 
   override async onload(): Promise<void> {
+    beginPluginActivation(this.manifest.version);
+    try {
+      await this.loadPlugin();
+    } finally {
+      endPluginActivation();
+    }
+  }
+
+  private async loadPlugin(): Promise<void> {
     const store = new PluginDataStore(this);
     this.data = await store.load();
     const registry = new DocumentAdapterRegistry([
@@ -62,7 +145,10 @@ export default class AbyssDocumentsPlugin extends Plugin {
       }),
     );
     this.registerView(DOCUMENT_VIEW_TYPE, (leaf) => new AbyssDocumentView(leaf, services));
-    this.registerExtensions(['pdf'], DOCUMENT_VIEW_TYPE);
+    // Obsidian's built-in PDF view already owns the `pdf` extension and rejects
+    // a second extension registration. The public workspace handoff below runs
+    // after core view state settles and replaces only real PDF leaves.
+    new CorePdfLeafHandoff(this).register();
     this.addCommand({
       id: 'show-outline',
       name: 'Show document outline',

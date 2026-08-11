@@ -17,7 +17,12 @@ export default defineConfig({
     globals: false,
     passWithNoTests: false,
     environment: 'jsdom',
-    include: ['src/**/*.test.ts', 'scripts/**/*.test.mjs'],
+    include: [
+      'src/**/*.test.ts',
+      'scripts/**/*.test.{mjs,ts,mts}',
+      'tests/fixtures/**/*.test.ts',
+      'tests/performance/**/*.test.ts',
+    ],
     setupFiles: ['obsidian-test-mocks/vitest-setup'],
     testTimeout: 5_000,
     hookTimeout: 10_000,

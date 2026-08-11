@@ -32,6 +32,8 @@ export class ReaderShell {
     options: ReaderShellOptions = {},
   ) {
     this.root = host.createDiv({ cls: 'abyss-documents' });
+    this.root.dataset['abyssDocument'] = '';
+    this.root.dataset['readingProfile'] = 'auto';
     this.root.style.setProperty(
       '--abyss-reader-sidebar-width',
       `${boundedSidebarWidth(options.sidebarWidth)}px`,
@@ -61,9 +63,9 @@ export class ReaderShell {
       event.stopPropagation();
       onIntent({ type: 'open-sidebar', tab: 'search' });
     };
-    this.root.addEventListener('keydown', onKeyDown);
+    this.root.addEventListener('keydown', onKeyDown, true);
     this.cleanups.push(() => {
-      this.root.removeEventListener('keydown', onKeyDown);
+      this.root.removeEventListener('keydown', onKeyDown, true);
     });
   }
 

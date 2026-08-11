@@ -1,4 +1,4 @@
-import { FileView, Notice, type TFile, type WorkspaceLeaf } from 'obsidian';
+import { FileView, Notice, Scope, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { ownerWindow } from './owner-dom.js';
 
 export const DOCUMENT_VIEW_TYPE = 'abyss-document-view';
@@ -22,6 +22,11 @@ export class AbyssDocumentView extends FileView {
   constructor(leaf: WorkspaceLeaf, services: AbyssDocumentViewServices) {
     super(leaf);
     this.controller = services.createController();
+    this.scope = new Scope(this.app.scope);
+    this.scope.register(['Mod'], 'f', () => {
+      this.controller.searchDocument();
+      return false;
+    });
     this.registerDomEvent(this.contentEl, 'click', (event) => {
       const target = event.target;
       if (

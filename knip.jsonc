@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "project": ["src/**/*.ts", "*.mjs", "*.mts", "tests/e2e/**/*.ts", "tests/e2e/**/*.mts"],
-  "entry": ["tests/e2e/**/*.e2e.ts"],
+  "entry": ["tests/e2e/**/*.e2e.ts", "tests/e2e/wdio.package.conf.mts"],
   "ignoreDependencies": [
     // wdio services/frameworks/drivers referenced by plugin-name string in the wdio
     // configs (`services: ['obsidian', ['appium', ...]]`, `framework: 'mocha'`), not

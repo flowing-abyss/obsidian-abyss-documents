@@ -6,6 +6,7 @@ import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import type { DocumentSession, DocumentViewport } from './document-core/document.js';
 import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1 } from './plugin-data.js';
+import { readerPerformanceSnapshot } from './reader-performance.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
 import { BUILTIN_PROFILES } from './reader/reading-profiles.js';
 import { AbyssDocumentsSettingTab } from './settings-tab.js';
@@ -138,6 +139,9 @@ describe('AbyssDocumentsPlugin', () => {
     expect(loadRuntime).not.toHaveBeenCalled();
     expect(createObjectURL).not.toHaveBeenCalled();
     expect(createWorker).not.toHaveBeenCalled();
+    expect(readerPerformanceSnapshot()).toMatchObject({
+      counters: { pdfRuntimeLoads: 0, pdfWorkDuringPluginOnload: 0 },
+    });
 
     plugin.onunload();
   });
@@ -153,7 +157,7 @@ describe('AbyssDocumentsPlugin', () => {
 
     await plugin.onload();
 
-    expect(registerExtensions).toHaveBeenCalledWith(['pdf'], DOCUMENT_VIEW_TYPE);
+    expect(registerExtensions).not.toHaveBeenCalled();
     const registration = registerView.mock.calls.find(([type]) => type === DOCUMENT_VIEW_TYPE);
     expect(registration).toBeDefined();
     const creator = registration?.[1];
@@ -166,6 +170,159 @@ describe('AbyssDocumentsPlugin', () => {
     if (cleanup === undefined) throw new Error('Expected runtime cleanup registration.');
     cleanup();
     expect(disposeRuntime).toHaveBeenCalledOnce();
+  });
+
+  it('hands a PDF opened by the core view to the registered document view', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf' },
+      });
+    });
+    app.workspace.trigger('file-open', pdfFile(app));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(setViewState).toHaveBeenCalledOnce();
+  });
+
+  it('hands an already-open core PDF over after the workspace layout becomes ready', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+
+    await plugin.onload();
+    app.workspace.setLayoutReady__();
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf' },
+      });
+    });
+  });
+
+  it('coalesces active-leaf, file-open, and layout-change ordering into one PDF handoff', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+
+    await plugin.onload();
+    app.workspace.trigger('active-leaf-change', leaf.asOriginalType3__());
+    app.workspace.trigger('file-open', pdfFile(app));
+    app.workspace.trigger('layout-change');
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('logs a local diagnostic and releases the leaf when the core PDF handoff fails', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const cause = new Error('view rejected');
+    const setViewState = vi.spyOn(leaf, 'setViewState').mockRejectedValueOnce(cause);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledWith(
+        '[abyss-documents] Could not open PDF in the document reader',
+        { cause, path: 'Books/Guide.pdf' },
+      );
+    });
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('cancels a scheduled handoff during plugin cleanup and ignores later workspace events', async () => {
+    vi.useFakeTimers();
+    try {
+      const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+      const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+      const leaf = app.workspace.getLeaf(false);
+      await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+      const setViewState = vi.spyOn(leaf, 'setViewState');
+
+      await plugin.onload();
+      app.workspace.trigger('file-open', pdfFile(app));
+      const cleanups = (plugin as unknown as { cleanups__: Array<() => unknown> }).cleanups__;
+      for (const cleanup of [...cleanups].reverse()) cleanup();
+      for (const cleanup of [...cleanups].reverse()) cleanup();
+      app.workspace.trigger('layout-change');
+      await vi.runAllTimersAsync();
+
+      expect(setViewState).not.toHaveBeenCalled();
+      expect(readerPerformanceSnapshot().marks).toContainEqual(
+        expect.objectContaining({ name: 'pdf-handoff-cleanup' }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not start a second handoff while the same leaf is still in flight', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    let settleHandoff: (() => void) | undefined;
+    const pendingHandoff = new Promise<void>((resolve) => {
+      settleHandoff = resolve;
+    });
+    const setViewState = vi.spyOn(leaf, 'setViewState').mockReturnValue(pendingHandoff);
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledOnce();
+    });
+    app.workspace.trigger('layout-change');
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(setViewState).toHaveBeenCalledOnce();
+    settleHandoff?.();
+    await pendingHandoff;
+  });
+
+  it('ignores non-PDF view states and missing or non-PDF file paths', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    const getLeaves = vi.spyOn(app.workspace, 'getLeavesOfType').mockReturnValue([leaf]);
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+    const getViewState = vi.spyOn(leaf, 'getViewState');
+    await plugin.onload();
+
+    for (const state of [
+      { type: 'markdown', state: { file: 'Books/Guide.pdf' } },
+      { type: 'pdf', state: {} },
+      { type: 'pdf', state: { file: 'Books/Guide.md' } },
+    ] as const) {
+      setViewState.mockClear();
+      getViewState.mockReturnValueOnce(state);
+      app.workspace.trigger('layout-change');
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      expect(setViewState).not.toHaveBeenCalled();
+    }
+    expect(getLeaves).toHaveBeenCalled();
   });
 
   it('registers outline and document-search commands without default hotkeys or name prefixes', async () => {

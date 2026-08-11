@@ -29,6 +29,13 @@ coverage/
 tests/e2e/wdio-logs/
 allure-results/
 
+# Generated PDF-reader qualification vault and QA/performance artifacts
+/dev-documents-vault/
+/artifacts/manual-qa/
+/artifacts/performance/
+/artifacts/build-meta.json
+/docs/
+
 # AI — anchored (leading /) so these only match the generated symlinks at
 # the repo root, not the real files nested under .ai/configs/ that share
 # the same directory names (e.g. .ai/configs/.claude/, .ai/configs/.codex/).
@@ -54,4 +61,3 @@ allure-results/
 /AGENTS.md
 /CLAUDE.md
 /opencode.json
-

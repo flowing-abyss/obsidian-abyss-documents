@@ -9,6 +9,7 @@ import type {
 } from '../document-core/document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../document-core/errors.js';
 import type { ReadingProfileId } from '../document-core/reading.js';
+import { markReaderPerformance, markReaderPerformanceOnce } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
@@ -53,6 +54,8 @@ export class ReaderController {
   ) {}
 
   open(file: TFile, host: HTMLElement): Promise<void> {
+    markReaderPerformanceOnce('first-reader-intent');
+    markReaderPerformance('reader-intent');
     this.activeOpen?.abort();
     const abortController = new AbortController();
     this.activeOpen = abortController;
@@ -155,6 +158,7 @@ export class ReaderController {
     shell.toolbar.setPageCount(viewport.pageCount);
     shell.toolbar.setCurrentPage(this.currentPageIndex);
     shell.toolbar.setProfile(this.currentProfile);
+    shell.root.dataset['readingProfile'] = this.currentProfile;
     const unsubscribeViewport = viewport.onEvent((event) => {
       this.handleViewportEvent(viewport, shell, event);
     });
@@ -386,6 +390,7 @@ export class ReaderController {
       viewport.setReadingColors(this.profileService.resolve(profile, shell.obsidianTheme));
       this.currentProfile = profile;
       shell.toolbar.setProfile(profile);
+      shell.root.dataset['readingProfile'] = profile;
     } catch (cause) {
       new Notice(`Could not apply ${profile} profile: ${this.reason(cause)}`);
       console.error('[abyss-documents] Failed to apply PDF reading profile', {
