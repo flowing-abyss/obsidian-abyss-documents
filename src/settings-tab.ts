@@ -1,5 +1,10 @@
 import { Notice, PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
-import type { ReadingProfileId, ResolvedReadingColors } from './document-core/reading.js';
+import type {
+  ReaderPages,
+  ReaderScrolling,
+  ReadingProfileId,
+  ResolvedReadingColors,
+} from './document-core/reading.js';
 import type { PluginDataStore } from './plugin-data.js';
 import { normalizeCustomReadingColors } from './reader/reading-profiles.js';
 import type { AnnotationPaletteEntry, PluginSettings } from './settings.js';
@@ -19,6 +24,9 @@ type SettingFieldId =
   | 'reading.custom.imageDim'
   | 'reading.defaultProfile'
   | 'reading.rememberPerDocument'
+  | 'layout.default.pages'
+  | 'layout.default.scrolling'
+  | 'layout.rememberPerDocument'
   | 'annotations.author'
   | 'annotations.markdownTemplate'
   | `annotations.palette.${number}.meaning`;
@@ -84,6 +92,8 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     this.containerEl.addClass('abyss-documents-settings');
     const reading = this.collapsibleSection('Reading appearance', 'reading-appearance');
     this.renderReadingAppearance(reading.body);
+    const layout = this.collapsibleSection('Page layout', 'page-layout');
+    this.renderPageLayout(layout.body);
     const annotations = this.collapsibleSection('Annotations', 'annotations');
     this.renderAnnotations(annotations.body);
     const advanced = this.collapsibleSection('Advanced', 'advanced');
@@ -207,6 +217,81 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
               toggle.setValue(settings.debugLogging);
             },
           });
+        });
+      });
+  }
+
+  private renderPageLayout(container: HTMLElement): void {
+    const { layout } = this.store.snapshot.settings;
+    new Setting(container)
+      .setName('Default pages')
+      .setDesc('Used when a document has no remembered page layout.')
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOptions({ single: 'Single', facing: 'Facing' })
+          .setValue(layout.default.pages)
+          .onChange((value) => {
+            if (!isReaderPages(value)) return;
+            this.updateSettings(
+              (settings) => ({
+                ...settings,
+                layout: {
+                  ...settings.layout,
+                  default: { ...settings.layout.default, pages: value },
+                },
+              }),
+              {
+                field: 'layout.default.pages',
+                synchronize: (settings) => {
+                  dropdown.setValue(settings.layout.default.pages);
+                },
+              },
+            );
+          });
+      });
+    new Setting(container)
+      .setName('Default scrolling')
+      .setDesc('Chooses continuous flow or discrete page navigation by default.')
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOptions({ continuous: 'Continuous', 'page-by-page': 'Page by page' })
+          .setValue(layout.default.scrolling)
+          .onChange((value) => {
+            if (!isReaderScrolling(value)) return;
+            this.updateSettings(
+              (settings) => ({
+                ...settings,
+                layout: {
+                  ...settings.layout,
+                  default: { ...settings.layout.default, scrolling: value },
+                },
+              }),
+              {
+                field: 'layout.default.scrolling',
+                synchronize: (settings) => {
+                  dropdown.setValue(settings.layout.default.scrolling);
+                },
+              },
+            );
+          });
+      });
+    new Setting(container)
+      .setName('Remember layout per document')
+      .setDesc('Restores the last page layout selected for each PDF.')
+      .addToggle((toggle) => {
+        toggle.setValue(layout.rememberPerDocument).onChange((value) => {
+          this.updateSettings(
+            (settings) => ({
+              ...settings,
+              layout: { ...settings.layout, rememberPerDocument: value },
+            }),
+            {
+              field: 'layout.rememberPerDocument',
+              synchronize: (settings) => {
+                toggle.setValue(settings.layout.rememberPerDocument);
+              },
+            },
+          );
         });
       });
   }
@@ -391,4 +476,12 @@ function isReadingProfileId(value: string): value is ReadingProfileId {
     value === 'dark' ||
     value === 'custom'
   );
+}
+
+function isReaderPages(value: string): value is ReaderPages {
+  return value === 'single' || value === 'facing';
+}
+
+function isReaderScrolling(value: string): value is ReaderScrolling {
+  return value === 'continuous' || value === 'page-by-page';
 }

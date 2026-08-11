@@ -189,7 +189,10 @@ function viewerRuntime(
     currentPageNumber = 1;
     currentScale = 1;
     currentScaleValue = 'auto';
+    pagesRotation = 0;
     pageColors: object | null;
+    scrollMode = 0;
+    spreadMode = 0;
 
     constructor(
       readonly options: {
@@ -220,6 +223,8 @@ function viewerRuntime(
         this.currentPageNumber = 1;
         this.currentScale = 1;
         this.currentScaleValue = 'auto';
+        this.scrollMode = 0;
+        this.spreadMode = 0;
         this.options.findController.setDocument(null);
         return;
       }
@@ -254,6 +259,8 @@ function viewerRuntime(
     PDFLinkService: FakeLinkService,
     PDFFindController: FakeFindController,
     PDFViewer: FakeViewer,
+    ScrollMode: { UNKNOWN: -1, VERTICAL: 0, HORIZONTAL: 1, WRAPPED: 2, PAGE: 3 },
+    SpreadMode: { UNKNOWN: -1, NONE: 0, ODD: 1, EVEN: 2 },
   } as unknown as PdfRuntime['pdfjsViewer'];
   return { module, state };
 }
@@ -315,11 +322,13 @@ describe('PdfDocumentViewport', () => {
     eventBus.dispatch('pagechanging', { pageNumber: 2 });
     eventBus.dispatch('scalechanging', { scale: 1.5, presetValue: undefined });
     eventBus.dispatch('scalechanging', { scale: 1.2, presetValue: 'page-width' });
+    eventBus.dispatch('scalechanging', { scale: 0.9, presetValue: 'page-height' });
 
     expect(events).toEqual([
       { type: 'page-change', pageIndex: 1 },
       { type: 'scale-change', scale: 1.5 },
       { type: 'scale-change', scale: 'page-width' },
+      { type: 'scale-change', scale: 'page-height' },
     ]);
   });
 
@@ -340,14 +349,111 @@ describe('PdfDocumentViewport', () => {
     fixture.viewport.focus();
     eventBus.dispatch('pagesinit', {});
 
-    expect(linkService.pages).toEqual([3]);
-    expect(linkService.positions).toEqual([
-      [2, 12, 0],
-      [1, 0, 24],
-    ]);
+    expect(linkService.pages).toEqual([]);
+    expect(linkService.positions).toEqual([[1, 0, 24]]);
     expect(viewer.currentScale).toBe(1);
     expect(viewer.currentScaleValue).toBe('page-fit');
     expect(viewer.focus).toHaveBeenCalledOnce();
+  });
+
+  it('maps every pages and scrolling combination through public PDF.js setters', async () => {
+    const fixture = await mountedViewport(8);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('pagesinit', {});
+    viewer.currentPageNumber = 4;
+
+    const cases = [
+      [{ pages: 'single', scrolling: 'continuous' }, 0, 0],
+      [{ pages: 'facing', scrolling: 'continuous' }, 1, 0],
+      [{ pages: 'single', scrolling: 'page-by-page' }, 0, 3],
+      [{ pages: 'facing', scrolling: 'page-by-page' }, 1, 3],
+    ] as const;
+    for (const [layout, spreadMode, scrollMode] of cases) {
+      fixture.viewport.setLayout(layout);
+      expect(viewer.spreadMode).toBe(spreadMode);
+      expect(viewer.scrollMode).toBe(scrollMode);
+      expect(viewer.currentPageNumber).toBe(4);
+    }
+  });
+
+  it('coalesces pre-pagesinit location, scale, and layout so the latest requests win', async () => {
+    const fixture = await mountedViewport(8);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || viewer === undefined || linkService === undefined) {
+      throw new Error('Expected viewer state.');
+    }
+
+    await fixture.viewport.goTo({ pageIndex: 2 });
+    await fixture.viewport.goTo({ pageIndex: 5 });
+    fixture.viewport.setScale(1.25);
+    fixture.viewport.setScale(1.75);
+    fixture.viewport.setLayout({ pages: 'single', scrolling: 'continuous' });
+    fixture.viewport.setLayout({ pages: 'facing', scrolling: 'page-by-page' });
+
+    expect(linkService.pages).toEqual([]);
+    eventBus.dispatch('pagesinit', {});
+
+    expect(linkService.pages).toEqual([6]);
+    expect(viewer.currentScale).toBe(1.75);
+    expect(viewer.spreadMode).toBe(1);
+    expect(viewer.scrollMode).toBe(3);
+  });
+
+  it('computes Fit height numerically from the current public page viewport and rotation', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    const getViewport = vi.fn(({ scale, rotation }: { scale: number; rotation: number }) => ({
+      width: (rotation % 180 === 0 ? 600 : 800) * scale,
+      height: (rotation % 180 === 0 ? 800 : 600) * scale,
+    }));
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is inspected, never invoked detached
+    const getPage = vi.mocked(fixture.documentProxy.getPage);
+    getPage.mockResolvedValue({
+      rotate: 90,
+      getViewport,
+    } as unknown as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+    Object.defineProperty(viewer.options.container, 'clientHeight', {
+      configurable: true,
+      value: 1_005,
+    });
+    viewer.currentPageNumber = 2;
+    viewer.pagesRotation = 90;
+    eventBus.dispatch('pagesinit', {});
+
+    fixture.viewport.setScale('page-height');
+
+    await vi.waitFor(() => {
+      expect(viewer.currentScale).toBeCloseTo(0.9375, 5);
+    });
+    expect(getPage).toHaveBeenLastCalledWith(2);
+    expect(getViewport).toHaveBeenLastCalledWith({ scale: 4 / 3, rotation: 180 });
+  });
+
+  it('steps fit and numeric scales with PDF.js rounding and clamps at public bounds', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('pagesinit', {});
+
+    viewer.currentScale = 1;
+    fixture.viewport.stepScale(1);
+    expect(viewer.currentScale).toBeCloseTo(1.1, 5);
+    fixture.viewport.stepScale(-1);
+    expect(viewer.currentScale).toBe(1);
+
+    fixture.viewport.setScale(25);
+    fixture.viewport.stepScale(1);
+    expect(viewer.currentScale).toBe(25);
+    fixture.viewport.setScale(0.1);
+    fixture.viewport.stepScale(-1);
+    expect(viewer.currentScale).toBeCloseTo(0.1, 5);
   });
 
   it('recomputes fit presets when the document host resizes and disconnects on destroy', async () => {
@@ -602,11 +708,17 @@ describe('PdfDocumentViewport', () => {
     });
     const scaleDuringRebind = viewer.currentScale;
     fixture.viewport.setScale(1.75);
+    fixture.viewport.stepScale(1);
 
     expect(viewer.currentScale).toBe(scaleDuringRebind);
     eventBus.dispatch('pagesinit', {});
-    expect(viewer.currentScale).toBe(1.75);
+    expect(viewer.currentScale).toBe(2);
     expect(viewer.currentPageNumber).toBe(2);
+    fixture.viewport.stepScale(1);
+    expect(viewer.currentScale).toBeCloseTo(2.2, 5);
+    fixture.viewport.setScale(2.5);
+    fixture.viewport.stepScale(1);
+    expect(viewer.currentScale).toBeCloseTo(2.8, 5);
   });
 
   it('queues navigation while reading colors are rebinding and applies the latest destination', async () => {
@@ -636,6 +748,145 @@ describe('PdfDocumentViewport', () => {
     expect(linkService.positions).toEqual([]);
     expect(linkService.pages).toEqual([4]);
     expect(viewer.currentPageNumber).toBe(4);
+  });
+
+  it('restores the latest layout after a reading-color document rebind resets PDF.js', async () => {
+    const fixture = await mountedViewport(6);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('pagesinit', {});
+    fixture.viewport.setLayout({ pages: 'facing', scrolling: 'page-by-page' });
+    viewer.currentPageNumber = 4;
+
+    fixture.viewport.setReadingColors({
+      background: '#202020',
+      foreground: '#e6e1d8',
+      brightness: 0.86,
+      contrast: 0.95,
+      imageDim: 0.18,
+    });
+    expect(viewer.spreadMode).toBe(0);
+    expect(viewer.scrollMode).toBe(0);
+    eventBus.dispatch('pagesinit', {});
+
+    expect(viewer.spreadMode).toBe(1);
+    expect(viewer.scrollMode).toBe(3);
+    expect(viewer.currentPageNumber).toBe(4);
+  });
+
+  it('preserves a newer public scale event over an earlier requested preset during rebind', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('pagesinit', {});
+    fixture.viewport.setScale('page-fit');
+    viewer.currentScale = 1.6;
+    viewer.currentScaleValue = '1.6';
+    eventBus.dispatch('scalechanging', { scale: 1.6, presetValue: undefined });
+
+    fixture.viewport.setReadingColors({
+      background: '#202020',
+      foreground: '#e6e1d8',
+      brightness: 0.86,
+      contrast: 0.95,
+      imageDim: 0.18,
+    });
+    eventBus.dispatch('pagesinit', {});
+
+    expect(viewer.currentScale).toBeCloseTo(1.6, 5);
+  });
+
+  it('cancels an unresolved Fit-height calculation during teardown', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    const page = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    const getPage = vi.mocked(fixture.documentProxy.getPage);
+    getPage.mockReturnValue(page.promise);
+    eventBus.dispatch('pagesinit', {});
+    let scale = viewer.currentScale;
+    const assignScale = vi.fn((next: number) => {
+      scale = next;
+    });
+    Object.defineProperty(viewer, 'currentScale', {
+      configurable: true,
+      get: () => scale,
+      set: assignScale,
+    });
+
+    fixture.viewport.setScale('page-height');
+    await fixture.viewport.destroy();
+    assignScale.mockClear();
+    page.resolve({
+      rotate: 0,
+      getViewport: vi.fn(() => ({ width: 600, height: 800 })),
+    } as unknown as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+    await Promise.resolve();
+
+    expect(assignScale).not.toHaveBeenCalled();
+  });
+
+  it('contains a current public-page failure while computing Fit height', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    if (eventBus === undefined) throw new Error('Expected an event bus.');
+    const cause = new Error('page viewport unavailable');
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockRejectedValueOnce(cause);
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    eventBus.dispatch('pagesinit', {});
+
+    fixture.viewport.setScale('page-height');
+
+    await vi.waitFor(() => {
+      expect(events).toContainEqual({ type: 'render-error', pageIndex: 0, cause });
+    });
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to render PDF page', {
+      pageIndex: 0,
+      cause,
+    });
+  });
+
+  it('discards an old-page Fit-height result after navigating to a differently sized page', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    Object.defineProperty(viewer.options.container, 'clientHeight', {
+      configurable: true,
+      value: 1_005,
+    });
+    const firstPage = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    const secondPage = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage)
+      .mockReturnValueOnce(firstPage.promise)
+      .mockReturnValueOnce(secondPage.promise);
+    eventBus.dispatch('pagesinit', {});
+
+    fixture.viewport.setScale('page-height');
+    await fixture.viewport.goTo({ pageIndex: 1 });
+    secondPage.resolve({
+      rotate: 0,
+      getViewport: vi.fn(() => ({ width: 800, height: 400 })),
+    } as unknown as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+    await vi.waitFor(() => {
+      expect(viewer.currentScale).toBeCloseTo(2.5, 5);
+    });
+    firstPage.resolve({
+      rotate: 0,
+      getViewport: vi.fn(() => ({ width: 400, height: 800 })),
+    } as unknown as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+    await Promise.resolve();
+
+    expect(viewer.currentPageNumber).toBe(2);
+    expect(viewer.currentScale).toBeCloseTo(2.5, 5);
   });
 
   it('queues a scale selected before initial pages are ready', async () => {

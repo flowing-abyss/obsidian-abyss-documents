@@ -7,6 +7,7 @@ import type {
 } from '../../document-core/document.js';
 import { TypedEventSource } from '../../document-core/events.js';
 import type {
+  ReaderLayout,
   ReaderScale,
   ReadingAppearance,
   ResolvedReadingProfile,
@@ -25,6 +26,11 @@ const TEXT_LAYER_MODE_ENABLE = 1;
 const ANNOTATION_MODE_ENABLE_FORMS = 2;
 const MAX_CANVAS_PIXELS = 16_777_216;
 const FIND_SELECTION_TIMEOUT_MS = 2_000;
+const MIN_SCALE = 0.1;
+const MAX_SCALE = 25;
+const SCALE_DELTA = 1.1;
+const VERTICAL_PADDING = 5;
+const PDF_TO_CSS_UNITS = 96 / 72;
 
 type PdfEventBus = InstanceType<PdfRuntime['pdfjsViewer']['EventBus']>;
 type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
@@ -102,7 +108,11 @@ export class PdfDocumentViewport implements DocumentViewport {
   private resizeObserver: ResizeObserver | null = null;
   private resizeFrame: number | null = null;
   private pendingLocation: DocumentLocation | null = null;
-  private pendingScale: ScaleRequest | null = null;
+  private requestedLayout: ReaderLayout = { pages: 'single', scrolling: 'continuous' };
+  private requestedScale: ScaleRequest = 'page-width';
+  private scaleRequestRevision = 0;
+  private explicitScaleRequest = false;
+  private applyingScale: ScaleRequest | null = null;
 
   constructor(
     private readonly pdf: PDFDocumentProxy,
@@ -166,17 +176,21 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   async goTo(location: DocumentLocation): Promise<void> {
     this.requireMounted(this.linkService);
-    if (this.colorRebindActive) {
+    if (!this.pagesInitialized || this.colorRebindActive) {
       this.pendingLocation = { ...location };
       return;
     }
     this.navigateTo(location);
+    const viewer = this.requireMounted(this.viewer);
+    this.refitPageHeight(viewer);
   }
 
   setScale(scale: ScaleRequest): void {
     const viewer = this.requireMounted(this.viewer);
+    this.requestedScale = scale;
+    this.explicitScaleRequest = true;
+    this.scaleRequestRevision += 1;
     if (!this.pagesInitialized) {
-      this.pendingScale = scale;
       return;
     }
     if (this.colorRebindActive && this.preservedViewState !== null) {
@@ -186,7 +200,26 @@ export class PdfDocumentViewport implements DocumentViewport {
       };
       return;
     }
-    this.applyScale(viewer, scale);
+    this.applyScale(viewer, scale, this.scaleRequestRevision);
+  }
+
+  stepScale(direction: -1 | 1): void {
+    const viewer = this.requireMounted(this.viewer);
+    const current =
+      typeof this.requestedScale === 'number' ? this.requestedScale : viewer.currentScale;
+    const delta = direction > 0 ? SCALE_DELTA : 1 / SCALE_DELTA;
+    const round = direction > 0 ? Math.ceil : Math.floor;
+    const stepped = round(Number((current * delta).toFixed(2)) * 10) / 10;
+    this.setScale(Math.min(MAX_SCALE, Math.max(MIN_SCALE, stepped)));
+  }
+
+  setLayout(layout: ReaderLayout): void {
+    const viewer = this.requireMounted(this.viewer);
+    this.requestedLayout = { ...layout };
+    if (!this.pagesInitialized || this.colorRebindActive) {
+      return;
+    }
+    this.applyLayout(viewer, layout);
   }
 
   setReadingColors(appearance: ReadingAppearance): void {
@@ -363,9 +396,10 @@ export class PdfDocumentViewport implements DocumentViewport {
   private bindEvents(): void {
     this.bind('pagesinit', () => {
       this.pagesInitialized = true;
+      if (this.colorRebindActive) return;
       if (this.viewer !== null) {
-        this.applyScale(this.viewer, this.pendingScale ?? 'page-width');
-        this.pendingScale = null;
+        this.applyLayout(this.viewer, this.requestedLayout);
+        this.applyScale(this.viewer, this.requestedScale, this.scaleRequestRevision);
       }
       this.flushPendingLocation();
     });
@@ -402,18 +436,34 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private onPageChanging(event: unknown): void {
     const pageNumber = positiveInteger(record(event)?.['pageNumber']);
-    if (pageNumber !== null) this.events.emit({ type: 'page-change', pageIndex: pageNumber - 1 });
+    if (pageNumber === null) return;
+    this.events.emit({ type: 'page-change', pageIndex: pageNumber - 1 });
+    if (this.viewer !== null) this.refitPageHeight(this.viewer);
   }
 
   private onScaleChanging(event: unknown): void {
     const data = record(event);
     if (data === null) return;
+    const eventScale = this.scaleFromEvent(data);
+    if (eventScale === null) return;
+    this.requestedScale = eventScale;
+    this.explicitScaleRequest = true;
+    this.scaleRequestRevision += 1;
+    this.events.emit({ type: 'scale-change', scale: eventScale });
+  }
+
+  private scaleFromEvent(data: Record<string, unknown>): ReaderScale | null {
+    let result: ReaderScale | null = this.applyingScale;
     const preset = data['presetValue'];
-    if (preset === 'page-width' || preset === 'page-fit') {
-      this.events.emit({ type: 'scale-change', scale: preset });
-    } else if (typeof data['scale'] === 'number' && Number.isFinite(data['scale'])) {
-      this.events.emit({ type: 'scale-change', scale: data['scale'] });
+    if (
+      result === null &&
+      (preset === 'page-width' || preset === 'page-fit' || preset === 'page-height')
+    ) {
+      result = preset;
     }
+    const scale = data['scale'];
+    if (result === null && typeof scale === 'number' && Number.isFinite(scale)) result = scale;
+    return result;
   }
 
   private onPageRendered(event: unknown): void {
@@ -465,6 +515,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     const pageColors = this.requestedPageColors;
     this.preservedViewState ??= this.captureViewState(viewer);
     this.colorRebindActive = true;
+    this.pagesInitialized = false;
     this.colorRebindRevision = this.colorRequestRevision;
     viewer.pageColors = pageColors;
     this.replacePendingPagesInit(() => {
@@ -511,10 +562,11 @@ export class PdfDocumentViewport implements DocumentViewport {
     const state = this.requireMounted(this.preservedViewState);
     this.preservedViewState = null;
     try {
-      if (state.scale.type === 'preset') viewer.currentScaleValue = state.scale.value;
-      else viewer.currentScale = state.scale.value;
+      this.applyLayout(viewer, this.requestedLayout);
       viewer.currentPageNumber = state.pageNumber;
       this.flushPendingLocation();
+      const scale = this.explicitScaleRequest ? this.requestedScale : this.scaleFromState(state);
+      this.applyScale(viewer, scale, this.scaleRequestRevision);
     } catch (cause) {
       this.handleRenderError(state.pageNumber, cause);
     }
@@ -523,7 +575,9 @@ export class PdfDocumentViewport implements DocumentViewport {
   private captureViewState(viewer: PdfViewer): PreservedViewState {
     const scaleValue = viewer.currentScaleValue;
     let scale: PreservedScale;
-    if (!this.pagesInitialized) {
+    if (this.explicitScaleRequest) {
+      scale = this.preservedScale(this.requestedScale);
+    } else if (!this.pagesInitialized) {
       scale = { type: 'preset', value: 'page-width' };
     } else if (
       scaleValue === 'page-width' ||
@@ -537,15 +591,79 @@ export class PdfDocumentViewport implements DocumentViewport {
     return { pageNumber: viewer.currentPageNumber, scale };
   }
 
-  private applyScale(viewer: PdfViewer, scale: ScaleRequest): void {
-    if (typeof scale === 'number') viewer.currentScale = scale;
-    else viewer.currentScaleValue = scale;
+  private applyScale(viewer: PdfViewer, scale: ScaleRequest, revision: number): void {
+    if (scale === 'page-height') {
+      this.applyPageHeight(viewer, revision).catch((cause: unknown) => {
+        this.handlePageHeightFailure(viewer, revision, cause);
+      });
+      return;
+    }
+    this.applyingScale = scale;
+    try {
+      if (typeof scale === 'number') viewer.currentScale = scale;
+      else viewer.currentScaleValue = scale;
+    } finally {
+      this.applyingScale = null;
+    }
+  }
+
+  private async applyPageHeight(viewer: PdfViewer, revision: number): Promise<void> {
+    const pageNumber = this.pendingLocation?.pageIndex ?? viewer.currentPageNumber - 1;
+    const page = await this.pdf.getPage(pageNumber + 1);
+    if (!this.isCurrentScaleRequest(viewer, revision)) return;
+    const rotation = (page.rotate + viewer.pagesRotation) % 360;
+    const viewport = page.getViewport({
+      scale: PDF_TO_CSS_UNITS,
+      rotation,
+    });
+    const availableHeight = Math.max(
+      1,
+      this.requireMounted(this.root).clientHeight - VERTICAL_PADDING,
+    );
+    this.applyingScale = 'page-height';
+    try {
+      viewer.currentScale = availableHeight / viewport.height;
+    } finally {
+      this.applyingScale = null;
+    }
+  }
+
+  private isCurrentScaleRequest(viewer: PdfViewer, revision: number): boolean {
+    return (
+      revision === this.scaleRequestRevision &&
+      this.viewer === viewer &&
+      this.pagesInitialized &&
+      !this.colorRebindActive &&
+      this.destroyPromise === null
+    );
+  }
+
+  private handlePageHeightFailure(viewer: PdfViewer, revision: number, cause: unknown): void {
+    if (!this.isCurrentScaleRequest(viewer, revision)) return;
+    this.handleRenderError(viewer.currentPageNumber, cause);
+  }
+
+  private applyLayout(viewer: PdfViewer, layout: ReaderLayout): void {
+    const pageNumber = viewer.currentPageNumber;
+    viewer.spreadMode =
+      layout.pages === 'facing'
+        ? this.pdfjsViewer.SpreadMode.ODD
+        : this.pdfjsViewer.SpreadMode.NONE;
+    viewer.scrollMode =
+      layout.scrolling === 'page-by-page'
+        ? this.pdfjsViewer.ScrollMode.PAGE
+        : this.pdfjsViewer.ScrollMode.VERTICAL;
+    viewer.currentPageNumber = pageNumber;
   }
 
   private preservedScale(scale: ScaleRequest): PreservedScale {
     return typeof scale === 'number'
       ? { type: 'numeric', value: scale }
       : { type: 'preset', value: scale };
+  }
+
+  private scaleFromState(state: PreservedViewState): ScaleRequest {
+    return state.scale.value;
   }
 
   private navigateTo(location: DocumentLocation): void {
@@ -573,7 +691,6 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private clearPendingInteractions(): void {
     this.pendingLocation = null;
-    this.pendingScale = null;
   }
 
   private readonly onResize = (): void => {
@@ -583,12 +700,34 @@ export class PdfDocumentViewport implements DocumentViewport {
       if (!this.pagesInitialized || this.colorRebindActive || this.destroyPromise !== null) return;
       const viewer = this.viewer;
       if (viewer === null) return;
-      const scale = viewer.currentScaleValue;
-      if (scale === 'page-width' || scale === 'page-fit' || scale === 'page-height') {
-        viewer.currentScaleValue = scale;
+      const fitScale = this.fitScaleForResize(viewer);
+      if (fitScale !== null) {
+        this.requestedScale = fitScale;
+        this.scaleRequestRevision += 1;
+        this.applyScale(viewer, fitScale, this.scaleRequestRevision);
       }
     });
   };
+
+  private fitScaleForResize(viewer: PdfViewer): ScaleRequest | null {
+    let result: ScaleRequest | null = null;
+    if (this.requestedScale === 'page-height') result = 'page-height';
+    const scale = viewer.currentScaleValue;
+    if (result === null && (scale === 'page-width' || scale === 'page-fit')) result = scale;
+    return result;
+  }
+
+  private refitPageHeight(viewer: PdfViewer): void {
+    if (
+      this.requestedScale !== 'page-height' ||
+      !this.pagesInitialized ||
+      this.colorRebindActive ||
+      this.destroyPromise !== null
+    )
+      return;
+    this.scaleRequestRevision += 1;
+    this.applyScale(viewer, 'page-height', this.scaleRequestRevision);
+  }
 
   private disconnectResizeObserver(): void {
     this.resizeObserver?.disconnect();

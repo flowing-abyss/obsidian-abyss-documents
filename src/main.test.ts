@@ -45,12 +45,15 @@ function pdfFile(app: App, path = 'Books/Guide.pdf'): TFile {
 }
 
 function documentSession(fingerprint: string) {
+  const setLayout = vi.fn();
   const setReadingColors = vi.fn();
   const viewport: DocumentViewport = {
     pageCount: 3,
     mount: vi.fn(async () => undefined),
     goTo: vi.fn(async () => undefined),
     setScale: vi.fn(),
+    stepScale: vi.fn(),
+    setLayout,
     setReadingColors,
     search: vi.fn(),
     searchAgain: vi.fn(),
@@ -71,7 +74,7 @@ function documentSession(fingerprint: string) {
     createViewport: vi.fn(async () => viewport),
     close: vi.fn(async () => undefined),
   };
-  return { session, setReadingColors };
+  return { session, setLayout, setReadingColors };
 }
 
 function resolved(colors: (typeof BUILTIN_PROFILES)[keyof typeof BUILTIN_PROFILES]) {
@@ -96,6 +99,9 @@ function capturedMenuItems() {
     const item = {
       onClick(handler: () => void) {
         entry.click = handler;
+        return item;
+      },
+      setDisabled() {
         return item;
       },
       setChecked() {
@@ -644,6 +650,48 @@ describe('AbyssDocumentsPlugin', () => {
 
     expect(reader.saveData).not.toHaveBeenCalled();
     expect(reader.plugin.data.view.profileByFingerprint).toEqual({ [fingerprint]: 'dark' });
+    if (reader.view.file !== null) await reader.view.onUnloadFile(reader.view.file);
+  });
+
+  it('restores and saves per-document layouts through the loaded plugin data store', async () => {
+    const fingerprint = 'layout-fingerprint';
+    const remembered = { pages: 'facing', scrolling: 'page-by-page' } as const;
+    const data: PluginDataV2 = {
+      ...DEFAULT_DATA,
+      settings: {
+        ...DEFAULT_DATA.settings,
+        layout: { ...DEFAULT_DATA.settings.layout, rememberPerDocument: true },
+      },
+      view: {
+        ...DEFAULT_DATA.view,
+        layoutByFingerprint: { [fingerprint]: remembered },
+      },
+    };
+    const session = documentSession(fingerprint);
+    const entries = capturedMenuItems();
+    const reader = await loadedReader(data, session);
+
+    expect(session.setLayout).toHaveBeenCalledWith(remembered);
+    const layout =
+      reader.view.contentEl.querySelector<HTMLButtonElement>('[data-control="layout"]');
+    if (layout === null) throw new Error('Expected the layout button.');
+    layout.click();
+    entries.find((entry) => entry.title === 'Single')?.click();
+    await vi.waitFor(() => {
+      expect(reader.saveData).toHaveBeenCalledOnce();
+    });
+
+    expect(reader.plugin.data.view.layoutByFingerprint[fingerprint]).toEqual({
+      pages: 'single',
+      scrolling: 'page-by-page',
+    });
+    expect(reader.saveData.mock.calls[0]?.[0]).toMatchObject({
+      view: {
+        layoutByFingerprint: {
+          [fingerprint]: { pages: 'single', scrolling: 'page-by-page' },
+        },
+      },
+    });
     if (reader.view.file !== null) await reader.view.onUnloadFile(reader.view.file);
   });
 });

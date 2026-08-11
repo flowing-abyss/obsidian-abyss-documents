@@ -59,6 +59,8 @@ function viewport(): DocumentViewport {
     mount: vi.fn(async () => undefined),
     goTo: vi.fn(async () => undefined),
     setScale: vi.fn(),
+    stepScale: vi.fn(),
+    setLayout: vi.fn(),
     setReadingColors: vi.fn(),
     search: vi.fn(),
     searchAgain: vi.fn(),

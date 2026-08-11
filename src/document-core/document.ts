@@ -1,5 +1,5 @@
 import type { TFile } from 'obsidian';
-import type { ReaderScale, ReadingAppearance } from './reading.js';
+import type { ReaderLayout, ReaderScale, ReadingAppearance } from './reading.js';
 
 export type DocumentCapability =
   'outline' | 'text-search' | 'existing-annotations' | 'annotation-write' | 'ocr';
@@ -48,6 +48,8 @@ export interface DocumentViewport {
   mount(host: HTMLElement): Promise<void>;
   goTo(location: DocumentLocation): Promise<void>;
   setScale(scale: ReaderScale): void;
+  stepScale(direction: -1 | 1): void;
+  setLayout(layout: ReaderLayout): void;
   setReadingColors(appearance: ReadingAppearance): void;
   search(query: string): void;
   searchAgain(direction: 'next' | 'previous'): void;

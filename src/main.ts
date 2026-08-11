@@ -125,27 +125,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
     const registry = new DocumentAdapterRegistry([
       new PdfDocumentAdapter(this.app.vault, this.runtimeLoader, createPdfDocumentViewport),
     ]);
-    const profileState: ReaderProfileState = {
-      get reading() {
-        return store.snapshot.settings.reading;
-      },
-      get profileByFingerprint() {
-        return store.snapshot.view.profileByFingerprint;
-      },
-      updateProfileForFingerprint: async (fingerprint, profile) => {
-        await store.update((data) => ({
-          ...data,
-          view: {
-            ...data.view,
-            profileByFingerprint: {
-              ...data.view.profileByFingerprint,
-              [fingerprint]: profile,
-            },
-          },
-        }));
-        this.data = store.snapshot;
-      },
-    };
+    const profileState = this.createReaderState(store);
     const services = {
       createController: () =>
         new ReaderController(
@@ -193,6 +173,49 @@ export default class AbyssDocumentsPlugin extends Plugin {
     this.register(() => {
       this.runtimeLoader.dispose();
     });
+  }
+
+  private createReaderState(store: PluginDataStore): ReaderProfileState {
+    return {
+      get reading() {
+        return store.snapshot.settings.reading;
+      },
+      get layout() {
+        return store.snapshot.settings.layout;
+      },
+      get profileByFingerprint() {
+        return store.snapshot.view.profileByFingerprint;
+      },
+      get layoutByFingerprint() {
+        return store.snapshot.view.layoutByFingerprint;
+      },
+      updateLayoutForFingerprint: async (fingerprint, layout) => {
+        await store.update((data) => ({
+          ...data,
+          view: {
+            ...data.view,
+            layoutByFingerprint: {
+              ...data.view.layoutByFingerprint,
+              [fingerprint]: layout,
+            },
+          },
+        }));
+        this.data = store.snapshot;
+      },
+      updateProfileForFingerprint: async (fingerprint, profile) => {
+        await store.update((data) => ({
+          ...data,
+          view: {
+            ...data.view,
+            profileByFingerprint: {
+              ...data.view.profileByFingerprint,
+              [fingerprint]: profile,
+            },
+          },
+        }));
+        this.data = store.snapshot;
+      },
+    };
   }
 
   private reportMigrationDiagnostics(diagnostics: readonly MigrationDiagnostic[]): void {

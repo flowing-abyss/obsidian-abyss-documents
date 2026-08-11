@@ -143,23 +143,51 @@ describe('AbyssDocumentsSettingTab', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders Reading appearance, Annotations, and Advanced collapsed', () => {
+  it('renders Reading appearance, Page layout, Annotations, and Advanced collapsed', () => {
     const { tab } = fixture();
 
     tab.render();
 
     const expanders = Array.from(tab.containerEl.querySelectorAll<HTMLElement>('[aria-expanded]'));
-    expect(expanders).toHaveLength(3);
+    expect(expanders).toHaveLength(4);
     expect(expanders.every((element) => element.getAttribute('aria-expanded') === 'false')).toBe(
       true,
     );
     expect(tab.containerEl.textContent).toContain('Reading appearance');
+    expect(tab.containerEl.textContent).toContain('Page layout');
     expect(tab.containerEl.textContent).toContain('Annotations');
     expect(tab.containerEl.textContent).toContain('Advanced');
     expect(tab.containerEl.textContent).not.toMatch(/ocr/iu);
     expect(tab.containerEl.classList.contains('abyss-documents-settings')).toBe(true);
     expect(tab.getSettingDefinitions()).toEqual([]);
     (tab as unknown as { display(): void }).display();
+  });
+
+  it('shows and persists functional default layout controls independently from profiles', async () => {
+    const controls = captureControls();
+    const { onSettingsChange, persistence, store, tab } = fixture();
+    tab.render();
+    const { body } = expandSection(controls, tab, 'Page layout');
+
+    expect(body.textContent).toContain('Default pages');
+    expect(body.textContent).toContain('Default scrolling');
+    expect(body.textContent).toContain('Remember layout per document');
+    controls.dropdowns.get('Default pages')?.setValue('unknown');
+    controls.dropdowns.get('Default scrolling')?.setValue('unknown');
+    expect(persistence.saveData).not.toHaveBeenCalled();
+
+    controls.dropdowns.get('Default pages')?.setValue('facing');
+    controls.dropdowns.get('Default scrolling')?.setValue('page-by-page');
+    controls.toggles.get('Remember layout per document')?.setValue(true);
+    await vi.waitFor(() => {
+      expect(persistence.saveData).toHaveBeenCalledTimes(3);
+    });
+
+    expect(store.snapshot.settings.layout).toEqual({
+      default: { pages: 'facing', scrolling: 'page-by-page' },
+      rememberPerDocument: true,
+    });
+    expect(onSettingsChange).toHaveBeenCalledTimes(3);
   });
 
   it('expands and collapses both native settings sections', () => {

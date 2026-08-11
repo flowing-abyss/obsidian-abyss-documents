@@ -27,15 +27,26 @@ export type ShellFactory = (
 
 export interface ReaderProfileState {
   readonly reading: PluginSettings['reading'];
+  readonly layout: PluginSettings['layout'];
   readonly profileByFingerprint: Readonly<Record<string, ReadingProfileId>>;
+  readonly layoutByFingerprint: Readonly<Record<string, ReaderLayout>>;
+  updateLayoutForFingerprint(fingerprint: string, layout: ReaderLayout): void | Promise<void>;
   updateProfileForFingerprint(fingerprint: string, profile: ReadingProfileId): void | Promise<void>;
 }
 
 const DEFAULT_PROFILE_STATE: ReaderProfileState = {
   reading: DEFAULT_SETTINGS.reading,
+  layout: DEFAULT_SETTINGS.layout,
   profileByFingerprint: {},
+  layoutByFingerprint: {},
+  updateLayoutForFingerprint: () => undefined,
   updateProfileForFingerprint: () => undefined,
 };
+
+interface LayoutPolicySnapshot {
+  readonly default: ReaderLayout;
+  readonly rememberPerDocument: boolean;
+}
 
 export class ReaderController {
   private queue: Promise<void> = Promise.resolve();
@@ -45,9 +56,12 @@ export class ReaderController {
   private shell: ReaderShell | null = null;
   private unsubscribeViewport: (() => void) | null = null;
   private currentPageIndex = 0;
+  private navigationPageIndex = 0;
+  private pendingNavigationPageIndex: number | null = null;
+  private navigationRequestRevision = 0;
   private currentProfile: ReadingProfileId = 'default';
-  private currentScale: ReaderScale = 'page-width';
   private currentLayout: ReaderLayout = DEFAULT_READER_LAYOUT;
+  private layoutPolicy = captureLayoutPolicy(DEFAULT_PROFILE_STATE.layout);
   private outlineLoadedFor: DocumentSession | null = null;
   private outlineLoadingFor: DocumentSession | null = null;
   private currentSearchQuery = '';
@@ -92,6 +106,12 @@ export class ReaderController {
       viewport.setReadingColors(
         this.profileService.resolve(this.currentProfile, shell.obsidianTheme),
       );
+      const layout = this.layoutPolicyChanged()
+        ? this.initialLayout(this.session?.descriptor.fingerprint ?? '')
+        : { ...this.currentLayout };
+      viewport.setLayout(layout);
+      this.currentLayout = layout;
+      shell.toolbar.setLayout(layout);
       shell.toolbar.setProfile(this.currentProfile);
     } catch (cause) {
       console.error('[abyss-documents] Failed to refresh PDF reading settings', {
@@ -156,9 +176,15 @@ export class ReaderController {
     shell: ReaderShell,
   ): () => void {
     this.currentPageIndex = 0;
+    this.navigationPageIndex = 0;
+    this.pendingNavigationPageIndex = null;
+    this.navigationRequestRevision += 1;
     this.currentSearchQuery = '';
     this.currentProfile = this.initialProfile(session.descriptor.fingerprint);
+    this.currentLayout = this.initialLayout(session.descriptor.fingerprint);
+    this.layoutPolicy = captureLayoutPolicy(this.profileState.layout);
     this.profileService.setCustom(this.profileState.reading.custom);
+    viewport.setLayout(this.currentLayout);
     viewport.setReadingColors(
       this.profileService.resolve(this.currentProfile, shell.obsidianTheme),
     );
@@ -213,6 +239,9 @@ export class ReaderController {
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
     this.currentSearchQuery = '';
+    this.navigationPageIndex = 0;
+    this.pendingNavigationPageIndex = null;
+    this.navigationRequestRevision += 1;
 
     let failure = this.tryCleanup(unsubscribeViewport);
     const lifecycleFailure = await this.releasePartial(viewport, session);
@@ -259,16 +288,16 @@ export class ReaderController {
         this.navigateTo(intent.pageIndex);
         return;
       case 'previous-page':
-        this.navigateTo(this.currentPageIndex - 1);
+        this.navigateRelative(-1);
         return;
       case 'next-page':
-        this.navigateTo(this.currentPageIndex + 1);
+        this.navigateRelative(1);
         return;
       case 'set-scale':
         this.setScale(intent.scale);
         return;
       case 'zoom-step':
-        this.setScale(steppedScale(this.currentScale, intent.direction));
+        this.stepScale(intent.direction);
         return;
       case 'set-layout':
         this.setLayout(intent.layout);
@@ -363,14 +392,33 @@ export class ReaderController {
     this.navigateToLocation({ pageIndex });
   }
 
+  private navigateRelative(direction: -1 | 1): void {
+    if (this.currentLayout.pages === 'single') {
+      this.navigateTo(this.navigationPageIndex + direction);
+      return;
+    }
+    const spreadStart = Math.floor(this.navigationPageIndex / 2) * 2;
+    this.navigateTo(spreadStart + direction * 2);
+  }
+
   private navigateToLocation(location: DocumentLocation): void {
     const viewport = this.viewport;
     const shell = this.shell;
     if (viewport === null || shell === null || viewport.pageCount === 0) return;
     const target = Math.min(viewport.pageCount - 1, Math.max(0, Math.floor(location.pageIndex)));
     const destination: DocumentLocation = { ...location, pageIndex: target };
+    this.navigationPageIndex = target;
+    this.pendingNavigationPageIndex = target;
+    const revision = ++this.navigationRequestRevision;
     void viewport.goTo(destination).catch((cause: unknown) => {
       if (this.viewport !== viewport) return;
+      if (
+        revision === this.navigationRequestRevision &&
+        this.pendingNavigationPageIndex === target
+      ) {
+        this.navigationPageIndex = this.currentPageIndex;
+        this.pendingNavigationPageIndex = null;
+      }
       shell.toolbar.setCurrentPage(this.currentPageIndex);
       const reason = this.reason(cause);
       new Notice(`Could not go to page ${target + 1}: ${reason}`);
@@ -387,7 +435,6 @@ export class ReaderController {
     if (viewport === null || shell === null) return;
     try {
       viewport.setScale(scale);
-      this.currentScale = scale;
       shell.toolbar.setScale(scale);
     } catch (cause) {
       new Notice(`Could not change zoom: ${this.reason(cause)}`);
@@ -395,9 +442,43 @@ export class ReaderController {
     }
   }
 
+  private stepScale(direction: -1 | 1): void {
+    const viewport = this.viewport;
+    if (viewport === null) return;
+    try {
+      viewport.stepScale(direction);
+    } catch (cause) {
+      new Notice(`Could not change zoom: ${this.reason(cause)}`);
+      console.error('[abyss-documents] Failed to step PDF scale', { direction, cause });
+    }
+  }
+
   private setLayout(layout: ReaderLayout): void {
-    this.currentLayout = layout;
-    this.shell?.toolbar.setLayout(layout);
+    const viewport = this.viewport;
+    const session = this.session;
+    const shell = this.shell;
+    if (viewport === null || session === null || shell === null) return;
+    try {
+      viewport.setLayout(layout);
+      this.currentLayout = { ...layout };
+      shell.toolbar.setLayout(layout);
+    } catch (cause) {
+      new Notice(`Could not change page layout: ${this.reason(cause)}`);
+      console.error('[abyss-documents] Failed to change PDF layout', { layout, cause });
+      return;
+    }
+
+    const fingerprint = session.descriptor.fingerprint;
+    if (!this.profileState.layout.rememberPerDocument || fingerprint.length === 0) return;
+    try {
+      void Promise.resolve(this.profileState.updateLayoutForFingerprint(fingerprint, layout)).catch(
+        (cause: unknown) => {
+          this.layoutPersistenceFailure(fingerprint, layout, cause);
+        },
+      );
+    } catch (cause) {
+      this.layoutPersistenceFailure(fingerprint, layout, cause);
+    }
   }
 
   private setProfile(profile: ReadingProfileId): void {
@@ -444,7 +525,6 @@ export class ReaderController {
         this.handlePageChange(viewport, shell, event.pageIndex);
         return;
       case 'scale-change':
-        this.currentScale = event.scale;
         shell.toolbar.setScale(event.scale);
         return;
       case 'search-results':
@@ -464,6 +544,13 @@ export class ReaderController {
       Math.max(0, viewport.pageCount - 1),
       Math.max(0, Math.floor(pageIndex)),
     );
+    if (
+      this.pendingNavigationPageIndex === null ||
+      this.currentPageIndex === this.pendingNavigationPageIndex
+    ) {
+      this.navigationPageIndex = this.currentPageIndex;
+      this.pendingNavigationPageIndex = null;
+    }
     shell.toolbar.setCurrentPage(this.currentPageIndex);
     shell.sidebar?.outlinePanel.setCurrentPage(this.currentPageIndex);
     shell.announce(`Page ${this.currentPageIndex + 1} of ${viewport.pageCount}`);
@@ -505,6 +592,38 @@ export class ReaderController {
     if (isReadingProfileId(saved)) return saved;
     const fallback = this.profileState.reading.defaultProfile;
     return isReadingProfileId(fallback) ? fallback : 'default';
+  }
+
+  private initialLayout(fingerprint: string): ReaderLayout {
+    const saved = this.profileState.layout.rememberPerDocument
+      ? this.profileState.layoutByFingerprint[fingerprint]
+      : undefined;
+    if (isReaderLayout(saved)) return { ...saved };
+    const fallback = this.profileState.layout.default;
+    return isReaderLayout(fallback) ? { ...fallback } : { ...DEFAULT_READER_LAYOUT };
+  }
+
+  private layoutPolicyChanged(): boolean {
+    const next = captureLayoutPolicy(this.profileState.layout);
+    const changed =
+      next.rememberPerDocument !== this.layoutPolicy.rememberPerDocument ||
+      next.default.pages !== this.layoutPolicy.default.pages ||
+      next.default.scrolling !== this.layoutPolicy.default.scrolling;
+    this.layoutPolicy = next;
+    return changed;
+  }
+
+  private layoutPersistenceFailure(
+    fingerprint: string,
+    layout: ReaderLayout,
+    cause: unknown,
+  ): void {
+    new Notice(`Could not remember page layout: ${this.reason(cause)}`);
+    console.error('[abyss-documents] Failed to remember PDF page layout', {
+      fingerprint,
+      layout,
+      cause,
+    });
   }
 
   private profilePersistenceFailure(
@@ -565,7 +684,18 @@ function isReadingProfileId(value: unknown): value is ReadingProfileId {
   );
 }
 
-function steppedScale(current: ReaderScale, direction: -1 | 1): number {
-  const numeric = typeof current === 'number' ? current : 1;
-  return Math.min(10, Math.max(0.1, Math.round((numeric + direction * 0.1) * 100) / 100));
+function isReaderLayout(value: unknown): value is ReaderLayout {
+  if (typeof value !== 'object' || value === null) return false;
+  const layout = value as Partial<ReaderLayout>;
+  return (
+    (layout.pages === 'single' || layout.pages === 'facing') &&
+    (layout.scrolling === 'continuous' || layout.scrolling === 'page-by-page')
+  );
+}
+
+function captureLayoutPolicy(layout: PluginSettings['layout']): LayoutPolicySnapshot {
+  return {
+    default: { ...layout.default },
+    rememberPerDocument: layout.rememberPerDocument,
+  };
 }

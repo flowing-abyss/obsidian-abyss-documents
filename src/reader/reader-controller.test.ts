@@ -53,6 +53,8 @@ function viewport(pageCount = 3) {
   const searchAgain = vi.fn();
   const selectSearchHit = vi.fn(async () => undefined);
   const setScale = vi.fn();
+  const stepScale = vi.fn();
+  const setLayout = vi.fn();
   const setReadingColors = vi.fn();
   let listener: Parameters<DocumentViewport['onEvent']>[0] | null = null;
   const unsubscribe = vi.fn();
@@ -61,6 +63,8 @@ function viewport(pageCount = 3) {
     mount,
     goTo,
     setScale,
+    stepScale,
+    setLayout,
     setReadingColors,
     search,
     searchAgain,
@@ -84,7 +88,9 @@ function viewport(pageCount = 3) {
     searchAgain,
     selectSearchHit,
     setReadingColors,
+    setLayout,
     setScale,
+    stepScale,
     unsubscribe,
     value,
   };
@@ -119,11 +125,18 @@ function adapterFor(path: string, createdSession: ReturnType<typeof session>) {
 }
 
 function profileState(options?: {
+  defaultLayout?: ReaderLayout;
   defaultProfile?: ReadingProfileId;
+  layouts?: Record<string, ReaderLayout>;
   profiles?: Record<string, ReadingProfileId>;
+  rememberLayoutPerDocument?: boolean;
   rememberPerDocument?: boolean;
 }) {
+  const layouts = { ...options?.layouts };
   const profiles = { ...options?.profiles };
+  const updateLayout = vi.fn((fingerprint: string, layout: ReaderLayout) => {
+    layouts[fingerprint] = layout;
+  });
   const updateProfile = vi.fn((fingerprint: string, profile: ReadingProfileId) => {
     profiles[fingerprint] = profile;
   });
@@ -139,10 +152,16 @@ function profileState(options?: {
         imageDim: 0,
       },
     },
+    layout: {
+      default: options?.defaultLayout ?? { pages: 'single', scrolling: 'continuous' },
+      rememberPerDocument: options?.rememberLayoutPerDocument ?? false,
+    },
+    layoutByFingerprint: layouts,
     profileByFingerprint: profiles,
+    updateLayoutForFingerprint: updateLayout,
     updateProfileForFingerprint: updateProfile,
   };
-  return { profiles, updateProfile, value };
+  return { layouts, profiles, updateLayout, updateProfile, value };
 }
 
 function capturingShellFactory() {
@@ -411,8 +430,208 @@ describe('ReaderController', () => {
 
     shell.send({ type: 'set-layout', layout });
 
+    expect(createdSession.createViewport).toHaveBeenCalledOnce();
     const layoutButton = shell.created.root.querySelector('[data-control="layout"]');
     expect(layoutButton?.getAttribute('aria-label')).toBe('Layout: Facing, page by page');
+  });
+
+  it('applies the global layout and remembers later choices by fingerprint when enabled', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(8);
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const state = profileState({
+      defaultLayout: { pages: 'facing', scrolling: 'continuous' },
+      rememberLayoutPerDocument: true,
+    });
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+
+    expect(createdViewport.setLayout).toHaveBeenCalledWith({
+      pages: 'facing',
+      scrolling: 'continuous',
+    });
+    shell.send({
+      type: 'set-layout',
+      layout: { pages: 'single', scrolling: 'page-by-page' },
+    });
+
+    expect(createdViewport.setLayout).toHaveBeenLastCalledWith({
+      pages: 'single',
+      scrolling: 'page-by-page',
+    });
+    expect(state.layouts[pdf.path]).toEqual({ pages: 'single', scrolling: 'page-by-page' });
+  });
+
+  it('restores a fingerprint layout only when layout memory is enabled', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const remembered = { pages: 'facing', scrolling: 'page-by-page' } as const;
+    for (const rememberLayoutPerDocument of [true, false]) {
+      const createdViewport = viewport(8);
+      const createdSession = session(pdf.path, createdViewport);
+      const adapter = adapterFor(pdf.path, createdSession);
+      const state = profileState({
+        defaultLayout: { pages: 'single', scrolling: 'continuous' },
+        layouts: { [pdf.path]: remembered },
+        rememberLayoutPerDocument,
+      });
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapter.value]),
+        undefined,
+        state.value,
+      );
+
+      await controller.open(pdf, createDiv());
+
+      expect(createdViewport.setLayout).toHaveBeenCalledWith(
+        rememberLayoutPerDocument ? remembered : { pages: 'single', scrolling: 'continuous' },
+      );
+      await controller.close();
+    }
+  });
+
+  it('steps between facing spreads while direct even-page entry stays exact', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(8);
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const state = profileState({
+      defaultLayout: { pages: 'facing', scrolling: 'page-by-page' },
+    });
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    createdViewport.emit({ type: 'page-change', pageIndex: 3 });
+
+    shell.send({ type: 'previous-page' });
+    shell.send({ type: 'next-page' });
+    shell.send({ type: 'go-to-page', pageIndex: 5 });
+    shell.send({ type: 'zoom-step', direction: 1 });
+
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(1, { pageIndex: 0 });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(2, { pageIndex: 2 });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, { pageIndex: 5 });
+    expect(createdViewport.stepScale).toHaveBeenCalledWith(1);
+  });
+
+  it('does not let an older navigation failure roll back a newer request to the same page', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(8);
+    const navigationCause = new Error('first request failed');
+    createdViewport.goTo.mockRejectedValueOnce(navigationCause).mockResolvedValue(undefined);
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    createdViewport.emit({ type: 'page-change', pageIndex: 1 });
+
+    shell.send({ type: 'previous-page' });
+    shell.send({ type: 'previous-page' });
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to navigate PDF page', {
+        pageIndex: 0,
+        cause: navigationCause,
+      });
+    });
+    shell.send({ type: 'next-page' });
+
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, { pageIndex: 1 });
+  });
+
+  it('keeps an active layout when unrelated reading settings refresh', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(8);
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const state = profileState({
+      defaultLayout: { pages: 'single', scrolling: 'continuous' },
+    });
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({
+      type: 'set-layout',
+      layout: { pages: 'facing', scrolling: 'page-by-page' },
+    });
+    (state.value.reading.custom as { brightness: number }).brightness = 1.25;
+
+    controller.refreshReadingSettings();
+
+    expect(createdViewport.setLayout).toHaveBeenLastCalledWith({
+      pages: 'facing',
+      scrolling: 'page-by-page',
+    });
+
+    Object.assign(state.value.layout.default, {
+      pages: 'single',
+      scrolling: 'page-by-page',
+    });
+    controller.refreshReadingSettings();
+
+    expect(createdViewport.setLayout).toHaveBeenLastCalledWith({
+      pages: 'single',
+      scrolling: 'page-by-page',
+    });
+  });
+
+  it('contains synchronous scale, step, and layout failures at the reader boundary', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(3);
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+    );
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    createdViewport.setScale.mockImplementationOnce(() => {
+      throw new Error('scale failed');
+    });
+    createdViewport.stepScale.mockImplementationOnce(() => {
+      throw new Error('step failed');
+    });
+    createdViewport.setLayout.mockImplementationOnce(() => {
+      throw new Error('layout failed');
+    });
+
+    shell.send({ type: 'set-scale', scale: 1.25 });
+    shell.send({ type: 'zoom-step', direction: 1 });
+    shell.send({
+      type: 'set-layout',
+      layout: { pages: 'facing', scrolling: 'continuous' },
+    });
+
+    expect(notices).toHaveBeenCalledWith('Could not change zoom: scale failed', undefined);
+    expect(notices).toHaveBeenCalledWith('Could not change zoom: step failed', undefined);
+    expect(notices).toHaveBeenCalledWith('Could not change page layout: layout failed', undefined);
+    expect(log).toHaveBeenCalledTimes(3);
   });
 
   it('uses the global default and leaves the fingerprint map untouched when remembering is off', async () => {
@@ -558,7 +777,7 @@ describe('ReaderController', () => {
     shell.send({ type: 'toggle-sidebar' });
 
     expect(createdViewport.goTo).toHaveBeenNthCalledWith(1, { pageIndex: 0 });
-    expect(createdViewport.goTo).toHaveBeenNthCalledWith(2, { pageIndex: 2 });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(2, { pageIndex: 1 });
     expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, { pageIndex: 2 });
     expect(createdViewport.setScale).toHaveBeenCalledWith('page-fit');
   });
