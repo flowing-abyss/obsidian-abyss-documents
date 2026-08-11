@@ -222,5 +222,18 @@ describe('PDF reader foundation', () => {
       await browser.waitUntil(async () => (await page.getValue()) === target);
     }
     await expect($$('[data-page-number] canvas')).toBeElementsArrayOfSize({ lte: 7 });
+    const maximum = await browser.execute(() => {
+      const metrics = (
+        window as Window & {
+          __abyssDocumentsPerformance?: {
+            counters?: { maxRenderedPagesDuringLongNavigation?: number };
+          };
+        }
+      ).__abyssDocumentsPerformance;
+      return metrics?.counters?.maxRenderedPagesDuringLongNavigation ?? null;
+    });
+    expect(maximum).not.toBeNull();
+    expect(maximum).toBeGreaterThan(0);
+    expect(maximum).toBeLessThanOrEqual(7);
   });
 });

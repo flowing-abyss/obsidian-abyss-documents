@@ -41,6 +41,15 @@ export function evaluateReaderBudget(input: ReaderBudgetInput):
       readonly zeroPdfWorkDuringActivation: boolean;
     } {
   if (!input.available) return { status: 'unavailable', reason: input.reason };
+  validateSamples('activationMs', input.activationMs);
+  validateSamples('firstUsablePageMs', input.firstUsablePageMs);
+  validateSamples('pdfWorkDuringActivation', input.pdfWorkDuringActivation);
+  if (
+    input.activationMs.length !== input.firstUsablePageMs.length ||
+    input.activationMs.length !== input.pdfWorkDuringActivation.length
+  ) {
+    throw new Error('Measured benchmark sample arrays must have matching lengths.');
+  }
   const activation = summarizeSamples(input.activationMs);
   const firstUsablePage = summarizeSamples(input.firstUsablePageMs);
   const firstUsablePageP95Ms = input.platform === 'android' ? 4_000 : 2_000;
@@ -110,7 +119,7 @@ async function main(): Promise<void> {
   }
 }
 
-interface MeasuredSamples {
+export interface MeasuredSamples {
   readonly environment: Record<string, unknown>;
   readonly fixtureHashes: Record<string, string>;
   readonly iterationCount: number;
@@ -250,7 +259,83 @@ async function readAndroidSamples(input: string | undefined): Promise<MeasuredSa
       'Android reference device did not provide ABYSS_BENCHMARK_RAW_INPUT; Appium measurements are unavailable.',
     );
   }
-  return JSON.parse(await readFile(path.resolve(input), 'utf8')) as MeasuredSamples;
+  return parseMeasuredSamples(JSON.parse(await readFile(path.resolve(input), 'utf8')));
+}
+
+export function parseMeasuredSamples(input: unknown): MeasuredSamples {
+  const root = requiredRecord(input, 'Android benchmark input');
+  const environment = requiredRecord(root['environment'], 'environment');
+  const fixtureHashesInput = requiredRecord(root['fixtureHashes'], 'fixtureHashes');
+  const fixtureHashes = Object.fromEntries(
+    Object.entries(fixtureHashesInput).map(([name, hash]) => {
+      if (typeof hash !== 'string' || hash.length === 0) {
+        throw new Error(`fixtureHashes.${name} must be a non-empty string.`);
+      }
+      return [name, hash];
+    }),
+  );
+  const iterationCount = root['iterationCount'];
+  if (!Number.isInteger(iterationCount) || (iterationCount as number) < 5) {
+    throw new Error('iterationCount must be an integer of at least five.');
+  }
+  const samplesInput = requiredRecord(root['samples'], 'samples');
+  const samples = {
+    activationMs: sampleArray(samplesInput['activationMs'], 'samples.activationMs'),
+    coldFirstUsablePageMs: sampleArray(
+      samplesInput['coldFirstUsablePageMs'],
+      'samples.coldFirstUsablePageMs',
+    ),
+    warmFirstUsablePageMs: sampleArray(
+      samplesInput['warmFirstUsablePageMs'],
+      'samples.warmFirstUsablePageMs',
+    ),
+    pdfWorkDuringActivation: sampleArray(
+      samplesInput['pdfWorkDuringActivation'],
+      'samples.pdfWorkDuringActivation',
+    ),
+  };
+  for (const [name, values] of Object.entries(samples)) {
+    if (values.length !== iterationCount) {
+      throw new Error(`${name} length must match iterationCount.`);
+    }
+  }
+  const versionsInput = requiredRecord(root['versions'], 'versions');
+  const version = (name: 'obsidian' | 'pdfjs' | 'plugin'): string => {
+    const value = versionsInput[name];
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`versions.${name} must be a non-empty string.`);
+    }
+    return value;
+  };
+  return {
+    environment,
+    fixtureHashes,
+    iterationCount: iterationCount as number,
+    samples,
+    versions: { obsidian: version('obsidian'), pdfjs: version('pdfjs'), plugin: version('plugin') },
+  };
+}
+
+function requiredRecord(value: unknown, name: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${name} must be an object.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function sampleArray(value: unknown, name: string): number[] {
+  if (!Array.isArray(value)) throw new Error(`${name} must be an array.`);
+  validateSamples(name, value);
+  return value as number[];
+}
+
+function validateSamples(name: string, samples: readonly unknown[]): void {
+  if (samples.length < 5) throw new Error(`${name} must contain at least five samples.`);
+  if (
+    !samples.every((sample) => typeof sample === 'number' && Number.isFinite(sample) && sample >= 0)
+  ) {
+    throw new Error(`${name} samples must be finite non-negative numbers.`);
+  }
 }
 
 function integerEnvironment(name: string, fallback: number, minimum: number): number {
@@ -271,6 +356,7 @@ async function writeUnavailable(output: string, unavailableReason: string): Prom
   };
   await writeFile(output, `${JSON.stringify(unavailable, null, 2)}\n`);
   console.info(`Reader benchmark unavailable: ${unavailable.reason} Raw status: ${output}`);
+  process.exitCode = process.env['ABYSS_ALLOW_UNAVAILABLE_BENCHMARK'] === '1' ? 0 : 1;
 }
 
 function hardwareEnvironment(): Record<string, unknown> {

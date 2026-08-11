@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import { deflateSync } from 'node:zlib';
 import {
   PDFDocument,
@@ -60,7 +61,7 @@ export async function generatePdfFixtures(outputDirectory: string): Promise<PdfF
   ]);
   const files: PdfFixtureMetadata[] = [];
   for (const entry of generated) {
-    await writeFile(new URL(entry.name, directoryUrl(outputDirectory)), entry.bytes);
+    await writeFile(path.join(outputDirectory, entry.name), entry.bytes);
     files.push({
       name: entry.name,
       pages: entry.pages,
@@ -76,15 +77,10 @@ export async function generatePdfFixtures(outputDirectory: string): Promise<PdfF
     files,
   };
   await writeFile(
-    new URL(FIXTURE_MANIFEST_FILE, directoryUrl(outputDirectory)),
+    path.join(outputDirectory, FIXTURE_MANIFEST_FILE),
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
   return manifest;
-}
-
-function directoryUrl(directory: string): URL {
-  const normalized = directory.endsWith('/') ? directory : `${directory}/`;
-  return new URL(`file://${normalized}`);
 }
 
 async function fixture(

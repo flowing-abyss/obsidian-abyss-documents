@@ -24,7 +24,7 @@ export const config: WebdriverIO.Config = {
     'wdio:obsidianOptions': {
       appVersion,
       installerVersion,
-      plugins: [pluginDirectory],
+      plugins: [],
       vault: vaultDirectory,
     },
   })),

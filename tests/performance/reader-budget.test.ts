@@ -28,7 +28,7 @@ describe('reader build and activation budgets', () => {
     expect(metrics.mainJsBytes).toBeLessThanOrEqual(2_097_152);
   });
 
-  it('records zero PDF work during real plugin activation and a bounded rendered-page maximum', async () => {
+  it('records zero PDF work during real plugin activation', async () => {
     const manifest: PluginManifest = {
       author: 'test',
       description: 'test',
@@ -45,6 +45,5 @@ describe('reader build and activation budgets', () => {
     const metrics = readerPerformanceSnapshot().counters;
     expect(metrics.pdfWorkDuringPluginOnload).toBe(0);
     expect(metrics.pdfRuntimeLoads).toBe(0);
-    expect(metrics.maxRenderedPagesDuringLongNavigation).toBeLessThanOrEqual(7);
   });
 });

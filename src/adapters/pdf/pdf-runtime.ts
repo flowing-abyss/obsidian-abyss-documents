@@ -70,12 +70,7 @@ export class PdfRuntimeLoader {
 
   dispose(): void {
     this.generation += 1;
-    if (this.workerUrl !== null) {
-      URL.revokeObjectURL(this.workerUrl);
-      markReaderPerformance('worker-revoked');
-    }
-    this.workerUrl = null;
-    setReaderCounter('workerUrlsActive', 0);
+    if (this.workerUrl !== null) this.revokeWorkerUrl(this.workerUrl);
     this.loadPromise = null;
   }
 
@@ -95,7 +90,6 @@ export class PdfRuntimeLoader {
     const workerBytes = workerSource.slice().buffer;
     const workerUrl = URL.createObjectURL(new Blob([workerBytes], { type: 'text/javascript' }));
     incrementReaderCounter('blobsCreated');
-    setReaderCounter('workerUrlsActive', 1);
     markReaderPerformance('blob-created');
 
     try {
@@ -104,6 +98,7 @@ export class PdfRuntimeLoader {
         throw new Error(`Unexpected PDF.js ${pdfjsLib.version}`);
       }
       this.workerUrl = workerUrl;
+      setReaderCounter('workerUrlsActive', 1);
       pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
       setReaderPdfjsVersion(pdfjsLib.version);
       return {
@@ -112,8 +107,17 @@ export class PdfRuntimeLoader {
         version: pdfjsLib.version,
       };
     } catch (error) {
-      URL.revokeObjectURL(workerUrl);
+      this.revokeWorkerUrl(workerUrl);
       throw error;
+    }
+  }
+
+  private revokeWorkerUrl(workerUrl: string): void {
+    URL.revokeObjectURL(workerUrl);
+    markReaderPerformance('worker-revoked');
+    if (this.workerUrl === workerUrl) {
+      this.workerUrl = null;
+      setReaderCounter('workerUrlsActive', 0);
     }
   }
 }

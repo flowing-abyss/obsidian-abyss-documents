@@ -129,6 +129,8 @@ describe('PdfRuntimeLoader', () => {
   });
 
   it('revokes a worker URL created after dispose wins an in-flight race', async () => {
+    beginPluginActivation();
+    endPluginActivation();
     const { revokeObjectURL } = stubWorkerUrls();
     const imports = deferred<ReturnType<typeof runtimeDependencies>>();
     const loader = new PdfRuntimeLoader(() => imports.promise);
@@ -139,6 +141,10 @@ describe('PdfRuntimeLoader', () => {
 
     await expect(loading).rejects.toMatchObject({ name: 'AbortError' });
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:pdf-worker');
+    expect(readerPerformanceSnapshot().counters.workerUrlsActive).toBe(0);
+    expect(
+      readerPerformanceSnapshot().marks.filter(({ name }) => name === 'worker-revoked'),
+    ).toHaveLength(1);
   });
 
   it('rejects when dispose wins after the worker URL is installed but before load settles', async () => {

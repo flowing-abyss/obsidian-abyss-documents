@@ -302,6 +302,32 @@ describe('AbyssDocumentsPlugin', () => {
     await pendingHandoff;
   });
 
+  it('ignores an in-flight core PDF handoff that settles after plugin cleanup', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    let rejectHandoff: ((cause: Error) => void) | undefined;
+    const pendingHandoff = new Promise<void>((_resolve, reject) => {
+      rejectHandoff = reject;
+    });
+    const setViewState = vi.spyOn(leaf, 'setViewState').mockReturnValue(pendingHandoff);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledOnce();
+    });
+    const cleanups = (plugin as unknown as { cleanups__: Array<() => unknown> }).cleanups__;
+    for (const cleanup of [...cleanups].reverse()) cleanup();
+    rejectHandoff?.(new Error('leaf destroyed during unload'));
+    await expect(pendingHandoff).rejects.toThrow('leaf destroyed during unload');
+    await Promise.resolve();
+
+    expect(log).not.toHaveBeenCalled();
+  });
+
   it('ignores non-PDF view states and missing or non-PDF file paths', async () => {
     const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
     const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);

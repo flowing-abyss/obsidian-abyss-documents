@@ -7,6 +7,31 @@ import { pathToFileURL } from 'node:url';
 import { generatePdfFixtures } from '../tests/fixtures/pdf-fixtures.mjs';
 
 const RELEASE_FILES = ['main.js', 'manifest.json', 'styles.css'] as const;
+const NODE_NETWORK_TRANSPORT =
+  /(?:require|import)\s*\(\s*['"](?:node:)?(?:dgram|dns|http|http2|https|net|tls|undici)['"]\s*\)/u;
+const EXTERNAL_REQUIRE = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/gu;
+
+export function assertLocalOnlyBundle(source: string): void {
+  const match = NODE_NETWORK_TRANSPORT.exec(source);
+  if (match !== null) {
+    throw new Error(
+      `Node network transport is forbidden in the local-only Community package: ${match[0]}`,
+    );
+  }
+  for (const external of source.matchAll(EXTERNAL_REQUIRE)) {
+    const moduleName = external[1];
+    if (moduleName !== 'obsidian') {
+      throw new Error(
+        `Unapproved external module is forbidden in the local-only Community package: ${moduleName ?? 'unknown'}`,
+      );
+    }
+  }
+  if (/\brequestUrl\b/u.test(source)) {
+    throw new Error(
+      'Obsidian requestUrl is forbidden in the local-only Community package because its Node transport is outside renderer interception.',
+    );
+  }
+}
 
 export async function stageCommunityPackage(
   sourceDirectory: string,
@@ -19,6 +44,7 @@ export async function stageCommunityPackage(
   if (manifest.id !== 'abyss-documents' || typeof manifest.version !== 'string') {
     throw new Error('Community package manifest must identify a versioned abyss-documents plugin.');
   }
+  assertLocalOnlyBundle(await readFile(path.join(sourceDirectory, 'main.js'), 'utf8'));
   await Promise.all(
     RELEASE_FILES.map((file) =>
       copyFile(path.join(sourceDirectory, file), path.join(destinationDirectory, file)),
@@ -29,7 +55,10 @@ export async function stageCommunityPackage(
 
 export async function prepareSmokeVault(vaultDirectory: string): Promise<void> {
   await mkdir(path.join(vaultDirectory, '.obsidian'), { recursive: true });
-  await writeFile(path.join(vaultDirectory, '.obsidian', 'app.json'), '{}\n');
+  await Promise.all([
+    writeFile(path.join(vaultDirectory, '.obsidian', 'app.json'), '{}\n'),
+    writeFile(path.join(vaultDirectory, '.obsidian', 'community-plugins.json'), '[]\n'),
+  ]);
   await generatePdfFixtures(path.join(vaultDirectory, 'Documents'));
 }
 
@@ -51,11 +80,11 @@ async function run(
 async function main(): Promise<void> {
   const repoRoot = path.resolve(import.meta.dirname, '..');
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'abyss-community-smoke-'));
-  const pluginDirectory = path.join(temporaryRoot, 'package', 'abyss-documents');
   const vaultDirectory = path.join(temporaryRoot, 'vault');
+  const pluginDirectory = path.join(vaultDirectory, '.obsidian', 'plugins', 'abyss-documents');
   try {
-    const staged = await stageCommunityPackage(repoRoot, pluginDirectory);
     await prepareSmokeVault(vaultDirectory);
+    const staged = await stageCommunityPackage(repoRoot, pluginDirectory);
     await run(
       process.execPath,
       [

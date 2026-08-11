@@ -18,6 +18,7 @@ export const PLUGIN_ID = 'abyss-documents';
 
 class CorePdfLeafHandoff {
   private active = true;
+  private lifecycleGeneration = 0;
   private readonly handoffsInFlight = new Set<WorkspaceLeaf>();
   private timer: number | null = null;
 
@@ -36,6 +37,7 @@ class CorePdfLeafHandoff {
   private readonly dispose = (): void => {
     markReaderPerformance('pdf-handoff-cleanup');
     this.active = false;
+    this.lifecycleGeneration += 1;
     if (this.timer !== null) window.clearTimeout(this.timer);
     this.timer = null;
     this.handoffsInFlight.clear();
@@ -61,6 +63,7 @@ class CorePdfLeafHandoff {
     if (viewState.type !== 'pdf' || filePath === undefined) return;
     markReaderPerformance('pdf-handoff-start');
     this.handoffsInFlight.add(leaf);
+    const lifecycleGeneration = this.lifecycleGeneration;
     void leaf
       .setViewState({
         ...viewState,
@@ -68,12 +71,15 @@ class CorePdfLeafHandoff {
         type: DOCUMENT_VIEW_TYPE,
       })
       .catch((error: unknown) => {
+        if (!this.active || lifecycleGeneration !== this.lifecycleGeneration) return;
         console.error(`[${PLUGIN_ID}] Could not open PDF in the document reader`, {
           cause: error,
           path: filePath,
         });
       })
-      .finally(() => this.handoffsInFlight.delete(leaf));
+      .finally(() => {
+        if (lifecycleGeneration === this.lifecycleGeneration) this.handoffsInFlight.delete(leaf);
+      });
   }
 }
 

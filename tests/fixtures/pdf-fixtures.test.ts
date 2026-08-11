@@ -97,6 +97,20 @@ describe('generatePdfFixtures', () => {
     ).toEqual(first);
   });
 
+  it('writes fixture paths containing URL-reserved characters as filesystem paths', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'abyss fixtures # ? %-'));
+    temporaryDirectories.push(directory);
+
+    const manifest = await generatePdfFixtures(directory);
+
+    expect(await sha256(path.join(directory, 'text-12-pages.pdf'))).toBe(
+      fixture(manifest, 'text-12-pages.pdf').sha256,
+    );
+    expect(JSON.parse(await readFile(path.join(directory, FIXTURE_MANIFEST_FILE), 'utf8'))).toEqual(
+      manifest,
+    );
+  });
+
   it('places the known search term only on pages 2, 7, and 11 of the search fixture', async () => {
     const directory = await temporaryDirectory();
     await generatePdfFixtures(directory);

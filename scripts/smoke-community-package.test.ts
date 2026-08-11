@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { prepareSmokeVault, stageCommunityPackage } from './smoke-community-package.mjs';
+import {
+  assertLocalOnlyBundle,
+  prepareSmokeVault,
+  stageCommunityPackage,
+} from './smoke-community-package.mjs';
 
 const temporaryDirectories: string[] = [];
 
@@ -38,6 +42,27 @@ describe('stageCommunityPackage', () => {
     await prepareSmokeVault(vault);
 
     expect(await readFile(path.join(vault, '.obsidian', 'app.json'), 'utf8')).toBe('{}\n');
+    expect(await readFile(path.join(vault, '.obsidian', 'community-plugins.json'), 'utf8')).toBe(
+      '[]\n',
+    );
     expect(await readdir(path.join(vault, 'Documents'))).toContain('text-12-pages.pdf');
+  });
+
+  it('rejects packaged Node transport imports that renderer interception cannot observe', () => {
+    expect(() => {
+      assertLocalOnlyBundle('const obsidian = require("obsidian");');
+    }).not.toThrow();
+    expect(() => {
+      assertLocalOnlyBundle('const https = require("node:https");');
+    }).toThrow('Node network transport');
+    expect(() => {
+      assertLocalOnlyBundle('import("undici")');
+    }).toThrow('Node network transport');
+    expect(() => {
+      assertLocalOnlyBundle('const electron = require("electron");');
+    }).toThrow('external module');
+    expect(() => {
+      assertLocalOnlyBundle('obsidian.requestUrl("https://example.com")');
+    }).toThrow('Obsidian requestUrl');
   });
 });

@@ -1,5 +1,27 @@
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import process from 'node:process';
 import { describe, expect, it } from 'vitest';
-import { evaluateReaderBudget, parseObsidianEval, summarizeSamples } from './benchmark-reader.mjs';
+import {
+  evaluateReaderBudget,
+  parseMeasuredSamples,
+  parseObsidianEval,
+  summarizeSamples,
+} from './benchmark-reader.mjs';
+
+const repoRoot = path.resolve(import.meta.dirname, '..');
+
+function runBenchmark(environment: NodeJS.ProcessEnv = {}) {
+  return spawnSync(
+    process.execPath,
+    ['--import', 'tsx', path.join(repoRoot, 'scripts', 'benchmark-reader.mts')],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: process.env['PATH'], ...environment },
+    },
+  );
+}
 
 describe('reader benchmark summaries', () => {
   it('removes the Obsidian CLI eval marker before parsing serialized instrumentation', () => {
@@ -24,15 +46,80 @@ describe('reader benchmark summaries', () => {
     });
   });
 
+  it('exits nonzero when a benchmark environment is unavailable unless explicitly allowed', () => {
+    const required = runBenchmark();
+    const diagnostic = runBenchmark({ ABYSS_ALLOW_UNAVAILABLE_BENCHMARK: '1' });
+
+    expect(required.status).toBe(1);
+    expect(required.stdout).toContain('Reader benchmark unavailable:');
+    expect(diagnostic.status).toBe(0);
+    expect(diagnostic.stdout).toContain('Reader benchmark unavailable:');
+  });
+
   it('fails measured desktop samples at either activation or first-page budget', () => {
     expect(
       evaluateReaderBudget({
-        activationMs: [90, 101],
+        activationMs: [90, 91, 92, 93, 101],
         available: true,
-        firstUsablePageMs: [1_500, 2_001],
-        pdfWorkDuringActivation: [0, 0],
+        firstUsablePageMs: [1_500, 1_600, 1_700, 1_800, 2_001],
+        pdfWorkDuringActivation: [0, 0, 0, 0, 0],
         platform: 'desktop',
       }),
     ).toMatchObject({ status: 'failed' });
+  });
+
+  it.each([
+    {
+      name: 'fewer than five samples',
+      samples: [1, 2, 3, 4],
+    },
+    {
+      name: 'a negative sample',
+      samples: [1, 2, 3, 4, -1],
+    },
+    {
+      name: 'a non-finite sample',
+      samples: [1, 2, 3, 4, Number.NaN],
+    },
+  ])('rejects $name before evaluating a measured budget', ({ samples }) => {
+    expect(() =>
+      evaluateReaderBudget({
+        activationMs: samples,
+        available: true,
+        firstUsablePageMs: [1, 2, 3, 4, 5],
+        pdfWorkDuringActivation: [0, 0, 0, 0, 0],
+        platform: 'desktop',
+      }),
+    ).toThrow(/at least five|finite non-negative/u);
+  });
+
+  it('validates the complete Android sample schema instead of trusting parsed JSON', () => {
+    const valid = {
+      environment: { device: 'Pixel reference' },
+      fixtureHashes: { 'text-12-pages.pdf': 'abc123' },
+      iterationCount: 5,
+      samples: {
+        activationMs: [1, 2, 3, 4, 5],
+        coldFirstUsablePageMs: [101, 102, 103, 104, 105],
+        warmFirstUsablePageMs: [51, 52, 53, 54, 55],
+        pdfWorkDuringActivation: [0, 0, 0, 0, 0],
+      },
+      versions: { obsidian: '1.13.4', pdfjs: '6.2.108', plugin: '0.1.0' },
+    };
+
+    expect(parseMeasuredSamples(valid)).toEqual(valid);
+    expect(() =>
+      parseMeasuredSamples({
+        ...valid,
+        iterationCount: 6,
+      }),
+    ).toThrow('iterationCount');
+    expect(() =>
+      parseMeasuredSamples({
+        ...valid,
+        versions: { obsidian: '1.13.4', pdfjs: '', plugin: '0.1.0' },
+      }),
+    ).toThrow('versions.pdfjs');
+    expect(() => parseMeasuredSamples(null)).toThrow('object');
   });
 });
