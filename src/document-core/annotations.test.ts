@@ -88,6 +88,20 @@ describe('annotation identity', () => {
     expect(() => asAnnotationId('   ')).toThrow(/empty/u);
   });
 
+  it('rejects coercible objects before identity or timestamp normalization', () => {
+    const uuidObject = {
+      toString: () => '01918f62-5c0b-7cc3-98ad-6f126f164f08',
+    } as unknown as string;
+    const stableObject = { trim: () => 'foreign-viewer-id' } as unknown as string;
+    const timestampObject = {
+      toString: () => '2026-08-11T10:00:00.000Z',
+    } as unknown as string;
+
+    expect(() => asAnnotationId(stableObject)).toThrow(/string/u);
+    expect(() => asGeneratedAnnotationId(uuidObject)).toThrow(/string/u);
+    expect(() => asUtcTimestamp(timestampObject)).toThrow(/string/u);
+  });
+
   it('keeps generated ids stricter than foreign standard ids', () => {
     const foreign = asAnnotationId('foreign-viewer-id');
     const generated = asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08');

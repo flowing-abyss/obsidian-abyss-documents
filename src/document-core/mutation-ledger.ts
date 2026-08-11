@@ -56,6 +56,12 @@ type AttemptExecutor<TSession extends DocumentSaveOwner> = (
   signal: AbortSignal,
 ) => Promise<VerifiedSaveResult>;
 
+class DocumentPathChangedError extends LedgerTransitionError {
+  constructor(state: MutationLedgerState) {
+    super(state, 'save after document path changed');
+  }
+}
+
 const PREPARED_ATTEMPT_TOKEN = Symbol('MutationLedgerPreparedSaveAttempt');
 const ACTIVE_ATTEMPT_TOKEN = Symbol('MutationLedgerActiveSaveAttempt');
 
@@ -199,7 +205,6 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
 
   prepareSave(captured: CapturedGeneration): DocumentSaveAttempt<TSession> {
     this.requireActiveCapture(captured);
-    this.requireOwnerPath();
     if (this.preparedAttempt !== null || this.activeAttempt !== null) {
       throw new LedgerTransitionError(this.currentState, 'prepare another save');
     }
@@ -234,9 +239,14 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
   private claimAttempt(
     prepared: DocumentSaveAttempt<TSession>,
   ): ActiveDocumentSaveAttempt<TSession> {
-    this.requireOwnerPath();
     if (this.preparedAttempt !== prepared || this.activeCapture !== prepared.captured) {
       throw new StaleGenerationError(prepared.captured.captureId, prepared.captured.generation);
+    }
+    try {
+      this.requireOwnerPath();
+    } catch (cause) {
+      this.failPreparedAttempt(prepared, cause);
+      throw cause;
     }
     const active = new LedgerActiveDocumentSaveAttempt(
       ACTIVE_ATTEMPT_TOKEN,
@@ -255,6 +265,8 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
     active: ActiveDocumentSaveAttempt<TSession>,
     result: VerifiedSaveResult,
   ): VerifiedSaveResult {
+    this.requireActiveAttempt(active);
+    this.requireOwnerPath();
     const staged = this.stagedCommit;
     if (staged?.attempt !== active) {
       throw new LedgerTransitionError(this.currentState, 'finish save without commit');
@@ -263,6 +275,7 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
     if (!verifiedResultsMatch(staged.result, returned)) {
       throw new TypeError('The service returned a different verified result than it committed.');
     }
+    this.requireOwnerPath();
     this.finalizeCommit(active);
     return staged.result;
   }
@@ -286,6 +299,25 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
     value?: unknown,
   ): void {
     this.requireActiveAttempt(attempt);
+    if (action === 'fail') {
+      this.failAttempt(attempt, value);
+      return;
+    }
+
+    try {
+      this.requireOwnerPath();
+      this.applyAttemptTransition(attempt, action, value);
+      this.requireOwnerPath();
+    } catch (cause) {
+      this.rethrowAttemptTransitionFailure(attempt, cause);
+    }
+  }
+
+  private applyAttemptTransition(
+    attempt: ActiveDocumentSaveAttempt<TSession>,
+    action: Exclude<ActiveAttemptAction, 'fail'>,
+    value: unknown,
+  ): void {
     if (action === 'writing') {
       this.transition('serializing', 'writing');
       return;
@@ -294,11 +326,19 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
       this.transition('writing', 'verifying');
       return;
     }
-    if (action === 'commit') {
-      this.stageCommit(attempt, value as VerifiedSaveResult);
-      return;
+    this.stageCommit(attempt, value as VerifiedSaveResult);
+  }
+
+  private rethrowAttemptTransitionFailure(
+    attempt: ActiveDocumentSaveAttempt<TSession>,
+    cause: unknown,
+  ): never {
+    const pathFailure = cause instanceof DocumentPathChangedError ? cause : this.ownerPathFailure();
+    if (pathFailure !== null) {
+      if (this.activeAttempt === attempt) this.failAttempt(attempt, pathFailure);
+      throw pathFailure;
     }
-    this.failAttempt(attempt, value);
+    throw cause;
   }
 
   private stageCommit(
@@ -334,6 +374,19 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
     this.currentState = this.entries.length === 0 ? 'committed' : 'dirty';
   }
 
+  private failPreparedAttempt(attempt: DocumentSaveAttempt<TSession>, cause: unknown): void {
+    if (this.preparedAttempt !== attempt || this.activeCapture !== attempt.captured) {
+      throw new StaleGenerationError(attempt.captured.captureId, attempt.captured.generation);
+    }
+    this.failure = Object.freeze({
+      generation: attempt.captured.generation,
+      stage: 'serializing',
+      cause,
+    });
+    this.completeAttempt();
+    this.currentState = this.entries.length === 0 ? 'committed' : 'dirty';
+  }
+
   private requireActiveAttempt(attempt: ActiveDocumentSaveAttempt<TSession>): void {
     if (this.activeAttempt !== attempt) {
       throw new StaleGenerationError(attempt.captured.captureId, attempt.captured.generation);
@@ -348,9 +401,14 @@ export class MutationLedger<TSession extends DocumentSaveOwner = DocumentSaveOwn
   }
 
   private requireOwnerPath(): void {
-    if (this.owner.descriptor.path !== this.ownerPath) {
-      throw new LedgerTransitionError(this.currentState, 'save after document path changed');
-    }
+    const failure = this.ownerPathFailure();
+    if (failure !== null) throw failure;
+  }
+
+  private ownerPathFailure(): DocumentPathChangedError | null {
+    return this.owner.descriptor.path === this.ownerPath
+      ? null
+      : new DocumentPathChangedError(this.currentState);
   }
 
   private failureStage(): MutationLedgerFailure['stage'] {

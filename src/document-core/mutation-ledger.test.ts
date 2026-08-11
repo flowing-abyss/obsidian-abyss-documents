@@ -99,6 +99,19 @@ function runAttempt(
   );
 }
 
+async function commitPending(ledger: MutationLedger<EditableDocumentSession>): Promise<void> {
+  const captured = ledger.capture();
+  await runAttempt(ledger.prepareSave(captured), (active, result) => {
+    active.markWriting();
+    active.markVerifying();
+    active.commit(result);
+  });
+}
+
+function setDescriptorPath(descriptor: { path: string }, path: string): void {
+  descriptor.path = path;
+}
+
 describe('MutationLedger', () => {
   it('binds save execution to one owner and invokes a service only once', async () => {
     const ownedLedger = new MutationLedger(session);
@@ -294,13 +307,294 @@ describe('MutationLedger', () => {
     ledger.append(comment());
     const attempt = ledger.prepareSave(ledger.capture());
     const save = vi.fn();
-    descriptor.path = 'Research/other.pdf';
+    setDescriptorPath(descriptor, 'Research/other.pdf');
 
     await expect(attempt.run({ save }, new AbortController().signal)).rejects.toThrow(
       /path changed/u,
     );
     expect(save).not.toHaveBeenCalled();
     expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.state).toBe('dirty');
+
+    setDescriptorPath(descriptor, session.descriptor.path);
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('does not let a copied attempt clear a valid prepared capture on path mismatch', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    const copied = Object.assign(
+      Object.create(Reflect.getPrototypeOf(attempt)),
+      attempt,
+    ) as DocumentSaveAttempt<EditableDocumentSession>;
+    const save = vi.fn();
+    setDescriptorPath(descriptor, 'Research/other.pdf');
+
+    await expect(copied.run({ save }, new AbortController().signal)).rejects.toThrow(
+      StaleGenerationError,
+    );
+    expect(ledger.state).toBe('serializing');
+    expect(save).not.toHaveBeenCalled();
+
+    await expect(attempt.run({ save }, new AbortController().signal)).rejects.toThrow(
+      /path changed/u,
+    );
+    expect(ledger.state).toBe('dirty');
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(save).not.toHaveBeenCalled();
+
+    setDescriptorPath(descriptor, session.descriptor.path);
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('fails retryably when the owner path changes during serialization', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            setDescriptorPath(descriptor, 'Research/other.pdf');
+            active.markWriting();
+            return verifiedResult(active.captured.generation);
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/path changed/u);
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.state).toBe('dirty');
+
+    setDescriptorPath(descriptor, session.descriptor.path);
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('fails retryably when the owner path changes during writing', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            active.markWriting();
+            setDescriptorPath(descriptor, 'Research/other.pdf');
+            active.markVerifying();
+            return verifiedResult(active.captured.generation);
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/path changed/u);
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.state).toBe('dirty');
+
+    setDescriptorPath(descriptor, session.descriptor.path);
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('fails retryably when the owner path changes after a staged commit', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            const result = verifiedResult(active.captured.generation);
+            active.markWriting();
+            active.markVerifying();
+            active.commit(result);
+            setDescriptorPath(descriptor, 'Research/other.pdf');
+            return result;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/path changed/u);
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.state).toBe('dirty');
+
+    setDescriptorPath(descriptor, session.descriptor.path);
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('allows explicit failure cleanup after the owner path changes', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    const cause = new Error('path changed during serialization');
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            setDescriptorPath(descriptor, 'Research/other.pdf');
+            active.fail(cause);
+            throw cause;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toBe(cause);
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.lastFailure).toMatchObject({ stage: 'serializing', cause });
+    expect(ledger.state).toBe('dirty');
+
+    setDescriptorPath(descriptor, session.descriptor.path);
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('revokes an active attempt when a service catches a path mismatch', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    let pathFailure: unknown;
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            const result = verifiedResult(active.captured.generation);
+            setDescriptorPath(descriptor, 'Research/other.pdf');
+            try {
+              active.markWriting();
+            } catch (cause) {
+              pathFailure = cause;
+            }
+            setDescriptorPath(descriptor, session.descriptor.path);
+            active.markWriting();
+            active.markVerifying();
+            active.commit(result);
+            return result;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(StaleGenerationError);
+    expect(pathFailure).toBeInstanceOf(Error);
+    expect(pathFailure).toMatchObject({ action: 'save after document path changed' });
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.state).toBe('dirty');
+
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('revokes an active attempt when staged-result normalization changes the owner path', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+    let pathFailure: unknown;
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            const normal = verifiedResult(active.captured.generation);
+            const pathChangingResult = {
+              get verified() {
+                setDescriptorPath(descriptor, 'Research/other.pdf');
+                return true as const;
+              },
+              generation: normal.generation,
+              sha256: normal.sha256,
+              byteSize: normal.byteSize,
+              committedAt: normal.committedAt,
+            } satisfies VerifiedSaveResult;
+            active.markWriting();
+            active.markVerifying();
+            try {
+              active.commit(pathChangingResult);
+            } catch (cause) {
+              pathFailure = cause;
+            }
+            setDescriptorPath(descriptor, session.descriptor.path);
+            active.commit(normal);
+            return normal;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(StaleGenerationError);
+    expect(pathFailure).toBeInstanceOf(Error);
+    expect(pathFailure).toMatchObject({ action: 'save after document path changed' });
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.state).toBe('dirty');
+
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
+  });
+
+  it('rejects a returned result that changes the owner path during final normalization', async () => {
+    const descriptor = { ...session.descriptor };
+    const mutableSession: EditableDocumentSession = { ...session, descriptor };
+    const ledger = new MutationLedger(mutableSession);
+    ledger.append(comment());
+    const attempt = ledger.prepareSave(ledger.capture());
+
+    await expect(
+      attempt.run(
+        {
+          save: async (active) => {
+            const normal = verifiedResult(active.captured.generation);
+            active.markWriting();
+            active.markVerifying();
+            active.commit(normal);
+            return {
+              get verified() {
+                setDescriptorPath(descriptor, 'Research/other.pdf');
+                return true as const;
+              },
+              generation: normal.generation,
+              sha256: normal.sha256,
+              byteSize: normal.byteSize,
+              committedAt: normal.committedAt,
+            } satisfies VerifiedSaveResult;
+          },
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow(/path changed/u);
+    expect(ledger.pending()).toEqual([comment()]);
+    expect(ledger.committedGeneration).toBe(0);
+    expect(ledger.state).toBe('dirty');
+
+    setDescriptorPath(descriptor, session.descriptor.path);
+    await commitPending(ledger);
+    expect(ledger.state).toBe('committed');
   });
 
   it('keeps edits made during save in the next generation when the captured save fails', async () => {
@@ -564,6 +858,214 @@ describe('MutationLedger', () => {
       (input as { comment: string }).comment = 'changed outside';
     }).not.toThrow();
     expect(captured.mutations).toEqual([comment('original')]);
+  });
+
+  it('drops unknown properties without freezing caller-owned objects', () => {
+    const external = { mutable: true };
+    const input = {
+      kind: 'set-comment',
+      comment: 'canonical',
+      external,
+      target: { ...target, external },
+    } as unknown as AnnotationMutation;
+    const ledger = new MutationLedger(session);
+
+    const entry = ledger.append(input);
+
+    expect(entry.mutation).toEqual(comment('canonical'));
+    expect(entry.mutation).not.toHaveProperty('external');
+    if (entry.mutation.kind !== 'set-comment') throw new Error('Expected a comment mutation.');
+    expect(entry.mutation.target).not.toHaveProperty('external');
+    expect(Object.isFrozen(external)).toBe(false);
+    external.mutable = false;
+    expect(external.mutable).toBe(false);
+  });
+
+  it('canonicalizes every mutation variant and nested record without caller extras', () => {
+    const timestamp = asUtcTimestamp('2026-08-11T10:00:00.000Z');
+    const generated = asGeneratedAnnotationId('01918f62-5c0b-7cc3-98ad-6f126f164f08');
+    const external = { mutable: true };
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+    const canonicalAnchor = {
+      kind: 'fixed-page' as const,
+      pageIndex: 0,
+      coordinateSpace: 'page-points-top-left' as const,
+      geometry: { kind: 'point' as const, point: { x: 1, y: 2 } },
+    };
+    const anchorWithExtras = {
+      ...canonicalAnchor,
+      external,
+      geometry: {
+        ...canonicalAnchor.geometry,
+        external,
+        point: { ...canonicalAnchor.geometry.point, external },
+      },
+    };
+    const targetWithExtras = { ...target, external };
+    const commonCreate = {
+      kind: 'create' as const,
+      id: generated,
+      type: 'text-note' as const,
+      color: null,
+      selectedText: null,
+      author: '',
+      createdAt: timestamp,
+      modifiedAt: timestamp,
+      comment: '',
+    };
+    const cases = [
+      {
+        input: { ...commonCreate, anchor: anchorWithExtras, cyclic },
+        expected: { ...commonCreate, anchor: canonicalAnchor },
+      },
+      {
+        input: {
+          kind: 'set-geometry',
+          target: targetWithExtras,
+          anchor: anchorWithExtras,
+          cyclic,
+        },
+        expected: { kind: 'set-geometry', target, anchor: canonicalAnchor },
+      },
+      {
+        input: { kind: 'set-comment', target: targetWithExtras, comment: '', cyclic },
+        expected: { kind: 'set-comment', target, comment: '' },
+      },
+      {
+        input: { kind: 'set-color', target: targetWithExtras, color: null, cyclic },
+        expected: { kind: 'set-color', target, color: null },
+      },
+      {
+        input: { kind: 'convert-type', target: targetWithExtras, type: 'underline', cyclic },
+        expected: { kind: 'convert-type', target, type: 'underline' },
+      },
+      {
+        input: { kind: 'delete', target: targetWithExtras, cyclic },
+        expected: { kind: 'delete', target },
+      },
+      {
+        input: {
+          kind: 'set-metadata',
+          target: targetWithExtras,
+          metadata: { author: 'Ada', modifiedAt: timestamp, external },
+          cyclic,
+        },
+        expected: {
+          kind: 'set-metadata',
+          target,
+          metadata: { author: 'Ada', modifiedAt: timestamp },
+        },
+      },
+    ] as unknown as ReadonlyArray<{
+      input: AnnotationMutation;
+      expected: AnnotationMutation;
+    }>;
+
+    for (const { input, expected } of cases) {
+      const ledger = new MutationLedger(session);
+      expect(ledger.append(input).mutation).toEqual(expected);
+    }
+    expect(Object.isFrozen(external)).toBe(false);
+    expect(Object.isFrozen(cyclic)).toBe(false);
+  });
+
+  it('ignores cyclic unknown properties without traversing caller state', () => {
+    const cyclic: { self?: unknown; mutable: boolean } = { mutable: true };
+    cyclic.self = cyclic;
+    const input = {
+      kind: 'set-comment',
+      target,
+      comment: 'cyclic',
+      cyclic,
+    } as unknown as AnnotationMutation;
+    const ledger = new MutationLedger(session);
+
+    const entry = ledger.append(input);
+
+    expect(entry.mutation).toEqual(comment('cyclic'));
+    expect(entry.mutation).not.toHaveProperty('cyclic');
+    expect(Object.isFrozen(cyclic)).toBe(false);
+    cyclic.mutable = false;
+    expect(cyclic.mutable).toBe(false);
+  });
+
+  it('reads recognized scalar getters once before validation and freezing', () => {
+    const external = { mutable: true };
+    let reads = 0;
+    const input = {
+      kind: 'set-comment',
+      target,
+      get comment(): unknown {
+        reads += 1;
+        return reads === 1 ? 'single read' : external;
+      },
+    } as unknown as AnnotationMutation;
+    const ledger = new MutationLedger(session);
+
+    const entry = ledger.append(input);
+
+    expect(entry.mutation).toEqual(comment('single read'));
+    expect(reads).toBe(1);
+    expect(Object.isFrozen(external)).toBe(false);
+  });
+
+  it('copies ink arrays without invoking caller-owned collection methods', () => {
+    const externalPoint = { x: 90, y: 90 };
+    const externalPaths = [[externalPoint]];
+    const paths = [[{ x: 1, y: 2 }]];
+    Object.defineProperty(paths, 'map', { value: () => externalPaths });
+    const input = {
+      kind: 'set-geometry',
+      target,
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'ink', paths },
+      },
+    } as AnnotationMutation;
+    const ledger = new MutationLedger(session);
+
+    const entry = ledger.append(input);
+
+    expect(entry.mutation).toMatchObject({ anchor: { geometry: { paths: [[{ x: 1, y: 2 }]] } } });
+    expect(Object.isFrozen(externalPaths)).toBe(false);
+    expect(Object.isFrozen(externalPoint)).toBe(false);
+  });
+
+  it('does not traverse a cyclic value returned by an overridden array method', () => {
+    const cyclic: unknown[] = [];
+    cyclic.push(cyclic);
+    const paths = [[{ x: 3, y: 4 }]];
+    Object.defineProperty(paths, 'map', { value: () => cyclic });
+    const input = {
+      kind: 'set-geometry',
+      target,
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'ink', paths },
+      },
+    } as AnnotationMutation;
+    const ledger = new MutationLedger(session);
+
+    const entry = ledger.append(input);
+
+    expect(entry.mutation).toMatchObject({ anchor: { geometry: { paths: [[{ x: 3, y: 4 }]] } } });
+    expect(Object.isFrozen(cyclic)).toBe(false);
+  });
+
+  it('wraps nullish top-level mutations without journaling them', () => {
+    for (const malformed of [null, undefined]) {
+      const ledger = new MutationLedger(session);
+      expect(() => ledger.append(malformed as unknown as AnnotationMutation)).toThrow(
+        InvalidAnnotationMutationError,
+      );
+      expect(ledger.pending()).toEqual([]);
+      expect(ledger.state).toBe('committed');
+    }
   });
 
   it('copies and deeply freezes nested geometry before journaling', () => {
@@ -947,6 +1449,50 @@ describe('MutationLedger', () => {
       const ledger = new MutationLedger(session);
       expect(() => ledger.append(mutation)).toThrow(InvalidAnnotationMutationError);
       expect(ledger.pending()).toEqual([]);
+    }
+  });
+
+  it('rejects coercible identity objects before journaling', () => {
+    const timestamp = asUtcTimestamp('2026-08-11T10:00:00.000Z');
+    const generatedObject = {
+      toString: () => '01918f62-5c0b-7cc3-98ad-6f126f164f08',
+    };
+    const stableObject = { trim: () => 'nm-object' };
+    const malformed = [
+      {
+        kind: 'create',
+        id: generatedObject,
+        type: 'text-note',
+        anchor: {
+          kind: 'fixed-page',
+          pageIndex: 0,
+          coordinateSpace: 'page-points-top-left',
+          geometry: { kind: 'point', point: { x: 1, y: 2 } },
+        },
+        color: null,
+        selectedText: null,
+        author: '',
+        createdAt: timestamp,
+        modifiedAt: timestamp,
+        comment: '',
+      },
+      {
+        kind: 'set-comment',
+        target: { kind: 'legacy', fingerprint: 'legacy', promoteTo: generatedObject },
+        comment: '',
+      },
+      {
+        kind: 'set-comment',
+        target: { kind: 'stable', id: stableObject },
+        comment: '',
+      },
+    ] as unknown as readonly AnnotationMutation[];
+
+    for (const mutation of malformed) {
+      const ledger = new MutationLedger(session);
+      expect(() => ledger.append(mutation)).toThrow(InvalidAnnotationMutationError);
+      expect(ledger.pending()).toEqual([]);
+      expect(ledger.state).toBe('committed');
     }
   });
 

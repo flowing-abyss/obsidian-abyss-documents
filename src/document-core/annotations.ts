@@ -201,16 +201,23 @@ export type AnnotationSink = (batch: readonly DocumentAnnotation[]) => void;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export function asAnnotationId(value: string): AnnotationId {
-  if (value.trim().length === 0) throw new TypeError('An annotation id cannot be empty.');
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new TypeError('An annotation id must be a non-empty string.');
+  }
   return value as AnnotationId;
 }
 
 export function asGeneratedAnnotationId(value: string): GeneratedAnnotationId {
-  if (!UUID_PATTERN.test(value)) throw new TypeError('A generated annotation id must be a UUID.');
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) {
+    throw new TypeError('A generated annotation id must be a UUID string.');
+  }
   return value as GeneratedAnnotationId;
 }
 
 export function asUtcTimestamp(value: string): UtcTimestamp {
+  if (typeof value !== 'string') {
+    throw new TypeError('An annotation timestamp must be a normalized UTC string.');
+  }
   let normalized: string;
   try {
     normalized = new Date(value).toISOString();
@@ -258,17 +265,16 @@ export function resolveAnnotationReference(
 }
 
 export function freezeAnnotationMutation(mutation: AnnotationMutation): AnnotationMutation {
-  validateAnnotationMutation(mutation);
-  return freezeMutation(cloneMutation(mutation));
-}
-
-function validateAnnotationMutation(mutation: AnnotationMutation): void {
+  let kind: unknown;
   try {
-    validateMutationValue(mutation);
+    const source = requireRecord(mutation, 'An annotation mutation');
+    kind = source.kind;
+    const cloned = cloneMutation(source, kind);
+    validateMutationValue(cloned);
+    return freezeMutation(cloned);
   } catch (cause) {
     if (cause instanceof InvalidAnnotationMutationError) throw cause;
     const reason = cause instanceof Error ? cause.message : String(cause);
-    const kind = (mutation as { readonly kind?: unknown }).kind;
     throw new InvalidAnnotationMutationError(typeof kind === 'string' ? kind : '<unknown>', reason);
   }
 }
@@ -515,75 +521,214 @@ function identityMatches(annotation: DocumentAnnotation, reference: AnnotationId
   );
 }
 
-function cloneMutation(mutation: AnnotationMutation): AnnotationMutation {
-  switch (mutation.kind) {
+interface RuntimeRecord {
+  readonly [key: string]: unknown;
+  readonly anchor?: unknown;
+  readonly author?: unknown;
+  readonly bottomLeft?: unknown;
+  readonly bottomRight?: unknown;
+  readonly color?: unknown;
+  readonly comment?: unknown;
+  readonly coordinateSpace?: unknown;
+  readonly createdAt?: unknown;
+  readonly exact?: unknown;
+  readonly fingerprint?: unknown;
+  readonly geometry?: unknown;
+  readonly height?: unknown;
+  readonly id?: unknown;
+  readonly kind?: unknown;
+  readonly metadata?: unknown;
+  readonly modifiedAt?: unknown;
+  readonly pageIndex?: unknown;
+  readonly paths?: unknown;
+  readonly point?: unknown;
+  readonly prefix?: unknown;
+  readonly progression?: unknown;
+  readonly promoteTo?: unknown;
+  readonly quadrilaterals?: unknown;
+  readonly rectangle?: unknown;
+  readonly selectedText?: unknown;
+  readonly selector?: unknown;
+  readonly suffix?: unknown;
+  readonly target?: unknown;
+  readonly topLeft?: unknown;
+  readonly topRight?: unknown;
+  readonly type?: unknown;
+  readonly width?: unknown;
+  readonly x?: unknown;
+  readonly y?: unknown;
+}
+
+function cloneMutation(source: RuntimeRecord, kind: unknown): AnnotationMutation {
+  switch (kind) {
     case 'create':
-      return { ...mutation, anchor: cloneAnchor(mutation.anchor) };
+      return {
+        kind: 'create',
+        id: source.id as GeneratedAnnotationId,
+        type: source.type as WritableAnnotationType,
+        anchor: cloneAnchor(source.anchor),
+        color: source.color as string | null,
+        selectedText: source.selectedText as string | null,
+        author: source.author as string,
+        createdAt: source.createdAt as UtcTimestamp,
+        modifiedAt: source.modifiedAt as UtcTimestamp,
+        comment: source.comment as string,
+      };
     case 'set-geometry':
       return {
         kind: 'set-geometry',
-        target: cloneMutationTarget(mutation.target),
-        anchor: cloneAnchor(mutation.anchor),
+        target: cloneMutationTarget(source.target),
+        anchor: cloneAnchor(source.anchor),
       };
     case 'set-comment':
-      return { ...mutation, target: cloneMutationTarget(mutation.target) };
+      return {
+        kind: 'set-comment',
+        target: cloneMutationTarget(source.target),
+        comment: source.comment as string,
+      };
     case 'set-color':
-      return { ...mutation, target: cloneMutationTarget(mutation.target) };
+      return {
+        kind: 'set-color',
+        target: cloneMutationTarget(source.target),
+        color: source.color as string | null,
+      };
     case 'convert-type':
-      return { ...mutation, target: cloneMutationTarget(mutation.target) };
+      return {
+        kind: 'convert-type',
+        target: cloneMutationTarget(source.target),
+        type: source.type as ConvertibleAnnotationType,
+      };
     case 'delete':
-      return { ...mutation, target: cloneMutationTarget(mutation.target) };
+      return { kind: 'delete', target: cloneMutationTarget(source.target) };
     case 'set-metadata':
       return {
-        ...mutation,
-        target: cloneMutationTarget(mutation.target),
-        metadata: { ...mutation.metadata },
+        kind: 'set-metadata',
+        target: cloneMutationTarget(source.target),
+        metadata: cloneMetadata(source.metadata),
       };
   }
+  throw new TypeError('An annotation mutation has an unsupported kind.');
 }
 
 function cloneCapability(capability: AnnotationCapability): AnnotationCapability {
   if (capability.available) return { available: true };
-  return { available: false, reason: { ...capability.reason } };
+  return {
+    available: false,
+    reason: { code: capability.reason.code, message: capability.reason.message },
+  };
 }
 
 function freezeCapability(capability: AnnotationCapability): AnnotationCapability {
   return deepFreeze(capability);
 }
 
-function cloneMutationTarget(target: AnnotationMutationTarget): AnnotationMutationTarget {
-  return { ...target };
-}
-
-function cloneAnchor(anchor: AnnotationAnchor): AnnotationAnchor {
-  if (anchor.kind === 'fixed-page') {
-    return { ...anchor, geometry: cloneGeometry(anchor.geometry) };
+function cloneMutationTarget(value: unknown): AnnotationMutationTarget {
+  const source = requireRecord(value, 'An annotation mutation target');
+  const kind = source.kind;
+  if (kind === 'stable') return { kind: 'stable', id: source.id as AnnotationId };
+  if (kind === 'legacy') {
+    return {
+      kind: 'legacy',
+      fingerprint: source.fingerprint as string,
+      promoteTo: source.promoteTo as GeneratedAnnotationId,
+    };
   }
-  return { ...anchor, selector: { ...anchor.selector } };
+  throw new TypeError('An annotation mutation target has an unsupported kind.');
 }
 
-function cloneGeometry(geometry: AnnotationGeometry): AnnotationGeometry {
-  switch (geometry.kind) {
+function cloneMetadata(value: unknown): AnnotationMetadataPatch {
+  const source = requireRecord(value, 'Annotation metadata');
+  return {
+    author: source.author as string,
+    modifiedAt: source.modifiedAt as UtcTimestamp,
+  };
+}
+
+function cloneAnchor(value: unknown): AnnotationAnchor {
+  const source = requireRecord(value, 'An annotation anchor');
+  const kind = source.kind;
+  if (kind === 'fixed-page') {
+    return {
+      kind: 'fixed-page',
+      pageIndex: source.pageIndex as number,
+      coordinateSpace: source.coordinateSpace as 'page-points-top-left',
+      geometry: cloneGeometry(source.geometry),
+    };
+  }
+  if (kind === 'reflowable-text') {
+    const selector = requireRecord(source.selector, 'A reflowable text selector');
+    return {
+      kind: 'reflowable-text',
+      selector: {
+        exact: selector.exact as string,
+        prefix: selector.prefix as string,
+        suffix: selector.suffix as string,
+      },
+      progression: source.progression as number | null,
+    };
+  }
+  throw new TypeError('An annotation anchor has an unsupported kind.');
+}
+
+function cloneGeometry(value: unknown): AnnotationGeometry {
+  const source = requireRecord(value, 'Annotation geometry');
+  switch (source.kind) {
     case 'point':
-      return { kind: 'point', point: { ...geometry.point } };
+      return { kind: 'point', point: clonePoint(source.point) };
     case 'rectangle':
-      return { kind: 'rectangle', rectangle: { ...geometry.rectangle } };
+      return { kind: 'rectangle', rectangle: cloneRectangle(source.rectangle) };
     case 'quadrilaterals':
       return {
         kind: 'quadrilaterals',
-        quadrilaterals: geometry.quadrilaterals.map((quad) => ({
-          bottomLeft: { ...quad.bottomLeft },
-          bottomRight: { ...quad.bottomRight },
-          topLeft: { ...quad.topLeft },
-          topRight: { ...quad.topRight },
-        })),
+        quadrilaterals: cloneArray(source.quadrilaterals, cloneQuadrilateral),
       };
     case 'ink':
       return {
         kind: 'ink',
-        paths: geometry.paths.map((path) => path.map((point) => ({ ...point }))),
+        paths: cloneArray(source.paths, (path) => cloneArray(path, clonePoint)),
       };
   }
+  throw new TypeError('Annotation geometry has an unsupported kind.');
+}
+
+function cloneRectangle(value: unknown): AnnotationRectangle {
+  const source = requireRecord(value, 'An annotation rectangle');
+  return {
+    x: source.x as number,
+    y: source.y as number,
+    width: source.width as number,
+    height: source.height as number,
+  };
+}
+
+function cloneQuadrilateral(value: unknown): AnnotationQuadrilateral {
+  const source = requireRecord(value, 'An annotation quadrilateral');
+  return {
+    bottomLeft: clonePoint(source.bottomLeft),
+    bottomRight: clonePoint(source.bottomRight),
+    topLeft: clonePoint(source.topLeft),
+    topRight: clonePoint(source.topRight),
+  };
+}
+
+function clonePoint(value: unknown): AnnotationPoint {
+  const source = requireRecord(value, 'An annotation point');
+  return { x: source.x as number, y: source.y as number };
+}
+
+function cloneArray<T>(value: unknown, clone: (item: unknown) => T): T[] {
+  if (!Array.isArray(value)) throw new TypeError('Annotation collections must be arrays.');
+  const length = value.length;
+  const copy = new Array<T>(length);
+  for (let index = 0; index < length; index += 1) copy[index] = clone(value[index]);
+  return copy;
+}
+
+function requireRecord(value: unknown, subject: string): RuntimeRecord {
+  if (value === null || typeof value !== 'object') {
+    throw new TypeError(`${subject} must be an object.`);
+  }
+  return value as RuntimeRecord;
 }
 
 function freezeMutation(mutation: AnnotationMutation): AnnotationMutation {
