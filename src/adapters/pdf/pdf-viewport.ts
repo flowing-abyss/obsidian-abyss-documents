@@ -18,6 +18,7 @@ import {
   markReaderPerformanceOnce,
   maximizeReaderCounter,
 } from '../../reader-performance.js';
+import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import { PdfAnnotationEditor } from './pdf-annotation-editor.js';
 import {
   PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
@@ -126,6 +127,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     private readonly pdf: PDFDocumentProxy,
     private readonly pdfjsViewer: PdfRuntime['pdfjsViewer'],
     private readonly textSearch: PdfTextSearch,
+    readonly annotationCapabilities: PdfAnnotationCapabilities,
   ) {
     this.pageCount = pdf.numPages;
   }
@@ -163,7 +165,10 @@ export class PdfDocumentViewport implements DocumentViewport {
       findController,
       textLayerMode: TEXT_LAYER_MODE_ENABLE,
       annotationMode: ANNOTATION_MODE_ENABLE_FORMS,
-      annotationEditorMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE,
+      annotationEditorMode:
+        this.annotationCapabilities.readOnlyReason === null
+          ? PDFJS_ANNOTATION_EDITOR_TYPE.NONE
+          : PDFJS_ANNOTATION_EDITOR_TYPE.DISABLE,
       enablePermissions: true,
       supportsPinchToZoom: true,
       maxCanvasPixels: MAX_CANVAS_PIXELS,
@@ -171,13 +176,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     });
 
     this.viewer = viewer;
-    this.annotationEditorInstance = new PdfAnnotationEditor({
-      annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
-      annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
-      eventBus,
-      pdf: this.pdf,
-      viewer,
-    });
+    this.annotationEditorInstance = this.createAnnotationEditor(eventBus, viewer);
     this.bindEvents();
     root.addEventListener('click', this.onRootClick);
     if (typeof ResizeObserver === 'function') {
@@ -342,8 +341,8 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.requireMounted(this.viewer).focus();
   }
 
-  get annotationEditor(): PdfAnnotationEditor {
-    return this.requireMounted(this.annotationEditorInstance);
+  get annotationEditor(): PdfAnnotationEditor | null {
+    return this.annotationEditorInstance;
   }
 
   destroy(): Promise<void> {
@@ -420,6 +419,20 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.findController = null;
     this.viewer = null;
     this.annotationEditorInstance = null;
+  }
+
+  private createAnnotationEditor(
+    eventBus: PdfEventBus,
+    viewer: PdfViewer,
+  ): PdfAnnotationEditor | null {
+    if (this.annotationCapabilities.readOnlyReason !== null) return null;
+    return new PdfAnnotationEditor({
+      annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
+      annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+      eventBus,
+      pdf: this.pdf,
+      viewer,
+    });
   }
 
   private bindEvents(): void {
@@ -557,8 +570,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     });
     try {
       const rebindableViewer = viewer as unknown as RebindablePdfViewer;
+      this.annotationEditorInstance?.detachFromDocument();
       rebindableViewer.setDocument(null);
       rebindableViewer.setDocument(this.pdf);
+      this.annotationEditorInstance?.resumeDocumentLifecycle();
     } catch (cause) {
       const pageNumber = this.preservedViewState.pageNumber;
       this.clearPendingPagesInit();
@@ -917,5 +932,9 @@ function readingProfile(appearance: ReadingAppearance): ResolvedReadingProfile {
   };
 }
 
-export const createPdfDocumentViewport: PdfViewportFactory = (pdf, pdfjsViewer, textSearch) =>
-  new PdfDocumentViewport(pdf, pdfjsViewer, textSearch);
+export const createPdfDocumentViewport: PdfViewportFactory = (
+  pdf,
+  pdfjsViewer,
+  textSearch,
+  annotationCapabilities,
+) => new PdfDocumentViewport(pdf, pdfjsViewer, textSearch, annotationCapabilities);

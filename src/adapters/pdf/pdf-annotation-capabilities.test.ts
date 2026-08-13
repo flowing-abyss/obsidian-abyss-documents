@@ -33,6 +33,28 @@ describe('loadPdfAnnotationCapabilities', () => {
     const capabilities = await loadPdfAnnotationCapabilities(pdf(), { MODIFY_CONTENTS });
 
     expect(capabilities.readOnlyReason).toBeNull();
+    expect(capabilities.editing).toEqual({
+      mutation: { available: true },
+      create: {
+        highlight: { available: true },
+        ink: { available: true },
+        'free-text': { available: true },
+        underline: {
+          available: false,
+          reason: {
+            code: 'unsupported-annotation',
+            message: 'PDF.js cannot create this annotation type.',
+          },
+        },
+        'text-note': {
+          available: false,
+          reason: {
+            code: 'unsupported-annotation',
+            message: 'PDF.js cannot create this annotation type.',
+          },
+        },
+      },
+    });
     expect(
       Object.fromEntries(
         Object.entries(capabilities.types).map(([type, value]) => [
@@ -105,6 +127,10 @@ describe('loadPdfAnnotationCapabilities', () => {
     const capabilities = await loadPdfAnnotationCapabilities(document, { MODIFY_CONTENTS });
 
     expect(capabilities.readOnlyReason?.code).toBe(code);
+    expect(capabilities.editing.mutation).toMatchObject({
+      available: false,
+      reason: { code },
+    });
     for (const type of ['highlight', 'ink', 'free-text'] as const) {
       expect(unavailableCode(capabilities.types[type].create)).toBe(code);
       expect(unavailableCode(capabilities.types[type].edit)).toBe(code);

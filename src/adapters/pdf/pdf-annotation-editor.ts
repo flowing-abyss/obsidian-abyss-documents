@@ -14,10 +14,7 @@ export type PdfAnnotationParameter =
   | 'highlight-free';
 
 export interface PdfAnnotationToolOptions {
-  readonly editComment?: boolean | undefined;
-  readonly editId?: string | null | undefined;
   readonly isFromKeyboard?: boolean | undefined;
-  readonly mustEnterInEditMode?: boolean | undefined;
 }
 
 interface AnnotationEditorTypeConstants {
@@ -93,7 +90,9 @@ export class PdfAnnotationEditor {
   private readonly storage: MutableAnnotationStorage;
   private callbackOwnership: CallbackOwnership | null = null;
   private manager: PdfAnnotationUiManager | null = null;
+  private managerEventsEnabled = true;
   private pendingModeChange: PendingModeChange | null = null;
+  private readonly retiredManagers = new WeakSet<object>();
   private destroyed = false;
   private lifecycleRevision = 0;
   private saving = false;
@@ -121,7 +120,10 @@ export class PdfAnnotationEditor {
       this.pendingModeChange = { listener, reject };
       this.dependencies.eventBus.on('annotationeditormodechanged', listener);
       try {
-        this.dependencies.viewer.annotationEditorMode = { mode, ...options };
+        this.dependencies.viewer.annotationEditorMode =
+          options.isFromKeyboard === undefined
+            ? { mode }
+            : { mode, isFromKeyboard: options.isFromKeyboard };
       } catch (cause) {
         this.dependencies.eventBus.off('annotationeditormodechanged', listener);
         this.pendingModeChange = null;
@@ -171,6 +173,20 @@ export class PdfAnnotationEditor {
     }
   }
 
+  detachFromDocument(): void {
+    if (this.destroyed) return;
+    this.managerEventsEnabled = false;
+    this.lifecycleRevision += 1;
+    this.cancelPendingModeChange('The PDF annotation editor was detached from its document.');
+    if (this.manager !== null) this.retiredManagers.add(this.manager);
+    this.restoreCallbacks();
+    this.manager = null;
+  }
+
+  resumeDocumentLifecycle(): void {
+    if (!this.destroyed) this.managerEventsEnabled = true;
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -183,11 +199,12 @@ export class PdfAnnotationEditor {
   }
 
   private readonly onManager = (event: unknown): void => {
-    if (this.destroyed) return;
+    if (this.destroyed || !this.managerEventsEnabled) return;
     const data = record(event);
     if (data?.['source'] !== this.dependencies.viewer) return;
     const manager = data['uiManager'];
     if (!this.isUiManager(manager)) return;
+    if (this.retiredManagers.has(manager)) return;
     this.lifecycleRevision += 1;
     this.cancelPendingModeChange('The PDF annotation editor was rebound.');
     this.restoreCallbacks();

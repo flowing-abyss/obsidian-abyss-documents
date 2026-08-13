@@ -4,6 +4,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentViewport } from '../../document-core/document.js';
 import { DocumentPasswordError } from '../../document-core/errors.js';
+import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfDocumentSession, type PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
@@ -100,16 +101,29 @@ function sessionFixture(overrides: Partial<PDFDocumentProxy> = {}) {
       _pdf: PDFDocumentProxy,
       _pdfjsViewer: PdfRuntime['pdfjsViewer'],
       _search: PdfTextSearch,
+      _annotationCapabilities: PdfAnnotationCapabilities,
     ) => createdViewport,
   ) satisfies PdfViewportFactory;
   const pdfjsViewer = {} as PdfRuntime['pdfjsViewer'];
-  const session = new PdfDocumentSession(
-    file('Books/Guide.pdf'),
+  const annotationCapabilities = {
+    editing: {} as never,
+    readOnlyReason: null,
+    types: {} as never,
+  } satisfies PdfAnnotationCapabilities;
+  const session = new PdfDocumentSession(file('Books/Guide.pdf'), document, pdfjsViewer, {
+    annotationCapabilities,
+    viewportFactory,
+  });
+  return {
+    annotationCapabilities,
+    cleanup,
+    createdViewport,
+    destroy,
     document,
     pdfjsViewer,
+    session,
     viewportFactory,
-  );
-  return { cleanup, createdViewport, destroy, document, pdfjsViewer, session, viewportFactory };
+  };
 }
 
 describe('PdfDocumentSession', () => {
@@ -184,7 +198,8 @@ describe('PdfDocumentSession', () => {
   });
 
   it('passes one session-owned text search service to every created viewport', async () => {
-    const { document, pdfjsViewer, session, viewportFactory } = sessionFixture();
+    const { annotationCapabilities, document, pdfjsViewer, session, viewportFactory } =
+      sessionFixture();
 
     await session.createViewport();
     await session.createViewport();
@@ -193,6 +208,7 @@ describe('PdfDocumentSession', () => {
     expect(viewportFactory.mock.calls[0]?.[0]).toBe(document);
     expect(viewportFactory.mock.calls[0]?.[1]).toBe(pdfjsViewer);
     expect(viewportFactory.mock.calls[0]?.[2]).toBe(viewportFactory.mock.calls[1]?.[2]);
+    expect(viewportFactory.mock.calls[0]?.[3]).toBe(annotationCapabilities);
   });
 
   it('maps a viewport factory failure through the session boundary', async () => {

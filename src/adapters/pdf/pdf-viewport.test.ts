@@ -6,6 +6,7 @@ import {
   endPluginActivation,
   readerPerformanceSnapshot,
 } from '../../reader-performance.js';
+import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfTextSearch } from './pdf-text-search.js';
 import { createPdfDocumentViewport, PdfDocumentViewport } from './pdf-viewport.js';
@@ -50,6 +51,7 @@ class FakeEventBus {
 
 function pdf(pageCount = 700): PDFDocumentProxy {
   return {
+    annotationStorage: { onResetModified: null, onSetModified: null },
     numPages: pageCount,
     getPage: vi.fn(async () => ({
       getTextContent: vi.fn(async () => ({
@@ -68,7 +70,17 @@ function pdf(pageCount = 700): PDFDocumentProxy {
         lang: null,
       })),
     })),
+    saveDocument: vi.fn(async () => new Uint8Array([37, 80, 68, 70])),
   } as unknown as PDFDocumentProxy;
+}
+
+function annotationManager() {
+  return {
+    endCurrentEditing: vi.fn(),
+    redo: vi.fn(),
+    undo: vi.fn(),
+    updateParams: vi.fn(),
+  };
 }
 
 interface ViewerRuntimeOptions {
@@ -196,6 +208,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
     currentScaleValue = 'auto';
     pagesRotation = 0;
     pageColors: object | null;
+    private currentAnnotationEditorMode: number;
     private currentScrollMode = 0;
     private currentSpreadMode = 0;
 
@@ -216,7 +229,18 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
       },
     ) {
       this.pageColors = options.pageColors;
+      this.currentAnnotationEditorMode = options.annotationEditorMode;
       state.viewer = this;
+    }
+
+    get annotationEditorMode(): number {
+      return this.currentAnnotationEditorMode;
+    }
+
+    set annotationEditorMode(request: number | { readonly mode: number }) {
+      const mode = typeof request === 'number' ? request : request.mode;
+      this.currentAnnotationEditorMode = mode;
+      this.options.eventBus.dispatch('annotationeditormodechanged', { source: this, mode });
     }
 
     get scrollMode(): number {
@@ -306,7 +330,11 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
   const documentProxy = pdf(pageCount);
   const runtime = viewerRuntime(options);
   const search = new PdfTextSearch(documentProxy);
-  const viewport = new PdfDocumentViewport(documentProxy, runtime.module, search);
+  const viewport = new PdfDocumentViewport(documentProxy, runtime.module, search, {
+    editing: {} as never,
+    readOnlyReason: null,
+    types: {} as never,
+  } satisfies PdfAnnotationCapabilities);
   const host = createDiv();
   host.setCssProps({ '--background-primary': '#fafafa', '--text-normal': '#202020' });
   await viewport.mount(host);
@@ -314,6 +342,31 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
 }
 
 describe('PdfDocumentViewport', () => {
+  it('does not expose an annotation editor for a read-only qualified document', async () => {
+    const documentProxy = pdf(3);
+    const runtime = viewerRuntime();
+    const viewport = new PdfDocumentViewport(
+      documentProxy,
+      runtime.module,
+      new PdfTextSearch(documentProxy),
+      {
+        editing: {} as never,
+        readOnlyReason: {
+          code: 'signed-document',
+          message: 'Signed PDF documents are opened read-only to preserve signatures.',
+        },
+        types: {} as never,
+      },
+    );
+    const host = createDiv();
+    host.setCssProps({ '--background-primary': '#fafafa', '--text-normal': '#202020' });
+
+    await viewport.mount(host);
+
+    expect(viewport.annotationEditor).toBeNull();
+    expect(viewport.annotationCapabilities.readOnlyReason?.code).toBe('signed-document');
+  });
+
   it('constructs the public PDF.js viewer stack with text, annotations, and bounded canvases', async () => {
     beginPluginActivation();
     endPluginActivation();
@@ -679,6 +732,78 @@ describe('PdfDocumentViewport', () => {
     eventBus.dispatch('pagesinit', {});
     expect(viewer.currentPageNumber).toBe(3);
     expect(viewer.currentScaleValue).toBe('page-fit');
+  });
+
+  it('keeps every annotation operation unavailable until a new manager replaces the retired one', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null) {
+      throw new Error('Expected writable annotation viewer state.');
+    }
+    const retiredManager = annotationManager();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: retiredManager });
+    eventBus.dispatch('pagesinit', {});
+
+    fixture.viewport.setReadingColors({
+      pageColors: null,
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
+
+    await expect(editor.setTool('ink')).rejects.toThrow('not ready');
+    expect(() => {
+      editor.setParameter('ink-thickness', 3);
+    }).toThrow('not ready');
+    expect(() => {
+      editor.undo();
+    }).toThrow('not ready');
+    await expect(editor.save(new AbortController().signal)).rejects.toThrow('not ready');
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: retiredManager });
+    expect(() => {
+      editor.redo();
+    }).toThrow('not ready');
+
+    const replacementManager = annotationManager();
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: replacementManager,
+    });
+    editor.setParameter('ink-thickness', 5);
+
+    expect(replacementManager.updateParams).toHaveBeenCalledWith(22, 5);
+  });
+
+  it('does not accept a replacement manager after destroy wins a profile rebind', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null) {
+      throw new Error('Expected writable annotation viewer state.');
+    }
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    eventBus.dispatch('pagesinit', {});
+    fixture.viewport.setReadingColors({
+      pageColors: null,
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
+
+    await fixture.viewport.destroy();
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+
+    await expect(editor.setTool('highlight')).rejects.toThrow('destroyed');
+    await expect(editor.save(new AbortController().signal)).rejects.toThrow('destroyed');
   });
 
   it('waits for initial pages before rebinding the profile selected during mount', async () => {
@@ -1351,7 +1476,11 @@ describe('PdfDocumentViewport', () => {
     const documentProxy = pdf(1);
     const runtime = viewerRuntime();
     const search = new PdfTextSearch(documentProxy);
-    const viewport = await createPdfDocumentViewport(documentProxy, runtime.module, search);
+    const viewport = await createPdfDocumentViewport(documentProxy, runtime.module, search, {
+      editing: {} as never,
+      readOnlyReason: null,
+      types: {} as never,
+    });
 
     expect(viewport).toBeInstanceOf(PdfDocumentViewport);
     await viewport.mount(createDiv());

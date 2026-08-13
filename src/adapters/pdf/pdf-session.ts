@@ -7,27 +7,36 @@ import type {
   DocumentViewport,
   OutlineItem,
 } from '../../document-core/document.js';
+import type { DocumentEditingCapabilities } from '../../document-core/editable-document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../../document-core/errors.js';
+import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import { isPdfAbortFailure, mapPdfOutline } from './pdf-mappers.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfTextSearch } from './pdf-text-search.js';
 
-const PDF_CAPABILITIES: ReadonlySet<DocumentCapability> = new Set([
+const PDF_READ_CAPABILITIES: readonly DocumentCapability[] = [
   'outline',
   'text-search',
   'existing-annotations',
-  'annotation-write',
-]);
+];
 
 export type PdfViewportFactory = (
   pdf: PDFDocumentProxy,
   pdfjsViewer: PdfRuntime['pdfjsViewer'],
   textSearch: PdfTextSearch,
+  annotationCapabilities: PdfAnnotationCapabilities,
 ) => DocumentViewport | Promise<DocumentViewport>;
+
+interface PdfSessionAnnotationAccess {
+  readonly annotationCapabilities: PdfAnnotationCapabilities;
+  readonly viewportFactory: PdfViewportFactory;
+}
 
 export class PdfDocumentSession implements DocumentSession {
   readonly descriptor: DocumentDescriptor;
-  readonly capabilities = PDF_CAPABILITIES;
+  readonly capabilities: ReadonlySet<DocumentCapability>;
+  readonly annotationCapabilities: PdfAnnotationCapabilities;
+  readonly editingCapabilities: DocumentEditingCapabilities;
 
   private closePromise: Promise<void> | null = null;
   private search: PdfTextSearch | null = null;
@@ -36,7 +45,7 @@ export class PdfDocumentSession implements DocumentSession {
     private readonly file: TFile,
     private readonly pdf: PDFDocumentProxy,
     private readonly pdfjsViewer: PdfRuntime['pdfjsViewer'],
-    private readonly viewportFactory: PdfViewportFactory,
+    private readonly annotationAccess: PdfSessionAnnotationAccess,
   ) {
     this.descriptor = Object.freeze({
       path: file.path,
@@ -44,6 +53,14 @@ export class PdfDocumentSession implements DocumentSession {
       fingerprint: pdf.fingerprints[0] ?? file.path,
       pageCount: pdf.numPages,
     });
+    this.capabilities = new Set([
+      ...PDF_READ_CAPABILITIES,
+      ...(annotationAccess.annotationCapabilities.readOnlyReason === null
+        ? (['annotation-write'] as const)
+        : []),
+    ]);
+    this.annotationCapabilities = annotationAccess.annotationCapabilities;
+    this.editingCapabilities = annotationAccess.annotationCapabilities.editing;
   }
 
   async getOutline(): Promise<readonly OutlineItem[]> {
@@ -76,7 +93,12 @@ export class PdfDocumentSession implements DocumentSession {
     this.search ??= new PdfTextSearch(this.pdf);
     let viewport: DocumentViewport;
     try {
-      viewport = await this.viewportFactory(this.pdf, this.pdfjsViewer, this.search);
+      viewport = await this.annotationAccess.viewportFactory(
+        this.pdf,
+        this.pdfjsViewer,
+        this.search,
+        this.annotationCapabilities,
+      );
     } catch (cause) {
       if (this.closePromise !== null) throw this.cancelled(cause);
       if (cause instanceof DocumentOpenError) throw cause;

@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
-import { describe, expect, it, vi } from 'vitest';
-import { PdfAnnotationEditor } from './pdf-annotation-editor.js';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { PdfAnnotationEditor, type PdfAnnotationToolOptions } from './pdf-annotation-editor.js';
 
 type Listener = (event: unknown) => void;
 
@@ -62,6 +62,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
   } as unknown as PDFDocumentProxy;
   const eventBus = new FakeEventBus();
   const changedModes: number[] = [];
+  const modeRequests: Array<Record<string, unknown>> = [];
   const viewer = {
     currentMode: 0,
     annotationEditorMode: 0 as number | { readonly mode: number },
@@ -70,6 +71,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     configurable: true,
     get: () => viewer.currentMode,
     set: (options: { readonly mode: number }) => {
+      modeRequests.push({ ...options });
       if (viewer.currentMode === options.mode) return;
       viewer.currentMode = options.mode;
       changedModes.push(options.mode);
@@ -96,7 +98,16 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     pdf,
     viewer,
   });
-  return { annotationStorage, changedModes, editor, eventBus, pdf, saveDocument, viewer };
+  return {
+    annotationStorage,
+    changedModes,
+    editor,
+    eventBus,
+    modeRequests,
+    pdf,
+    saveDocument,
+    viewer,
+  };
 }
 
 function deferred<T>() {
@@ -110,6 +121,29 @@ function deferred<T>() {
 }
 
 describe('PdfAnnotationEditor lifecycle', () => {
+  it('does not expose target-edit options in the public tool contract', () => {
+    expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('editId');
+    expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('editComment');
+    expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('mustEnterInEditMode');
+    expectTypeOf<PdfAnnotationToolOptions>().toHaveProperty('isFromKeyboard');
+  });
+
+  it.each([
+    ['Underline', 'readonly-underline'],
+    ['Text Note', 'readonly-text-note'],
+  ])('does not forward an untyped %s target through setTool', async (_type, editId) => {
+    const { editor, eventBus, modeRequests, viewer } = fixture();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+
+    await editor.setTool('highlight', {
+      editComment: true,
+      editId,
+      mustEnterInEditMode: true,
+    } as never);
+
+    expect(modeRequests).toEqual([{ mode: 9 }]);
+  });
+
   it('captures only the viewer-owned UI manager lifecycle event and starts in NONE mode', async () => {
     const { editor, eventBus, viewer } = fixture();
     const uiManager = manager();

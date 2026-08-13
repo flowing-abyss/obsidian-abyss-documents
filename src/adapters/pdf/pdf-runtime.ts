@@ -10,6 +10,7 @@ import {
 const PDFJS_VERSION = '6.2.108';
 
 export const PDFJS_ANNOTATION_EDITOR_TYPE = Object.freeze({
+  DISABLE: -1,
   NONE: 0,
   FREETEXT: 3,
   HIGHLIGHT: 9,

@@ -40,6 +40,9 @@ function pdf(overrides: Partial<PDFDocumentProxy> = {}): PDFDocumentProxy {
   return {
     fingerprints: ['fingerprint', null],
     numPages: 3,
+    isPureXfa: false,
+    getPermissions: vi.fn(async () => null),
+    getSignatures: vi.fn(async () => null),
     getOutline: vi.fn(async () => []),
     getDestination: vi.fn(async () => null),
     getPageIndex: vi.fn(async () => 0),
@@ -67,7 +70,7 @@ function adapterFixture(options: {
   const loadingPromise = options.loadingPromise ?? defaultLoadingPromise;
   const getDocument = vi.fn(() => ({ promise: loadingPromise, destroy }));
   const runtime = {
-    pdfjsLib: { getDocument },
+    pdfjsLib: { getDocument, PermissionFlag: { MODIFY_CONTENTS: 0x08 } },
     pdfjsViewer: {},
     version: '6.2.108',
   } as unknown as PdfRuntime;
@@ -100,6 +103,41 @@ describe('PdfDocumentAdapter', () => {
 
     expect(fixture.vault.readBinary).toHaveBeenCalledWith(source);
     expect(fixture.getDocument).toHaveBeenCalledWith({ data: fixture.bytes });
+  });
+
+  it.each([
+    {
+      name: 'signed',
+      document: pdf({ getSignatures: vi.fn(async () => [{}]) }),
+      code: 'signed-document',
+    },
+    {
+      name: 'pure XFA',
+      document: pdf({ isPureXfa: true }),
+      code: 'pure-xfa',
+    },
+    {
+      name: 'permission-restricted',
+      document: pdf({ getPermissions: vi.fn(async () => [0x04, 0x10]) }),
+      code: 'permission-restricted',
+    },
+  ])('opens a $name document without annotation writing', async ({ document, code }) => {
+    const { adapter } = adapterFixture({ pdf: document });
+
+    const session = await adapter.open(file('Books/Guide.pdf'), AbortSignal.timeout(1_000));
+
+    expect(session.capabilities.has('annotation-write')).toBe(false);
+    expect(session).toMatchObject({
+      annotationCapabilities: { readOnlyReason: { code } },
+      editingCapabilities: {
+        mutation: { available: false, reason: { code } },
+        create: {
+          highlight: { available: false, reason: { code } },
+          ink: { available: false, reason: { code } },
+          'free-text': { available: false, reason: { code } },
+        },
+      },
+    });
   });
 
   it.each([
@@ -157,6 +195,24 @@ describe('PdfDocumentAdapter', () => {
     pending.resolve(pdf());
   });
 
+  it('aborts promptly during annotation capability resolution and destroys the loading task', async () => {
+    const permissions = deferred<number[] | null>();
+    const fixture = adapterFixture({
+      pdf: pdf({ getPermissions: vi.fn(() => permissions.promise) }),
+    });
+    const controller = new AbortController();
+
+    const opening = fixture.adapter.open(file('Guide.pdf'), controller.signal);
+    await vi.waitFor(() => {
+      expect(fixture.getDocument).toHaveBeenCalledOnce();
+    });
+    controller.abort();
+
+    await expect(opening).rejects.toMatchObject({ name: 'DocumentCancelledError' });
+    expect(fixture.destroy).toHaveBeenCalledOnce();
+    permissions.resolve(null);
+  });
+
   it('preserves a non-Error PDF.js loading rejection as the typed cause', async () => {
     const { adapter } = adapterFixture({ loadFailure: 'raw loading rejection' });
 
@@ -164,6 +220,19 @@ describe('PdfDocumentAdapter', () => {
       { name: 'DocumentOpenError', cause: 'raw loading rejection' },
     );
   });
+
+  it.each([new Error('permission worker failed'), 'raw permission rejection'])(
+    'preserves an annotation capability rejection as the typed cause: %s',
+    async (cause) => {
+      const { adapter } = adapterFixture({
+        pdf: pdf({ getPermissions: vi.fn(() => rejectedWith<number[] | null>(cause)) }),
+      });
+
+      await expect(
+        adapter.open(file('Guide.pdf'), AbortSignal.timeout(1_000)),
+      ).rejects.toMatchObject({ name: 'DocumentOpenError', cause });
+    },
+  );
 
   it('keeps cancellation primary when destroying an aborted loading task also fails', async () => {
     const pending = deferred<PDFDocumentProxy>();
