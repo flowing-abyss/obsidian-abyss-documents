@@ -37,7 +37,7 @@ describe('ReaderSidebar', () => {
     const sidebar = new ReaderSidebar(createDiv(), handlers);
     const annotation = {
       ...({} as DocumentAnnotation),
-      identity: { kind: 'legacy' as const, fingerprint: 'one' },
+      identity: { kind: 'stable' as const, id: 'one' as never },
       type: 'highlight' as const,
       anchor: {
         kind: 'fixed-page' as const,
@@ -56,6 +56,44 @@ describe('ReaderSidebar', () => {
     };
     sidebar.annotationsPanel.setAnnotations([annotation]);
     expect(sidebar.annotationsPanel.root.textContent).toContain('Important');
+  });
+  it('forwards optional drag, copy, and insert callbacks into annotation cards', () => {
+    const onAnnotationCopy = vi.fn();
+    const onAnnotationInsert = vi.fn();
+    const onAnnotationTransfer = vi.fn();
+    const handlers = { ...callbacks(), onAnnotationCopy, onAnnotationInsert, onAnnotationTransfer };
+    const sidebar = new ReaderSidebar(createDiv(), handlers);
+    const item = {
+      ...({} as DocumentAnnotation),
+      identity: { kind: 'stable' as const, id: 'one' as never },
+      type: 'highlight' as const,
+      anchor: {
+        kind: 'fixed-page' as const,
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: { kind: 'point' as const, point: { x: 0, y: 0 } },
+      },
+      color: null,
+      selectedText: 'Text',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: '',
+      tags: [],
+      links: [],
+    };
+    sidebar.annotationsPanel.setAnnotations([item]);
+    const row = sidebar.root.querySelector<HTMLElement>('[draggable="true"]');
+    if (row === null) throw new Error('Expected draggable card.');
+    const transfer = { setData: vi.fn() } as unknown as DataTransfer;
+    row.dispatchEvent(
+      Object.assign(new Event('dragstart', { bubbles: true }), { dataTransfer: transfer }),
+    );
+    sidebar.root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]')?.click();
+    sidebar.root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]')?.click();
+    expect(onAnnotationTransfer).toHaveBeenCalledWith(item, transfer);
+    expect(onAnnotationCopy).toHaveBeenCalledWith(item);
+    expect(onAnnotationInsert).toHaveBeenCalledWith(item);
   });
   it('keeps sidebar DOM absent until an explicit open and remembers the selected tab', () => {
     const host = createDiv();

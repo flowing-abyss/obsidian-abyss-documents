@@ -7,6 +7,7 @@ import {
 } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { DocumentOpenError } from '../document-core/errors.js';
+import type { AnnotationHrefReference } from './annotation-transfer.js';
 import {
   AbyssDocumentView,
   DOCUMENT_VIEW_TYPE,
@@ -39,10 +40,12 @@ function controller() {
   const searchDocument = vi.fn();
   const refreshReadingSettings = vi.fn();
   const saveDocument = vi.fn(async () => undefined);
+  const resolveAnnotationLink = vi.fn(async (_reference: AnnotationHrefReference) => undefined);
   const reader: ReaderViewController = {
     open,
     close,
     refreshReadingSettings,
+    resolveAnnotationLink,
     saveDocument,
     searchDocument,
     showOutline,
@@ -52,6 +55,7 @@ function controller() {
     open,
     reader,
     refreshReadingSettings,
+    resolveAnnotationLink,
     saveDocument,
     searchDocument,
     showOutline,
@@ -59,6 +63,26 @@ function controller() {
 }
 
 describe('AbyssDocumentView', () => {
+  it('forwards canonical deep-link state after the PDF is mounted and rejects malformed state', async () => {
+    const reader = controller();
+    const fixture = viewFixture(reader.reader);
+    await fixture.view.setState(
+      {
+        file: fixture.file.path,
+        subpath: '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4',
+      },
+      { history: false },
+    );
+    await fixture.view.onLoadFile(fixture.file);
+    expect(reader.resolveAnnotationLink).toHaveBeenCalledWith({
+      id: '12R',
+      page: 2,
+      fingerprint: 'rectangle:1,2,3,4',
+    });
+
+    fixture.view.setEphemeralState({ subpath: '#annotation=x&page=0&fingerprint=y' });
+    expect(reader.resolveAnnotationLink).toHaveBeenCalledOnce();
+  });
   it('identifies the PDF document view and uses the current basename as its title', async () => {
     const fixture = viewFixture(controller().reader);
 

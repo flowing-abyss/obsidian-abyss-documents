@@ -58,6 +58,28 @@ describe('extractAnnotations', () => {
     expect(annotations[1]).toMatchObject({ type: 'text-note', comment: 'Ordinary note' });
   });
 
+  it('uses canonical alias, heading, and Unicode token normalization', async () => {
+    const batches: DocumentAnnotation[][] = [];
+    await extractAnnotations(
+      {
+        numPages: 1,
+        getPage: vi.fn(async () =>
+          page([
+            {
+              annotationType: 9,
+              id: 'token-id',
+              rect: [0, 0, 1, 1],
+              contentsObj: { str: '#ＴＡＧ [[Ｆｏｏ#Heading|Alias]]' },
+            },
+          ]),
+        ),
+      },
+      new AbortController().signal,
+      (batch) => batches.push([...batch]),
+    );
+    expect(batches.flat()[0]).toMatchObject({ tags: ['ＴＡＧ'], links: ['Ｆｏｏ'] });
+  });
+
   it('stops before reading a stale page and yields batches within a configurable deadline', async () => {
     const controller = new AbortController();
     const second = page([]);

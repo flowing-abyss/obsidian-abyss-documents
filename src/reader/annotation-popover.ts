@@ -20,7 +20,10 @@ export interface AnnotationPassivePopupRequest {
   readonly y: number;
 }
 
+import type { AnnotationLinkSuggestionProvider, LinkSuggestion } from './link-suggestions.js';
 import { ownerWindow } from './owner-dom.js';
+
+let popoverSequence = 0;
 
 export class AnnotationPopover {
   readonly element: HTMLDivElement;
@@ -28,13 +31,21 @@ export class AnnotationPopover {
   private readonly input: HTMLTextAreaElement;
   private readonly actions: HTMLDivElement;
   private readonly readOnlyReason: HTMLDivElement;
+  private readonly suggestions: HTMLDivElement;
   private readonly cleanups: Array<() => void> = [];
   private active: AnnotationPopoverRequest | null = null;
   private passiveEdit: (() => void) | null = null;
   private previousFocus: HTMLElement | null = null;
   private destroyed = false;
+  private suggestionItems: readonly LinkSuggestion[] = [];
+  private suggestionIndex = -1;
+  private suggestionStart = -1;
 
-  constructor(private readonly host: HTMLElement) {
+  constructor(
+    private readonly host: HTMLElement,
+    private readonly linkSuggestions: AnnotationLinkSuggestionProvider | null = null,
+    private readonly sourcePath = '',
+  ) {
     const owner = ownerWindow(host);
     this.element = owner.createDiv();
     this.element.className = 'abyss-annotation-popover';
@@ -46,6 +57,9 @@ export class AnnotationPopover {
     this.input = owner.createEl('textarea');
     this.input.className = 'abyss-annotation-comment';
     this.input.setAttribute('aria-label', 'Comment');
+    this.input.setAttribute('role', 'combobox');
+    this.input.setAttribute('aria-autocomplete', 'list');
+    this.input.setAttribute('aria-expanded', 'false');
     this.input.rows = 4;
 
     this.readOnlyReason = owner.createDiv();
@@ -55,10 +69,12 @@ export class AnnotationPopover {
 
     this.actions = owner.createDiv();
     this.actions.className = 'abyss-annotation-popover-actions';
-    this.element.append(this.input, this.readOnlyReason, this.actions);
+    this.suggestions = this.createSuggestions(owner);
+    this.element.append(this.input, this.suggestions, this.readOnlyReason, this.actions);
     host.append(this.element);
 
     this.listen(this.element, 'keydown', (event) => {
+      if (event.target === this.input && this.handleSuggestionKey(event)) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -79,9 +95,27 @@ export class AnnotationPopover {
     this.listen(this.element, 'input', (event) => {
       const target = event.target;
       if (!(target instanceof ownerWindow(this.host).Element)) return;
-      if (!target.matches('input[data-action="annotation-color"]')) return;
-      this.active?.onColor?.((target as HTMLInputElement).value);
+      if (target === this.input) {
+        this.updateSuggestions();
+        return;
+      }
+      if (target.matches('input[data-action="annotation-color"]'))
+        this.active?.onColor?.((target as HTMLInputElement).value);
     });
+    this.listen(this.input, 'select', () => {
+      this.updateSuggestions();
+    });
+  }
+
+  private createSuggestions(owner: ReturnType<typeof ownerWindow>): HTMLDivElement {
+    const suggestions = owner.createDiv();
+    suggestions.className = 'abyss-annotation-link-suggestions';
+    suggestions.setAttribute('role', 'listbox');
+    suggestions.setAttribute('aria-label', 'Link suggestions');
+    suggestions.id = `abyss-annotation-suggestions-${++popoverSequence}`;
+    suggestions.hidden = true;
+    this.input.setAttribute('aria-controls', suggestions.id);
+    return suggestions;
   }
 
   open(request: AnnotationPopoverRequest): void {
@@ -96,6 +130,7 @@ export class AnnotationPopover {
     this.passiveEdit = null;
     this.input.hidden = false;
     this.input.value = request.comment;
+    this.hideSuggestions();
     const readOnly = request.readOnlyReason !== undefined;
     this.input.readOnly = readOnly;
     this.readOnlyReason.hidden = !readOnly;
@@ -118,6 +153,7 @@ export class AnnotationPopover {
     this.active = null;
     this.passiveEdit = request.onEdit ?? null;
     this.input.hidden = true;
+    this.hideSuggestions();
     this.readOnlyReason.hidden = request.readOnlyReason === undefined;
     this.readOnlyReason.textContent = request.readOnlyReason ?? '';
     this.actions.replaceChildren();
@@ -146,6 +182,7 @@ export class AnnotationPopover {
     this.passiveEdit = null;
     if (restoreFocus) this.previousFocus?.focus();
     this.previousFocus = null;
+    this.hideSuggestions();
   }
 
   destroy(): void {
@@ -235,6 +272,123 @@ export class AnnotationPopover {
     this.input.focus();
   }
 
+  private updateSuggestions(): void {
+    if (this.input.selectionStart !== this.input.selectionEnd) {
+      this.hideSuggestions();
+      return;
+    }
+    const token = annotationLinkTokenAtCursor(this.input.value, this.input.selectionStart);
+    if (token === null || this.linkSuggestions === null) {
+      this.hideSuggestions();
+      return;
+    }
+    this.suggestionStart = token.open;
+    this.suggestionItems = this.linkSuggestions.suggest(token.query, this.sourcePath);
+    this.suggestionIndex = this.suggestionItems.length > 0 ? 0 : -1;
+    this.suggestions.replaceChildren();
+    for (const [index, suggestion] of this.suggestionItems.entries()) {
+      const option = ownerWindow(this.host).createDiv();
+      option.setAttribute('role', 'option');
+      option.id = `${this.suggestions.id}-option-${index}`;
+      option.setAttribute('aria-selected', String(index === this.suggestionIndex));
+      option.textContent = suggestion.display;
+      option.addEventListener('click', () => {
+        this.chooseSuggestion(index);
+      });
+      this.suggestions.append(option);
+    }
+    this.suggestions.hidden = this.suggestionItems.length === 0;
+    this.input.setAttribute('aria-expanded', String(!this.suggestions.hidden));
+    this.updateSuggestionSelection();
+  }
+
+  private handleSuggestionKey(event: KeyboardEvent): boolean {
+    if (this.suggestions.hidden) return false;
+    if (!this.isSuggestionCursorCurrent()) {
+      this.hideSuggestions();
+      return false;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      this.hideSuggestions();
+      return true;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      this.suggestionIndex =
+        (this.suggestionIndex + direction + this.suggestionItems.length) %
+        this.suggestionItems.length;
+      this.updateSuggestionSelection();
+      return true;
+    }
+    if (event.key === 'Enter' && this.suggestionIndex >= 0) {
+      event.preventDefault();
+      this.chooseSuggestion(this.suggestionIndex);
+      return true;
+    }
+    return false;
+  }
+
+  private chooseSuggestion(index: number): void {
+    const suggestion = this.suggestionItems[index];
+    if (
+      suggestion === undefined ||
+      this.suggestionStart < 0 ||
+      this.input.selectionStart !== this.input.selectionEnd
+    ) {
+      this.hideSuggestions();
+      return;
+    }
+    const token = annotationLinkTokenAtCursor(this.input.value, this.input.selectionStart);
+    if (token?.open !== this.suggestionStart) {
+      this.hideSuggestions();
+      return;
+    }
+    if (token.close !== null && !isWikiLink(suggestion.insertion)) {
+      this.input.setRangeText(suggestion.insertion, token.open, token.close + 2, 'end');
+    } else if (token.close !== null) {
+      this.input.setRangeText(
+        wikiLinkTarget(suggestion.insertion),
+        token.open + 2,
+        token.targetEnd,
+        'end',
+      );
+    } else {
+      this.input.setRangeText(suggestion.insertion, token.open, this.input.selectionStart, 'end');
+    }
+    this.input.dispatchEvent(new (ownerWindow(this.host).Event)('input', { bubbles: true }));
+    this.hideSuggestions();
+    this.input.focus();
+  }
+
+  private isSuggestionCursorCurrent(): boolean {
+    if (this.input.selectionStart !== this.input.selectionEnd) return false;
+    return (
+      annotationLinkTokenAtCursor(this.input.value, this.input.selectionStart)?.open ===
+      this.suggestionStart
+    );
+  }
+
+  private updateSuggestionSelection(): void {
+    this.suggestions.querySelectorAll('[role="option"]').forEach((option, index) => {
+      option.setAttribute('aria-selected', String(index === this.suggestionIndex));
+    });
+    const active = this.suggestions.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (active === null) this.input.removeAttribute('aria-activedescendant');
+    else this.input.setAttribute('aria-activedescendant', active.id);
+  }
+
+  private hideSuggestions(): void {
+    this.suggestionItems = [];
+    this.suggestionIndex = -1;
+    this.suggestionStart = -1;
+    this.suggestions.replaceChildren();
+    this.suggestions.hidden = true;
+    this.input.setAttribute('aria-expanded', 'false');
+    this.input.removeAttribute('aria-activedescendant');
+  }
+
   private listen<K extends keyof HTMLElementEventMap>(
     target: HTMLElement,
     type: K,
@@ -245,4 +399,39 @@ export class AnnotationPopover {
       target.removeEventListener(type, listener);
     });
   }
+}
+
+interface AnnotationLinkToken {
+  readonly close: number | null;
+  readonly open: number;
+  readonly query: string;
+  readonly targetEnd: number;
+}
+
+function annotationLinkTokenAtCursor(value: string, cursor: number): AnnotationLinkToken | null {
+  const open = value.lastIndexOf('[[', cursor);
+  if (open < 0 || cursor < open + 2) return null;
+  const closeIndex = value.indexOf(']]', open + 2);
+  const close = closeIndex < 0 ? null : closeIndex;
+  if (!cursorBelongsToToken(cursor, close)) return null;
+  const aliasIndex = value.indexOf('|', open + 2);
+  const targetEnd = targetEndForToken(aliasIndex, close, cursor);
+  return { close, open, query: value.slice(open + 2, targetEnd), targetEnd };
+}
+
+function cursorBelongsToToken(cursor: number, close: number | null): boolean {
+  return close === null || cursor <= close;
+}
+
+function targetEndForToken(alias: number, close: number | null, cursor: number): number {
+  if (alias >= 0 && (close === null || alias < close)) return alias;
+  return close ?? cursor;
+}
+
+function isWikiLink(value: string): boolean {
+  return value.startsWith('[[') && value.endsWith(']]');
+}
+
+function wikiLinkTarget(value: string): string {
+  return isWikiLink(value) ? (value.slice(2, -2).split('|', 1)[0] ?? '') : value;
 }

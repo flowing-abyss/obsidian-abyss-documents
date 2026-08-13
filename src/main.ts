@@ -12,7 +12,9 @@ import {
   endPluginActivation,
   markReaderPerformance,
 } from './reader-performance.js';
+import { AnnotationTransferService } from './reader/annotation-transfer.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
+import { LinkSuggestionService } from './reader/link-suggestions.js';
 import { ReaderController, type ReaderProfileState } from './reader/reader-controller.js';
 import { ReaderShell } from './reader/reader-shell.js';
 import { SaveConflictModal } from './reader/save-conflict-modal.js';
@@ -116,6 +118,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
   protected readonly runtimeLoader = new PdfRuntimeLoader();
   protected saveBoundary!: PdfWriteBoundary;
   protected saveCoordinator!: DocumentSaveCoordinator;
+  protected linkSuggestions!: LinkSuggestionService;
 
   override async onload(): Promise<void> {
     beginPluginActivation(this.manifest.version);
@@ -130,10 +133,18 @@ export default class AbyssDocumentsPlugin extends Plugin {
     const store = new PluginDataStore(this);
     this.data = await store.load();
     this.reportMigrationDiagnostics(store.migrationResult.diagnostics);
+    const linkSuggestions = new LinkSuggestionService(
+      this.app.vault,
+      this.app.metadataCache,
+      this.app.fileManager,
+    );
+    this.linkSuggestions = linkSuggestions;
+    this.registerLinkSuggestionInvalidation(linkSuggestions);
     const pdfAdapter = new PdfDocumentAdapter(
       this.app.vault,
       this.runtimeLoader,
       createPdfDocumentViewport,
+      linkSuggestions,
     );
     const registry = new DocumentAdapterRegistry([pdfAdapter]);
     this.saveBoundary = new PdfWriteBoundary(this.app.vault);
@@ -142,6 +153,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
     );
     const annotationCache = new AnnotationCache(this.app.vault.adapter, this.app.vault.configDir);
     this.registerAnnotationCacheInvalidation(annotationCache);
+    const annotationTransfer = this.createAnnotationIntegration(store);
     const profileState = this.createReaderState(store);
     const saveFailureBoundary = new SaveFailureNoticeBoundary();
     const services = {
@@ -155,6 +167,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
           profileState,
           {
             annotationCache,
+            annotationTransfer,
             saveFailureBoundary,
             saveCoordinator: this.saveCoordinator,
             resolveSaveConflict: (path) => {
@@ -185,28 +198,54 @@ export default class AbyssDocumentsPlugin extends Plugin {
     // a second extension registration. The public workspace handoff below runs
     // after core view state settles and replaces only real PDF leaves.
     new CorePdfLeafHandoff(this).register();
-    this.addCommand({
-      id: 'show-outline',
-      name: 'Show document outline',
-      checkCallback: (checking) => {
-        const view = this.app.workspace.getActiveViewOfType(AbyssDocumentView);
-        if (view === null) return false;
-        if (!checking) view.showOutline();
-        return true;
-      },
-    });
-    this.addCommand({
-      id: 'search-document',
-      name: 'Search document',
-      checkCallback: (checking) => {
-        const view = this.app.workspace.getActiveViewOfType(AbyssDocumentView);
-        if (view === null) return false;
-        if (!checking) view.searchDocument();
-        return true;
-      },
-    });
+    this.registerReaderCommands();
     this.register(() => {
       this.runtimeLoader.dispose();
+    });
+  }
+
+  private registerReaderCommands(): void {
+    const commands = [
+      {
+        id: 'show-outline',
+        name: 'Show document outline',
+        run: (view: AbyssDocumentView) => {
+          view.showOutline();
+        },
+      },
+      {
+        id: 'search-document',
+        name: 'Search document',
+        run: (view: AbyssDocumentView) => {
+          view.searchDocument();
+        },
+      },
+    ] as const;
+    for (const command of commands) {
+      this.addCommand({
+        id: command.id,
+        name: command.name,
+        checkCallback: (checking) => {
+          const view = this.app.workspace.getActiveViewOfType(AbyssDocumentView);
+          if (view === null) return false;
+          if (!checking) command.run(view);
+          return true;
+        },
+      });
+    }
+  }
+
+  private createAnnotationIntegration(store: PluginDataStore): AnnotationTransferService {
+    return new AnnotationTransferService({
+      fileManager: this.app.fileManager,
+      workspace: this.app.workspace,
+      clipboard: { writeText: async (value) => navigator.clipboard.writeText(value) },
+      template: () => store.snapshot.settings.annotations.markdownTemplate,
+      onFailure: (failure) => {
+        const verb = failure.action === 'copy' ? 'copy' : 'insert';
+        new Notice(`Could not ${verb} annotation ${failure.annotation} from ${failure.file}.`);
+        console.error('[abyss-documents] Failed to transfer PDF annotation', failure);
+      },
     });
   }
 
@@ -236,6 +275,17 @@ export default class AbyssDocumentsPlugin extends Plugin {
         invalidate(file.path);
       }),
     );
+  }
+
+  private registerLinkSuggestionInvalidation(suggestions: LinkSuggestionService): void {
+    const invalidate = (): void => {
+      suggestions.invalidate();
+    };
+    this.registerEvent(this.app.vault.on('create', invalidate));
+    this.registerEvent(this.app.vault.on('delete', invalidate));
+    this.registerEvent(this.app.vault.on('rename', invalidate));
+    this.registerEvent(this.app.metadataCache.on('changed', invalidate));
+    this.registerEvent(this.app.metadataCache.on('resolved', invalidate));
   }
 
   private createReaderState(store: PluginDataStore): ReaderProfileState {

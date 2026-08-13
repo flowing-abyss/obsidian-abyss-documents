@@ -49,6 +49,30 @@ function createStore() {
 }
 
 describe('PluginDataStore', () => {
+  it('migrates only the unchanged broken transfer default to a complete native link template', () => {
+    const oldDefault = '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})';
+    const migrated = migratePluginData({
+      ...DEFAULT_DATA,
+      settings: {
+        ...DEFAULT_DATA.settings,
+        annotations: { ...DEFAULT_DATA.settings.annotations, markdownTemplate: oldDefault },
+      },
+    });
+    expect(migrated.data.settings.annotations.markdownTemplate).toBe(
+      '> {{quote}}\n\n{{comment}}\n\n{{link}}',
+    );
+    const custom = migratePluginData({
+      ...DEFAULT_DATA,
+      settings: {
+        ...DEFAULT_DATA.settings,
+        annotations: {
+          ...DEFAULT_DATA.settings.annotations,
+          markdownTemplate: `${oldDefault}\ncustom`,
+        },
+      },
+    });
+    expect(custom.data.settings.annotations.markdownTemplate).toBe(`${oldDefault}\ncustom`);
+  });
   it('migrates every valid V1 automatic profile to Follow Obsidian', () => {
     const v1Auto = {
       schemaVersion: 1,

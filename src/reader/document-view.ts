@@ -1,4 +1,5 @@
 import { FileView, Notice, Scope, type TFile, type WorkspaceLeaf } from 'obsidian';
+import { parseAnnotationHref, type AnnotationHrefReference } from './annotation-transfer.js';
 import { ownerWindow } from './owner-dom.js';
 
 export const DOCUMENT_VIEW_TYPE = 'abyss-document-view';
@@ -9,6 +10,7 @@ export interface ReaderViewController {
   showOutline(): void;
   searchDocument(): void;
   refreshReadingSettings(): void;
+  resolveAnnotationLink(reference: AnnotationHrefReference): Promise<void>;
   saveDocument(): Promise<void>;
 }
 
@@ -20,6 +22,7 @@ export class AbyssDocumentView extends FileView {
   private readonly controller: ReaderViewController;
   private loadGeneration = 0;
   private lastOpenFailureNoticeKey: string | null = null;
+  private pendingAnnotationReference: AnnotationHrefReference | null = null;
 
   constructor(leaf: WorkspaceLeaf, services: AbyssDocumentViewServices) {
     super(leaf);
@@ -67,6 +70,25 @@ export class AbyssDocumentView extends FileView {
     const generation = ++this.loadGeneration;
     await super.onLoadFile(file);
     await this.openAtBoundary(file, generation);
+    await this.resolvePendingAnnotation();
+  }
+
+  override async setState(
+    state: Record<string, unknown>,
+    result: { history: boolean },
+  ): Promise<void> {
+    this.captureAnnotationReference(state);
+    await super.setState(state, result);
+  }
+
+  override setEphemeralState(state: unknown): void {
+    super.setEphemeralState(state);
+    this.captureAnnotationReference(state);
+    void this.resolvePendingAnnotation().catch((cause: unknown) => {
+      console.error('[abyss-documents] Failed to contain PDF annotation link resolution', {
+        cause,
+      });
+    });
   }
 
   override async onUnloadFile(file: TFile): Promise<void> {
@@ -118,6 +140,20 @@ export class AbyssDocumentView extends FileView {
       console.error('[abyss-documents] Failed to open PDF', { path: file.path, cause });
       this.renderOpenFailure(reason);
     }
+  }
+
+  private captureAnnotationReference(state: unknown): void {
+    if (typeof state !== 'object' || state === null) return;
+    const subpath = (state as Record<string, unknown>)['subpath'];
+    if (typeof subpath !== 'string') return;
+    this.pendingAnnotationReference = parseAnnotationHref(subpath);
+  }
+
+  private async resolvePendingAnnotation(): Promise<void> {
+    const reference = this.pendingAnnotationReference;
+    if (reference === null || this.file === null) return;
+    this.pendingAnnotationReference = null;
+    await this.controller.resolveAnnotationLink(reference);
   }
 
   private renderOpenFailure(reason: string): void {

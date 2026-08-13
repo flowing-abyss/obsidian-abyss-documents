@@ -1,3 +1,4 @@
+import { setIcon } from 'obsidian';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation } from '../document-core/document.js';
 import { ownerWindow } from './owner-dom.js';
@@ -15,7 +16,11 @@ export interface AnnotationPanelFilter {
 
 export interface AnnotationsPanelOptions {
   readonly colorMeanings?: Readonly<Record<string, string>>;
+  readonly onCopy?: (annotation: DocumentAnnotation) => void;
+  readonly onInsert?: (annotation: DocumentAnnotation) => void;
   readonly onNavigate: (location: DocumentLocation) => void;
+  readonly onTransfer?: (annotation: DocumentAnnotation, transfer: DataTransfer) => void;
+  readonly onTransferFailure?: (annotation: DocumentAnnotation, cause: unknown) => void;
 }
 
 export class AnnotationsPanel {
@@ -30,6 +35,7 @@ export class AnnotationsPanel {
   private filtered: readonly DocumentAnnotation[] = [];
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
   private currentPage = 0;
+  private selectedAnnotationId: string | null = null;
   private windowStart = 0;
   private estimatedCardHeight = ESTIMATED_CARD_HEIGHT;
   private offsets: number[] = [0];
@@ -168,6 +174,25 @@ export class AnnotationsPanel {
     this.render();
   }
 
+  selectAnnotation(id: string): boolean {
+    const index = this.filtered.findIndex((annotation) => annotationId(annotation) === id);
+    if (index < 0) return false;
+    this.selectedAnnotationId = id;
+    this.root.scrollTop = this.scrollTopForIndex(index);
+    this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
+    this.render();
+    this.list.querySelector<HTMLElement>(`[data-annotation-id="${CSS.escape(id)}"]`)?.focus();
+    return true;
+  }
+
+  setResolutionError(kind: 'ambiguous' | 'unresolved', path: string): void {
+    this.status.setAttribute('role', 'alert');
+    this.status.textContent =
+      kind === 'ambiguous'
+        ? `The link in ${path} matches more than one annotation.`
+        : `The linked annotation in ${path} could not be found.`;
+  }
+
   private applyFilter(invalidateMeasurements = false): void {
     if (invalidateMeasurements) this.clearMeasurements();
     const query = normalize(this.filter.query.trim());
@@ -280,24 +305,24 @@ export class AnnotationsPanel {
     return spacer;
   }
 
-  private card(annotation: DocumentAnnotation, index: number): HTMLButtonElement {
+  private card(annotation: DocumentAnnotation, index: number): HTMLElement {
     const owner = ownerWindow(this.root);
+    const row = this.cardRow(annotation, index);
     const button = owner.createEl('button');
     button.type = 'button';
     button.className = 'abyss-annotation-card';
     button.dataset['annotationId'] = annotationId(annotation);
     button.dataset['annotationRowId'] = this.rowId(annotation);
-    button.setAttribute('role', 'listitem');
-    button.setAttribute('aria-posinset', String(index + 1));
-    button.setAttribute('aria-setsize', String(this.filtered.length));
     button.tabIndex = index === this.windowStart ? 0 : -1;
     if (annotationPage(annotation) === this.currentPage)
       button.setAttribute('aria-current', 'location');
+    if (annotationId(annotation) === this.selectedAnnotationId)
+      button.setAttribute('aria-current', 'true');
     const header = owner.createDiv();
     header.className = 'abyss-annotation-card-header';
     const meaning =
       annotation.color === null ? undefined : this.options.colorMeanings?.[annotation.color];
-    header.textContent = `Page ${annotationPage(annotation) + 1} · ${meaning ?? annotation.type}`;
+    header.textContent = annotationHeader(annotation, meaning);
     const text = owner.createDiv();
     text.className = 'abyss-annotation-card-text';
     text.textContent =
@@ -310,6 +335,64 @@ export class AnnotationsPanel {
     button.addEventListener('keydown', (event) => {
       this.onKeyDown(event, index);
     });
+    row.append(button);
+    const actions = this.cardActions(annotation);
+    if (actions !== null) row.append(actions);
+    return row;
+  }
+
+  private cardRow(annotation: DocumentAnnotation, index: number): HTMLElement {
+    const row = ownerWindow(this.root).createEl('article');
+    row.className = 'abyss-annotation-card-row';
+    row.dataset['annotationCardId'] = annotationId(annotation);
+    row.dataset['annotationRowId'] = this.rowId(annotation);
+    row.setAttribute('role', 'listitem');
+    row.setAttribute('aria-posinset', String(index + 1));
+    row.setAttribute('aria-setsize', String(this.filtered.length));
+    row.draggable = isTransferableAnnotation(annotation);
+    row.addEventListener('dragstart', (event) => {
+      if (event.dataTransfer === null || !isTransferableAnnotation(annotation)) return;
+      try {
+        this.options.onTransfer?.(annotation, event.dataTransfer);
+      } catch (cause) {
+        event.preventDefault();
+        this.options.onTransferFailure?.(annotation, cause);
+      }
+    });
+    return row;
+  }
+
+  private cardActions(annotation: DocumentAnnotation): HTMLElement | null {
+    if (!isTransferableAnnotation(annotation)) return null;
+    if (this.options.onCopy === undefined && this.options.onInsert === undefined) return null;
+    const actions = ownerWindow(this.root).createDiv();
+    actions.className = 'abyss-annotation-card-actions';
+    if (this.options.onCopy !== undefined) {
+      actions.append(
+        this.actionButton('copy-annotation-link', 'Copy annotation link', () => {
+          this.options.onCopy?.(annotation);
+        }),
+      );
+    }
+    if (this.options.onInsert !== undefined) {
+      actions.append(
+        this.actionButton('insert-annotation', 'Insert into active Markdown note', () => {
+          this.options.onInsert?.(annotation);
+        }),
+      );
+    }
+    return actions;
+  }
+
+  private actionButton(action: string, label: string, callback: () => void): HTMLButtonElement {
+    const button = ownerWindow(this.root).createEl('button');
+    button.type = 'button';
+    button.className = 'clickable-icon abyss-annotation-card-action';
+    button.dataset['action'] = action;
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    setIcon(button, action === 'copy-annotation-link' ? 'copy' : 'file-input');
+    button.addEventListener('click', callback);
     return button;
   }
 
@@ -429,7 +512,7 @@ export class AnnotationsPanel {
   private collectMeasurements(): { readonly changed: boolean; readonly newlyMeasured: number[] } {
     let changed = false;
     const newlyMeasured: number[] = [];
-    const cards = Array.from(this.list.querySelectorAll<HTMLElement>('[data-annotation-row-id]'));
+    const cards = Array.from(this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row'));
     for (const card of cards) {
       const height = measuredCardHeight(card);
       const rowId = card.dataset['annotationRowId'];
@@ -463,7 +546,7 @@ export class AnnotationsPanel {
   private restoreFocusedRow(rowId: string | undefined): void {
     if (rowId === undefined) return;
     const target = Array.from(
-      this.list.querySelectorAll<HTMLElement>('[data-annotation-row-id]'),
+      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card[data-annotation-row-id]'),
     ).find((candidate) => candidate.dataset['annotationRowId'] === rowId);
     if (target === undefined) return;
     const scrollTop = this.root.scrollTop;
@@ -514,8 +597,18 @@ function annotationId(annotation: DocumentAnnotation): string {
     : annotation.identity.fingerprint;
 }
 
+function isTransferableAnnotation(annotation: DocumentAnnotation): boolean {
+  return annotation.identity.kind === 'stable' && annotation.anchor.kind === 'fixed-page';
+}
+
 function annotationPage(annotation: DocumentAnnotation): number {
   return annotation.anchor.kind === 'fixed-page' ? annotation.anchor.pageIndex : 0;
+}
+
+function annotationHeader(annotation: DocumentAnnotation, meaning: string | undefined): string {
+  const label =
+    annotation.identity.kind === 'stable' ? (meaning ?? annotation.type) : 'Pending save';
+  return `Page ${annotationPage(annotation) + 1} · ${label}`;
 }
 
 function location(annotation: DocumentAnnotation): DocumentLocation {

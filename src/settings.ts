@@ -29,6 +29,10 @@ export interface PluginSettings {
   readonly debugLogging: boolean;
 }
 
+export const LEGACY_ANNOTATION_MARKDOWN_TEMPLATE =
+  '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})';
+export const DEFAULT_ANNOTATION_MARKDOWN_TEMPLATE = '> {{quote}}\n\n{{comment}}\n\n{{link}}';
+
 export const DEFAULT_SETTINGS: PluginSettings = {
   reading: {
     defaultProfile: 'default',
@@ -57,7 +61,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
       { name: 'Orange', color: '#f19837', meaning: '' },
       { name: 'Gray', color: '#aaaaaa', meaning: '' },
     ],
-    markdownTemplate: '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})',
+    markdownTemplate: DEFAULT_ANNOTATION_MARKDOWN_TEMPLATE,
   },
   debugLogging: false,
 };

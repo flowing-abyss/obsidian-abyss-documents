@@ -1,4 +1,5 @@
 import { Platform, setIcon } from 'obsidian';
+import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation, SearchHit } from '../document-core/document.js';
 import { AnnotationsPanel } from './annotations-panel.js';
 import { OutlinePanel } from './outline-panel.js';
@@ -23,6 +24,10 @@ export interface ReaderSidebarCallbacks {
   readonly annotationColorMeanings?: Readonly<Record<string, string>>;
   readonly onClose: () => void;
   readonly onAnnotationNavigate?: (location: DocumentLocation) => void;
+  readonly onAnnotationCopy?: (annotation: DocumentAnnotation) => void;
+  readonly onAnnotationInsert?: (annotation: DocumentAnnotation) => void;
+  readonly onAnnotationTransfer?: (annotation: DocumentAnnotation, transfer: DataTransfer) => void;
+  readonly onAnnotationTransferFailure?: (annotation: DocumentAnnotation, cause: unknown) => void;
   readonly onTabChange: (tab: ReaderSidebarTab) => void;
   readonly onOutlineNavigate: (location: DocumentLocation) => void;
   readonly onSearchNavigate: (hit: SearchHit, index: number, kind: SearchNavigationKind) => void;
@@ -73,6 +78,16 @@ export class ReaderSidebar {
         ? {}
         : { colorMeanings: callbacks.annotationColorMeanings }),
       onNavigate: callbacks.onAnnotationNavigate ?? (() => undefined),
+      ...(callbacks.onAnnotationCopy === undefined ? {} : { onCopy: callbacks.onAnnotationCopy }),
+      ...(callbacks.onAnnotationInsert === undefined
+        ? {}
+        : { onInsert: callbacks.onAnnotationInsert }),
+      ...(callbacks.onAnnotationTransfer === undefined
+        ? {}
+        : { onTransfer: callbacks.onAnnotationTransfer }),
+      ...(callbacks.onAnnotationTransferFailure === undefined
+        ? {}
+        : { onTransferFailure: callbacks.onAnnotationTransferFailure }),
     });
     const searchCallbacks: SearchPanelCallbacks = {
       onClose: () => {

@@ -103,7 +103,7 @@ function sessionFixture(overrides: Partial<PDFDocumentProxy> = {}) {
       _pdf: PDFDocumentProxy,
       _pdfjsViewer: PdfRuntime['pdfjsViewer'],
       _search: PdfTextSearch,
-      _annotationCapabilities: PdfAnnotationCapabilities,
+      _context: Parameters<PdfViewportFactory>[3],
     ) => createdViewport,
   ) satisfies PdfViewportFactory;
   const pdfjsViewer = {} as PdfRuntime['pdfjsViewer'];
@@ -252,7 +252,31 @@ describe('PdfDocumentSession', () => {
     expect(viewportFactory.mock.calls[0]?.[0]).toBe(document);
     expect(viewportFactory.mock.calls[0]?.[1]).toBe(pdfjsViewer);
     expect(viewportFactory.mock.calls[0]?.[2]).toBe(viewportFactory.mock.calls[1]?.[2]);
-    expect(viewportFactory.mock.calls[0]?.[3]).toBe(annotationCapabilities);
+    expect(viewportFactory.mock.calls[0]?.[3]).toMatchObject({
+      annotationCapabilities,
+      sourcePath: 'Books/Guide.pdf',
+    });
+  });
+
+  it('passes the per-reader link provider only through its PDF source context', async () => {
+    const fixture = sessionFixture();
+    const linkSuggestions = { suggest: vi.fn(() => []) };
+    const configured = new PdfDocumentSession(
+      file('Books/Guide.pdf'),
+      fixture.document,
+      fixture.pdfjsViewer,
+      {
+        annotationCapabilities: fixture.annotationCapabilities,
+        viewportFactory: fixture.viewportFactory,
+        linkSuggestions,
+      },
+    );
+    await configured.createViewport();
+    expect(fixture.viewportFactory.mock.calls[0]?.[3]).toEqual({
+      annotationCapabilities: fixture.annotationCapabilities,
+      sourcePath: 'Books/Guide.pdf',
+      linkSuggestions,
+    });
   });
 
   it('maps a viewport factory failure through the session boundary', async () => {

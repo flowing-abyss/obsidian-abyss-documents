@@ -333,10 +333,13 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
   const runtime = viewerRuntime(options);
   const search = new PdfTextSearch(documentProxy);
   const viewport = new PdfDocumentViewport(documentProxy, runtime.module, search, {
-    editing: {} as never,
-    readOnlyReason: null,
-    types: {} as never,
-  } satisfies PdfAnnotationCapabilities);
+    annotationCapabilities: {
+      editing: {} as never,
+      readOnlyReason: null,
+      types: {} as never,
+    } satisfies PdfAnnotationCapabilities,
+    sourcePath: 'Books/Guide.pdf',
+  });
   const host = createDiv();
   host.setCssProps({ '--background-primary': '#fafafa', '--text-normal': '#202020' });
   await viewport.mount(host);
@@ -352,12 +355,15 @@ describe('PdfDocumentViewport', () => {
       runtime.module,
       new PdfTextSearch(documentProxy),
       {
-        editing: {} as never,
-        readOnlyReason: {
-          code: 'signed-document',
-          message: 'Signed PDF documents are opened read-only to preserve signatures.',
+        annotationCapabilities: {
+          editing: {} as never,
+          readOnlyReason: {
+            code: 'signed-document',
+            message: 'Signed PDF documents are opened read-only to preserve signatures.',
+          },
+          types: {} as never,
         },
-        types: {} as never,
+        sourcePath: 'Books/Signed.pdf',
       },
     );
     const host = createDiv();
@@ -1593,9 +1599,12 @@ describe('PdfDocumentViewport', () => {
     const runtime = viewerRuntime();
     const search = new PdfTextSearch(documentProxy);
     const viewport = await createPdfDocumentViewport(documentProxy, runtime.module, search, {
-      editing: {} as never,
-      readOnlyReason: null,
-      types: {} as never,
+      annotationCapabilities: {
+        editing: {} as never,
+        readOnlyReason: null,
+        types: {} as never,
+      },
+      sourcePath: 'Books/Guide.pdf',
     });
 
     expect(viewport).toBeInstanceOf(PdfDocumentViewport);

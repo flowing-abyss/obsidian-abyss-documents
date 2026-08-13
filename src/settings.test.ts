@@ -20,7 +20,7 @@ describe('DEFAULT_SETTINGS', () => {
     });
     expect(DEFAULT_SETTINGS.annotations).toMatchObject({
       author: '',
-      markdownTemplate: '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})',
+      markdownTemplate: '> {{quote}}\n\n{{comment}}\n\n{{link}}',
       palette: [
         { name: 'Yellow', color: '#ffd400', meaning: '' },
         { name: 'Red', color: '#ff6666', meaning: '' },

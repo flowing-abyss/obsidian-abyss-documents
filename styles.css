@@ -6610,7 +6610,49 @@
   color: var(--text-normal);
   text-align: start;
   white-space: normal;
+}
+
+.abyss-documents .abyss-annotation-card-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--size-2-1);
+  align-items: start;
   margin-block-end: var(--size-2-1);
+}
+
+.abyss-documents .abyss-annotation-card-actions {
+  display: flex;
+  gap: var(--size-2-1);
+}
+
+.abyss-documents .abyss-annotation-card-action {
+  min-width: 44px;
+  min-height: 44px;
+  font-size: var(--font-ui-smaller);
+}
+
+.abyss-documents .abyss-annotation-link-suggestions {
+  max-height: min(14rem, 40vh);
+  overflow: auto;
+  padding: var(--size-2-1);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary-alt);
+  box-shadow: var(--shadow-s);
+}
+
+.abyss-documents .abyss-annotation-link-suggestions > [role='option'] {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: var(--size-2-1) var(--size-2-2);
+  border: 0;
+  background: transparent;
+  text-align: start;
+}
+
+.abyss-documents .abyss-annotation-link-suggestions > [role='option'][aria-selected='true'] {
+  background: var(--background-modifier-hover);
 }
 
 .abyss-documents .abyss-annotation-card:hover,

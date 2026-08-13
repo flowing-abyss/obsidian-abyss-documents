@@ -54,7 +54,7 @@ describe('AnnotationsPanel', () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
       this: HTMLElement,
     ) {
-      const id = this.dataset['annotationId'];
+      const id = this.dataset['annotationId'] ?? this.dataset['annotationCardId'];
       const index = id === undefined ? -1 : Number(id.slice('annotation-'.length));
       const height = index < 0 ? 0 : (heights[index % heights.length] ?? 0);
       return DOMRect.fromRect({ height });
@@ -253,6 +253,107 @@ describe('AnnotationsPanel', () => {
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
     panel.setError('Could not index annotations. Reopen the PDF to retry.');
     expect(root.querySelector('[role="alert"]')?.textContent).toContain('Could not index');
+  });
+
+  it('sets drag payloads and exposes keyboard/mobile Copy and Insert actions', () => {
+    const root = createDiv();
+    const onTransfer = vi.fn();
+    const onCopy = vi.fn();
+    const onInsert = vi.fn();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn(), onTransfer, onCopy, onInsert });
+    const item = annotation(2);
+    panel.setAnnotations([item]);
+    const row = root.querySelector<HTMLElement>('[draggable="true"]');
+    if (row === null) throw new Error('Expected draggable annotation row.');
+    const transfer = { setData: vi.fn() } as unknown as DataTransfer;
+    row.dispatchEvent(
+      Object.assign(new Event('dragstart', { bubbles: true }), { dataTransfer: transfer }),
+    );
+    root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]')?.click();
+    expect(onTransfer).toHaveBeenCalledWith(item, transfer);
+    expect(onCopy).toHaveBeenCalledWith(item);
+    expect(onInsert).toHaveBeenCalledWith(item);
+  });
+
+  it('keeps uncommitted annotations pending with no transfer surface', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onTransfer: vi.fn(),
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations([
+      { ...annotation(1), identity: { kind: 'legacy', fingerprint: 'pending' } },
+    ]);
+    expect(root.textContent).toContain('Pending save');
+    expect(root.querySelector('[draggable="true"]')).toBeNull();
+    expect(root.querySelector('[data-action="copy-annotation-link"]')).toBeNull();
+    expect(root.querySelector('[data-action="insert-annotation"]')).toBeNull();
+  });
+
+  it('does not expose PDF transfer controls for stable reflowable annotations', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onTransfer: vi.fn(),
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations([
+      {
+        ...annotation(1),
+        anchor: {
+          kind: 'reflowable-text',
+          selector: { exact: 'text', prefix: '', suffix: '' },
+          progression: 0.2,
+        },
+      },
+    ]);
+    expect(root.querySelector('[draggable="true"]')).toBeNull();
+    expect(root.querySelector('[data-action="copy-annotation-link"]')).toBeNull();
+    expect(root.querySelector('[data-action="insert-annotation"]')).toBeNull();
+  });
+
+  it('uses direct listitem rows and contains drag failures', () => {
+    const root = createDiv();
+    const item = annotation(1);
+    const onTransferFailure = vi.fn();
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onTransfer: () => {
+        throw new Error('drag failed');
+      },
+      onTransferFailure,
+    });
+    panel.setAnnotations([item]);
+    const row = root.querySelector<HTMLElement>('[role="listitem"]');
+    expect(row?.parentElement).toBe(root.querySelector('[role="list"]'));
+    row?.dispatchEvent(
+      Object.assign(new Event('dragstart', { bubbles: true }), {
+        dataTransfer: { setData: vi.fn() },
+      }),
+    );
+    expect(onTransferFailure).toHaveBeenCalledWith(item, expect.any(Error));
+  });
+
+  it('selects a resolved annotation and renders explicit unresolved/ambiguous state', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 200 }, (_, index) => annotation(index)));
+    expect(panel.selectAnnotation('annotation-150')).toBe(true);
+    expect(
+      root.querySelector('[data-annotation-id="annotation-150"]')?.getAttribute('aria-current'),
+    ).toBe('true');
+    panel.setResolutionError('ambiguous', 'Books/Book.pdf');
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain(
+      'matches more than one annotation',
+    );
+    panel.setResolutionError('unresolved', 'Books/Book.pdf');
+    expect(root.querySelector('[role="alert"]')?.textContent).toContain('could not be found');
+    root.remove();
   });
 
   it('clears active facets, renders empty state, and navigates every geometry kind', () => {

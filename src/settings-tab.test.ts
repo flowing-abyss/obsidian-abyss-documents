@@ -408,7 +408,7 @@ describe('AbyssDocumentsSettingTab', () => {
     });
     expect(store.snapshot.settings.annotations).toMatchObject({
       author: '',
-      markdownTemplate: '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})',
+      markdownTemplate: '> {{quote}}\n\n{{comment}}\n\n{{link}}',
     });
     expect(store.snapshot.settings.annotations.palette[0]).toMatchObject({
       name: 'Yellow',
@@ -417,7 +417,7 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(requiredControl(controls.texts, 'Annotation author').getValue()).toBe('');
     expect(requiredControl(controls.texts, 'Yellow meaning').getValue()).toBe('');
     expect(requiredControl(controls.textAreas, 'Annotation transfer template').getValue()).toBe(
-      '> {{quote}}\n\n{{comment}}\n\n[Open annotation]({{link}})',
+      '> {{quote}}\n\n{{comment}}\n\n{{link}}',
     );
   });
 

@@ -29,10 +29,17 @@ import {
   type NativeEditableSaveSession,
   type NativeSaveRecoveryFailure,
   type VerifiedReloadListener,
+  type VerifiedReloadSource,
 } from '../document-core/save-coordinator.js';
 import { markReaderPerformance, markReaderPerformanceOnce } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
 import type { AnnotationToolbarIntent } from './annotation-toolbar.js';
+import {
+  applyAnnotationTransfer,
+  resolveAnnotationHref,
+  type AnnotationHrefReference,
+  type AnnotationTransferService,
+} from './annotation-transfer.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
 import type { SaveConflictAction } from './save-conflict-modal.js';
@@ -76,6 +83,10 @@ interface ReaderControllerServices {
   readonly resolveSaveConflict?: (path: string) => Promise<SaveConflictAction>;
   readonly confirmSaveRecovery?: (path: string, current: BaseToken) => Promise<boolean>;
   readonly saveFailureBoundary?: SaveFailureNoticeBoundary;
+  readonly annotationTransfer?: Pick<
+    AnnotationTransferService,
+    'build' | 'copyAnnotationLink' | 'insertAnnotationIntoActiveMarkdown'
+  >;
 }
 
 interface NativeEditableSessionFactory extends DocumentSession {
@@ -95,6 +106,21 @@ interface AnnotationToolRequest {
   readonly shell: ReaderShell;
   readonly tool: PdfAnnotationTool;
   readonly viewport: DocumentViewport;
+}
+
+interface VerifiedAnnotationMarker {
+  readonly file: TFile;
+  readonly projectionRevision: number;
+  readonly revision: number;
+  readonly session: DocumentSession & AnnotationListingSession;
+  readonly shell: ReaderShell;
+  readonly source: VerifiedReloadSource;
+  readonly token: BaseToken;
+}
+
+interface VerifiedAnnotationRefresh {
+  readonly abort: AbortController;
+  readonly marker: VerifiedAnnotationMarker;
 }
 
 class SaveDiscardedError extends SaveConflictError {
@@ -121,8 +147,18 @@ export class ReaderController {
   private outlineLoadingFor: DocumentSession | null = null;
   private currentSearchQuery = '';
   private annotationAbort: AbortController | null = null;
+  private annotationIntentFor: DocumentSession | null = null;
+  private annotationProjectionRevision = 0;
   private annotationsLoadedFor: DocumentSession | null = null;
   private annotationsLoadingFor: DocumentSession | null = null;
+  private currentAnnotations: readonly DocumentAnnotation[] = [];
+  private verifiedAnnotationAbort: AbortController | null = null;
+  private verifiedAnnotationFailedMarker: VerifiedAnnotationMarker | null = null;
+  private verifiedAnnotationInvalidation: Promise<void> | null = null;
+  private verifiedAnnotationInvalidationFor: DocumentSession | null = null;
+  private verifiedAnnotationMarker: VerifiedAnnotationMarker | null = null;
+  private verifiedAnnotationRefresh: Promise<void> | null = null;
+  private verifiedAnnotationRefreshFor: DocumentSession | null = null;
   private readonly annotationCache: AnnotationCache | null;
   private readonly profileService: ReadingProfileService;
   private readonly saveCoordinator: ReaderControllerServices['saveCoordinator'];
@@ -205,6 +241,45 @@ export class ReaderController {
 
   saveDocument(): Promise<void> {
     return this.autosave?.flush() ?? Promise.resolve();
+  }
+
+  async resolveAnnotationLink(reference: AnnotationHrefReference): Promise<void> {
+    const shell = this.shell;
+    const session = this.session;
+    if (shell === null || session === null || !hasAnnotationListing(session)) return;
+    const annotations = await this.ensureAnnotationsLoaded(session, shell);
+    if (this.session !== session || this.shell !== shell) return;
+    this.openSidebar('annotations');
+    const resolution = resolveAnnotationHref(reference, annotations);
+    if (resolution.status !== 'resolved') {
+      this.reportAnnotationResolutionFailure(shell, session, reference, resolution);
+      return;
+    }
+    const id =
+      resolution.annotation.identity.kind === 'stable'
+        ? resolution.annotation.identity.id
+        : resolution.annotation.identity.fingerprint;
+    shell.sidebar?.annotationsPanel.selectAnnotation(id);
+    this.navigateToLocation(annotationLocation(resolution.annotation));
+  }
+
+  private reportAnnotationResolutionFailure(
+    shell: ReaderShell,
+    session: DocumentSession,
+    reference: AnnotationHrefReference,
+    resolution: Exclude<ReturnType<typeof resolveAnnotationHref>, { readonly status: 'resolved' }>,
+  ): void {
+    shell.sidebar?.annotationsPanel.setResolutionError(resolution.status, session.descriptor.path);
+    const candidates =
+      resolution.status === 'ambiguous'
+        ? resolution.candidates.map(annotationDiagnosticIdentity)
+        : undefined;
+    console.error('[abyss-documents] Could not resolve PDF annotation link', {
+      path: session.descriptor.path,
+      reference,
+      status: resolution.status,
+      ...(candidates === undefined ? {} : { candidates }),
+    });
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -297,10 +372,7 @@ export class ReaderController {
     this.pendingNavigationPageIndex = null;
     this.navigationRequestRevision += 1;
     this.currentSearchQuery = '';
-    this.annotationAbort?.abort();
-    this.annotationAbort = null;
-    this.annotationsLoadedFor = null;
-    this.annotationsLoadingFor = null;
+    this.resetAnnotationProjectionState();
     this.currentProfile = this.initialProfile(session.descriptor.fingerprint);
     this.currentLayout = this.initialLayout(session.descriptor.fingerprint);
     this.layoutPolicy = captureLayoutPolicy(this.profileState.layout);
@@ -331,6 +403,23 @@ export class ReaderController {
     this.unsubscribeViewport = unsubscribeViewport;
     this.activateNativeSave(session);
     return unsubscribeViewport;
+  }
+
+  private resetAnnotationProjectionState(): void {
+    this.annotationAbort?.abort();
+    this.annotationAbort = null;
+    this.verifiedAnnotationAbort?.abort();
+    this.verifiedAnnotationAbort = null;
+    this.verifiedAnnotationFailedMarker = null;
+    this.verifiedAnnotationInvalidation = null;
+    this.verifiedAnnotationInvalidationFor = null;
+    this.verifiedAnnotationMarker = null;
+    this.verifiedAnnotationRefresh = null;
+    this.verifiedAnnotationRefreshFor = null;
+    this.annotationIntentFor = null;
+    this.annotationsLoadedFor = null;
+    this.annotationsLoadingFor = null;
+    this.currentAnnotations = [];
   }
 
   private activateNativeSave(session: DocumentSession): void {
@@ -400,7 +489,7 @@ export class ReaderController {
   ): void {
     const coordinator = this.saveCoordinator as Partial<Pick<DocumentSaveCoordinator, 'register'>>;
     if (typeof coordinator.register !== 'function') return;
-    const listener: VerifiedReloadListener = (token, _revision, source) => {
+    const listener: VerifiedReloadListener = (token, revision, source) => {
       if (source !== native) {
         if (native.isDirty) {
           scheduler.pauseForFailure(
@@ -414,6 +503,7 @@ export class ReaderController {
         (
           native as NativeEditableSaveSession & { acceptVerifiedReload(token: unknown): void }
         ).acceptVerifiedReload(token);
+        this.markVerifiedAnnotationsStale(session, token, revision, source);
       }
     };
     try {
@@ -428,6 +518,200 @@ export class ReaderController {
         this.reportPartialCleanupFailure(session.descriptor.path, this.asError(cleanupCause));
       }
       throw cause;
+    }
+  }
+
+  private markVerifiedAnnotationsStale(
+    session: DocumentSession,
+    token: BaseToken,
+    revision: number,
+    source: VerifiedReloadSource,
+  ): void {
+    const context = this.annotationContextFor(session);
+    if (context === null || !hasAnnotationListing(session)) return;
+    const { file, shell } = context;
+    const marker: VerifiedAnnotationMarker = Object.freeze({
+      file,
+      projectionRevision: ++this.annotationProjectionRevision,
+      revision,
+      session,
+      shell,
+      source,
+      token,
+    });
+    this.verifiedAnnotationMarker = marker;
+    this.verifiedAnnotationFailedMarker = null;
+    this.annotationAbort?.abort(
+      new DOMException('The saved PDF superseded the live annotation index.', 'AbortError'),
+    );
+    this.annotationAbort = null;
+    this.verifiedAnnotationAbort?.abort(
+      new DOMException('A newer verified PDF superseded this annotation refresh.', 'AbortError'),
+    );
+    this.annotationsLoadedFor = null;
+    this.annotationsLoadingFor = null;
+    this.currentAnnotations = [];
+    if (this.hasAnnotationIntent(session)) shell.sidebar?.annotationsPanel.setLoading();
+    this.startVerifiedAnnotationInvalidation(marker);
+  }
+
+  private startVerifiedAnnotationInvalidation(marker: VerifiedAnnotationMarker): void {
+    const task = Promise.resolve(this.annotationCache?.invalidate(marker.session.descriptor.path))
+      .then(() => {
+        if (!this.isCurrentAnnotationMarker(marker) || !this.hasAnnotationIntent(marker.session))
+          return;
+        this.verifiedAnnotationRefresh = this.scheduleVerifiedAnnotationRefresh(marker.session);
+      })
+      .catch((cause: unknown) => {
+        if (!this.isCurrentAnnotationMarker(marker)) return;
+        this.verifiedAnnotationFailedMarker = marker;
+        this.reportVerifiedAnnotationRefreshFailure(marker, cause);
+      })
+      .finally(() => {
+        if (this.verifiedAnnotationInvalidation !== task) return;
+        this.verifiedAnnotationInvalidation = null;
+        this.verifiedAnnotationInvalidationFor = null;
+      });
+    this.verifiedAnnotationInvalidation = task;
+    this.verifiedAnnotationInvalidationFor = marker.session;
+  }
+
+  private scheduleVerifiedAnnotationRefresh(session: DocumentSession): Promise<void> {
+    const existing = this.verifiedAnnotationRefresh;
+    if (existing !== null && Object.is(this.verifiedAnnotationRefreshFor, session)) return existing;
+    let attemptedMarker: VerifiedAnnotationMarker | null = null;
+    const extraction = Promise.resolve().then(async () => {
+      const marker = this.verifiedAnnotationMarker;
+      if (
+        marker === null ||
+        !Object.is(marker.session, session) ||
+        !this.isCurrentAnnotationMarker(marker)
+      )
+        return;
+      attemptedMarker = marker;
+      const abort = new AbortController();
+      this.verifiedAnnotationAbort = abort;
+      const refresh = { abort, marker } satisfies VerifiedAnnotationRefresh;
+      try {
+        const annotations = await this.reextractVerifiedAnnotations(refresh);
+        if (!this.isCurrentAnnotationRefresh(refresh)) return;
+        this.verifiedAnnotationMarker = null;
+        this.annotationsLoadedFor = session;
+        this.annotationsLoadingFor = null;
+        this.currentAnnotations = annotations;
+        marker.shell.sidebar?.annotationsPanel.setAnnotations(annotations);
+        marker.shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
+      } finally {
+        if (this.verifiedAnnotationAbort === abort) this.verifiedAnnotationAbort = null;
+      }
+    });
+    const promise = extraction
+      .catch((cause: unknown) => {
+        if (attemptedMarker === null || this.verifiedAnnotationMarker !== attemptedMarker) return;
+        this.reportVerifiedAnnotationRefreshFailure(attemptedMarker, cause);
+        if (!isAbortFailure(cause)) this.verifiedAnnotationFailedMarker = attemptedMarker;
+      })
+      .finally(() => {
+        if (this.verifiedAnnotationRefresh !== promise) return;
+        this.verifiedAnnotationRefresh = null;
+        this.verifiedAnnotationRefreshFor = null;
+        if (
+          this.hasPendingVerifiedAnnotations(session) &&
+          this.hasAnnotationIntent(session) &&
+          this.verifiedAnnotationFailedMarker !== this.verifiedAnnotationMarker
+        )
+          this.verifiedAnnotationRefresh = this.scheduleVerifiedAnnotationRefresh(session);
+      });
+    this.verifiedAnnotationRefresh = promise;
+    this.verifiedAnnotationRefreshFor = session;
+    return promise;
+  }
+
+  private async awaitVerifiedAnnotationRefresh(session: DocumentSession): Promise<void> {
+    const invalidation = this.verifiedAnnotationInvalidation;
+    if (invalidation !== null && Object.is(this.verifiedAnnotationInvalidationFor, session))
+      await invalidation;
+    while (
+      this.hasPendingVerifiedAnnotations(session) &&
+      this.verifiedAnnotationFailedMarker !== this.verifiedAnnotationMarker
+    ) {
+      try {
+        await this.scheduleVerifiedAnnotationRefresh(session);
+      } catch (cause) {
+        if (!isAbortFailure(cause)) throw cause;
+      }
+    }
+  }
+
+  private async reextractVerifiedAnnotations(
+    refresh: VerifiedAnnotationRefresh,
+  ): Promise<readonly DocumentAnnotation[]> {
+    const { abort, marker } = refresh;
+    const reopened = await this.registry.requireFor(marker.file).open(marker.file, abort.signal);
+    try {
+      if (!hasAnnotationListing(reopened)) return [];
+      return await this.loadAnnotationData(reopened, abort.signal);
+    } finally {
+      await this.closeAnnotationRefreshSession(reopened, marker.session.descriptor.path);
+    }
+  }
+
+  private isCurrentAnnotationMarker(marker: VerifiedAnnotationMarker): boolean {
+    return (
+      this.verifiedAnnotationMarker === marker &&
+      marker.projectionRevision === this.annotationProjectionRevision &&
+      Object.is(this.session, marker.session) &&
+      Object.is(this.shell, marker.shell)
+    );
+  }
+
+  private annotationContextFor(
+    session: DocumentSession,
+  ): { readonly file: TFile; readonly shell: ReaderShell } | null {
+    if (!Object.is(this.session, session) || this.currentFile === null || this.shell === null)
+      return null;
+    return { file: this.currentFile, shell: this.shell };
+  }
+
+  private hasAnnotationIntent(session: DocumentSession): boolean {
+    return Object.is(this.annotationIntentFor, session);
+  }
+
+  private hasPendingVerifiedAnnotations(session: DocumentSession): boolean {
+    return Object.is(this.verifiedAnnotationMarker?.session, session);
+  }
+
+  private isCurrentAnnotationRefresh(refresh: VerifiedAnnotationRefresh): boolean {
+    return !refresh.abort.signal.aborted && this.isCurrentAnnotationMarker(refresh.marker);
+  }
+
+  private reportVerifiedAnnotationRefreshFailure(
+    marker: VerifiedAnnotationMarker,
+    cause: unknown,
+  ): void {
+    if (isAbortFailure(cause)) return;
+    marker.shell.sidebar?.annotationsPanel.setError(
+      'Could not refresh saved annotations. Reopen the PDF to retry.',
+    );
+    console.error('[abyss-documents] Failed to refresh verified PDF annotations', {
+      path: marker.session.descriptor.path,
+      revision: marker.revision,
+      token: marker.token,
+      cause,
+    });
+  }
+
+  private async closeAnnotationRefreshSession(
+    session: DocumentSession,
+    path: string,
+  ): Promise<void> {
+    try {
+      await session.close();
+    } catch (cause) {
+      console.error('[abyss-documents] Failed to close verified annotation refresh', {
+        path,
+        cause,
+      });
     }
   }
 
@@ -608,15 +892,13 @@ export class ReaderController {
   private resetReaderState(): void {
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
-    this.annotationAbort?.abort();
-    this.annotationAbort = null;
-    this.annotationsLoadedFor = null;
-    this.annotationsLoadingFor = null;
+    this.resetAnnotationProjectionState();
     this.currentSearchQuery = '';
     this.navigationPageIndex = 0;
     this.pendingNavigationPageIndex = null;
     this.navigationRequestRevision += 1;
     this.annotationToolRequestRevision += 1;
+    this.annotationProjectionRevision += 1;
     this.currentAnnotationTool = 'select';
     this.currentFile = null;
     this.currentHost = null;
@@ -895,6 +1177,29 @@ export class ReaderController {
     const session = this.session;
     const viewport = this.viewport;
     if (shell === null || session === null || viewport === null) return;
+    const transfer = this.services.annotationTransfer;
+    const file = this.currentFile;
+    const transferCallbacks: Partial<ReaderSidebarCallbacks> =
+      transfer === undefined || file === null
+        ? {}
+        : {
+            onAnnotationCopy: (annotation) => {
+              transfer.copyAnnotationLink(annotation, file).catch((cause: unknown) => {
+                console.error('[abyss-documents] Failed to contain annotation copy', { cause });
+              });
+            },
+            onAnnotationInsert: (annotation) => {
+              transfer.insertAnnotationIntoActiveMarkdown(annotation, file);
+            },
+            onAnnotationTransfer: (annotation, dataTransfer) => {
+              applyAnnotationTransfer(dataTransfer, transfer.build(annotation, file));
+            },
+            onAnnotationTransferFailure: (annotation, cause) => {
+              this.reportAnnotationFailure('drag PDF annotation', cause, {
+                annotation: annotationDiagnosticIdentity(annotation),
+              });
+            },
+          };
     const callbacks: ReaderSidebarCallbacks = {
       annotationColorMeanings: Object.fromEntries(
         (this.profileState.annotations?.palette ?? []).map((entry) => [
@@ -906,6 +1211,7 @@ export class ReaderController {
       onAnnotationNavigate: (location) => {
         this.navigateToLocation(location);
       },
+      ...transferCallbacks,
       onTabChange: (nextTab) => {
         if (nextTab === 'outline' && this.session === session && this.shell === shell)
           this.loadOutline(session, shell);
@@ -931,12 +1237,11 @@ export class ReaderController {
   }
 
   private loadAnnotations(session: DocumentSession, shell: ReaderShell): void {
-    if (
-      this.annotationsLoadedFor === session ||
-      this.annotationsLoadingFor === session ||
-      !hasAnnotationListing(session)
-    )
-      return;
+    if (!hasAnnotationListing(session)) return;
+    this.annotationIntentFor = session;
+    if (this.requestPendingVerifiedAnnotations(session, shell)) return;
+    if (this.hydrateLoadedAnnotations(session, shell)) return;
+    if (Object.is(this.annotationsLoadingFor, session)) return;
     this.annotationAbort?.abort();
     const abort = new AbortController();
     this.annotationAbort = abort;
@@ -947,6 +1252,7 @@ export class ReaderController {
         if (this.session !== session || this.shell !== shell || abort.signal.aborted) return;
         this.annotationsLoadingFor = null;
         this.annotationsLoadedFor = session;
+        this.currentAnnotations = annotations;
         shell.sidebar?.annotationsPanel.setAnnotations(annotations);
         shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
       })
@@ -968,6 +1274,61 @@ export class ReaderController {
           cause,
         });
       });
+  }
+
+  private async ensureAnnotationsLoaded(
+    session: DocumentSession & AnnotationListingSession,
+    shell: ReaderShell,
+  ): Promise<readonly DocumentAnnotation[]> {
+    this.annotationIntentFor = session;
+    const refreshed = await this.waitForPendingVerifiedAnnotations(session, shell);
+    if (refreshed !== null) return refreshed;
+    if (Object.is(this.annotationsLoadedFor, session)) return this.currentAnnotations;
+    this.annotationAbort?.abort();
+    const abort = new AbortController();
+    this.annotationAbort = abort;
+    this.annotationsLoadingFor = session;
+    shell.sidebar?.annotationsPanel.setLoading();
+    const annotations = await this.loadAnnotationData(session, abort.signal);
+    if (this.session !== session || this.shell !== shell || abort.signal.aborted)
+      throw new DOMException('Annotation link resolution was superseded.', 'AbortError');
+    this.annotationsLoadingFor = null;
+    this.annotationsLoadedFor = session;
+    this.currentAnnotations = annotations;
+    shell.sidebar?.annotationsPanel.setAnnotations(annotations);
+    shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
+    return annotations;
+  }
+
+  private requestPendingVerifiedAnnotations(session: DocumentSession, shell: ReaderShell): boolean {
+    if (!this.hasPendingVerifiedAnnotations(session)) return false;
+    this.verifiedAnnotationFailedMarker = null;
+    shell.sidebar?.annotationsPanel.setLoading();
+    void this.awaitVerifiedAnnotationRefresh(session).catch((cause: unknown) => {
+      const marker = this.verifiedAnnotationMarker;
+      if (marker !== null) this.reportVerifiedAnnotationRefreshFailure(marker, cause);
+    });
+    return true;
+  }
+
+  private hydrateLoadedAnnotations(session: DocumentSession, shell: ReaderShell): boolean {
+    if (!Object.is(this.annotationsLoadedFor, session)) return false;
+    shell.sidebar?.annotationsPanel.setAnnotations(this.currentAnnotations);
+    shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
+    return true;
+  }
+
+  private async waitForPendingVerifiedAnnotations(
+    session: DocumentSession,
+    shell: ReaderShell,
+  ): Promise<readonly DocumentAnnotation[] | null> {
+    if (!this.hasPendingVerifiedAnnotations(session)) return null;
+    this.verifiedAnnotationFailedMarker = null;
+    shell.sidebar?.annotationsPanel.setLoading();
+    await this.awaitVerifiedAnnotationRefresh(session);
+    if (!Object.is(this.session, session) || !Object.is(this.shell, shell))
+      throw new DOMException('Annotation link resolution was superseded.', 'AbortError');
+    return this.currentAnnotations;
   }
 
   private async loadAnnotationData(
@@ -1392,6 +1753,28 @@ function annotationFailurePage(cause: unknown): number | null {
     current = 'cause' in current ? current.cause : null;
   }
   return null;
+}
+
+function annotationLocation(annotation: DocumentAnnotation): DocumentLocation {
+  if (annotation.anchor.kind !== 'fixed-page') return { pageIndex: 0 };
+  const { geometry } = annotation.anchor;
+  if (geometry.kind === 'point')
+    return { pageIndex: annotation.anchor.pageIndex, ...geometry.point };
+  if (geometry.kind === 'rectangle')
+    return {
+      pageIndex: annotation.anchor.pageIndex,
+      x: geometry.rectangle.x,
+      y: geometry.rectangle.y,
+    };
+  if (geometry.kind === 'quadrilaterals')
+    return { pageIndex: annotation.anchor.pageIndex, ...geometry.quadrilaterals[0]?.topLeft };
+  return { pageIndex: annotation.anchor.pageIndex, ...geometry.paths[0]?.[0] };
+}
+
+function annotationDiagnosticIdentity(annotation: DocumentAnnotation): string {
+  return annotation.identity.kind === 'stable'
+    ? annotation.identity.id
+    : annotation.identity.fingerprint;
 }
 
 function annotationMutationAction(

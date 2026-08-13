@@ -11,6 +11,7 @@ import type {
 import type { DocumentEditingCapabilities } from '../../document-core/editable-document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../../document-core/errors.js';
 import type { BaseToken, NativeEditableSaveSession } from '../../document-core/save-coordinator.js';
+import type { AnnotationLinkSuggestionProvider } from '../../reader/link-suggestions.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import type { PdfAnnotationEditor } from './pdf-annotation-editor.js';
 import { extractAnnotations } from './pdf-annotations.js';
@@ -29,13 +30,20 @@ export type PdfViewportFactory = (
   pdf: PDFDocumentProxy,
   pdfjsViewer: PdfRuntime['pdfjsViewer'],
   textSearch: PdfTextSearch,
-  annotationCapabilities: PdfAnnotationCapabilities,
+  context: PdfViewportContext,
 ) => DocumentViewport | Promise<DocumentViewport>;
+
+export interface PdfViewportContext {
+  readonly annotationCapabilities: PdfAnnotationCapabilities;
+  readonly sourcePath: string;
+  readonly linkSuggestions?: AnnotationLinkSuggestionProvider;
+}
 
 interface PdfSessionAnnotationAccess {
   readonly annotationCapabilities: PdfAnnotationCapabilities;
   readonly viewportFactory: PdfViewportFactory;
   readonly openedBaseToken?: BaseToken | null;
+  readonly linkSuggestions?: AnnotationLinkSuggestionProvider;
 }
 
 export class PdfDocumentSession implements DocumentSession {
@@ -123,11 +131,12 @@ export class PdfDocumentSession implements DocumentSession {
     this.search ??= new PdfTextSearch(this.pdf);
     let viewport: DocumentViewport;
     try {
+      const context = this.viewportContext();
       viewport = await this.annotationAccess.viewportFactory(
         this.pdf,
         this.pdfjsViewer,
         this.search,
-        this.annotationCapabilities,
+        context,
       );
     } catch (cause) {
       if (this.closePromise !== null) throw this.cancelled(cause);
@@ -156,6 +165,15 @@ export class PdfDocumentSession implements DocumentSession {
     }
     this.createdViewport = viewport;
     return viewport;
+  }
+
+  private viewportContext(): PdfViewportContext {
+    const linkSuggestions = this.annotationAccess.linkSuggestions;
+    return {
+      annotationCapabilities: this.annotationCapabilities,
+      sourcePath: this.descriptor.path,
+      ...(linkSuggestions === undefined ? {} : { linkSuggestions }),
+    };
   }
 
   createNativeEditableSession(

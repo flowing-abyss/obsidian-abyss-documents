@@ -5,12 +5,15 @@ import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { PdfWriteBoundary } from './adapters/pdf/pdf-write-boundary.js';
 import { AnnotationCache } from './annotation-cache.js';
+import type { AnnotationSink, DocumentAnnotation } from './document-core/annotations.js';
 import type { DocumentSession, DocumentViewport } from './document-core/document.js';
 import { DocumentSaveCoordinator } from './document-core/save-coordinator.js';
 import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1, type PluginDataV2 } from './plugin-data.js';
 import { readerPerformanceSnapshot } from './reader-performance.js';
+import { AnnotationPopover } from './reader/annotation-popover.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
+import { LinkSuggestionService } from './reader/link-suggestions.js';
 import { BUILTIN_PROFILES } from './reader/reading-profiles.js';
 import { SaveConflictModal, type SaveConflictAction } from './reader/save-conflict-modal.js';
 import { SaveRecoveryModal } from './reader/save-recovery-modal.js';
@@ -144,6 +147,108 @@ async function loadedReader(
 }
 
 describe('AbyssDocumentsPlugin', () => {
+  it('contains clipboard transfer failure with one annotation/file Notice and diagnostic', async () => {
+    const created = documentSession('transfer');
+    const item = {
+      ...({} as DocumentAnnotation),
+      identity: { kind: 'stable' as const, id: 'committed-one' as never },
+      type: 'highlight' as const,
+      anchor: {
+        kind: 'fixed-page' as const,
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: { kind: 'point' as const, point: { x: 0, y: 0 } },
+      },
+      color: null,
+      selectedText: 'Quote',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: '',
+      tags: [],
+      links: [],
+    };
+    Object.assign(created.session, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([item]);
+      },
+    });
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const reader = await loadedReader(DEFAULT_DATA, created);
+    reader.view.contentEl.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
+    reader.view.contentEl
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(
+        reader.view.contentEl.querySelector('[data-action="copy-annotation-link"]'),
+      ).not.toBeNull();
+    });
+    reader.view.contentEl
+      .querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledWith(
+        'Could not copy annotation committed-one from Books/Guide.pdf.',
+        undefined,
+      );
+    });
+    expect(log).toHaveBeenCalledWith(
+      '[abyss-documents] Failed to transfer PDF annotation',
+      expect.objectContaining({
+        action: 'copy',
+        annotation: 'committed-one',
+        file: 'Books/Guide.pdf',
+      }),
+    );
+  });
+  it('wires metadata-cache-only wiki suggestions to the reader PDF source path', async () => {
+    const plugin = createPlugin();
+    const suggest = vi
+      .spyOn(LinkSuggestionService.prototype, 'suggest')
+      .mockReturnValue([
+        { display: 'Concept', path: 'Notes/Concept.md', insertion: '[[Concept]]' },
+      ]);
+    await plugin.onload();
+    const host = createDiv();
+    const provider = (plugin as unknown as { linkSuggestions: LinkSuggestionService })
+      .linkSuggestions;
+    const popover = new AnnotationPopover(host, provider, 'Books/Guide.pdf');
+    popover.open({
+      comment: '[[con',
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      onSave: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected comment input.');
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(suggest).toHaveBeenCalledWith('con', 'Books/Guide.pdf');
+    expect(host.querySelector('[role="listbox"]')?.textContent).toContain('Concept');
+
+    popover.destroy();
+  });
+  it('invalidates the wiki suggestion index for public vault and metadata events', async () => {
+    const app = App.createConfigured__({ files: { 'Notes/Concept.md': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const invalidate = vi.spyOn(LinkSuggestionService.prototype, 'invalidate');
+    await plugin.onload();
+    invalidate.mockClear();
+    const markdown = app.vault.getAbstractFileByPath('Notes/Concept.md');
+    if (markdown === null) throw new Error('Expected Markdown fixture.');
+
+    app.vault.trigger('create', markdown);
+    app.vault.trigger('delete', markdown);
+    app.vault.trigger('rename', markdown, 'Notes/Old.md');
+    app.metadataCache.trigger('changed', markdown, '', {});
+    app.metadataCache.trigger('resolved');
+
+    expect(invalidate.mock.calls.length).toBeGreaterThanOrEqual(5);
+  });
   it('invalidates only PDF cache partitions for public modify, delete, and rename events', async () => {
     const app = App.createConfigured__({
       files: { 'Books/Guide.pdf': '', 'Books/Renamed.pdf': '', 'Notes/Guide.md': '' },

@@ -2,6 +2,155 @@ import { describe, expect, it, vi } from 'vitest';
 import { AnnotationPopover } from './annotation-popover.js';
 
 describe('AnnotationPopover', () => {
+  it('offers metadata-backed wiki-link suggestions after [[ with keyboard selection', () => {
+    const host = document.body.createDiv();
+    const provider = {
+      suggest: (query: string) =>
+        query === 'con'
+          ? [{ display: 'Concept', path: 'Notes/Concept.md', insertion: '[[Concept|Idea]]' }]
+          : [],
+    };
+    const popover = new AnnotationPopover(host, provider, 'Books/Book.pdf');
+    const save = vi.fn();
+    popover.open({
+      comment: 'See [[con',
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      onSave: save,
+      x: 0,
+      y: 0,
+    });
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected comment input.');
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(host.querySelector('[role="listbox"]')?.textContent).toContain('Concept');
+    expect(input.getAttribute('role')).toBe('combobox');
+    expect(input.getAttribute('aria-controls')).toBe(host.querySelector('[role="listbox"]')?.id);
+    expect(input.getAttribute('aria-activedescendant')).toBe(
+      host.querySelector('[role="option"][aria-selected="true"]')?.id,
+    );
+    input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown' }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+    expect(save).toHaveBeenCalledWith('See [[Concept|Idea]]');
+    popover.destroy();
+    host.remove();
+  });
+
+  it('replaces only a closed wiki-link target while preserving brackets and alias suffix', () => {
+    const host = document.body.createDiv();
+    const suggest = vi.fn(() => [
+      { display: 'Concept', path: 'Notes/Concept.md', insertion: '[[Concept]]' },
+    ]);
+    const popover = new AnnotationPopover(host, { suggest }, 'Books/Book.pdf');
+    popover.open({
+      comment: 'See [[con|Existing alias]] later',
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      onSave: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected input.');
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    host.querySelector<HTMLButtonElement>('[role="option"]')?.click();
+    expect(input.value).toBe('See [[Concept|Existing alias]] later');
+    expect(suggest).toHaveBeenCalledWith('con', 'Books/Book.pdf');
+    popover.destroy();
+  });
+
+  it('replaces the whole closed wiki token when Obsidian generates Markdown links', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationPopover(
+      host,
+      {
+        suggest: () => [
+          {
+            display: 'Concept',
+            path: 'Notes/Concept.md',
+            insertion: '[Concept](Notes/Concept.md)',
+          },
+        ],
+      },
+      'Books/Book.pdf',
+    );
+    popover.open({
+      comment: 'See [[con|Old alias]] later',
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      onSave: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected input.');
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    host.querySelector<HTMLElement>('[role="option"]')?.click();
+    expect(input.value).toBe('See [Concept](Notes/Concept.md) later');
+    popover.destroy();
+  });
+
+  it('ignores closed tokens outside the cursor and cannot accept a stale selection', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationPopover(
+      host,
+      { suggest: () => [{ display: 'Concept', path: 'Concept.md', insertion: '[[Concept]]' }] },
+      'Books/Book.pdf',
+    );
+    popover.open({
+      comment: '[[closed]] prose',
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      onSave: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected input.');
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(host.querySelector<HTMLElement>('[role="listbox"]')?.hidden).toBe(true);
+    input.value = '[[con]] elsewhere';
+    input.setSelectionRange(5, 5);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(host.querySelector<HTMLElement>('[role="listbox"]')?.hidden).toBe(false);
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    expect(input.value).toBe('[[con]] elsewhere');
+    popover.destroy();
+  });
+  it('hides suggestions for non-collapsed selections and rejects a range crossing the token', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationPopover(
+      host,
+      { suggest: () => [{ display: 'Concept', path: 'Concept.md', insertion: '[[Concept]]' }] },
+      'Books/Book.pdf',
+    );
+    popover.open({
+      comment: 'See [[con]] later',
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      onSave: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected input.');
+    input.setSelectionRange(7, 7);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(host.querySelector<HTMLElement>('[role="listbox"]')?.hidden).toBe(false);
+
+    input.setSelectionRange(4, 9);
+    input.dispatchEvent(new Event('select', { bubbles: true }));
+    expect(host.querySelector<HTMLElement>('[role="listbox"]')?.hidden).toBe(true);
+    input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    expect(input.value).toBe('See [[con]] later');
+    popover.destroy();
+  });
   it('edits ordinary comment text and inserts tags and wiki links without conversion controls', () => {
     const host = document.body.createDiv();
     const save = vi.fn();

@@ -6,7 +6,12 @@ import type {
   PdfAnnotationTool,
 } from '../adapters/pdf/pdf-annotation-editor.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
-import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
+import type {
+  AnnotationGeometry,
+  AnnotationSink,
+  DocumentAnnotation,
+} from '../document-core/annotations.js';
+import { asAnnotationId } from '../document-core/annotations.js';
 import { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
 import type {
   DocumentAdapter,
@@ -16,6 +21,7 @@ import type {
 import { DocumentOpenError } from '../document-core/errors.js';
 import type { ReaderLayout, ReadingProfileId } from '../document-core/reading.js';
 import {
+  DocumentSaveCoordinator,
   NATIVE_RECOVERY_SOURCE,
   SaveConflictError,
   type BaseToken,
@@ -46,6 +52,27 @@ function files(...paths: string[]): TFile[] {
     if (!(source instanceof MockTFile)) throw new Error(`Expected a test file at ${path}.`);
     return source.asOriginalType2__();
   });
+}
+
+function annotationRecord(
+  id: string,
+  pageIndex: number,
+  geometry: AnnotationGeometry,
+): DocumentAnnotation {
+  return {
+    identity: { kind: 'stable', id: asAnnotationId(id) },
+    type: 'highlight',
+    anchor: { kind: 'fixed-page', pageIndex, coordinateSpace: 'page-points-top-left', geometry },
+    color: null,
+    selectedText: id,
+    author: '',
+    createdAt: null,
+    modifiedAt: null,
+    comment: '',
+    tags: [],
+    links: [],
+    capabilities: {} as DocumentAnnotation['capabilities'],
+  };
 }
 
 function resolved(colors: (typeof BUILTIN_PROFILES)[keyof typeof BUILTIN_PROFILES]) {
@@ -229,6 +256,138 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('opens annotations lazily and resolves id first or unique geometry fallback without arbitrary navigation', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const record = {
+      identity: { kind: 'stable', id: asAnnotationId('99R') },
+      type: 'highlight',
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 1,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'rectangle', rectangle: { x: 10, y: 20, width: 30, height: 4 } },
+      },
+      color: null,
+      selectedText: 'Quote',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: '',
+      tags: [],
+      links: [],
+      capabilities: {} as DocumentAnnotation['capabilities'],
+    } satisfies DocumentAnnotation;
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      sink([record]);
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    await controller.resolveAnnotationLink({
+      id: 'old-id',
+      page: 2,
+      fingerprint: 'highlight:rectangle:10,20,30,4',
+    });
+    expect(listAnnotations).toHaveBeenCalledOnce();
+    expect(shell.created.sidebar?.activeTab).toBe('annotations');
+    expect(createdViewport.goTo).toHaveBeenCalledWith({ pageIndex: 1, x: 10, y: 20 });
+
+    await controller.resolveAnnotationLink({
+      id: 'missing',
+      page: 3,
+      fingerprint: 'rectangle:0,0,1,1',
+    });
+    expect(
+      shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')?.textContent,
+    ).toContain('could not be found');
+  });
+  it('navigates point, quadrilateral, ink, and reflowable deep links and diagnoses ambiguity', async () => {
+    const [pdf] = files('Books/Geometry.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const createdViewport = viewport(8);
+    const createdSession = session(pdf.path, createdViewport);
+    const base = annotationRecord('point', 1, { kind: 'point', point: { x: 1, y: 2 } });
+    const records: DocumentAnnotation[] = [
+      base,
+      annotationRecord('quad', 2, {
+        kind: 'quadrilaterals',
+        quadrilaterals: [
+          {
+            topLeft: { x: 3, y: 4 },
+            topRight: { x: 5, y: 4 },
+            bottomLeft: { x: 3, y: 6 },
+            bottomRight: { x: 5, y: 6 },
+          },
+        ],
+      }),
+      annotationRecord('ink', 3, { kind: 'ink', paths: [[{ x: 7, y: 8 }]] }),
+      {
+        ...annotationRecord('flow', 0, { kind: 'point', point: { x: 0, y: 0 } }),
+        anchor: {
+          kind: 'reflowable-text',
+          selector: { exact: 'x', prefix: '', suffix: '' },
+          progression: 0.5,
+        },
+      },
+      annotationRecord('dupe-a', 4, { kind: 'point', point: { x: 9, y: 10 } }),
+      {
+        ...annotationRecord('dupe-b', 4, { kind: 'point', point: { x: 9, y: 10 } }),
+        selectedText: 'dupe-a',
+      },
+    ];
+    Object.assign(createdSession.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink(records);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    await controller.resolveAnnotationLink({
+      id: 'point',
+      page: 2,
+      fingerprint: 'highlight:point:1,2',
+    });
+    await controller.resolveAnnotationLink({
+      id: 'quad',
+      page: 3,
+      fingerprint: 'highlight:quadrilaterals:3,4,5,4,3,6,5,6',
+    });
+    await controller.resolveAnnotationLink({
+      id: 'ink',
+      page: 4,
+      fingerprint: 'highlight:ink:7,8',
+    });
+    await controller.resolveAnnotationLink({
+      id: 'flow',
+      page: 1,
+      fingerprint: 'highlight:reflowable:x',
+    });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(1, { pageIndex: 1, x: 1, y: 2 });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(2, { pageIndex: 2, x: 3, y: 4 });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, { pageIndex: 3, x: 7, y: 8 });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(4, { pageIndex: 0 });
+    await controller.resolveAnnotationLink({
+      id: 'old',
+      page: 5,
+      fingerprint: 'highlight:point:9,10',
+    });
+    expect(log).toHaveBeenCalledWith(
+      '[abyss-documents] Could not resolve PDF annotation link',
+      expect.objectContaining({ status: 'ambiguous', candidates: ['dupe-a', 'dupe-b'] }),
+    );
+  });
   it('configures the native annotation toolbar and forwards only supported tools and colors', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -1948,6 +2107,461 @@ describe('ReaderController', () => {
     expect(source.destroy).not.toHaveBeenCalled();
     expect(notice).toHaveBeenCalledOnce();
     expect(unregister).not.toHaveBeenCalled();
+  });
+
+  it('invalidates and cancellably replaces stale annotations with ids from a verified reopened PDF', async () => {
+    const [pdf] = files('Books/Committed.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const active = session(pdf.path);
+    const pending = {
+      ...annotationRecord('temporary', 0, { kind: 'point', point: { x: 1, y: 2 } }),
+      identity: { kind: 'legacy' as const, fingerprint: 'pending' },
+    };
+    Object.assign(active.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([pending]);
+      },
+    });
+    const reopened = session(pdf.path);
+    const committed = annotationRecord('committed-id', 0, { kind: 'point', point: { x: 1, y: 2 } });
+    Object.assign(reopened.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([committed]);
+      },
+    });
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      pendingRevision: 1,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    let broadcast: VerifiedReloadListener | undefined;
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open.mockResolvedValueOnce(active.value).mockResolvedValueOnce(reopened.value);
+    const invalidate = vi.fn(async () => undefined);
+    const cache = {
+      generation: vi.fn(() => 1),
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => true),
+      invalidate,
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        annotationCache: cache,
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    await controller.open(pdf, createDiv());
+    if (broadcast === undefined) throw new Error('Expected save listener.');
+    await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
+    expect(adapter.open).toHaveBeenCalledOnce();
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['committed-id']);
+    });
+    expect(invalidate).toHaveBeenCalledWith(pdf.path);
+    expect(reopened.close).toHaveBeenCalledOnce();
+  });
+
+  it('joins an in-flight persisted refresh when a deep-link intent arrives', async () => {
+    const [pdf] = files('Books/Intent.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const active = session(pdf.path);
+    Object.assign(active.value, {
+      listAnnotations: vi.fn(async () => {
+        throw new Error('The pre-save session must not be scanned after verification.');
+      }),
+    });
+    const reopened = session(pdf.path);
+    const extractionGate = deferred<void>();
+    const committed = annotationRecord('committed-id', 0, {
+      kind: 'point',
+      point: { x: 1, y: 2 },
+    });
+    Object.assign(reopened.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        await extractionGate.promise;
+        sink([committed]);
+      },
+    });
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      pendingRevision: 1,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    let broadcast: VerifiedReloadListener | undefined;
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open.mockResolvedValueOnce(active.value).mockResolvedValueOnce(reopened.value);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    await controller.open(pdf, createDiv());
+    if (broadcast === undefined) throw new Error('Expected save listener.');
+    await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
+
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(adapter.open).toHaveBeenCalledTimes(2);
+    });
+    const navigation = controller.resolveAnnotationLink({
+      id: 'committed-id',
+      page: 1,
+      fingerprint: 'highlight:point:1,2',
+    });
+    expect(adapter.open).toHaveBeenCalledTimes(2);
+    extractionGate.resolve();
+    await navigation;
+    expect(adapter.open).toHaveBeenCalledTimes(2);
+    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['committed-id']);
+    expect(reopened.close).toHaveBeenCalledOnce();
+  });
+
+  it('coalesces rapid verified saves into one persisted annotation scan', async () => {
+    const [pdf] = files('Books/Coalesced.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const active = session(pdf.path);
+    Object.assign(active.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([]);
+      },
+    });
+    const reopened = session(pdf.path);
+    Object.assign(reopened.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotationRecord('newest-id', 0, { kind: 'point', point: { x: 2, y: 2 } })]);
+      },
+    });
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      pendingRevision: 2,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    let broadcast: VerifiedReloadListener | undefined;
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open.mockResolvedValueOnce(active.value).mockResolvedValueOnce(reopened.value);
+    const invalidateGate = deferred<void>();
+    const invalidate = vi.fn(() => invalidateGate.promise);
+    const cache = {
+      generation: vi.fn(() => 1),
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => true),
+      invalidate,
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        annotationCache: cache,
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    });
+    if (broadcast === undefined) throw new Error('Expected save listener.');
+    const first = broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
+    const second = broadcast({ sha256: 'c'.repeat(64), byteSize: 6, mtime: 3 }, 2, source);
+    await vi.waitFor(() => {
+      expect(invalidate).toHaveBeenCalledTimes(2);
+    });
+    expect(adapter.open).toHaveBeenCalledOnce();
+    invalidateGate.resolve();
+    await Promise.all([first, second]);
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['newest-id']);
+    });
+    expect(adapter.open).toHaveBeenCalledTimes(2);
+    expect(reopened.close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps verified annotation scans off the real coordinator save queue and coalesces revisions', async () => {
+    const [pdf] = files('Books/Coordinator.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const active = session(pdf.path);
+    Object.assign(active.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([]);
+      },
+    });
+    const reopened = session(pdf.path);
+    Object.assign(reopened.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotationRecord('newest-id', 0, { kind: 'point', point: { x: 2, y: 2 } })]);
+      },
+    });
+    const baseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 };
+    const source = {
+      baseToken,
+      pendingRevision: 2,
+      isDirty: false,
+      prepare: vi.fn(async (revision: number) => ({
+        revision,
+        baseToken,
+        bytes: new Uint8Array([revision]),
+      })),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open.mockResolvedValueOnce(active.value).mockResolvedValueOnce(reopened.value);
+    const invalidations = [deferred<void>(), deferred<void>()];
+    const invalidate = vi.fn(() => invalidations[invalidate.mock.calls.length - 1]?.promise);
+    const cache = {
+      generation: vi.fn(() => 1),
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => true),
+      invalidate,
+    } as unknown as AnnotationCache;
+    const write = vi.fn(async (request: { bytes: Uint8Array }) => ({
+      token: {
+        sha256: String(request.bytes[0]).repeat(64),
+        byteSize: request.bytes.byteLength,
+        mtime: request.bytes[0] ?? 0,
+      },
+    }));
+    const coordinator = new DocumentSaveCoordinator(
+      { write },
+      vi.fn(async () => undefined),
+    );
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      { annotationCache: cache, saveCoordinator: coordinator },
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    });
+    const signal = new AbortController().signal;
+    const first = coordinator.save({ path: pdf.path, baseToken, revision: 1, source }, signal);
+    await expect(first).resolves.toMatchObject({ generation: 1 });
+    const second = coordinator.save({ path: pdf.path, baseToken, revision: 2, source }, signal);
+    await expect(second).resolves.toMatchObject({ generation: 2 });
+    expect(adapter.open).toHaveBeenCalledOnce();
+    expect(invalidate).toHaveBeenCalledTimes(2);
+
+    invalidations.forEach((gate) => {
+      gate.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['newest-id']);
+    });
+    expect(adapter.open).toHaveBeenCalledTimes(2);
+    expect(reopened.close).toHaveBeenCalledOnce();
+  });
+
+  it('reports a current persisted annotation refresh failure without retrying forever', async () => {
+    const [pdf] = files('Books/Refresh-failure.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const active = session(pdf.path);
+    Object.assign(active.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([]);
+      },
+    });
+    const retry = session(pdf.path);
+    Object.assign(retry.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotationRecord('retried-id', 0, { kind: 'point', point: { x: 3, y: 4 } })]);
+      },
+    });
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      pendingRevision: 1,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    let broadcast: VerifiedReloadListener | undefined;
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open.mockResolvedValueOnce(active.value).mockResolvedValueOnce(retry.value);
+    const invalidate = vi
+      .fn<AnnotationCache['invalidate']>()
+      .mockRejectedValueOnce(new Error('annotation cache invalidation failed'))
+      .mockResolvedValue(undefined);
+    const cache = {
+      generation: vi.fn(() => 1),
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => true),
+      invalidate,
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        annotationCache: cache,
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    });
+    if (broadcast === undefined) throw new Error('Expected save listener.');
+
+    await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
+    await vi.waitFor(() => {
+      expect(
+        shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')?.textContent,
+      ).toContain('Could not refresh saved annotations');
+    });
+    expect(adapter.open).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      '[abyss-documents] Failed to refresh verified PDF annotations',
+      expect.objectContaining({ path: pdf.path, revision: 1 }),
+    );
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['retried-id']);
+    });
+    expect(adapter.open).toHaveBeenCalledTimes(2);
+    expect(retry.close).toHaveBeenCalledOnce();
+  });
+
+  it('suppresses an older verified annotation refresh when a newer save finishes first', async () => {
+    const [pdf] = files('Books/Race.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const active = session(pdf.path);
+    Object.assign(active.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([]);
+      },
+    });
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      pendingRevision: 2,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    const first = session(pdf.path);
+    const firstGate = deferred<void>();
+    Object.assign(first.value, {
+      listAnnotations: async (_signal: AbortSignal, _sink: AnnotationSink) => {
+        await firstGate.promise;
+        throw new Error('The stale adapter ignored cancellation.');
+      },
+    });
+    const second = session(pdf.path);
+    Object.assign(second.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotationRecord('newest-id', 0, { kind: 'point', point: { x: 2, y: 2 } })]);
+      },
+    });
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open
+      .mockResolvedValueOnce(active.value)
+      .mockResolvedValueOnce(first.value)
+      .mockResolvedValueOnce(second.value);
+    let broadcast: VerifiedReloadListener | undefined;
+    const cache = {
+      generation: vi.fn(() => 1),
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => true),
+      invalidate: vi.fn(async () => undefined),
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        annotationCache: cache,
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    });
+    if (broadcast === undefined) throw new Error('Expected listener.');
+    const saveOne = broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
+    await vi.waitFor(() => {
+      expect(adapter.open).toHaveBeenCalledTimes(2);
+    });
+    const saveTwo = broadcast({ sha256: 'c'.repeat(64), byteSize: 6, mtime: 3 }, 2, source);
+    await saveTwo;
+    firstGate.resolve();
+    await saveOne;
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['newest-id']);
+    });
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(second.close).toHaveBeenCalledOnce();
   });
 
   it('keeps dirty edits conflicted and reloads a clean peer after explicit recovery broadcasts', async () => {

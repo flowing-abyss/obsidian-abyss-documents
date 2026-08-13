@@ -6,7 +6,12 @@ import {
   type ReadingProfileId,
   type ResolvedReadingColors,
 } from './document-core/reading.js';
-import { DEFAULT_SETTINGS, type PluginSettings } from './settings.js';
+import {
+  DEFAULT_ANNOTATION_MARKDOWN_TEMPLATE,
+  DEFAULT_SETTINGS,
+  LEGACY_ANNOTATION_MARKDOWN_TEMPLATE,
+  type PluginSettings,
+} from './settings.js';
 
 type V1ReadingProfileId = 'auto' | 'light' | 'sepia' | 'dark' | 'custom';
 
@@ -252,13 +257,20 @@ function migrateAnnotations(
       diagnostics,
     ),
     palette: palette(annotations['palette'], diagnostics),
-    markdownTemplate: string(
-      annotations['markdownTemplate'],
-      DEFAULT_SETTINGS.annotations.markdownTemplate,
-      'settings.annotations.markdownTemplate',
-      diagnostics,
-    ),
+    markdownTemplate: migrateAnnotationTemplate(annotations['markdownTemplate'], diagnostics),
   };
+}
+
+function migrateAnnotationTemplate(value: unknown, diagnostics: MigrationDiagnostic[]): string {
+  const template = string(
+    value,
+    DEFAULT_SETTINGS.annotations.markdownTemplate,
+    'settings.annotations.markdownTemplate',
+    diagnostics,
+  );
+  return template === LEGACY_ANNOTATION_MARKDOWN_TEMPLATE
+    ? DEFAULT_ANNOTATION_MARKDOWN_TEMPLATE
+    : template;
 }
 
 function migrateView(

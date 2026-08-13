@@ -1,4 +1,5 @@
 import type { PDFPageProxy } from 'pdfjs-dist/build/pdf.mjs';
+import { parseAnnotationTokens } from '../../annotation-tokens.js';
 import type {
   AnnotationCapabilities,
   AnnotationGeometry,
@@ -126,7 +127,7 @@ function mapPdfAnnotation(
 ): DocumentAnnotation {
   const type = annotationType(source.annotationType);
   const comment = objectString(source.contentsObj);
-  const tokens = parseTokens(comment);
+  const tokens = parseAnnotationTokens(comment);
   return Object.freeze({
     identity:
       typeof source.id === 'string' && source.id.length > 0
@@ -149,7 +150,7 @@ function mapPdfAnnotation(
     createdAt: pdfDate(source.creationDate),
     modifiedAt: pdfDate(source.modificationDate),
     comment,
-    tags: Object.freeze(tokens.tags),
+    tags: Object.freeze(tokens.tags.map(({ display }) => display)),
     links: Object.freeze(tokens.links),
     capabilities: READ_ONLY_CAPABILITIES,
   });
@@ -244,47 +245,6 @@ function objectString(value: unknown): string {
   if (typeof value !== 'object' || value === null) return '';
   const candidate = (value as { readonly str?: unknown }).str;
   return typeof candidate === 'string' ? candidate : '';
-}
-
-function parseTokens(comment: string): { readonly tags: string[]; readonly links: string[] } {
-  return { tags: parseTags(comment), links: parseLinks(comment) };
-}
-
-function parseTags(comment: string): string[] {
-  const tags: string[] = [];
-  const tagKeys = new Set<string>();
-  const pattern = /(^|[\s([{])#([\p{L}\p{N}_/-]+)/gu;
-  for (const match of comment.matchAll(pattern)) {
-    const display = match[2]?.normalize('NFKC');
-    if (display === undefined || display.length === 0) continue;
-    const key = display.toLocaleLowerCase();
-    if (!tagKeys.has(key)) {
-      tagKeys.add(key);
-      tags.push(display);
-    }
-  }
-  return tags;
-}
-
-function parseLinks(comment: string): string[] {
-  const links: string[] = [];
-  const linkKeys = new Set<string>();
-  let cursor = 0;
-  while (cursor < comment.length) {
-    const open = comment.indexOf('[[', cursor);
-    if (open < 0) break;
-    const close = comment.indexOf(']]', open + 2);
-    if (close < 0) break;
-    cursor = close + 2;
-    const display = comment.slice(open + 2, close).trim();
-    if (display.length === 0 || display.includes('[') || display.includes('\n')) continue;
-    const key = display.normalize('NFKC').toLocaleLowerCase();
-    if (!linkKeys.has(key)) {
-      linkKeys.add(key);
-      links.push(display);
-    }
-  }
-  return links;
 }
 
 function externalType(value: unknown): string {

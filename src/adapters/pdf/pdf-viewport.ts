@@ -26,7 +26,7 @@ import {
   PDFJS_ANNOTATION_EDITOR_TYPE,
   type PdfRuntime,
 } from './pdf-runtime.js';
-import type { PdfViewportFactory } from './pdf-session.js';
+import type { PdfViewportContext, PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
 
 const TEXT_LAYER_MODE_ENABLE = 1;
@@ -146,9 +146,13 @@ export class PdfDocumentViewport implements DocumentViewport {
     private readonly pdf: PDFDocumentProxy,
     private readonly pdfjsViewer: PdfRuntime['pdfjsViewer'],
     private readonly textSearch: PdfTextSearch,
-    readonly annotationCapabilities: PdfAnnotationCapabilities,
+    private readonly context: PdfViewportContext,
   ) {
     this.pageCount = pdf.numPages;
+  }
+
+  get annotationCapabilities(): PdfAnnotationCapabilities {
+    return this.context.annotationCapabilities;
   }
 
   async mount(host: HTMLElement): Promise<void> {
@@ -203,14 +207,19 @@ export class PdfDocumentViewport implements DocumentViewport {
     const { eventBus, findController, linkService, pageColors, root, viewerElement } = context;
     const commentBridge =
       this.annotationCapabilities.readOnlyReason === null
-        ? new PdfCommentBridge(root, {
-            onFailure: ({ action, cause }) => {
-              this.events.emit({ type: 'annotation-mutation-error', action, cause });
+        ? new PdfCommentBridge(
+            root,
+            {
+              onFailure: ({ action, cause }) => {
+                this.events.emit({ type: 'annotation-mutation-error', action, cause });
+              },
+              onNativeMutation: () => {
+                this.annotationEditorInstance?.notifyNativeMutation();
+              },
             },
-            onNativeMutation: () => {
-              this.annotationEditorInstance?.notifyNativeMutation();
-            },
-          })
+            this.context.sourcePath,
+            this.context.linkSuggestions ?? null,
+          )
         : null;
     this.commentBridge = commentBridge;
     const Viewer = this.pdfjsViewer.PDFViewer as PdfViewerWithCommentManagerOptions;
@@ -990,5 +999,5 @@ export const createPdfDocumentViewport: PdfViewportFactory = (
   pdf,
   pdfjsViewer,
   textSearch,
-  annotationCapabilities,
-) => new PdfDocumentViewport(pdf, pdfjsViewer, textSearch, annotationCapabilities);
+  context,
+) => new PdfDocumentViewport(pdf, pdfjsViewer, textSearch, context);

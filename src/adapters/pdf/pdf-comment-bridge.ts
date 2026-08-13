@@ -1,4 +1,5 @@
 import { AnnotationPopover } from '../../reader/annotation-popover.js';
+import type { AnnotationLinkSuggestionProvider } from '../../reader/link-suggestions.js';
 import { PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE } from './pdf-runtime.js';
 
 interface PdfCommentData {
@@ -90,8 +91,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   constructor(
     host: HTMLElement,
     private readonly options: PdfCommentBridgeOptions = {},
+    sourcePath = '',
+    linkSuggestions: AnnotationLinkSuggestionProvider | null = null,
   ) {
-    this.popover = new AnnotationPopover(host);
+    this.popover = new AnnotationPopover(host, linkSuggestions, sourcePath);
     this.dialogElement = this.popover.element;
   }
 
