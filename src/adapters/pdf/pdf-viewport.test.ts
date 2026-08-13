@@ -208,6 +208,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
         findController: FakeFindController;
         textLayerMode: number;
         annotationMode: number;
+        annotationEditorMode: number;
         enablePermissions: boolean;
         supportsPinchToZoom: boolean;
         maxCanvasPixels: number;
@@ -323,6 +324,7 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.options).toMatchObject({
       textLayerMode: 1,
       annotationMode: 2,
+      annotationEditorMode: 0,
       enablePermissions: true,
       supportsPinchToZoom: true,
       maxCanvasPixels: 16_777_216,

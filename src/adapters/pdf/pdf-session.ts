@@ -12,10 +12,11 @@ import { isPdfAbortFailure, mapPdfOutline } from './pdf-mappers.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfTextSearch } from './pdf-text-search.js';
 
-const READ_ONLY_CAPABILITIES: ReadonlySet<DocumentCapability> = new Set([
+const PDF_CAPABILITIES: ReadonlySet<DocumentCapability> = new Set([
   'outline',
   'text-search',
   'existing-annotations',
+  'annotation-write',
 ]);
 
 export type PdfViewportFactory = (
@@ -26,7 +27,7 @@ export type PdfViewportFactory = (
 
 export class PdfDocumentSession implements DocumentSession {
   readonly descriptor: DocumentDescriptor;
-  readonly capabilities = READ_ONLY_CAPABILITIES;
+  readonly capabilities = PDF_CAPABILITIES;
 
   private closePromise: Promise<void> | null = null;
   private search: PdfTextSearch | null = null;

@@ -113,7 +113,7 @@ function sessionFixture(overrides: Partial<PDFDocumentProxy> = {}) {
 }
 
 describe('PdfDocumentSession', () => {
-  it('exposes the PDF descriptor and read-only capabilities', () => {
+  it('exposes the PDF descriptor and native annotation writer capability', () => {
     const { session } = sessionFixture();
 
     expect(session.descriptor).toEqual({
@@ -123,7 +123,7 @@ describe('PdfDocumentSession', () => {
       pageCount: 3,
     });
     expect(session.capabilities).toEqual(
-      new Set(['outline', 'text-search', 'existing-annotations']),
+      new Set(['outline', 'text-search', 'existing-annotations', 'annotation-write']),
     );
   });
 

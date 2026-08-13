@@ -112,6 +112,48 @@ async function createDocument(title: string): Promise<{ document: PDFDocument; f
   return { document, font };
 }
 
+export async function createReadonlyAnnotationFixture(
+  includeReadOnlyAnnotations: boolean,
+): Promise<Uint8Array> {
+  const { document, font } = await createDocument('Native annotation qualification fixture');
+  const page = document.addPage(PAGE_SIZE);
+  drawPage(
+    page,
+    font,
+    'Native annotation qualification',
+    'This page exercises PDF.js incremental annotation saves.',
+  );
+  if (includeReadOnlyAnnotations) {
+    const underline = document.context.register(
+      document.context.obj({
+        Type: 'Annot',
+        Subtype: 'Underline',
+        Rect: [72, 540, 240, 562],
+        QuadPoints: [72, 562, 240, 562, 72, 540, 240, 540],
+        C: [0.1, 0.6, 0.9],
+        Contents: PDFHexString.fromText('Existing underline'),
+        NM: PDFHexString.fromText('readonly-underline'),
+        P: page.ref,
+      }),
+    );
+    const textNote = document.context.register(
+      document.context.obj({
+        Type: 'Annot',
+        Subtype: 'Text',
+        Rect: [260, 520, 284, 544],
+        C: [0.9, 0.7, 0.1],
+        Contents: PDFHexString.fromText('Existing text note'),
+        NM: PDFHexString.fromText('readonly-text-note'),
+        Name: 'Comment',
+        Open: false,
+        P: page.ref,
+      }),
+    );
+    page.node.set(PDFName.of('Annots'), document.context.obj([underline, textNote]));
+  }
+  return document.save({ addDefaultPage: false, useObjectStreams: false });
+}
+
 function drawPage(page: PDFPage, font: PDFFont, heading: string, body: string): void {
   page.drawText(heading, { color: rgb(0.1, 0.1, 0.1), font, size: 20, x: 54, y: 724 });
   page.drawText(body, {

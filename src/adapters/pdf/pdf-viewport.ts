@@ -18,7 +18,12 @@ import {
   markReaderPerformanceOnce,
   maximizeReaderCounter,
 } from '../../reader-performance.js';
-import type { PdfRuntime } from './pdf-runtime.js';
+import { PdfAnnotationEditor } from './pdf-annotation-editor.js';
+import {
+  PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
+  PDFJS_ANNOTATION_EDITOR_TYPE,
+  type PdfRuntime,
+} from './pdf-runtime.js';
 import type { PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
 
@@ -91,6 +96,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private linkService: PdfLinkService | null = null;
   private findController: PdfFindController | null = null;
   private viewer: PdfViewer | null = null;
+  private annotationEditorInstance: PdfAnnotationEditor | null = null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
@@ -157,6 +163,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       findController,
       textLayerMode: TEXT_LAYER_MODE_ENABLE,
       annotationMode: ANNOTATION_MODE_ENABLE_FORMS,
+      annotationEditorMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE,
       enablePermissions: true,
       supportsPinchToZoom: true,
       maxCanvasPixels: MAX_CANVAS_PIXELS,
@@ -164,6 +171,13 @@ export class PdfDocumentViewport implements DocumentViewport {
     });
 
     this.viewer = viewer;
+    this.annotationEditorInstance = new PdfAnnotationEditor({
+      annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
+      annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+      eventBus,
+      pdf: this.pdf,
+      viewer,
+    });
     this.bindEvents();
     root.addEventListener('click', this.onRootClick);
     if (typeof ResizeObserver === 'function') {
@@ -328,6 +342,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.requireMounted(this.viewer).focus();
   }
 
+  get annotationEditor(): PdfAnnotationEditor {
+    return this.requireMounted(this.annotationEditorInstance);
+  }
+
   destroy(): Promise<void> {
     this.destroyPromise ??= this.destroyOnce();
     return this.destroyPromise;
@@ -346,6 +364,9 @@ export class PdfDocumentViewport implements DocumentViewport {
       }
     };
     this.abortSearches();
+    attempt(() => {
+      this.annotationEditorInstance?.destroy();
+    });
     const eventBus = this.eventBus;
     this.clearPendingPagesInit();
     this.colorRebindActive = false;
@@ -389,11 +410,16 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.events.clear();
     this.eventBus = null;
     this.linkService = null;
-    this.findController = null;
-    this.viewer = null;
+    this.clearOwnedViewerReferences();
     this.viewerElement = null;
     this.root = null;
     if (failure !== undefined) throw failure;
+  }
+
+  private clearOwnedViewerReferences(): void {
+    this.findController = null;
+    this.viewer = null;
+    this.annotationEditorInstance = null;
   }
 
   private bindEvents(): void {

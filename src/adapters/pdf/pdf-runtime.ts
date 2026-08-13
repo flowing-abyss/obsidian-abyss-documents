@@ -9,6 +9,25 @@ import {
 
 const PDFJS_VERSION = '6.2.108';
 
+export const PDFJS_ANNOTATION_EDITOR_TYPE = Object.freeze({
+  NONE: 0,
+  FREETEXT: 3,
+  HIGHLIGHT: 9,
+  INK: 15,
+});
+
+export const PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE = Object.freeze({
+  FREETEXT_SIZE: 11,
+  FREETEXT_COLOR: 12,
+  FREETEXT_OPACITY: 13,
+  INK_COLOR: 21,
+  INK_THICKNESS: 22,
+  INK_OPACITY: 23,
+  HIGHLIGHT_COLOR: 31,
+  HIGHLIGHT_THICKNESS: 32,
+  HIGHLIGHT_FREE: 33,
+});
+
 type PdfjsLib = typeof PdfjsLibModule;
 type PdfjsViewer = typeof PdfjsViewerModule;
 

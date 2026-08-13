@@ -5,14 +5,143 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, type PDFObject } from 'pdf-lib';
-import { afterEach, describe, expect, it } from 'vitest';
 import {
+  AnnotationEditorLayer,
+  AnnotationEditorUIManager,
+  DrawLayer,
+  getDocument,
+  type PDFDocumentProxy,
+} from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { EventBus } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { PdfAnnotationEditor } from '../../src/adapters/pdf/pdf-annotation-editor.js';
+import {
+  PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
+  PDFJS_ANNOTATION_EDITOR_TYPE,
+} from '../../src/adapters/pdf/pdf-runtime.js';
+import {
+  createReadonlyAnnotationFixture,
   FIXTURE_MANIFEST_FILE,
   generatePdfFixtures,
   type PdfFixtureManifest,
 } from './pdf-fixtures.mjs';
 
+async function saveWithNativePdfjsEditors(
+  original: Uint8Array,
+  annotations: ReadonlyArray<Record<string, unknown>>,
+): Promise<Uint8Array> {
+  const loadingTask = getDocument({
+    data: Uint8Array.from(original),
+    isOffscreenCanvasSupported: true,
+    standardFontDataUrl,
+  });
+  const pdf = await loadingTask.promise;
+  const container = createDiv();
+  const viewer = createDiv();
+  const editorLayerElement = createDiv();
+  const drawLayerElement = createDiv();
+  container.append(viewer, editorLayerElement);
+  editorLayerElement.append(drawLayerElement);
+  document.body.append(container);
+  Object.defineProperty(editorLayerElement, 'getBoundingClientRect', {
+    value: () => new DOMRect(0, 0, 612, 792),
+  });
+  const eventBus = new EventBus();
+  const uiManager = new AnnotationEditorUIManager(
+    container,
+    viewer,
+    null,
+    null,
+    null,
+    null,
+    eventBus,
+    pdf,
+    null,
+    'yellow=#FFDE00',
+    false,
+    false,
+    false,
+    null,
+    null,
+    true,
+  );
+  const page = await pdf.getPage(1);
+  const drawLayer = new DrawLayer({ pageIndex: 0 });
+  drawLayer.setParent(drawLayerElement);
+  const l10n = {
+    get: async (_ids: unknown, _args: unknown, fallback: unknown) => fallback,
+    getDirection: () => 'ltr',
+    getLanguage: () => 'en-us',
+    pause: () => undefined,
+    resume: () => undefined,
+    translate: async () => undefined,
+    translateOnce: async () => undefined,
+  };
+  const editorLayer = new AnnotationEditorLayer({
+    div: editorLayerElement,
+    drawLayer,
+    enabled: true,
+    l10n: l10n as never,
+    mode: {},
+    pageIndex: 0,
+    structTreeLayer: null as never,
+    uiManager,
+    viewport: page.getViewport({ scale: 1 }),
+  });
+  const runtimeViewer = { annotationEditorMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE };
+  const annotationEditor = new PdfAnnotationEditor({
+    annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
+    annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+    eventBus,
+    pdf,
+    viewer: runtimeViewer,
+  });
+  eventBus.dispatch('annotationeditoruimanager', { source: runtimeViewer, uiManager });
+  try {
+    for (const data of annotations) {
+      const editor = await editorLayer.deserialize(data);
+      if (editor === null) throw new Error('PDF.js rejected native editor fixture data.');
+      editorLayer.addOrRebuild(editor);
+    }
+    return await annotationEditor.save(new AbortController().signal);
+  } finally {
+    annotationEditor.destroy();
+    editorLayer.destroy();
+    drawLayer.destroy();
+    uiManager.destroy();
+    container.remove();
+    await loadingTask.destroy();
+  }
+}
+
+async function reopenedAnnotations(
+  bytes: Uint8Array,
+): Promise<ReadonlyArray<Record<string, unknown>>> {
+  const loadingTask = getDocument({ data: Uint8Array.from(bytes), standardFontDataUrl });
+  try {
+    const pdf: PDFDocumentProxy = await loadingTask.promise;
+    const annotations = await (await pdf.getPage(1)).getAnnotations();
+    return annotations.map(
+      (annotation) => normalizePdfjsValue(annotation) as Record<string, unknown>,
+    );
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
+function normalizePdfjsValue(value: unknown): unknown {
+  if (ArrayBuffer.isView(value)) return Array.from(value as Uint8Array);
+  if (Array.isArray(value)) return value.map(normalizePdfjsValue);
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [key, normalizePdfjsValue(nested)]),
+  );
+}
+
 const temporaryDirectories: string[] = [];
+const enumerableArrayDescriptors = new Map<string, PropertyDescriptor>();
+let matchMediaDescriptor: PropertyDescriptor | undefined;
+let innerTextDescriptor: PropertyDescriptor | undefined;
 const standardFontDataUrl = `${path.join(
   path.dirname(fileURLToPath(import.meta.resolve('pdfjs-dist/package.json'))),
   'standard_fonts',
@@ -29,6 +158,45 @@ async function sha256(file: string): Promise<string> {
     .update(await readFile(file))
     .digest('hex');
 }
+
+beforeAll(() => {
+  document.documentElement.setCssProps({ '--freetext-padding': '0', '--outline-width': '0px' });
+  for (const name of Object.keys(Array.prototype)) {
+    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, name);
+    if (descriptor?.enumerable !== true) continue;
+    enumerableArrayDescriptors.set(name, descriptor);
+    Object.defineProperty(Array.prototype, name, { ...descriptor, enumerable: false });
+  }
+  matchMediaDescriptor = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: () => ({ matches: false }),
+  });
+  innerTextDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText');
+  if (innerTextDescriptor === undefined) {
+    Object.defineProperty(HTMLElement.prototype, 'innerText', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.textContent;
+      },
+      set(this: HTMLElement, value: string) {
+        this.textContent = value;
+      },
+    });
+  }
+});
+
+afterAll(() => {
+  document.documentElement.style.removeProperty('--freetext-padding');
+  document.documentElement.style.removeProperty('--outline-width');
+  for (const [name, descriptor] of enumerableArrayDescriptors) {
+    Object.defineProperty(Array.prototype, name, descriptor);
+  }
+  if (matchMediaDescriptor === undefined) Reflect.deleteProperty(window, 'matchMedia');
+  else Object.defineProperty(window, 'matchMedia', matchMediaDescriptor);
+  if (innerTextDescriptor === undefined) Reflect.deleteProperty(HTMLElement.prototype, 'innerText');
+  else Object.defineProperty(HTMLElement.prototype, 'innerText', innerTextDescriptor);
+});
 
 function pageText(file: string): string[] {
   const script = `
@@ -170,5 +338,121 @@ describe('generatePdfFixtures', () => {
 
     expect(bytes.toString('utf8')).toBe('ABYSS-DOCUMENTS INVALID PDF FIXTURE v1\n');
     await expect(PDFDocument.load(Uint8Array.from(bytes))).rejects.toThrow();
+  });
+});
+
+describe('native PDF.js annotation save qualification', () => {
+  it.each([
+    {
+      name: 'FreeText',
+      data: {
+        annotationType: 3,
+        color: [20, 80, 220],
+        fontSize: 18,
+        isCopy: true,
+        pageIndex: 0,
+        rect: [72, 620, 252, 670],
+        rotation: 0,
+        value: 'Native FreeText',
+      },
+      expected: {
+        annotationType: 3,
+        contentsObj: { dir: 'ltr', str: 'Native FreeText' },
+        defaultAppearanceData: {
+          fontColor: [20, 79, 219],
+          fontName: 'Helv',
+          fontSize: 18,
+        },
+        rect: [252, 570, 432, 620],
+      },
+    },
+    {
+      name: 'Highlight',
+      data: {
+        annotationType: 9,
+        color: [255, 222, 0],
+        opacity: 0.75,
+        isCopy: true,
+        pageIndex: 0,
+        quadPoints: new Float32Array([72, 590, 220, 590, 72, 568, 220, 568]),
+        rect: [72, 568, 220, 590],
+        rotation: 0,
+      },
+      expected: {
+        annotationType: 9,
+        color: [255, 222, 0],
+        quadPoints: [72, 590, 220, 590, 72, 568, 220, 568],
+        rect: [71.3591996133, 567.1511939764, 220.6260002553, 590.8319935799],
+      },
+    },
+    {
+      name: 'Ink',
+      data: {
+        annotationType: 15,
+        color: [180, 30, 80],
+        opacity: 0.8,
+        isCopy: true,
+        pageIndex: 0,
+        paths: { points: [new Float32Array([90, 510, 130, 535, 170, 500])] },
+        rect: [90, 500, 170, 535],
+        rotation: 0,
+        thickness: 3,
+      },
+      expected: {
+        annotationType: 15,
+        color: [180, 30, 80],
+        inkLists: [[157.5, 495.0000305175781, 197.5, 520, 237.5, 485.0000305175781]],
+        rect: [153.7499931157, 491.2500301301, 221.2499890924, 506.2500143498],
+      },
+    },
+  ])(
+    'saves and semantically reopens a native $name incremental update',
+    async ({ data, expected }) => {
+      const original = await createReadonlyAnnotationFixture(false);
+
+      const saved = await saveWithNativePdfjsEditors(original, [data]);
+      const annotations = await reopenedAnnotations(saved);
+
+      expect(saved.slice(0, original.byteLength)).toEqual(original);
+      const text = new TextDecoder('latin1').decode(saved);
+      expect(text.match(/%%EOF/gu)).toHaveLength(2);
+      expect(text.slice(original.byteLength)).toMatch(/\/Prev\s+\d+/u);
+      expect(annotations).toEqual([expect.objectContaining(expected)]);
+    },
+  );
+
+  it('preserves existing Underline and Text annotations after a native supported edit', async () => {
+    const original = await createReadonlyAnnotationFixture(true);
+    const before = await reopenedAnnotations(original);
+
+    const saved = await saveWithNativePdfjsEditors(original, [
+      {
+        annotationType: 3,
+        color: [30, 60, 190],
+        fontSize: 14,
+        isCopy: true,
+        pageIndex: 0,
+        rect: [72, 440, 240, 480],
+        rotation: 0,
+        value: 'Unrelated supported edit',
+      },
+    ]);
+    const after = await reopenedAnnotations(saved);
+
+    const readOnlyProjection = (annotations: ReadonlyArray<Record<string, unknown>>) =>
+      annotations
+        .filter(
+          (annotation) => annotation['annotationType'] === 10 || annotation['annotationType'] === 1,
+        )
+        .map((annotation) => ({
+          annotationType: annotation['annotationType'],
+          color: annotation['color'],
+          contentsObj: annotation['contentsObj'],
+          id: annotation['id'],
+          quadPoints: annotation['quadPoints'],
+          rect: annotation['rect'],
+        }));
+    expect(readOnlyProjection(after)).toEqual(readOnlyProjection(before));
+    expect(after).toHaveLength(before.length + 1);
   });
 });
