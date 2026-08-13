@@ -1,5 +1,5 @@
 import { Notice, type TFile } from 'obsidian';
-import type { AnnotationCache } from '../annotation-cache.js';
+import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
 import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
 import type {
@@ -412,7 +412,7 @@ export class ReaderController {
         );
         console.error('[abyss-documents] Failed to extract PDF annotations', {
           path: session.descriptor.path,
-          page: this.currentPageIndex + 1,
+          page: annotationFailurePage(cause) ?? this.currentPageIndex + 1,
           cause,
         });
       });
@@ -422,13 +422,23 @@ export class ReaderController {
     session: DocumentSession & AnnotationListingSession,
     signal: AbortSignal,
   ): Promise<readonly DocumentAnnotation[]> {
-    const cached = await this.annotationCache?.read(
-      session.descriptor.path,
-      session.descriptor.fingerprint,
-    );
+    const path = session.descriptor.path;
+    let cacheGeneration = this.annotationCache?.generation(path);
+    let cached: readonly DocumentAnnotation[] | null | undefined;
+    try {
+      cached = await this.annotationCache?.read(
+        path,
+        session.descriptor.fingerprint,
+        cacheGeneration,
+      );
+    } catch (cause) {
+      if (!(cause instanceof StaleAnnotationCacheReadError)) throw cause;
+      this.throwIfAnnotationCancelled(signal);
+      cacheGeneration = this.annotationCache?.generation(path);
+      cached = null;
+    }
     this.throwIfAnnotationCancelled(signal);
     if (cached !== null && cached !== undefined) return cached;
-    const cacheGeneration = this.annotationCache?.generation(session.descriptor.path);
     const annotations: DocumentAnnotation[] = [];
     await session.listAnnotations(signal, (batch) => {
       annotations.push(...batch);
@@ -437,7 +447,7 @@ export class ReaderController {
     const stored = await this.annotationCache?.write(
       {
         version: 1,
-        documentPath: session.descriptor.path,
+        documentPath: path,
         fingerprint: session.descriptor.fingerprint,
         annotations,
       },
@@ -801,6 +811,21 @@ function isAbortFailure(cause: unknown): boolean {
     'name' in cause &&
     (cause as { readonly name?: unknown }).name === 'AbortError'
   );
+}
+
+function annotationFailurePage(cause: unknown): number | null {
+  const seen = new Set<unknown>();
+  let current = cause;
+  while (typeof current === 'object' && current !== null && !seen.has(current)) {
+    seen.add(current);
+    if ('pageNumber' in current) {
+      const pageNumber = current.pageNumber;
+      if (typeof pageNumber === 'number' && Number.isInteger(pageNumber) && pageNumber >= 1)
+        return pageNumber;
+    }
+    current = 'cause' in current ? current.cause : null;
+  }
+  return null;
 }
 
 function isReadingProfileId(value: unknown): value is ReadingProfileId {

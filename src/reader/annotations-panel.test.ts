@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import { asAnnotationId } from '../document-core/annotations.js';
 import { AnnotationsPanel } from './annotations-panel.js';
+import { ownerWindow } from './owner-dom.js';
 
 function annotation(
   index: number,
@@ -54,6 +55,46 @@ describe('AnnotationsPanel', () => {
       'annotation-4',
     ]);
     expect(root.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+  });
+
+  it('moves its bounded virtual window on scroll, resize, filters, and page sync', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const panel = new AnnotationsPanel(host, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
+    const firstIds = panel.visibleIds();
+    expect(firstIds[0]).toBe('annotation-0');
+
+    panel.root.scrollTop = 5000 * 112;
+    panel.root.dispatchEvent(new Event('scroll'));
+    const middleIds = panel.visibleIds();
+    expect(middleIds[0]).not.toBe('annotation-0');
+    expect(middleIds.some((id) => id === 'annotation-5000')).toBe(true);
+    expect(host.querySelectorAll('.abyss-annotation-card')).toHaveLength(middleIds.length);
+    expect(middleIds.length).toBeLessThanOrEqual(80);
+
+    panel.root.scrollTop = Number.MAX_SAFE_INTEGER;
+    panel.root.dispatchEvent(new Event('scroll'));
+    expect(panel.visibleIds()).toContain('annotation-9999');
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+
+    ownerWindow(panel.root).dispatchEvent(new Event('resize'));
+    expect(panel.visibleIds()).toContain('annotation-9999');
+    panel.setFilter({ query: 'concept 42', colors: new Set(), tags: new Set() });
+    expect(panel.root.scrollTop).toBe(0);
+    expect(panel.visibleIds()[0]).toBe('annotation-42');
+    panel.setFilter({ query: '', colors: new Set(), tags: new Set() });
+    panel.setCurrentPage(7500);
+    expect(panel.visibleIds()).toContain('annotation-7500');
+    expect(host.querySelector('[data-annotation-id="annotation-7500"]')).not.toBeNull();
+
+    const beforeDestroy = panel.visibleIds();
+    panel.destroy();
+    panel.destroy();
+    panel.root.scrollTop = 0;
+    panel.root.dispatchEvent(new Event('scroll'));
+    expect(panel.visibleIds()).toEqual(beforeDestroy);
+    host.remove();
   });
 
   it('offers real query, color, and collapsed tag controls for panel filtering', () => {

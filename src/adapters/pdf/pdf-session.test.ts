@@ -150,7 +150,10 @@ describe('PdfDocumentSession', () => {
     });
     await expect(
       session.listAnnotations(new AbortController().signal, () => undefined),
-    ).rejects.toMatchObject({ name: 'DocumentOpenError', cause });
+    ).rejects.toMatchObject({
+      name: 'DocumentOpenError',
+      cause: { name: 'PdfAnnotationExtractionError', pageNumber: 1, cause },
+    });
 
     const controller = new AbortController();
     controller.abort();

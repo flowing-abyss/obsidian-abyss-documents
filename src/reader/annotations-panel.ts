@@ -3,6 +3,8 @@ import type { DocumentLocation } from '../document-core/document.js';
 import { ownerWindow } from './owner-dom.js';
 
 const MAX_CARDS = 80;
+const ESTIMATED_CARD_HEIGHT = 112;
+const SCROLL_OVERSCAN = 10;
 
 export interface AnnotationPanelFilter {
   readonly query: string;
@@ -28,6 +30,14 @@ export class AnnotationsPanel {
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
   private currentPage = 0;
   private windowStart = 0;
+  private destroyed = false;
+  private readonly onScroll = (): void => {
+    if (this.destroyed || !this.updateWindowFromScroll()) return;
+    this.render();
+  };
+  private readonly onResize = (): void => {
+    if (!this.destroyed) this.render();
+  };
 
   constructor(
     host: HTMLElement,
@@ -64,6 +74,13 @@ export class AnnotationsPanel {
     this.bindEvents();
   }
 
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.root.removeEventListener('scroll', this.onScroll);
+    ownerWindow(this.root).removeEventListener('resize', this.onResize);
+  }
+
   private configureRoot(): void {
     this.root.className = 'abyss-reader-annotations';
     this.root.dataset['sidebarPanel'] = 'annotations';
@@ -71,9 +88,11 @@ export class AnnotationsPanel {
   }
 
   private bindEvents(): void {
+    this.root.addEventListener('scroll', this.onScroll);
+    ownerWindow(this.root).addEventListener('resize', this.onResize);
     this.query.addEventListener('input', () => {
       this.filter = { ...this.filter, query: this.query.value };
-      this.windowStart = 0;
+      this.resetVirtualScroll();
       this.applyFilter();
     });
   }
@@ -90,6 +109,7 @@ export class AnnotationsPanel {
 
   setAnnotations(annotations: readonly DocumentAnnotation[]): void {
     this.annotations = [...annotations];
+    this.resetVirtualScroll();
     this.status.removeAttribute('role');
     this.status.textContent = `${annotations.length} ${annotations.length === 1 ? 'annotation' : 'annotations'}`;
     this.renderFacets();
@@ -99,13 +119,13 @@ export class AnnotationsPanel {
   setFilter(filter: AnnotationPanelFilter): void {
     this.filter = filter;
     this.query.value = filter.query;
-    this.windowStart = 0;
+    this.resetVirtualScroll();
     this.renderFacets();
     this.applyFilter();
   }
 
   visibleIds(): string[] {
-    return this.filtered.map(annotationId);
+    return this.filtered.slice(this.windowStart, this.windowStart + MAX_CARDS).map(annotationId);
   }
 
   setCurrentPage(pageIndex: number): void {
@@ -113,8 +133,16 @@ export class AnnotationsPanel {
     const selected = this.filtered.findIndex(
       (annotation) => annotationPage(annotation) === this.currentPage,
     );
-    if (selected >= 0 && (selected < this.windowStart || selected >= this.windowStart + MAX_CARDS))
-      this.windowStart = Math.max(0, selected - Math.floor(MAX_CARDS / 2));
+    if (
+      selected >= 0 &&
+      (selected < this.windowStart || selected >= this.windowStart + MAX_CARDS)
+    ) {
+      this.root.scrollTop = selected * ESTIMATED_CARD_HEIGHT;
+      this.windowStart = clampWindowStart(
+        selected - Math.floor(MAX_CARDS / 2),
+        this.filtered.length,
+      );
+    }
     this.render();
   }
 
@@ -139,7 +167,7 @@ export class AnnotationsPanel {
           .join(' '),
       ).includes(query);
     });
-    this.windowStart = Math.min(this.windowStart, Math.max(0, this.filtered.length - MAX_CARDS));
+    this.windowStart = clampWindowStart(this.windowStart, this.filtered.length);
     this.render();
   }
 
@@ -163,7 +191,7 @@ export class AnnotationsPanel {
         if (input.checked) selected.add(color);
         else selected.delete(color);
         this.filter = { ...this.filter, colors: selected };
-        this.windowStart = 0;
+        this.resetVirtualScroll();
         this.applyFilter();
       });
       label.append(input, this.options.colorMeanings?.[color] ?? color);
@@ -191,7 +219,7 @@ export class AnnotationsPanel {
         if (input.checked) selected.add(display);
         else if (previous !== undefined) selected.delete(previous);
         this.filter = { ...this.filter, tags: selected };
-        this.windowStart = 0;
+        this.resetVirtualScroll();
         this.applyFilter();
       });
       label.append(input, `#${display}`);
@@ -202,14 +230,26 @@ export class AnnotationsPanel {
   private render(): void {
     this.list.replaceChildren();
     const visible = this.filtered.slice(this.windowStart, this.windowStart + MAX_CARDS);
+    if (visible.length > 0) this.list.append(this.spacer(this.windowStart, 'top'));
     for (const [offset, annotation] of visible.entries())
       this.list.append(this.card(annotation, this.windowStart + offset));
+    const remaining = this.filtered.length - this.windowStart - visible.length;
+    if (visible.length > 0) this.list.append(this.spacer(remaining, 'bottom'));
     if (this.filtered.length === 0) {
       const empty = ownerWindow(this.root).createEl('p');
       empty.className = 'abyss-reader-sidebar-empty';
       empty.textContent = 'No annotations match the current filters.';
       this.list.append(empty);
     }
+  }
+
+  private spacer(rows: number, edge: 'top' | 'bottom'): HTMLElement {
+    const spacer = ownerWindow(this.root).createDiv();
+    spacer.className = 'abyss-annotation-virtual-spacer';
+    spacer.dataset['virtualSpacer'] = edge;
+    spacer.setAttribute('aria-hidden', 'true');
+    spacer.style.height = `${rows * ESTIMATED_CARD_HEIGHT}px`;
+    return spacer;
   }
 
   private card(annotation: DocumentAnnotation, index: number): HTMLButtonElement {
@@ -219,6 +259,8 @@ export class AnnotationsPanel {
     button.className = 'abyss-annotation-card';
     button.dataset['annotationId'] = annotationId(annotation);
     button.setAttribute('role', 'listitem');
+    button.setAttribute('aria-posinset', String(index + 1));
+    button.setAttribute('aria-setsize', String(this.filtered.length));
     button.tabIndex = index === this.windowStart ? 0 : -1;
     if (annotationPage(annotation) === this.currentPage)
       button.setAttribute('aria-current', 'location');
@@ -250,8 +292,10 @@ export class AnnotationsPanel {
     if (event.key === 'End') target = this.filtered.length - 1;
     if (target === null) return;
     event.preventDefault();
-    if (target < this.windowStart || target >= this.windowStart + MAX_CARDS)
-      this.windowStart = Math.floor(target / MAX_CARDS) * MAX_CARDS;
+    if (target < this.windowStart || target >= this.windowStart + MAX_CARDS) {
+      this.root.scrollTop = target * ESTIMATED_CARD_HEIGHT;
+      this.windowStart = clampWindowStart(target - Math.floor(MAX_CARDS / 2), this.filtered.length);
+    }
     this.render();
     const annotation = this.filtered[target];
     if (annotation === undefined) return;
@@ -259,6 +303,23 @@ export class AnnotationsPanel {
       .querySelector<HTMLElement>(`[data-annotation-id="${CSS.escape(annotationId(annotation))}"]`)
       ?.focus();
   }
+
+  private resetVirtualScroll(): void {
+    this.windowStart = 0;
+    this.root.scrollTop = 0;
+  }
+
+  private updateWindowFromScroll(): boolean {
+    const target = Math.floor(this.root.scrollTop / ESTIMATED_CARD_HEIGHT) - SCROLL_OVERSCAN;
+    const next = clampWindowStart(target, this.filtered.length);
+    if (next === this.windowStart) return false;
+    this.windowStart = next;
+    return true;
+  }
+}
+
+function clampWindowStart(start: number, length: number): number {
+  return Math.max(0, Math.min(Math.floor(start), Math.max(0, length - MAX_CARDS)));
 }
 
 function annotationId(annotation: DocumentAnnotation): string {

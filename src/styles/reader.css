@@ -246,6 +246,10 @@
   padding: var(--size-4-2);
 }
 
+.abyss-documents .abyss-annotation-virtual-spacer {
+  flex: 0 0 auto;
+}
+
 .abyss-documents .abyss-annotation-card {
   display: flex;
   width: 100%;

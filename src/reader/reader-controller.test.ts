@@ -1,8 +1,8 @@
 import type { TFile } from 'obsidian';
 import { App, TFile as MockTFile, Notice } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
-import type { AnnotationCache } from '../annotation-cache.js';
-import type { DocumentAnnotation } from '../document-core/annotations.js';
+import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
+import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
 import { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
 import type {
   DocumentAdapter,
@@ -279,6 +279,41 @@ describe('ReaderController', () => {
       cause,
     });
   });
+  it('logs the exact extraction page carried through the session error boundary', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const pageFailure = Object.assign(new Error('page failed'), {
+      name: 'PdfAnnotationExtractionError',
+      pageNumber: 3,
+    });
+    const cause = new DocumentOpenError(pdf.path, 'Could not read annotations.', pageFailure);
+    Object.assign(createdSession.value, {
+      listAnnotations: vi.fn(async () => {
+        throw cause;
+      }),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'toggle-sidebar' });
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalled();
+    });
+
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to extract PDF annotations', {
+      path: pdf.path,
+      page: 3,
+      cause,
+    });
+  });
   it('silently discards an extraction invalidated before its cache write', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -318,6 +353,44 @@ describe('ReaderController', () => {
       '[abyss-documents] Failed to extract PDF annotations',
       expect.anything(),
     );
+  });
+  it('retries extraction after a cache read is invalidated and never renders stale data', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      sink([]);
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const generation = vi.fn(() => 1);
+    const cacheRead = vi.fn(async () => {
+      throw new StaleAnnotationCacheReadError();
+    });
+    const cacheWrite = vi.fn(async () => true);
+    const cache = {
+      generation,
+      read: cacheRead,
+      write: cacheWrite,
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationCache: cache },
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'toggle-sidebar' });
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
+      ?.click();
+
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledOnce();
+    });
+    expect(cacheRead).toHaveBeenCalledWith(pdf.path, pdf.path, 1);
+    expect(cacheWrite).toHaveBeenCalledWith(expect.objectContaining({ annotations: [] }), 1);
+    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain('0 annotations');
   });
   it('mounts a session viewport into the shell document region', async () => {
     beginPluginActivation();

@@ -51,6 +51,17 @@ const READ_ONLY_CAPABILITIES: AnnotationCapabilities = Object.freeze({
   conversions: Object.freeze({ highlight: NO_CONVERSION, underline: NO_CONVERSION }),
 });
 
+class PdfAnnotationExtractionError extends Error {
+  override readonly name = 'PdfAnnotationExtractionError';
+
+  constructor(
+    readonly pageNumber: number,
+    readonly cause: unknown,
+  ) {
+    super(`Could not extract annotations from PDF page ${pageNumber}.`);
+  }
+}
+
 export async function extractAnnotations(
   pdf: {
     readonly numPages: number;
@@ -61,28 +72,50 @@ export async function extractAnnotations(
 ): Promise<void> {
   let deadline = performance.now() + 50;
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    throwIfAborted(signal);
-    const page = await pdf.getPage(pageNumber);
-    throwIfAborted(signal);
-    const raw = (await page.getAnnotations({ intent: 'display' })) as PdfAnnotationData[];
-    throwIfAborted(signal);
-    let batch: DocumentAnnotation[] = [];
-    for (const [index, annotation] of raw.entries()) {
-      batch.push(mapPdfAnnotation(annotation, page, pageNumber - 1, index));
-      throwIfAborted(signal);
-      if (performance.now() < deadline) continue;
-      onBatch(batch);
-      batch = [];
-      await yieldToMainThread(signal);
-      deadline = performance.now() + 50;
-    }
-    if (batch.length > 0) onBatch(batch);
-    throwIfAborted(signal);
-    if (performance.now() >= deadline) {
-      await yieldToMainThread(signal);
-      deadline = performance.now() + 50;
+    try {
+      deadline = await extractPageAnnotations(pdf, pageNumber, {
+        deadline,
+        onBatch,
+        signal,
+      });
+    } catch (cause) {
+      if (signal.aborted || isAbortFailure(cause)) throw cause;
+      if (cause instanceof PdfAnnotationExtractionError) throw cause;
+      throw new PdfAnnotationExtractionError(pageNumber, cause);
     }
   }
+}
+
+async function extractPageAnnotations(
+  pdf: Parameters<typeof extractAnnotations>[0],
+  pageNumber: number,
+  context: {
+    readonly deadline: number;
+    readonly onBatch: AnnotationBatch;
+    readonly signal: AbortSignal;
+  },
+): Promise<number> {
+  const { onBatch, signal } = context;
+  let nextDeadline = context.deadline;
+  throwIfAborted(signal);
+  const page = await pdf.getPage(pageNumber);
+  throwIfAborted(signal);
+  const raw = (await page.getAnnotations({ intent: 'display' })) as PdfAnnotationData[];
+  let batch: DocumentAnnotation[] = [];
+  for (const [index, annotation] of raw.entries()) {
+    throwIfAborted(signal);
+    batch.push(mapPdfAnnotation(annotation, page, pageNumber - 1, index));
+    if (performance.now() < nextDeadline) continue;
+    onBatch(batch);
+    batch = [];
+    await yieldToMainThread(signal);
+    nextDeadline = performance.now() + 50;
+  }
+  if (batch.length > 0) onBatch(batch);
+  throwIfAborted(signal);
+  if (performance.now() < nextDeadline) return nextDeadline;
+  await yieldToMainThread(signal);
+  return performance.now() + 50;
 }
 
 function mapPdfAnnotation(
@@ -288,6 +321,12 @@ function finite(value: unknown): number | null {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException('Annotation extraction was cancelled.', 'AbortError');
+}
+
+function isAbortFailure(cause: unknown): boolean {
+  return (
+    typeof cause === 'object' && cause !== null && 'name' in cause && cause.name === 'AbortError'
+  );
 }
 
 async function yieldToMainThread(signal: AbortSignal): Promise<void> {

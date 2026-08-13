@@ -77,6 +77,25 @@ describe('extractAnnotations', () => {
     expect(pdf.getPage).toHaveBeenCalledTimes(1);
   });
 
+  it('enriches a page read failure with its exact 1-based page number', async () => {
+    const cause = new Error('worker page failed');
+    const pdf = {
+      numPages: 3,
+      getPage: vi.fn(async (pageNumber: number) => {
+        if (pageNumber === 2) throw cause;
+        return page([]);
+      }),
+    };
+
+    await expect(
+      extractAnnotations(pdf, new AbortController().signal, () => undefined),
+    ).rejects.toMatchObject({
+      name: 'PdfAnnotationExtractionError',
+      pageNumber: 2,
+      cause,
+    });
+  });
+
   it('flushes a large page in time-bounded batches without rendering it', async () => {
     const now = vi.spyOn(performance, 'now');
     let tick = 0;

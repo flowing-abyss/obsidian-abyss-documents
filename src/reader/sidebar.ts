@@ -107,6 +107,7 @@ export class ReaderSidebar {
 
   destroy(): void {
     this.isOpen = false;
+    this.annotationsPanel.destroy();
     this.root.remove();
   }
 
