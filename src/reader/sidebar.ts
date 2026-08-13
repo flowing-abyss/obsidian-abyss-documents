@@ -1,5 +1,6 @@
 import { Platform, setIcon } from 'obsidian';
 import type { DocumentLocation, SearchHit } from '../document-core/document.js';
+import { AnnotationsPanel } from './annotations-panel.js';
 import { OutlinePanel } from './outline-panel.js';
 import { ownerWindow } from './owner-dom.js';
 import {
@@ -19,7 +20,9 @@ const SIDEBAR_TABS: ReadonlyArray<{ readonly id: ReaderSidebarTab; readonly labe
 const SIDEBAR_INSTANCE_COUNTS = new WeakMap<Document, number>();
 
 export interface ReaderSidebarCallbacks {
+  readonly annotationColorMeanings?: Readonly<Record<string, string>>;
   readonly onClose: () => void;
+  readonly onAnnotationNavigate?: (location: DocumentLocation) => void;
   readonly onTabChange: (tab: ReaderSidebarTab) => void;
   readonly onOutlineNavigate: (location: DocumentLocation) => void;
   readonly onSearchNavigate: (hit: SearchHit, index: number, kind: SearchNavigationKind) => void;
@@ -34,7 +37,7 @@ export class ReaderSidebar {
   readonly root: HTMLElement;
   readonly outlinePanel: OutlinePanel;
   readonly searchPanel: SearchPanel;
-  readonly annotationsPanel: HTMLElement;
+  readonly annotationsPanel: AnnotationsPanel;
 
   activeTab: ReaderSidebarTab = 'outline';
   isOpen = false;
@@ -65,12 +68,12 @@ export class ReaderSidebar {
     host.append(this.root);
 
     this.outlinePanel = new OutlinePanel(this.panelHost, callbacks.onOutlineNavigate);
-    this.annotationsPanel = owner.createEl('section');
-    this.annotationsPanel.className = 'abyss-reader-annotations';
-    this.annotationsPanel.dataset['sidebarPanel'] = 'annotations';
-    this.annotationsPanel.setAttribute('aria-label', 'Annotations');
-    this.annotationsPanel.textContent = 'Annotations will appear here.';
-    this.panelHost.append(this.annotationsPanel);
+    this.annotationsPanel = new AnnotationsPanel(this.panelHost, {
+      ...(callbacks.annotationColorMeanings === undefined
+        ? {}
+        : { colorMeanings: callbacks.annotationColorMeanings }),
+      onNavigate: callbacks.onAnnotationNavigate ?? (() => undefined),
+    });
     const searchCallbacks: SearchPanelCallbacks = {
       onClose: () => {
         this.close();
@@ -164,14 +167,14 @@ export class ReaderSidebar {
       button.tabIndex = active ? 0 : -1;
     }
     this.outlinePanel.root.hidden = tab !== 'outline';
-    this.annotationsPanel.hidden = tab !== 'annotations';
+    this.annotationsPanel.root.hidden = tab !== 'annotations';
     this.searchPanel.root.hidden = tab !== 'search';
     this.outlinePanel.root.id = this.panelId('outline');
     this.outlinePanel.root.setAttribute('role', 'tabpanel');
     this.outlinePanel.root.setAttribute('aria-labelledby', this.tabId('outline'));
-    this.annotationsPanel.id = this.panelId('annotations');
-    this.annotationsPanel.setAttribute('role', 'tabpanel');
-    this.annotationsPanel.setAttribute('aria-labelledby', this.tabId('annotations'));
+    this.annotationsPanel.root.id = this.panelId('annotations');
+    this.annotationsPanel.root.setAttribute('role', 'tabpanel');
+    this.annotationsPanel.root.setAttribute('aria-labelledby', this.tabId('annotations'));
     this.searchPanel.root.id = this.panelId('search');
     this.searchPanel.root.setAttribute('role', 'tabpanel');
     this.searchPanel.root.setAttribute('aria-labelledby', this.tabId('search'));

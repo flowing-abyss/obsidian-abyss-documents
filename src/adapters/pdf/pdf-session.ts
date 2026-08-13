@@ -1,5 +1,6 @@
 import type { TFile } from 'obsidian';
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
+import type { AnnotationSink } from '../../document-core/annotations.js';
 import type {
   DocumentCapability,
   DocumentDescriptor,
@@ -10,6 +11,7 @@ import type {
 import type { DocumentEditingCapabilities } from '../../document-core/editable-document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../../document-core/errors.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
+import { extractAnnotations } from './pdf-annotations.js';
 import { isPdfAbortFailure, mapPdfOutline } from './pdf-mappers.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfTextSearch } from './pdf-text-search.js';
@@ -83,6 +85,28 @@ export class PdfDocumentSession implements DocumentSession {
       throw new DocumentOpenError(
         this.file.path,
         'Could not read this PDF outline. Try again.',
+        cause,
+      );
+    }
+  }
+
+  async listAnnotations(signal: AbortSignal, sink: AnnotationSink): Promise<void> {
+    this.assertOpen();
+    try {
+      await extractAnnotations(this.pdf, signal, sink);
+      this.assertOpen();
+    } catch (cause) {
+      if (signal.aborted || isPdfAbortFailure(cause)) {
+        throw new DocumentCancelledError(
+          this.file.path,
+          'Reading PDF annotations was cancelled.',
+          cause,
+        );
+      }
+      if (cause instanceof DocumentOpenError) throw cause;
+      throw new DocumentOpenError(
+        this.file.path,
+        'Could not read annotations from this PDF. Try reopening it.',
         cause,
       );
     }

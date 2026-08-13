@@ -127,6 +127,45 @@ function sessionFixture(overrides: Partial<PDFDocumentProxy> = {}) {
 }
 
 describe('PdfDocumentSession', () => {
+  it('lists PDF annotations through the public page mapper', async () => {
+    const getAnnotations = vi.fn(async () => [
+      { annotationType: 1, id: 'note', rect: [0, 0, 1, 1] },
+    ]);
+    const { session } = sessionFixture({
+      numPages: 1,
+      getPage: vi.fn(async () => ({ getAnnotations, view: [0, 0, 600, 800] })) as never,
+    });
+    const batches: unknown[] = [];
+    await session.listAnnotations(new AbortController().signal, (batch) => batches.push(...batch));
+    expect(batches).toHaveLength(1);
+  });
+
+  it('maps annotation extraction failures and owned cancellation at the session boundary', async () => {
+    const cause = new Error('annotation worker failed');
+    const { session } = sessionFixture({
+      numPages: 1,
+      getPage: vi.fn(async () => {
+        throw cause;
+      }),
+    });
+    await expect(
+      session.listAnnotations(new AbortController().signal, () => undefined),
+    ).rejects.toMatchObject({ name: 'DocumentOpenError', cause });
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(session.listAnnotations(controller.signal, () => undefined)).rejects.toMatchObject(
+      { name: 'DocumentCancelledError' },
+    );
+  });
+
+  it('rejects annotation listing after the session closes', async () => {
+    const { session } = sessionFixture();
+    await session.close();
+    await expect(
+      session.listAnnotations(new AbortController().signal, () => undefined),
+    ).rejects.toMatchObject({ name: 'DocumentCancelledError' });
+  });
   it('exposes the PDF descriptor and native annotation writer capability', () => {
     const { session } = sessionFixture();
 

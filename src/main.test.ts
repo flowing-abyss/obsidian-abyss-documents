@@ -3,6 +3,7 @@ import { App, Menu, TFile as MockTFile, Notice, WorkspaceLeaf } from 'obsidian-t
 import { describe, expect, it, vi } from 'vitest';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
+import { AnnotationCache } from './annotation-cache.js';
 import type { DocumentSession, DocumentViewport } from './document-core/document.js';
 import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1, type PluginDataV2 } from './plugin-data.js';
@@ -139,6 +140,33 @@ async function loadedReader(
 }
 
 describe('AbyssDocumentsPlugin', () => {
+  it('invalidates only PDF cache partitions for public modify, delete, and rename events', async () => {
+    const app = App.createConfigured__({
+      files: { 'Books/Guide.pdf': '', 'Books/Renamed.pdf': '', 'Notes/Guide.md': '' },
+    });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const invalidate = vi.spyOn(AnnotationCache.prototype, 'invalidate').mockResolvedValue();
+    await plugin.onload();
+    const pdf = pdfFile(app);
+    const renamed = pdfFile(app, 'Books/Renamed.pdf');
+    const markdown = app.vault.getAbstractFileByPath('Notes/Guide.md');
+    if (markdown === null) throw new Error('Expected markdown fixture.');
+
+    app.vault.trigger('modify', markdown);
+    app.vault.trigger('modify', pdf);
+    app.vault.trigger('delete', pdf);
+    app.vault.trigger('rename', renamed, 'Books/Guide.pdf');
+
+    await vi.waitFor(() => {
+      expect(invalidate).toHaveBeenCalledTimes(4);
+    });
+    expect(invalidate.mock.calls.map(([path]) => path)).toEqual([
+      'Books/Guide.pdf',
+      'Books/Guide.pdf',
+      'Books/Guide.pdf',
+      'Books/Renamed.pdf',
+    ]);
+  });
   it('loads version 1 data with a PDF-only view default', async () => {
     const loadRuntime = vi.spyOn(PdfRuntimeLoader.prototype, 'load');
     const createObjectURL = vi.fn();

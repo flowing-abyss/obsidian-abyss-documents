@@ -1,4 +1,6 @@
 import { Notice, type TFile } from 'obsidian';
+import type { AnnotationCache } from '../annotation-cache.js';
+import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
 import type {
   DocumentLocation,
@@ -26,6 +28,7 @@ export type ShellFactory = (
 ) => ReaderShell;
 
 export interface ReaderProfileState {
+  readonly annotations?: PluginSettings['annotations'];
   readonly reading: PluginSettings['reading'];
   readonly layout: PluginSettings['layout'];
   readonly profileByFingerprint: Readonly<Record<string, ReadingProfileId>>;
@@ -48,6 +51,11 @@ interface LayoutPolicySnapshot {
   readonly rememberPerDocument: boolean;
 }
 
+interface ReaderControllerServices {
+  readonly annotationCache?: AnnotationCache;
+  readonly profileService?: ReadingProfileService;
+}
+
 export class ReaderController {
   private queue: Promise<void> = Promise.resolve();
   private activeOpen: AbortController | null = null;
@@ -65,14 +73,22 @@ export class ReaderController {
   private outlineLoadedFor: DocumentSession | null = null;
   private outlineLoadingFor: DocumentSession | null = null;
   private currentSearchQuery = '';
+  private annotationAbort: AbortController | null = null;
+  private annotationsLoadedFor: DocumentSession | null = null;
+  private annotationsLoadingFor: DocumentSession | null = null;
+  private readonly annotationCache: AnnotationCache | null;
+  private readonly profileService: ReadingProfileService;
 
   constructor(
     private readonly registry: DocumentAdapterRegistry,
     private readonly createShell: ShellFactory = (host, onIntent) =>
       new ReaderShell(host, onIntent),
     private readonly profileState: ReaderProfileState = DEFAULT_PROFILE_STATE,
-    private readonly profileService = new ReadingProfileService(),
-  ) {}
+    services: ReaderControllerServices = {},
+  ) {
+    this.annotationCache = services.annotationCache ?? null;
+    this.profileService = services.profileService ?? new ReadingProfileService();
+  }
 
   open(file: TFile, host: HTMLElement): Promise<void> {
     markReaderPerformanceOnce('first-reader-intent');
@@ -180,6 +196,10 @@ export class ReaderController {
     this.pendingNavigationPageIndex = null;
     this.navigationRequestRevision += 1;
     this.currentSearchQuery = '';
+    this.annotationAbort?.abort();
+    this.annotationAbort = null;
+    this.annotationsLoadedFor = null;
+    this.annotationsLoadingFor = null;
     this.currentProfile = this.initialProfile(session.descriptor.fingerprint);
     this.currentLayout = this.initialLayout(session.descriptor.fingerprint);
     this.layoutPolicy = captureLayoutPolicy(this.profileState.layout);
@@ -238,6 +258,10 @@ export class ReaderController {
     this.unsubscribeViewport = null;
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
+    this.annotationAbort?.abort();
+    this.annotationAbort = null;
+    this.annotationsLoadedFor = null;
+    this.annotationsLoadingFor = null;
     this.currentSearchQuery = '';
     this.navigationPageIndex = 0;
     this.pendingNavigationPageIndex = null;
@@ -320,10 +344,21 @@ export class ReaderController {
     const viewport = this.viewport;
     if (shell === null || session === null || viewport === null) return;
     const callbacks: ReaderSidebarCallbacks = {
+      annotationColorMeanings: Object.fromEntries(
+        (this.profileState.annotations?.palette ?? []).map((entry) => [
+          entry.color.toLocaleLowerCase(),
+          entry.meaning.trim().length > 0 ? entry.meaning.trim() : entry.name,
+        ]),
+      ),
       onClose: () => undefined,
+      onAnnotationNavigate: (location) => {
+        this.navigateToLocation(location);
+      },
       onTabChange: (nextTab) => {
         if (nextTab === 'outline' && this.session === session && this.shell === shell)
           this.loadOutline(session, shell);
+        if (nextTab === 'annotations' && this.session === session && this.shell === shell)
+          this.loadAnnotations(session, shell);
       },
       onOutlineNavigate: (location) => {
         this.navigateToLocation(location);
@@ -340,6 +375,81 @@ export class ReaderController {
     const sidebar = shell.openSidebar(tab, callbacks);
     sidebar.outlinePanel.setCurrentPage(this.currentPageIndex);
     if (tab === 'outline') this.loadOutline(session, shell);
+    if (tab === 'annotations') this.loadAnnotations(session, shell);
+  }
+
+  private loadAnnotations(session: DocumentSession, shell: ReaderShell): void {
+    if (
+      this.annotationsLoadedFor === session ||
+      this.annotationsLoadingFor === session ||
+      !hasAnnotationListing(session)
+    )
+      return;
+    this.annotationAbort?.abort();
+    const abort = new AbortController();
+    this.annotationAbort = abort;
+    this.annotationsLoadingFor = session;
+    shell.sidebar?.annotationsPanel.setLoading();
+    void this.loadAnnotationData(session, abort.signal)
+      .then((annotations) => {
+        if (this.session !== session || this.shell !== shell || abort.signal.aborted) return;
+        this.annotationsLoadingFor = null;
+        this.annotationsLoadedFor = session;
+        shell.sidebar?.annotationsPanel.setAnnotations(annotations);
+        shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
+      })
+      .catch((cause: unknown) => {
+        if (
+          abort.signal.aborted ||
+          isAbortFailure(cause) ||
+          this.session !== session ||
+          this.shell !== shell
+        )
+          return;
+        this.annotationsLoadingFor = null;
+        shell.sidebar?.annotationsPanel.setError(
+          'Could not index annotations. Reopen the PDF to retry.',
+        );
+        console.error('[abyss-documents] Failed to extract PDF annotations', {
+          path: session.descriptor.path,
+          page: this.currentPageIndex + 1,
+          cause,
+        });
+      });
+  }
+
+  private async loadAnnotationData(
+    session: DocumentSession & AnnotationListingSession,
+    signal: AbortSignal,
+  ): Promise<readonly DocumentAnnotation[]> {
+    const cached = await this.annotationCache?.read(
+      session.descriptor.path,
+      session.descriptor.fingerprint,
+    );
+    this.throwIfAnnotationCancelled(signal);
+    if (cached !== null && cached !== undefined) return cached;
+    const cacheGeneration = this.annotationCache?.generation(session.descriptor.path);
+    const annotations: DocumentAnnotation[] = [];
+    await session.listAnnotations(signal, (batch) => {
+      annotations.push(...batch);
+    });
+    this.throwIfAnnotationCancelled(signal);
+    const stored = await this.annotationCache?.write(
+      {
+        version: 1,
+        documentPath: session.descriptor.path,
+        fingerprint: session.descriptor.fingerprint,
+        annotations,
+      },
+      cacheGeneration,
+    );
+    if (stored === false)
+      throw new DOMException('Annotation extraction became stale.', 'AbortError');
+    return annotations;
+  }
+
+  private throwIfAnnotationCancelled(signal: AbortSignal): void {
+    if (signal.aborted) throw new DOMException('Annotation loading was cancelled.', 'AbortError');
   }
 
   private loadOutline(session: DocumentSession, shell: ReaderShell): void {
@@ -553,6 +663,7 @@ export class ReaderController {
     }
     shell.toolbar.setCurrentPage(this.currentPageIndex);
     shell.sidebar?.outlinePanel.setCurrentPage(this.currentPageIndex);
+    shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
     shell.announce(`Page ${this.currentPageIndex + 1} of ${viewport.pageCount}`);
   }
 
@@ -671,6 +782,25 @@ export class ReaderController {
     }
     return String(cause);
   }
+}
+
+interface AnnotationListingSession {
+  listAnnotations(signal: AbortSignal, sink: AnnotationSink): Promise<void>;
+}
+
+function hasAnnotationListing(
+  session: DocumentSession,
+): session is DocumentSession & AnnotationListingSession {
+  return 'listAnnotations' in session && typeof session.listAnnotations === 'function';
+}
+
+function isAbortFailure(cause: unknown): boolean {
+  return (
+    typeof cause === 'object' &&
+    cause !== null &&
+    'name' in cause &&
+    (cause as { readonly name?: unknown }).name === 'AbortError'
+  );
 }
 
 function isReadingProfileId(value: unknown): value is ReadingProfileId {

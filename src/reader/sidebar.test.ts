@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { DocumentAnnotation } from '../document-core/annotations.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReaderSidebar, type ReaderSidebarCallbacks } from './sidebar.js';
 
 function callbacks(): ReaderSidebarCallbacks {
   return {
+    onAnnotationNavigate: vi.fn(),
     onClose: vi.fn(),
     onOutlineNavigate: vi.fn(),
     onSearchNavigate: vi.fn(),
@@ -22,6 +24,39 @@ function toggleSidebar(shell: ReaderShell, handlers: ReaderSidebarCallbacks): vo
 }
 
 describe('ReaderSidebar', () => {
+  it('constructs the annotation panel without requesting extraction until its tab is selected', () => {
+    const handlers = callbacks();
+    const sidebar = new ReaderSidebar(createDiv(), handlers);
+    expect(handlers.onTabChange).not.toHaveBeenCalled();
+    sidebar.root.querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')?.click();
+    expect(handlers.onTabChange).toHaveBeenCalledWith('annotations');
+    expect(sidebar.annotationsPanel.root.hidden).toBe(false);
+  });
+  it('passes configured color meanings into annotation cards', () => {
+    const handlers = { ...callbacks(), annotationColorMeanings: { '#ffd400': 'Important' } };
+    const sidebar = new ReaderSidebar(createDiv(), handlers);
+    const annotation = {
+      ...({} as DocumentAnnotation),
+      identity: { kind: 'legacy' as const, fingerprint: 'one' },
+      type: 'highlight' as const,
+      anchor: {
+        kind: 'fixed-page' as const,
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: { kind: 'point' as const, point: { x: 0, y: 0 } },
+      },
+      color: '#ffd400',
+      selectedText: 'Text',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: '',
+      tags: [],
+      links: [],
+    };
+    sidebar.annotationsPanel.setAnnotations([annotation]);
+    expect(sidebar.annotationsPanel.root.textContent).toContain('Important');
+  });
   it('keeps sidebar DOM absent until an explicit open and remembers the selected tab', () => {
     const host = createDiv();
     const handlers = callbacks();

@@ -6501,6 +6501,52 @@
   padding: var(--size-4-2);
 }
 
+.abyss-documents .abyss-annotations-status,
+.abyss-documents .abyss-annotation-tags {
+  padding: var(--size-4-2);
+  color: var(--text-muted);
+}
+
+.abyss-documents .abyss-annotations-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-1);
+  padding: var(--size-4-2);
+}
+
+.abyss-documents .abyss-annotation-card {
+  display: flex;
+  width: 100%;
+  height: auto;
+  flex-direction: column;
+  gap: var(--size-2-1);
+  padding: var(--size-4-2);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-normal);
+  text-align: start;
+  white-space: normal;
+}
+
+.abyss-documents .abyss-annotation-card:hover,
+.abyss-documents .abyss-annotation-card:focus-visible,
+.abyss-documents .abyss-annotation-card[aria-current='location'] {
+  background: var(--background-modifier-hover);
+}
+
+.abyss-documents .abyss-annotation-card-header {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.abyss-documents .abyss-annotation-card-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
 .abyss-documents .abyss-reader-search-result {
   display: flex;
   width: 100%;

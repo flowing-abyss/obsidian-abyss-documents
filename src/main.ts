@@ -2,6 +2,7 @@ import { FileView, Notice, Plugin, type WorkspaceLeaf } from 'obsidian';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
+import { AnnotationCache } from './annotation-cache.js';
 import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
 import { PluginDataStore, type MigrationDiagnostic, type PluginDataV2 } from './plugin-data.js';
 import {
@@ -125,6 +126,8 @@ export default class AbyssDocumentsPlugin extends Plugin {
     const registry = new DocumentAdapterRegistry([
       new PdfDocumentAdapter(this.app.vault, this.runtimeLoader, createPdfDocumentViewport),
     ]);
+    const annotationCache = new AnnotationCache(this.app.vault.adapter, this.app.vault.configDir);
+    this.registerAnnotationCacheInvalidation(annotationCache);
     const profileState = this.createReaderState(store);
     const services = {
       createController: () =>
@@ -135,6 +138,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
               sidebarWidth: store.snapshot.view.sidebarWidth,
             }),
           profileState,
+          { annotationCache },
         ),
     };
     this.addSettingTab(
@@ -175,6 +179,34 @@ export default class AbyssDocumentsPlugin extends Plugin {
     });
   }
 
+  private registerAnnotationCacheInvalidation(cache: AnnotationCache): void {
+    const invalidate = (path: string): void => {
+      if (!path.toLocaleLowerCase().endsWith('.pdf')) return;
+      void cache.invalidate(path).catch((cause: unknown) => {
+        console.error('[abyss-documents] Failed to invalidate PDF annotation cache', {
+          path,
+          cause,
+        });
+      });
+    };
+    this.registerEvent(
+      this.app.vault.on('modify', (file) => {
+        invalidate(file.path);
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => {
+        invalidate(file.path);
+      }),
+    );
+    this.registerEvent(
+      this.app.vault.on('rename', (file, oldPath) => {
+        invalidate(oldPath);
+        invalidate(file.path);
+      }),
+    );
+  }
+
   private createReaderState(store: PluginDataStore): ReaderProfileState {
     return {
       get reading() {
@@ -182,6 +214,9 @@ export default class AbyssDocumentsPlugin extends Plugin {
       },
       get layout() {
         return store.snapshot.settings.layout;
+      },
+      get annotations() {
+        return store.snapshot.settings.annotations;
       },
       get profileByFingerprint() {
         return store.snapshot.view.profileByFingerprint;

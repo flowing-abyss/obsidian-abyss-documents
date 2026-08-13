@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { PluginManifest } from 'obsidian';
 import { App } from 'obsidian-test-mocks/obsidian';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { PdfDocumentSession } from '../../src/adapters/pdf/pdf-session.js';
 import AbyssDocumentsPlugin from '../../src/main.js';
 import { readerPerformanceSnapshot } from '../../src/reader-performance.js';
 
@@ -29,6 +30,7 @@ describe('reader build and activation budgets', () => {
   });
 
   it('records zero PDF work during real plugin activation', async () => {
+    const listAnnotations = vi.spyOn(PdfDocumentSession.prototype, 'listAnnotations');
     const manifest: PluginManifest = {
       author: 'test',
       description: 'test',
@@ -45,5 +47,6 @@ describe('reader build and activation budgets', () => {
     const metrics = readerPerformanceSnapshot().counters;
     expect(metrics.pdfWorkDuringPluginOnload).toBe(0);
     expect(metrics.pdfRuntimeLoads).toBe(0);
+    expect(listAnnotations).not.toHaveBeenCalled();
   });
 });

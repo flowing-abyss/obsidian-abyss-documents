@@ -1,6 +1,8 @@
 import type { TFile } from 'obsidian';
 import { App, TFile as MockTFile, Notice } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
+import type { AnnotationCache } from '../annotation-cache.js';
+import type { DocumentAnnotation } from '../document-core/annotations.js';
 import { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
 import type {
   DocumentAdapter,
@@ -186,6 +188,137 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('does zero annotation work until Annotations is explicitly requested and cancels stale work', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const listAnnotations = vi.fn(
+      async (_signal: AbortSignal, sink: (items: readonly never[]) => void) => {
+        sink([]);
+      },
+    );
+    Object.assign(createdSession.value, { listAnnotations });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    expect(listAnnotations).not.toHaveBeenCalled();
+
+    shell.send({ type: 'toggle-sidebar' });
+    expect(listAnnotations).not.toHaveBeenCalled();
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledOnce();
+    });
+    const signal = listAnnotations.mock.calls[0]?.[0];
+    await controller.close();
+    expect(signal?.aborted).toBe(true);
+  });
+  it('loads a matching derived cache without extracting and reports a background extraction failure once', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const cause = new Error('annotation read failed');
+    const listAnnotations = vi.fn(async () => {
+      throw cause;
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const cacheRead = vi.fn(async (): Promise<readonly DocumentAnnotation[] | null> => []);
+    const cacheWrite = vi.fn(async () => true);
+    const cache = {
+      generation: vi.fn(() => 0),
+      read: cacheRead,
+      write: cacheWrite,
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationCache: cache },
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'toggle-sidebar' });
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(cacheRead).toHaveBeenCalledOnce();
+    });
+    expect(listAnnotations).not.toHaveBeenCalled();
+
+    cacheRead.mockResolvedValueOnce(null);
+    await controller.close();
+    const secondSession = session(pdf.path);
+    Object.assign(secondSession.value, { listAnnotations });
+    const secondShell = capturingShellFactory();
+    const failed = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, secondSession).value]),
+      secondShell.createShell,
+      undefined,
+      { annotationCache: cache },
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await failed.open(pdf, createDiv());
+    secondShell.send({ type: 'toggle-sidebar' });
+    secondShell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(
+        secondShell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]'),
+      ).not.toBeNull();
+    });
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to extract PDF annotations', {
+      path: pdf.path,
+      page: 1,
+      cause,
+    });
+  });
+  it('silently discards an extraction invalidated before its cache write', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const listAnnotations = vi.fn(
+      async (_signal: AbortSignal, sink: (items: readonly never[]) => void) => {
+        sink([]);
+      },
+    );
+    Object.assign(createdSession.value, { listAnnotations });
+    const cacheWrite = vi.fn(async () => false);
+    const cache = {
+      generation: vi.fn(() => 0),
+      read: vi.fn(async () => null),
+      write: cacheWrite,
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationCache: cache },
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'toggle-sidebar' });
+    shell.created.sidebar?.root
+      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(cacheWrite).toHaveBeenCalledOnce();
+    });
+    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain(
+      'Loading annotations',
+    );
+    expect(log).not.toHaveBeenCalledWith(
+      '[abyss-documents] Failed to extract PDF annotations',
+      expect.anything(),
+    );
+  });
   it('mounts a session viewport into the shell document region', async () => {
     beginPluginActivation();
     endPluginActivation();
