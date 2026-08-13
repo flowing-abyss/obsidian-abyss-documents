@@ -9,6 +9,7 @@ import {
 import { mapPdfOpenFailure } from './pdf-mappers.js';
 import type { PdfRuntimeLoader } from './pdf-runtime.js';
 import { PdfDocumentSession, type PdfViewportFactory } from './pdf-session.js';
+import { baseTokenFor } from './pdf-write-boundary.js';
 
 class PdfLoadingRejection extends Error {
   constructor(readonly original: unknown) {
@@ -104,7 +105,10 @@ export class PdfDocumentAdapter implements DocumentAdapter {
       markReaderPerformance('worker-start');
       const loadingTask = runtime.pdfjsLib.getDocument({ data: bytes });
       ownedLoadingTask = loadingTask;
-      const pdf = await waitForDocument(loadingTask, signal);
+      const [baseToken, pdf] = await Promise.all([
+        baseTokenFor(new Uint8Array(bytes), file.stat.mtime),
+        waitForDocument(loadingTask, signal),
+      ]);
       if (signal.aborted) throw abortReason(signal);
       const annotationCapabilities = await waitForAnnotationCapabilities(
         pdf,
@@ -114,6 +118,7 @@ export class PdfDocumentAdapter implements DocumentAdapter {
       signal.throwIfAborted();
       const session = new PdfDocumentSession(file, pdf, runtime.pdfjsViewer, {
         annotationCapabilities,
+        openedBaseToken: baseToken,
         viewportFactory: this.viewportFactory,
       });
       signal.throwIfAborted();
@@ -134,4 +139,46 @@ export class PdfDocumentAdapter implements DocumentAdapter {
       throw mapPdfOpenFailure(file.path, originalCause, signal);
     }
   }
+
+  async verifySavedBytes(bytes: Uint8Array, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const runtime = await this.runtimeLoader.load();
+    signal.throwIfAborted();
+    const loadingTask = runtime.pdfjsLib.getDocument({ data: Uint8Array.from(bytes) });
+    let pdf: PDFDocumentProxy | null = null;
+    let primaryFailure: unknown;
+    try {
+      pdf = await waitForDocument(loadingTask, signal);
+      signal.throwIfAborted();
+      await pdf.getDownloadInfo();
+      signal.throwIfAborted();
+    } catch (cause) {
+      primaryFailure = cause;
+    }
+    let cleanupFailure: unknown;
+    if (pdf !== null) {
+      try {
+        await pdf.cleanup();
+      } catch (cause) {
+        cleanupFailure = cause;
+      }
+    }
+    let destroyFailure: unknown;
+    try {
+      await loadingTask.destroy();
+    } catch (cause) {
+      destroyFailure = cause;
+    }
+    if (primaryFailure !== undefined) throw asError(primaryFailure, 'PDF verification failed.');
+    if (cleanupFailure !== undefined) throw asError(cleanupFailure, 'PDF cleanup failed.');
+    if (destroyFailure !== undefined)
+      throw asError(destroyFailure, 'PDF loading task cleanup failed.');
+  }
+}
+
+function asError(cause: unknown, fallback: string): Error {
+  if (cause instanceof Error) return cause;
+  const error = new Error(fallback);
+  Object.defineProperty(error, 'cause', { value: cause });
+  return error;
 }

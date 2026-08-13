@@ -310,6 +310,41 @@ describe('PdfAnnotationEditor lifecycle', () => {
 });
 
 describe('PdfAnnotationEditor save boundary', () => {
+  it('pauses the selected native tool only while PDF.js captures bytes and restores it afterward', async () => {
+    const fixtureValue = fixture();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    await fixtureValue.editor.setTool('ink');
+    fixtureValue.modeRequests.splice(0);
+    fixtureValue.saveDocument.mockImplementation(async () => {
+      expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
+      return new Uint8Array([37, 80, 68, 70]);
+    });
+
+    await fixtureValue.editor.save(new AbortController().signal);
+
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(15);
+    expect(fixtureValue.modeRequests).toEqual([{ mode: 0 }, { mode: 15 }]);
+  });
+
+  it('restores the selected tool when PDF.js serialization fails', async () => {
+    const fixtureValue = fixture();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    await fixtureValue.editor.setTool('highlight');
+    fixtureValue.saveDocument.mockRejectedValue(new Error('worker rejected save'));
+
+    await expect(fixtureValue.editor.save(new AbortController().signal)).rejects.toThrow(
+      'worker rejected save',
+    );
+
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(9);
+  });
+
   it('ends the current edit, calls saveDocument once, and copies returned bytes', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();

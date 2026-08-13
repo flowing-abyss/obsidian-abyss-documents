@@ -108,6 +108,85 @@ describe('PdfDocumentAdapter', () => {
     expect(fixture.destroy).not.toHaveBeenCalled();
   });
 
+  it('reopens saved bytes with bundled PDF.js and always cleans up the verification task', async () => {
+    const cleanup = vi.fn(async () => undefined);
+    const destroy = vi.fn(async () => undefined);
+    const getDownloadInfo = vi.fn(async () => ({ length: 3 }));
+    const document = pdf({ cleanup, getDownloadInfo });
+    const fixture = adapterFixture({ pdf: document });
+    fixture.getDocument.mockReturnValueOnce({
+      promise: Promise.resolve(document),
+      destroy,
+    });
+
+    await fixture.adapter.verifySavedBytes(new Uint8Array([1, 2, 3]), new AbortController().signal);
+
+    expect(getDownloadInfo).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it('destroys failed verification loading tasks and refuses already-aborted verification', async () => {
+    const fixture = adapterFixture({});
+    const destroy = vi.fn(async () => undefined);
+    fixture.getDocument.mockReturnValueOnce({
+      promise: Promise.reject(new Error('invalid saved PDF')),
+      destroy,
+    });
+
+    await expect(
+      fixture.adapter.verifySavedBytes(new Uint8Array([9]), new AbortController().signal),
+    ).rejects.toThrow('invalid saved PDF');
+    expect(destroy).toHaveBeenCalledOnce();
+    await expect(
+      fixture.adapter.verifySavedBytes(new Uint8Array([9]), AbortSignal.abort()),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('destroys verification loading tasks when cleanup throws and preserves the primary failure', async () => {
+    const primary = new Error('download info rejected');
+    const cleanupFailure = new Error('cleanup rejected');
+    const cleanup = vi.fn(async () => Promise.reject(cleanupFailure));
+    const destroy = vi.fn(async () => undefined);
+    const document = pdf({
+      cleanup,
+      getDownloadInfo: vi.fn(async () => Promise.reject(primary)),
+    });
+    const fixture = adapterFixture({ pdf: document });
+    fixture.getDocument.mockReturnValueOnce({ promise: Promise.resolve(document), destroy });
+
+    await expect(
+      fixture.adapter.verifySavedBytes(new Uint8Array([1]), new AbortController().signal),
+    ).rejects.toBe(primary);
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it('reports cleanup and loading-task destruction failures after successful verification', async () => {
+    const cleanup = vi.fn(async () => rejectedWith('raw cleanup failure'));
+    const document = pdf({ cleanup, getDownloadInfo: vi.fn(async () => ({ length: 1 })) });
+    const cleanupFixture = adapterFixture({ pdf: document });
+    cleanupFixture.getDocument.mockReturnValueOnce({
+      promise: Promise.resolve(document),
+      destroy: vi.fn(async () => undefined),
+    });
+    await expect(
+      cleanupFixture.adapter.verifySavedBytes(new Uint8Array([1]), new AbortController().signal),
+    ).rejects.toMatchObject({ message: 'PDF cleanup failed.', cause: 'raw cleanup failure' });
+
+    const destroyFailure = new Error('destroy rejected');
+    const destroy = vi.fn(async () => Promise.reject(destroyFailure));
+    const successful = pdf({ getDownloadInfo: vi.fn(async () => ({ length: 1 })) });
+    const destroyFixture = adapterFixture({ pdf: successful });
+    destroyFixture.getDocument.mockReturnValueOnce({
+      promise: Promise.resolve(successful),
+      destroy,
+    });
+    await expect(
+      destroyFixture.adapter.verifySavedBytes(new Uint8Array([1]), new AbortController().signal),
+    ).rejects.toBe(destroyFailure);
+  });
+
   it.each([
     {
       name: 'signed',

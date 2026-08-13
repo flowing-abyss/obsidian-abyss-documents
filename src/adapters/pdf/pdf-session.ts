@@ -10,8 +10,11 @@ import type {
 } from '../../document-core/document.js';
 import type { DocumentEditingCapabilities } from '../../document-core/editable-document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../../document-core/errors.js';
+import type { BaseToken, NativeEditableSaveSession } from '../../document-core/save-coordinator.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
+import type { PdfAnnotationEditor } from './pdf-annotation-editor.js';
 import { extractAnnotations } from './pdf-annotations.js';
+import { PdfEditableSession } from './pdf-editable-session.js';
 import { isPdfAbortFailure, mapPdfOutline } from './pdf-mappers.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfTextSearch } from './pdf-text-search.js';
@@ -32,6 +35,7 @@ export type PdfViewportFactory = (
 interface PdfSessionAnnotationAccess {
   readonly annotationCapabilities: PdfAnnotationCapabilities;
   readonly viewportFactory: PdfViewportFactory;
+  readonly openedBaseToken?: BaseToken | null;
 }
 
 export class PdfDocumentSession implements DocumentSession {
@@ -42,6 +46,8 @@ export class PdfDocumentSession implements DocumentSession {
 
   private closePromise: Promise<void> | null = null;
   private search: PdfTextSearch | null = null;
+  private editableSession: PdfEditableSession | null = null;
+  private createdViewport: DocumentViewport | null = null;
 
   constructor(
     private readonly file: TFile,
@@ -148,7 +154,25 @@ export class PdfDocumentSession implements DocumentSession {
       }
       throw this.cancelled(destroyFailure);
     }
+    this.createdViewport = viewport;
     return viewport;
+  }
+
+  createNativeEditableSession(
+    onRevision: (revision: number) => void,
+  ): NativeEditableSaveSession | null {
+    if (this.editableSession !== null) return this.editableSession;
+    const openedBaseToken = this.annotationAccess.openedBaseToken ?? null;
+    if (openedBaseToken === null || this.createdViewport === null) return null;
+    const editor = annotationEditorOf(this.createdViewport);
+    if (editor === null) return null;
+    this.editableSession = new PdfEditableSession(
+      this.descriptor.path,
+      openedBaseToken,
+      editor,
+      onRevision,
+    );
+    return this.editableSession;
   }
 
   close(): Promise<void> {
@@ -157,6 +181,9 @@ export class PdfDocumentSession implements DocumentSession {
   }
 
   private async closeOnce(): Promise<void> {
+    this.editableSession?.destroy();
+    this.editableSession = null;
+    this.createdViewport = null;
     this.search?.dispose();
     this.search = null;
 
@@ -191,4 +218,12 @@ export class PdfDocumentSession implements DocumentSession {
       cause,
     );
   }
+}
+
+function annotationEditorOf(viewport: DocumentViewport): PdfAnnotationEditor | null {
+  const candidate = viewport as DocumentViewport & { readonly annotationEditor?: unknown };
+  const editor = candidate.annotationEditor as Partial<PdfAnnotationEditor> | null | undefined;
+  return typeof editor?.save === 'function' && typeof editor.onDirty === 'function'
+    ? (editor as PdfAnnotationEditor)
+    : null;
 }

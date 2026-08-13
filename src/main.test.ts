@@ -3,13 +3,17 @@ import { App, Menu, TFile as MockTFile, Notice, WorkspaceLeaf } from 'obsidian-t
 import { describe, expect, it, vi } from 'vitest';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
+import { PdfWriteBoundary } from './adapters/pdf/pdf-write-boundary.js';
 import { AnnotationCache } from './annotation-cache.js';
 import type { DocumentSession, DocumentViewport } from './document-core/document.js';
+import { DocumentSaveCoordinator } from './document-core/save-coordinator.js';
 import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1, type PluginDataV2 } from './plugin-data.js';
 import { readerPerformanceSnapshot } from './reader-performance.js';
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
 import { BUILTIN_PROFILES } from './reader/reading-profiles.js';
+import { SaveConflictModal, type SaveConflictAction } from './reader/save-conflict-modal.js';
+import { SaveRecoveryModal } from './reader/save-recovery-modal.js';
 import { AbyssDocumentsSettingTab } from './settings-tab.js';
 
 const manifest: PluginManifest = {
@@ -510,6 +514,49 @@ describe('AbyssDocumentsPlugin', () => {
       expect(command).not.toHaveProperty('hotkeys');
       expect(command.name).not.toContain('Abyss Documents');
     }
+  });
+
+  it('creates one plugin-wide verified PDF save coordinator without loading PDF.js', async () => {
+    const app = App.createConfigured__();
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const loadRuntime = vi.spyOn(PdfRuntimeLoader.prototype, 'load');
+
+    await plugin.onload();
+
+    expect(plugin).toHaveProperty('saveBoundary', expect.any(PdfWriteBoundary));
+    expect(plugin).toHaveProperty('saveCoordinator', expect.any(DocumentSaveCoordinator));
+    expect(loadRuntime).not.toHaveBeenCalled();
+  });
+
+  it('wires conflict and destructive recovery confirmations through native modals', async () => {
+    const app = App.createConfigured__();
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const registerView = vi.spyOn(plugin, 'registerView');
+    const openConflict = vi.spyOn(SaveConflictModal.prototype, 'open').mockImplementation(() => {});
+    vi.spyOn(SaveConflictModal.prototype, 'waitForChoice').mockResolvedValue('cancel');
+    const openRecovery = vi.spyOn(SaveRecoveryModal.prototype, 'open').mockImplementation(() => {});
+    vi.spyOn(SaveRecoveryModal.prototype, 'waitForChoice').mockResolvedValue(false);
+    await plugin.onload();
+    const creator = registerView.mock.calls.find(([type]) => type === DOCUMENT_VIEW_TYPE)?.[1];
+    if (creator === undefined) throw new Error('Expected the document view creator.');
+    const view = creator(WorkspaceLeaf.create2__(app).asOriginalType3__());
+    const controller = (
+      view as unknown as {
+        controller: {
+          services: {
+            resolveSaveConflict(path: string): Promise<SaveConflictAction>;
+            confirmSaveRecovery(path: string): Promise<boolean>;
+          };
+        };
+      }
+    ).controller;
+
+    await expect(controller.services.resolveSaveConflict('Books/Guide.pdf')).resolves.toBe(
+      'cancel',
+    );
+    await expect(controller.services.confirmSaveRecovery('Guide.pdf')).resolves.toBe(false);
+    expect(openConflict).toHaveBeenCalledOnce();
+    expect(openRecovery).toHaveBeenCalledOnce();
   });
 
   it('registers one native settings tab', async () => {

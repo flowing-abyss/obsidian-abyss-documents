@@ -4,7 +4,9 @@ import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentViewport } from '../../document-core/document.js';
 import { DocumentPasswordError } from '../../document-core/errors.js';
+import type { BaseToken } from '../../document-core/save-coordinator.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
+import type { PdfAnnotationEditor } from './pdf-annotation-editor.js';
 import type { PdfRuntime } from './pdf-runtime.js';
 import { PdfDocumentSession, type PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
@@ -361,5 +363,36 @@ describe('PdfDocumentSession', () => {
       name: 'DocumentCancelledError',
     });
     expect(viewportFactory).not.toHaveBeenCalled();
+  });
+
+  it('creates one native editable session only after an editor viewport exists', async () => {
+    const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+    const nativeEditor = {
+      onDirty: vi.fn(() => () => undefined),
+      save: vi.fn(async () => new Uint8Array([1])),
+    } as unknown as PdfAnnotationEditor;
+    const createdViewport = viewport() as DocumentViewport & {
+      readonly annotationEditor: PdfAnnotationEditor;
+    };
+    Object.assign(createdViewport, { annotationEditor: nativeEditor });
+    const fixture = sessionFixture();
+    fixture.viewportFactory.mockResolvedValue(createdViewport);
+    const configured = new PdfDocumentSession(
+      file('Books/Guide.pdf'),
+      fixture.document,
+      fixture.pdfjsViewer,
+      {
+        annotationCapabilities: fixture.annotationCapabilities,
+        viewportFactory: fixture.viewportFactory,
+        openedBaseToken: baseToken,
+      },
+    );
+
+    expect(configured.createNativeEditableSession(vi.fn())).toBeNull();
+    await configured.createViewport();
+    const first = configured.createNativeEditableSession(vi.fn());
+    expect(first).not.toBeNull();
+    expect(configured.createNativeEditableSession(vi.fn())).toBe(first);
+    await configured.close();
   });
 });

@@ -2,8 +2,10 @@ import { FileView, Notice, Plugin, type WorkspaceLeaf } from 'obsidian';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
+import { PdfWriteBoundary } from './adapters/pdf/pdf-write-boundary.js';
 import { AnnotationCache } from './annotation-cache.js';
 import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
+import { DocumentSaveCoordinator } from './document-core/save-coordinator.js';
 import { PluginDataStore, type MigrationDiagnostic, type PluginDataV2 } from './plugin-data.js';
 import {
   beginPluginActivation,
@@ -13,6 +15,9 @@ import {
 import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
 import { ReaderController, type ReaderProfileState } from './reader/reader-controller.js';
 import { ReaderShell } from './reader/reader-shell.js';
+import { SaveConflictModal } from './reader/save-conflict-modal.js';
+import { SaveFailureNoticeBoundary } from './reader/save-failure-boundary.js';
+import { SaveRecoveryModal } from './reader/save-recovery-modal.js';
 import { AbyssDocumentsSettingTab } from './settings-tab.js';
 
 export const PLUGIN_ID = 'abyss-documents';
@@ -109,6 +114,8 @@ function corePdfPath(leaf: WorkspaceLeaf): string | undefined {
 export default class AbyssDocumentsPlugin extends Plugin {
   data!: PluginDataV2;
   protected readonly runtimeLoader = new PdfRuntimeLoader();
+  protected saveBoundary!: PdfWriteBoundary;
+  protected saveCoordinator!: DocumentSaveCoordinator;
 
   override async onload(): Promise<void> {
     beginPluginActivation(this.manifest.version);
@@ -123,12 +130,20 @@ export default class AbyssDocumentsPlugin extends Plugin {
     const store = new PluginDataStore(this);
     this.data = await store.load();
     this.reportMigrationDiagnostics(store.migrationResult.diagnostics);
-    const registry = new DocumentAdapterRegistry([
-      new PdfDocumentAdapter(this.app.vault, this.runtimeLoader, createPdfDocumentViewport),
-    ]);
+    const pdfAdapter = new PdfDocumentAdapter(
+      this.app.vault,
+      this.runtimeLoader,
+      createPdfDocumentViewport,
+    );
+    const registry = new DocumentAdapterRegistry([pdfAdapter]);
+    this.saveBoundary = new PdfWriteBoundary(this.app.vault);
+    this.saveCoordinator = new DocumentSaveCoordinator(this.saveBoundary, (bytes, signal) =>
+      pdfAdapter.verifySavedBytes(bytes, signal),
+    );
     const annotationCache = new AnnotationCache(this.app.vault.adapter, this.app.vault.configDir);
     this.registerAnnotationCacheInvalidation(annotationCache);
     const profileState = this.createReaderState(store);
+    const saveFailureBoundary = new SaveFailureNoticeBoundary();
     const services = {
       createController: () =>
         new ReaderController(
@@ -138,7 +153,23 @@ export default class AbyssDocumentsPlugin extends Plugin {
               sidebarWidth: store.snapshot.view.sidebarWidth,
             }),
           profileState,
-          { annotationCache },
+          {
+            annotationCache,
+            saveFailureBoundary,
+            saveCoordinator: this.saveCoordinator,
+            resolveSaveConflict: (path) => {
+              const modal = new SaveConflictModal(this.app, path.split('/').pop() ?? path);
+              const choice = modal.waitForChoice();
+              modal.open();
+              return choice;
+            },
+            confirmSaveRecovery: (path) => {
+              const modal = new SaveRecoveryModal(this.app, path.split('/').pop() ?? path);
+              const choice = modal.waitForChoice();
+              modal.open();
+              return choice;
+            },
+          },
         ),
     };
     this.addSettingTab(

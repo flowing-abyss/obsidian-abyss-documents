@@ -17,6 +17,14 @@ module.exports = {
       from: {},
       to: { dependencyTypes: ['npm-no-pkg'] },
     },
+    {
+      name: 'core-and-reader-do-not-depend-on-adapters',
+      comment:
+        'Document Core owns save contracts; reader UI consumes Core rather than PDF adapters.',
+      severity: 'error',
+      from: { path: '^src/(document-core|reader)/' },
+      to: { path: '^src/adapters/' },
+    },
   ],
   options: {
     doNotFollow: { path: 'node_modules' },

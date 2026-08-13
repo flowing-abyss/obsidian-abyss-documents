@@ -104,10 +104,16 @@ export class PdfAnnotationEditor {
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
     this.requireManager();
+    if (this.saving) {
+      throw new DOMException('The PDF annotation editor is capturing a save.', 'InvalidStateError');
+    }
     const mode = this.modeFor(tool);
+    await this.changeMode(mode, options);
+  }
+
+  private async changeMode(mode: number, options: PdfAnnotationToolOptions = {}): Promise<void> {
     if (this.dependencies.viewer.annotationEditorMode === mode) return;
     this.cancelPendingModeChange('The PDF annotation tool change was superseded.');
-
     await new Promise<void>((resolve, reject) => {
       const listener = (event: unknown): void => {
         const data = record(event);
@@ -154,23 +160,97 @@ export class PdfAnnotationEditor {
 
   async save(signal: AbortSignal): Promise<Uint8Array> {
     const manager = this.requireManager();
+    this.beginSave(signal);
+    const revision = this.lifecycleRevision;
+    let outcome: { bytes: Uint8Array | null; failure: Error | null } = {
+      bytes: null,
+      failure: null,
+    };
+    let restoredMode: number | null = null;
+    try {
+      restoredMode = await this.pauseForSave(manager, revision, signal);
+      outcome = { bytes: await this.captureBytes(manager, revision, signal), failure: null };
+    } catch (cause) {
+      outcome = { bytes: null, failure: asError(cause) };
+    } finally {
+      outcome.failure = await this.restoreAfterSave(
+        manager,
+        revision,
+        restoredMode,
+        outcome.failure,
+      );
+      this.saving = false;
+    }
+    if (outcome.failure !== null) throw outcome.failure;
+    if (outcome.bytes === null) throw this.staleError();
+    return outcome.bytes;
+  }
+
+  private beginSave(signal: AbortSignal): void {
     if (this.saving) {
       throw new DOMException('A PDF annotation save is already active.', 'InvalidStateError');
     }
     this.throwIfAborted(signal);
     this.saving = true;
-    const revision = this.lifecycleRevision;
-    try {
-      manager.endCurrentEditing();
-      this.throwIfAborted(signal);
-      if (manager !== this.manager || revision !== this.lifecycleRevision) throw this.staleError();
-      const bytes = await this.dependencies.pdf.saveDocument();
-      this.throwIfAborted(signal);
-      if (manager !== this.manager || revision !== this.lifecycleRevision) throw this.staleError();
-      return Uint8Array.from(bytes);
-    } finally {
-      this.saving = false;
+  }
+
+  private async pauseForSave(
+    manager: PdfAnnotationUiManager,
+    revision: number,
+    signal: AbortSignal,
+  ): Promise<number> {
+    manager.endCurrentEditing();
+    this.requireCurrentSave(manager, revision, signal);
+    const currentMode = this.dependencies.viewer.annotationEditorMode;
+    if (typeof currentMode !== 'number') {
+      throw new DOMException('The PDF annotation editor mode is unavailable.', 'InvalidStateError');
     }
+    if (currentMode !== this.dependencies.annotationEditorType.NONE) {
+      await this.changeMode(this.dependencies.annotationEditorType.NONE);
+    }
+    this.requireCurrentSave(manager, revision, signal);
+    return currentMode;
+  }
+
+  private async captureBytes(
+    manager: PdfAnnotationUiManager,
+    revision: number,
+    signal: AbortSignal,
+  ): Promise<Uint8Array> {
+    const bytes = await this.dependencies.pdf.saveDocument();
+    this.requireCurrentSave(manager, revision, signal);
+    return Uint8Array.from(bytes);
+  }
+
+  private async restoreAfterSave(
+    manager: PdfAnnotationUiManager,
+    revision: number,
+    mode: number | null,
+    failure: Error | null,
+  ): Promise<Error | null> {
+    if (
+      mode === null ||
+      manager !== this.manager ||
+      revision !== this.lifecycleRevision ||
+      this.destroyed
+    ) {
+      return failure;
+    }
+    try {
+      await this.changeMode(mode);
+      return failure;
+    } catch (cause) {
+      return failure ?? asError(cause);
+    }
+  }
+
+  private requireCurrentSave(
+    manager: PdfAnnotationUiManager,
+    revision: number,
+    signal: AbortSignal,
+  ): void {
+    this.throwIfAborted(signal);
+    if (manager !== this.manager || revision !== this.lifecycleRevision) throw this.staleError();
   }
 
   detachFromDocument(): void {
@@ -311,4 +391,11 @@ export class PdfAnnotationEditor {
   private staleError(): DOMException {
     return new DOMException('The PDF annotation editor changed during save.', 'InvalidStateError');
   }
+}
+
+function asError(cause: unknown): Error {
+  if (typeof cause === 'object' && cause !== null && 'name' in cause && 'message' in cause) {
+    return cause as Error;
+  }
+  return cause instanceof Error ? cause : new Error(String(cause));
 }

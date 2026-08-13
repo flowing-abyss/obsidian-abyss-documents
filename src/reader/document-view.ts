@@ -9,6 +9,7 @@ export interface ReaderViewController {
   showOutline(): void;
   searchDocument(): void;
   refreshReadingSettings(): void;
+  saveDocument(): Promise<void>;
 }
 
 export interface AbyssDocumentViewServices {
@@ -26,6 +27,12 @@ export class AbyssDocumentView extends FileView {
     this.scope = new Scope(this.app.scope);
     this.scope.register(['Mod'], 'f', () => {
       this.controller.searchDocument();
+      return false;
+    });
+    this.scope.register(['Mod'], 's', () => {
+      this.saveAtBoundary().catch((cause: unknown) => {
+        console.error('[abyss-documents] Failed to contain PDF save boundary', { cause });
+      });
       return false;
     });
     this.registerDomEvent(this.contentEl, 'click', (event) => {
@@ -83,6 +90,15 @@ export class AbyssDocumentView extends FileView {
 
   refreshReadingSettings(): void {
     this.controller.refreshReadingSettings();
+  }
+
+  private async saveAtBoundary(): Promise<void> {
+    try {
+      await this.controller.saveDocument();
+    } catch (cause) {
+      const path = this.file?.path ?? null;
+      console.error('[abyss-documents] Failed to save PDF annotations', { path, cause });
+    }
   }
 
   private async openAtBoundary(file: TFile, generation: number): Promise<void> {

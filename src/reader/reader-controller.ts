@@ -1,5 +1,6 @@
 import { Notice, type TFile } from 'obsidian';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
+import { AutosaveScheduler, type SaveReason } from '../autosave-scheduler.js';
 import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
 import type {
@@ -16,10 +17,21 @@ import {
   type ReaderScale,
   type ReadingProfileId,
 } from '../document-core/reading.js';
+import {
+  SaveConflictError,
+  isNativeSaveRecoveryFailure,
+  type BaseToken,
+  type DocumentSaveCoordinator,
+  type NativeEditableSaveSession,
+  type NativeSaveRecoveryFailure,
+  type VerifiedReloadListener,
+} from '../document-core/save-coordinator.js';
 import { markReaderPerformance, markReaderPerformanceOnce } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
+import type { SaveConflictAction } from './save-conflict-modal.js';
+import { SaveFailureNoticeBoundary } from './save-failure-boundary.js';
 import type { ReaderSidebarCallbacks, ReaderSidebarTab } from './sidebar.js';
 
 export type ShellFactory = (
@@ -54,6 +66,23 @@ interface LayoutPolicySnapshot {
 interface ReaderControllerServices {
   readonly annotationCache?: AnnotationCache;
   readonly profileService?: ReadingProfileService;
+  readonly saveCoordinator?: Pick<DocumentSaveCoordinator, 'save'> &
+    Partial<Pick<DocumentSaveCoordinator, 'inspectRecovery' | 'recover' | 'register'>>;
+  readonly resolveSaveConflict?: (path: string) => Promise<SaveConflictAction>;
+  readonly confirmSaveRecovery?: (path: string, current: BaseToken) => Promise<boolean>;
+  readonly saveFailureBoundary?: SaveFailureNoticeBoundary;
+}
+
+interface NativeEditableSessionFactory extends DocumentSession {
+  createNativeEditableSession(
+    onRevision: (revision: number) => void,
+  ): NativeEditableSaveSession | null;
+}
+
+class SaveDiscardedError extends SaveConflictError {
+  constructor(conflict: SaveConflictError) {
+    super(conflict.path, conflict.expected, conflict.actual);
+  }
 }
 
 export class ReaderController {
@@ -78,16 +107,29 @@ export class ReaderController {
   private annotationsLoadingFor: DocumentSession | null = null;
   private readonly annotationCache: AnnotationCache | null;
   private readonly profileService: ReadingProfileService;
+  private readonly saveCoordinator: ReaderControllerServices['saveCoordinator'];
+  private readonly saveFailureBoundary: SaveFailureNoticeBoundary;
+  private nativeSaveSession: NativeEditableSaveSession | null = null;
+  private autosave: AutosaveScheduler | null = null;
+  private saveAbort: AbortController | null = null;
+  private recoveryAbort: AbortController | null = null;
+  private unregisterSaveBroadcast: (() => void) | null = null;
+  private lastAutosaveFailureKey: string | null = null;
+  private readonly saveFailureOwner = {};
+  private currentFile: TFile | null = null;
+  private currentHost: HTMLElement | null = null;
 
   constructor(
     private readonly registry: DocumentAdapterRegistry,
     private readonly createShell: ShellFactory = (host, onIntent) =>
       new ReaderShell(host, onIntent),
     private readonly profileState: ReaderProfileState = DEFAULT_PROFILE_STATE,
-    services: ReaderControllerServices = {},
+    private readonly services: ReaderControllerServices = {},
   ) {
     this.annotationCache = services.annotationCache ?? null;
     this.profileService = services.profileService ?? new ReadingProfileService();
+    this.saveCoordinator = services.saveCoordinator;
+    this.saveFailureBoundary = services.saveFailureBoundary ?? new SaveFailureNoticeBoundary();
   }
 
   open(file: TFile, host: HTMLElement): Promise<void> {
@@ -137,6 +179,10 @@ export class ReaderController {
     }
   }
 
+  saveDocument(): Promise<void> {
+    return this.autosave?.flush() ?? Promise.resolve();
+  }
+
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.queue.then(operation, operation);
     this.queue = result.then(
@@ -177,13 +223,44 @@ export class ReaderController {
       await viewport.mount(shell.documentHost);
       this.throwIfCancelled(file, signal);
       unsubscribeViewport = this.activate(session, viewport, shell);
+      this.currentFile = file;
+      this.currentHost = host;
+      delete host.dataset['saveConflict'];
+      this.saveFailureBoundary.clear(this.saveFailureOwner, file.path);
     } catch (cause) {
-      let cleanupFailure = this.tryCleanup(unsubscribeViewport);
-      const lifecycleFailure = await this.releasePartial(viewport, session);
-      cleanupFailure ??= lifecycleFailure;
+      const cleanupFailure = await this.cleanupFailedMount(
+        shell,
+        session,
+        viewport,
+        unsubscribeViewport,
+      );
       this.reportPartialCleanupFailure(file.path, cleanupFailure);
       this.throwOpenFailure(file, signal, cause);
     }
+  }
+
+  private async cleanupFailedMount(
+    shell: ReaderShell,
+    session: DocumentSession | null,
+    viewport: DocumentViewport | null,
+    unsubscribeViewport: (() => void) | null,
+  ): Promise<Error | undefined> {
+    if (this.session === session) {
+      this.session = null;
+      this.viewport = null;
+      this.shell = null;
+      this.unsubscribeViewport = null;
+      this.resetReaderState();
+      this.releaseSaveLifecycle();
+    }
+    let failure = this.tryCleanup(unsubscribeViewport);
+    failure ??= await this.releasePartial(viewport, session);
+    try {
+      shell.destroy();
+    } catch (cause) {
+      failure ??= this.asError(cause);
+    }
+    return failure;
   }
 
   private activate(
@@ -230,7 +307,236 @@ export class ReaderController {
     this.session = session;
     this.viewport = viewport;
     this.unsubscribeViewport = unsubscribeViewport;
+    this.activateNativeSave(session);
     return unsubscribeViewport;
+  }
+
+  private activateNativeSave(session: DocumentSession): void {
+    if (this.saveCoordinator === undefined || !isNativeEditableSessionFactory(session)) return;
+    let scheduler: AutosaveScheduler | null = null;
+    const native = session.createNativeEditableSession((revision) => {
+      scheduler?.markDirty(revision);
+    });
+    if (native === null) return;
+    scheduler = new AutosaveScheduler(
+      async (revision, _reason) => {
+        const abort = new AbortController();
+        this.saveAbort = abort;
+        try {
+          const request = {
+            path: session.descriptor.path,
+            baseToken: native.baseToken,
+            revision,
+            source: native,
+          } as const;
+          try {
+            await this.saveCoordinator?.save(request, abort.signal);
+          } catch (cause) {
+            if (!(cause instanceof SaveConflictError) || this.optionsConflictResolver === null) {
+              throw cause;
+            }
+            const action = await this.optionsConflictResolver(session.descriptor.path);
+            if (action === 'overwrite') {
+              await this.saveCoordinator?.save({ ...request, overwrite: true }, abort.signal);
+            } else {
+              if (action === 'reload-discard') {
+                this.reloadCurrentAfterConflict();
+                throw new SaveDiscardedError(cause);
+              }
+              throw cause;
+            }
+          }
+          this.lastAutosaveFailureKey = null;
+          this.saveFailureBoundary.clear(this.saveFailureOwner, session.descriptor.path);
+        } finally {
+          if (this.saveAbort === abort) this.saveAbort = null;
+        }
+      },
+      {
+        onFailure: (cause, _generation, reason) => {
+          if (cause instanceof SaveDiscardedError) return;
+          this.reportSaveFailure(session.descriptor.path, cause, reason);
+        },
+      },
+    );
+    this.nativeSaveSession = native;
+    this.autosave = scheduler;
+    this.registerNativeSaveBroadcast(session, native, scheduler);
+  }
+
+  private registerNativeSaveBroadcast(
+    session: DocumentSession,
+    native: NativeEditableSaveSession,
+    scheduler: AutosaveScheduler,
+  ): void {
+    const coordinator = this.saveCoordinator as Partial<Pick<DocumentSaveCoordinator, 'register'>>;
+    if (typeof coordinator.register !== 'function') return;
+    const listener: VerifiedReloadListener = (token, _revision, source) => {
+      if (source !== native) {
+        if (native.isDirty) {
+          scheduler.pauseForFailure(
+            new SaveConflictError(session.descriptor.path, native.baseToken, token),
+            native.pendingRevision,
+          );
+        } else {
+          this.reloadCurrentAfterConflict();
+        }
+      } else if (this.nativeSaveSession === native && 'acceptVerifiedReload' in native) {
+        (
+          native as NativeEditableSaveSession & { acceptVerifiedReload(token: unknown): void }
+        ).acceptVerifiedReload(token);
+      }
+    };
+    try {
+      this.unregisterSaveBroadcast = coordinator.register(session.descriptor.path, listener);
+    } catch (cause) {
+      this.nativeSaveSession = null;
+      this.autosave = null;
+      scheduler.destroy();
+      try {
+        native.destroy();
+      } catch (cleanupCause) {
+        this.reportPartialCleanupFailure(session.descriptor.path, this.asError(cleanupCause));
+      }
+      throw cause;
+    }
+  }
+
+  private get optionsConflictResolver(): ((path: string) => Promise<SaveConflictAction>) | null {
+    return this.services.resolveSaveConflict ?? null;
+  }
+
+  private reloadCurrentAfterConflict(): void {
+    const file = this.currentFile;
+    const host = this.currentHost;
+    if (file === null || host === null) return;
+    this.reloadExternalFile(file, host);
+  }
+
+  private reloadExternalFile(file: TFile, host: HTMLElement): void {
+    queueMicrotask(() => {
+      void this.open(file, host).catch((cause: unknown) => {
+        host.dataset['saveConflict'] = 'true';
+        const reason = this.reason(cause);
+        this.saveFailureBoundary.report({
+          ownerId: this.saveFailureOwner,
+          host,
+          path: file.path,
+          reason,
+          retryAction: () => {
+            this.reloadExternalFile(file, host);
+          },
+          label: 'Could not reload updated PDF',
+        });
+        console.error('[abyss-documents] Failed to reload externally modified PDF', {
+          path: file.path,
+          cause,
+        });
+      });
+    });
+  }
+
+  private reportSaveFailure(path: string, cause: unknown, reason: SaveReason): void {
+    const failureReason = this.reason(cause);
+    const key = `${path}\u0000${failureReason}`;
+    if (key !== this.lastAutosaveFailureKey) {
+      const recovery = this.recoveryFailure(cause);
+      if (recovery !== null) {
+        this.reportRecoveryNotice(path, failureReason, recovery);
+      } else {
+        this.saveFailureBoundary.report({
+          ownerId: this.saveFailureOwner,
+          host: this.currentHost ?? document.body,
+          path,
+          reason: failureReason,
+          retryAction: () => {
+            const retrying = this.autosave?.retry();
+            if (retrying !== undefined) void retrying.catch(() => undefined);
+          },
+          ...(reason === 'manual' ? { label: 'Could not save PDF annotations' } : {}),
+        });
+      }
+      this.lastAutosaveFailureKey = key;
+    }
+    console.error(
+      reason === 'manual'
+        ? '[abyss-documents] Failed to save PDF annotations'
+        : '[abyss-documents] Failed to autosave PDF annotations',
+      { path, cause },
+    );
+  }
+
+  private reportRecoveryNotice(
+    path: string,
+    failureReason: string,
+    recovery: NativeSaveRecoveryFailure,
+  ): void {
+    if (this.currentHost !== null) this.currentHost.dataset['saveConflict'] = 'true';
+    this.saveFailureBoundary.report({
+      ownerId: this.saveFailureOwner,
+      host: this.currentHost ?? document.body,
+      path,
+      reason: failureReason,
+      retryAction: () => {
+        void this.restoreLastVerifiedCopy(recovery).catch(() => undefined);
+      },
+      label: 'PDF save could not be verified',
+      actionLabel: 'Restore last verified copy',
+    });
+  }
+
+  private recoveryFailure(cause: unknown): NativeSaveRecoveryFailure | null {
+    const coordinator = this.saveCoordinator;
+    if (
+      !isNativeSaveRecoveryFailure(cause) ||
+      cause.restored ||
+      cause.preimage === null ||
+      coordinator?.inspectRecovery === undefined ||
+      coordinator.recover === undefined ||
+      this.services.confirmSaveRecovery === undefined
+    )
+      return null;
+    return cause;
+  }
+
+  private async restoreLastVerifiedCopy(failure: NativeSaveRecoveryFailure): Promise<void> {
+    const coordinator = this.saveCoordinator;
+    const confirm = this.services.confirmSaveRecovery;
+    if (
+      coordinator?.inspectRecovery === undefined ||
+      coordinator.recover === undefined ||
+      confirm === undefined
+    )
+      return;
+    this.recoveryAbort?.abort(new DOMException('A newer PDF recovery started.', 'AbortError'));
+    const abort = new AbortController();
+    this.recoveryAbort = abort;
+    try {
+      const current = await coordinator.inspectRecovery(failure, abort.signal);
+      if (!(await confirm(failure.path, current))) return;
+      await coordinator.recover(failure, current, abort.signal);
+      this.finishRecovery(failure.path);
+    } catch (cause) {
+      this.reportRecoveryFailure(failure.path, cause, abort.signal);
+      throw cause;
+    } finally {
+      if (this.recoveryAbort === abort) this.recoveryAbort = null;
+    }
+  }
+
+  private finishRecovery(path: string): void {
+    this.lastAutosaveFailureKey = null;
+    this.saveFailureBoundary.clear(this.saveFailureOwner, path);
+    if (this.currentHost !== null) delete this.currentHost.dataset['saveConflict'];
+    this.reloadCurrentAfterConflict();
+  }
+
+  private reportRecoveryFailure(path: string, cause: unknown, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    console.error('[abyss-documents] Failed to restore the last verified PDF copy', {
+      path,
+      cause,
+    });
   }
 
   private reportPartialCleanupFailure(path: string, cause: Error | undefined): void {
@@ -256,16 +562,8 @@ export class ReaderController {
     this.session = null;
     this.shell = null;
     this.unsubscribeViewport = null;
-    this.outlineLoadedFor = null;
-    this.outlineLoadingFor = null;
-    this.annotationAbort?.abort();
-    this.annotationAbort = null;
-    this.annotationsLoadedFor = null;
-    this.annotationsLoadingFor = null;
-    this.currentSearchQuery = '';
-    this.navigationPageIndex = 0;
-    this.pendingNavigationPageIndex = null;
-    this.navigationRequestRevision += 1;
+    this.resetReaderState();
+    this.releaseSaveLifecycle();
 
     let failure = this.tryCleanup(unsubscribeViewport);
     const lifecycleFailure = await this.releasePartial(viewport, session);
@@ -276,6 +574,36 @@ export class ReaderController {
       failure ??= this.asError(cause);
     }
     if (failure !== undefined) throw failure;
+  }
+
+  private resetReaderState(): void {
+    this.outlineLoadedFor = null;
+    this.outlineLoadingFor = null;
+    this.annotationAbort?.abort();
+    this.annotationAbort = null;
+    this.annotationsLoadedFor = null;
+    this.annotationsLoadingFor = null;
+    this.currentSearchQuery = '';
+    this.navigationPageIndex = 0;
+    this.pendingNavigationPageIndex = null;
+    this.navigationRequestRevision += 1;
+    this.currentFile = null;
+    this.currentHost = null;
+  }
+
+  private releaseSaveLifecycle(): void {
+    this.autosave?.destroy();
+    this.autosave = null;
+    this.saveAbort?.abort(new DOMException('The PDF view was closed.', 'AbortError'));
+    this.saveAbort = null;
+    this.recoveryAbort?.abort(new DOMException('The PDF view was closed.', 'AbortError'));
+    this.recoveryAbort = null;
+    this.unregisterSaveBroadcast?.();
+    this.unregisterSaveBroadcast = null;
+    this.nativeSaveSession?.destroy();
+    this.nativeSaveSession = null;
+    this.lastAutosaveFailureKey = null;
+    this.saveFailureBoundary.release(this.saveFailureOwner);
   }
 
   private async releasePartial(
@@ -792,6 +1120,15 @@ export class ReaderController {
     }
     return String(cause);
   }
+}
+
+function isNativeEditableSessionFactory(
+  session: DocumentSession,
+): session is NativeEditableSessionFactory {
+  return (
+    'createNativeEditableSession' in session &&
+    typeof session.createNativeEditableSession === 'function'
+  );
 }
 
 interface AnnotationListingSession {

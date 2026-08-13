@@ -38,14 +38,24 @@ function controller() {
   const showOutline = vi.fn();
   const searchDocument = vi.fn();
   const refreshReadingSettings = vi.fn();
+  const saveDocument = vi.fn(async () => undefined);
   const reader: ReaderViewController = {
     open,
     close,
     refreshReadingSettings,
+    saveDocument,
     searchDocument,
     showOutline,
   };
-  return { close, open, reader, refreshReadingSettings, searchDocument, showOutline };
+  return {
+    close,
+    open,
+    reader,
+    refreshReadingSettings,
+    saveDocument,
+    searchDocument,
+    showOutline,
+  };
 }
 
 describe('AbyssDocumentView', () => {
@@ -177,6 +187,51 @@ describe('AbyssDocumentView', () => {
     if (callback === undefined) throw new Error('Expected the scoped search callback.');
     expect(callback(new KeyboardEvent('keydown'), {} as never)).toBe(false);
     expect(reader.searchDocument).toHaveBeenCalledOnce();
+  });
+
+  it('registers view-local Mod+S and leaves Notice ownership to the shared controller boundary', async () => {
+    const reader = controller();
+    const cause = new Error('vault rejected write');
+    reader.saveDocument.mockRejectedValue(cause);
+    const register = vi.spyOn(Scope.prototype, 'register');
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const fixture = viewFixture(reader.reader);
+
+    const callback = register.mock.calls.find(([, key]) => key === 's')?.[2];
+    if (callback === undefined) throw new Error('Expected the scoped save callback.');
+    expect(callback(new KeyboardEvent('keydown'), {} as never)).toBe(false);
+    await vi.waitFor(() => {
+      expect(reader.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    expect(notice).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to save PDF annotations', {
+      path: null,
+      cause,
+    });
+    expect(fixture.view.contentEl.querySelector('[data-autosave]')).toBeNull();
+  });
+
+  it('contains an unexpected rejection at the view-local save callback', async () => {
+    const reader = controller();
+    const cause = new Error('unexpected boundary rejection');
+    const register = vi.spyOn(Scope.prototype, 'register');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const fixture = viewFixture(reader.reader);
+    Object.assign(fixture.view, {
+      saveAtBoundary: vi.fn(async () => Promise.reject(cause)),
+    });
+    const callback = register.mock.calls.find(([, key]) => key === 's')?.[2];
+    if (callback === undefined) throw new Error('Expected the scoped save callback.');
+
+    callback(new KeyboardEvent('keydown'), {} as never);
+
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to contain PDF save boundary', {
+        cause,
+      });
+    });
   });
 
   it('ignores unrelated clicks and presents a safe reason for a non-error failure', async () => {

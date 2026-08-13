@@ -12,6 +12,14 @@ import type {
 import { DocumentOpenError } from '../document-core/errors.js';
 import type { ReaderLayout, ReadingProfileId } from '../document-core/reading.js';
 import {
+  NATIVE_RECOVERY_SOURCE,
+  SaveConflictError,
+  type BaseToken,
+  type NativeDocumentSaveRequest,
+  type NativeEditableSaveSession,
+  type VerifiedReloadListener,
+} from '../document-core/save-coordinator.js';
+import {
   beginPluginActivation,
   endPluginActivation,
   readerPerformanceSnapshot,
@@ -1374,5 +1382,650 @@ describe('ReaderController', () => {
       pageIndex: 1,
       cause: navigationCause,
     });
+  });
+
+  it('connects native dirty revisions to invisible autosave and force-save verification', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/First.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdViewport = viewport();
+      const createdSession = session(pdf.path, createdViewport);
+      const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      const dirtyListeners: Array<(revision: number) => void> = [];
+      const source: NativeEditableSaveSession = {
+        baseToken,
+        pendingRevision: 1,
+        isDirty: true,
+        prepare: vi.fn(async () => ({ revision: 1, baseToken, bytes: new Uint8Array([1]) })),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      };
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          dirtyListeners.push(onRevision);
+          return source;
+        },
+      });
+      const save = vi.fn(async (request: NativeDocumentSaveRequest) => ({
+        verified: true as const,
+        generation: request.revision,
+        sha256: 'b'.repeat(64),
+        byteSize: 5,
+        committedAt: '2026-08-13T00:00:00.000Z' as never,
+      }));
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        undefined,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+
+      dirtyListeners[0]?.(1);
+      await vi.advanceTimersByTimeAsync(749);
+      expect(save).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(save).toHaveBeenCalledOnce();
+      expect(save.mock.calls[0]?.[0]).toMatchObject({ path: pdf.path, revision: 1, source });
+
+      dirtyListeners[0]?.(2);
+      await controller.saveDocument();
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(save.mock.calls[1]?.[0]).toMatchObject({ revision: 2 });
+      expect(document.querySelector('[data-autosave]')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels pending autosave on close without promising an unload write', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/First.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdSession = session(pdf.path);
+      const dirtyListeners: Array<(revision: number) => void> = [];
+      const source = {
+        baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+        pendingRevision: 1,
+        isDirty: true,
+        prepare: vi.fn(),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      } satisfies NativeEditableSaveSession;
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          dirtyListeners.push(onRevision);
+          return source;
+        },
+      });
+      const save = vi.fn();
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        undefined,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+      dirtyListeners[0]?.(1);
+
+      await controller.close();
+      await vi.runAllTimersAsync();
+
+      expect(save).not.toHaveBeenCalled();
+      expect(source.destroy).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('accepts an own-view token but never destroys pending edits after another view saves', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+    const acceptVerifiedReload = vi.fn();
+    const source = {
+      baseToken,
+      pendingRevision: 1,
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload,
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(createdSession.value, {
+      createNativeEditableSession() {
+        return source;
+      },
+    });
+    let broadcast: VerifiedReloadListener | undefined;
+    const unregister = vi.fn();
+    const register = vi.fn((_path: string, listener: VerifiedReloadListener) => {
+      broadcast = listener;
+      return unregister;
+    });
+    const createdAdapter = adapterFor(pdf.path, createdSession);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([createdAdapter.value]),
+      undefined,
+      undefined,
+      { saveCoordinator: { save: vi.fn(), register } },
+    );
+    await controller.open(pdf, createDiv());
+    if (broadcast === undefined) throw new Error('Expected a verified-save listener.');
+    const verifiedToken: BaseToken = { sha256: 'b'.repeat(64), byteSize: 5, mtime: 20 };
+
+    await broadcast(verifiedToken, 1, source);
+    expect(acceptVerifiedReload).toHaveBeenCalledWith(verifiedToken);
+
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    await broadcast(verifiedToken, 2, {
+      prepare: vi.fn(),
+      commit: vi.fn(),
+    });
+    await Promise.resolve();
+    expect(createdAdapter.open).toHaveBeenCalledOnce();
+    expect(source.destroy).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledOnce();
+    expect(unregister).not.toHaveBeenCalled();
+  });
+
+  it('keeps dirty edits conflicted and reloads a clean peer after explicit recovery broadcasts', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+      pendingRevision: 1,
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession() {
+        return source;
+      },
+    });
+    let broadcast: VerifiedReloadListener | undefined;
+    const createdAdapter = adapterFor(pdf.path, createdSession);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([createdAdapter.value]),
+      undefined,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    await controller.open(pdf, createDiv());
+    if (broadcast === undefined) throw new Error('Expected a verified-save listener.');
+    const recovered = { sha256: 'b'.repeat(64), byteSize: 5, mtime: 20 };
+
+    await broadcast(recovered, 0, NATIVE_RECOVERY_SOURCE);
+    expect(createdAdapter.open).toHaveBeenCalledOnce();
+    expect(source.destroy).not.toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledOnce();
+
+    Object.defineProperty(source, 'isDirty', { value: false });
+    await broadcast(recovered, 0, NATIVE_RECOVERY_SOURCE);
+    await vi.waitFor(() => {
+      expect(createdAdapter.open).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('shows actionable conflict state when clean-peer automatic reload fails', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+      pendingRevision: 0,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession() {
+        return source;
+      },
+    });
+    let broadcast: VerifiedReloadListener | undefined;
+    const createdAdapter = adapterFor(pdf.path, createdSession);
+    createdAdapter.open
+      .mockResolvedValueOnce(createdSession.value)
+      .mockRejectedValueOnce(new Error('reload parser failed'))
+      .mockResolvedValueOnce(createdSession.value);
+    const host = createDiv();
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([createdAdapter.value]),
+      undefined,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    await controller.open(pdf, host);
+    if (broadcast === undefined) throw new Error('Expected a verified-save listener.');
+
+    await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 20 }, 1, {
+      prepare: vi.fn(),
+      commit: vi.fn(),
+    });
+    await vi.waitFor(() => {
+      expect(createdAdapter.open).toHaveBeenCalledTimes(2);
+    });
+
+    expect(host.dataset['saveConflict']).toBe('true');
+    const message = notice.mock.calls[0]?.[0];
+    expect(message).toBeInstanceOf(DocumentFragment);
+    const retry = (message as DocumentFragment).querySelector<HTMLButtonElement>('button');
+    expect(retry?.textContent).toBe('Retry');
+    retry?.click();
+    await vi.waitFor(() => {
+      expect(createdAdapter.open).toHaveBeenCalledTimes(3);
+    });
+    expect(host.dataset['saveConflict']).toBeUndefined();
+  });
+
+  it('requires explicit conflict action before overwrite and forwards the destructive flag', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const listeners: Array<(revision: number) => void> = [];
+    const baseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+    const source = {
+      baseToken,
+      pendingRevision: 1,
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession(onRevision: (revision: number) => void) {
+        listeners.push(onRevision);
+        return source;
+      },
+    });
+    const conflict = new SaveConflictError(pdf.path, baseToken, {
+      sha256: 'c'.repeat(64),
+      byteSize: 9,
+      mtime: 30,
+    });
+    const save = vi
+      .fn<(request: NativeDocumentSaveRequest) => Promise<never>>()
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce({} as never);
+    const resolveSaveConflict = vi.fn(async () => 'overwrite' as const);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      undefined,
+      undefined,
+      { saveCoordinator: { save }, resolveSaveConflict },
+    );
+    await controller.open(pdf, createDiv());
+    listeners[0]?.(1);
+
+    await controller.saveDocument();
+
+    expect(resolveSaveConflict).toHaveBeenCalledWith(pdf.path);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(save.mock.calls[0]?.[0].overwrite).not.toBe(true);
+    expect(save.mock.calls[1]?.[0].overwrite).toBe(true);
+  });
+
+  it('pauses failed background autosave with one deduplicated Notice and diagnostic', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/First.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdSession = session(pdf.path);
+      const listeners: Array<(revision: number) => void> = [];
+      const source = {
+        baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+        pendingRevision: 1,
+        isDirty: true,
+        prepare: vi.fn(),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      } satisfies NativeEditableSaveSession;
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          listeners.push(onRevision);
+          return source;
+        },
+      });
+      const cause = new Error('disk full');
+      const save = vi.fn(async () => Promise.reject(cause));
+      const notice = vi.spyOn(Notice.prototype, 'constructor__');
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        undefined,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+      listeners[0]?.(1);
+      await vi.advanceTimersByTimeAsync(750);
+
+      const message = notice.mock.calls[0]?.[0];
+      expect(message).toBeInstanceOf(DocumentFragment);
+      expect((message as DocumentFragment).textContent).toContain(
+        'Could not autosave PDF annotations: disk full',
+      );
+      expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to autosave PDF annotations', {
+        path: pdf.path,
+        cause,
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(notice).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exposes a real Retry action that resumes the paused scheduler snapshot', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/First.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdSession = session(pdf.path);
+      const listeners: Array<(revision: number) => void> = [];
+      const source = {
+        baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+        pendingRevision: 1,
+        isDirty: true,
+        prepare: vi.fn(),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      } satisfies NativeEditableSaveSession;
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          listeners.push(onRevision);
+          return source;
+        },
+      });
+      const save = vi.fn().mockRejectedValueOnce(new Error('disk full')).mockResolvedValueOnce({});
+      const notice = vi.spyOn(Notice.prototype, 'constructor__');
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        undefined,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+      listeners[0]?.(1);
+      await vi.advanceTimersByTimeAsync(750);
+      const message = notice.mock.calls[0]?.[0];
+      expect(message).toBeInstanceOf(DocumentFragment);
+      const retry = (message as DocumentFragment).querySelector<HTMLButtonElement>('button');
+      expect(retry?.textContent).toBe('Retry');
+
+      retry?.click();
+      await vi.waitFor(() => {
+        expect(save).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('routes a manual save failure through the shared actionable Retry boundary', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const listeners: Array<(revision: number) => void> = [];
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+      pendingRevision: 1,
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession(onRevision: (revision: number) => void) {
+        listeners.push(onRevision);
+        return source;
+      },
+    });
+    const save = vi.fn(async () => Promise.reject(new Error('manual disk failure')));
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      undefined,
+      undefined,
+      { saveCoordinator: { save } },
+    );
+    await controller.open(pdf, createDiv());
+    listeners[0]?.(1);
+
+    await expect(controller.saveDocument()).rejects.toThrow('manual disk failure');
+
+    const message = notice.mock.calls[0]?.[0];
+    expect(message).toBeInstanceOf(DocumentFragment);
+    expect((message as DocumentFragment).querySelector('button')?.textContent).toBe('Retry');
+  });
+
+  it('offers explicitly confirmed last-verified recovery for an ambiguous write', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const listeners: Array<(revision: number) => void> = [];
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+      pendingRevision: 1,
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession(onRevision: (revision: number) => void) {
+        listeners.push(onRevision);
+        return source;
+      },
+    });
+    const failure = Object.assign(new Error('ambiguous write'), {
+      path: pdf.path,
+      preimage: new Uint8Array([1, 2, 3, 4]),
+      preparedBytes: new Uint8Array([5, 6, 7]),
+      restored: false,
+    });
+    const current = { sha256: 'c'.repeat(64), byteSize: 2, mtime: 30 };
+    const inspectRecovery = vi.fn(async () => current);
+    const recover = vi.fn(async () => source.baseToken);
+    const confirmSaveRecovery = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      undefined,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(async () => Promise.reject(failure)),
+          inspectRecovery,
+          recover,
+        },
+        confirmSaveRecovery,
+      },
+    );
+    await controller.open(pdf, createDiv());
+    listeners[0]?.(1);
+    await expect(controller.saveDocument()).rejects.toBe(failure);
+    const message = notice.mock.calls[0]?.[0] as DocumentFragment;
+    const restore = message.querySelector<HTMLButtonElement>('button');
+    expect(restore?.textContent).toBe('Restore last verified copy');
+
+    restore?.click();
+    await vi.waitFor(() => {
+      expect(confirmSaveRecovery).toHaveBeenCalledOnce();
+    });
+    expect(recover).not.toHaveBeenCalled();
+    restore?.click();
+    await vi.waitFor(() => {
+      expect(confirmSaveRecovery).toHaveBeenCalledTimes(2);
+      expect(confirmSaveRecovery).toHaveBeenLastCalledWith(pdf.path, current);
+      expect(recover).toHaveBeenCalledWith(failure, current, expect.any(AbortSignal));
+    });
+  });
+
+  it.each(['cancel', 'reload-discard'] as const)(
+    'does not overwrite after a %s conflict action',
+    async (action) => {
+      const [pdf] = files('Books/First.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdSession = session(pdf.path);
+      const listeners: Array<(revision: number) => void> = [];
+      const baseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      const source = {
+        baseToken,
+        pendingRevision: 1,
+        isDirty: true,
+        prepare: vi.fn(),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      } satisfies NativeEditableSaveSession;
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          listeners.push(onRevision);
+          return source;
+        },
+      });
+      const save = vi.fn(async () =>
+        Promise.reject(
+          new SaveConflictError(pdf.path, baseToken, {
+            sha256: 'c'.repeat(64),
+            byteSize: 9,
+            mtime: 30,
+          }),
+        ),
+      );
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        undefined,
+        undefined,
+        { saveCoordinator: { save }, resolveSaveConflict: vi.fn(async () => action) },
+      );
+      await controller.open(pdf, createDiv());
+      listeners[0]?.(1);
+
+      await expect(controller.saveDocument()).rejects.toBeInstanceOf(SaveConflictError);
+      expect(save).toHaveBeenCalledOnce();
+      await Promise.resolve();
+    },
+  );
+
+  it('does not present Retry after an explicitly confirmed reload-discard', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const listeners: Array<(revision: number) => void> = [];
+    const baseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+    const source = {
+      baseToken,
+      pendingRevision: 1,
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession(onRevision: (revision: number) => void) {
+        listeners.push(onRevision);
+        return source;
+      },
+    });
+    const save = vi.fn(async () =>
+      Promise.reject(
+        new SaveConflictError(pdf.path, baseToken, {
+          sha256: 'b'.repeat(64),
+          byteSize: 5,
+          mtime: 20,
+        }),
+      ),
+    );
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      undefined,
+      undefined,
+      {
+        saveCoordinator: { save },
+        resolveSaveConflict: vi.fn(async () => 'reload-discard' as const),
+      },
+    );
+    await controller.open(pdf, createDiv());
+    listeners[0]?.(1);
+
+    await expect(controller.saveDocument()).rejects.toBeInstanceOf(SaveConflictError);
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('cleans a partially activated native save lifecycle when broadcast registration throws', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+      pendingRevision: 0,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession() {
+        return source;
+      },
+    });
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      undefined,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn(() => {
+            throw new Error('register rejected');
+          }),
+        },
+      },
+    );
+
+    const failure = await controller.open(pdf, createDiv()).catch((cause: unknown) => cause);
+    expect(failure).toBeInstanceOf(DocumentOpenError);
+    const activationCause = (failure as DocumentOpenError).cause;
+    expect(activationCause).toBeInstanceOf(Error);
+    expect((activationCause as Error).message).toBe('register rejected');
+    expect(source.destroy).toHaveBeenCalledOnce();
+    expect(createdViewport.destroy).toHaveBeenCalledOnce();
+    expect(createdSession.close).toHaveBeenCalledOnce();
+    await controller.close();
+    expect(createdViewport.destroy).toHaveBeenCalledOnce();
+    expect(createdSession.close).toHaveBeenCalledOnce();
   });
 });
