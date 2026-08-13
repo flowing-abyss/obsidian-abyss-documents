@@ -575,6 +575,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       rebindableViewer.setDocument(this.pdf);
       this.annotationEditorInstance?.resumeDocumentLifecycle();
     } catch (cause) {
+      this.annotationEditorInstance?.resumeDocumentLifecycle();
       const pageNumber = this.preservedViewState.pageNumber;
       this.clearPendingPagesInit();
       this.colorRebindActive = false;

@@ -806,6 +806,60 @@ describe('PdfDocumentViewport', () => {
     await expect(editor.save(new AbortController().signal)).rejects.toThrow('destroyed');
   });
 
+  it.each(['detach', 'reattach'] as const)(
+    'recovers manager lifecycle when profile %s throws without reviving the retired manager',
+    async (failurePoint) => {
+      const fixture = await mountedViewport(3);
+      const eventBus = fixture.runtime.state.eventBus;
+      const viewer = fixture.runtime.state.viewer;
+      const editor = fixture.viewport.annotationEditor;
+      if (eventBus === undefined || viewer === undefined || editor === null) {
+        throw new Error('Expected writable annotation viewer state.');
+      }
+      const retiredManager = annotationManager();
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: retiredManager });
+      eventBus.dispatch('pagesinit', {});
+      const originalSetDocument = viewer.setDocument.bind(viewer);
+      let calls = 0;
+      vi.spyOn(viewer, 'setDocument').mockImplementation((document) => {
+        calls += 1;
+        if (
+          (failurePoint === 'detach' && calls === 1) ||
+          (failurePoint === 'reattach' && calls === 2)
+        ) {
+          throw new Error(`${failurePoint} failed`);
+        }
+        originalSetDocument(document);
+      });
+
+      fixture.viewport.setReadingColors({
+        pageColors: null,
+        brightness: 1,
+        contrast: 1,
+        imageDim: 0,
+      });
+
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: retiredManager });
+      expect(() => {
+        editor.undo();
+      }).toThrow('not ready');
+      const replacementManager = annotationManager();
+      eventBus.dispatch('annotationeditoruimanager', {
+        source: viewer,
+        uiManager: replacementManager,
+      });
+      editor.undo();
+      await fixture.viewport.destroy();
+      eventBus.dispatch('annotationeditoruimanager', {
+        source: viewer,
+        uiManager: annotationManager(),
+      });
+
+      expect(replacementManager.undo).toHaveBeenCalledOnce();
+      await expect(editor.save(new AbortController().signal)).rejects.toThrow('destroyed');
+    },
+  );
+
   it('waits for initial pages before rebinding the profile selected during mount', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;

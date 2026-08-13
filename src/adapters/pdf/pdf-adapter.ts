@@ -22,13 +22,8 @@ class PdfCapabilityRejection extends Error {
   }
 }
 
-function loadingTaskAbort(
-  loadingTask: PDFDocumentLoadingTask,
-  signal: AbortSignal,
-  reject: (reason: Error) => void,
-): () => void {
+function loadingTaskAbort(signal: AbortSignal, reject: (reason: Error) => void): () => void {
   return () => {
-    void loadingTask.destroy().catch(() => undefined);
     reject(abortReason(signal));
   };
 }
@@ -40,7 +35,7 @@ function waitForDocument(
   if (signal.aborted) return Promise.reject(abortReason(signal));
 
   return new Promise<PDFDocumentProxy>((resolve, reject) => {
-    const abort = loadingTaskAbort(loadingTask, signal, reject);
+    const abort = loadingTaskAbort(signal, reject);
     signal.addEventListener('abort', abort, { once: true });
     loadingTask.promise.then(
       (pdf) => {
@@ -64,13 +59,12 @@ function abortReason(signal: AbortSignal): Error {
 function waitForAnnotationCapabilities(
   pdf: PDFDocumentProxy,
   permissionFlags: Parameters<typeof loadPdfAnnotationCapabilities>[1],
-  loadingTask: PDFDocumentLoadingTask,
   signal: AbortSignal,
 ): Promise<PdfAnnotationCapabilities> {
   if (signal.aborted) return Promise.reject(abortReason(signal));
   const loading = loadPdfAnnotationCapabilities(pdf, permissionFlags);
   return new Promise<PdfAnnotationCapabilities>((resolve, reject) => {
-    const abort = loadingTaskAbort(loadingTask, signal, reject);
+    const abort = loadingTaskAbort(signal, reject);
     signal.addEventListener('abort', abort, { once: true });
     loading.then(
       (capabilities) => {
@@ -99,6 +93,7 @@ export class PdfDocumentAdapter implements DocumentAdapter {
   }
 
   async open(file: TFile, signal: AbortSignal): Promise<DocumentSession> {
+    let ownedLoadingTask: PDFDocumentLoadingTask | null = null;
     try {
       signal.throwIfAborted();
       const runtime = await this.runtimeLoader.load();
@@ -108,23 +103,30 @@ export class PdfDocumentAdapter implements DocumentAdapter {
       incrementReaderCounter('workersStarted');
       markReaderPerformance('worker-start');
       const loadingTask = runtime.pdfjsLib.getDocument({ data: bytes });
+      ownedLoadingTask = loadingTask;
       const pdf = await waitForDocument(loadingTask, signal);
-      if (signal.aborted) {
-        void loadingTask.destroy().catch(() => undefined);
-        throw abortReason(signal);
-      }
+      if (signal.aborted) throw abortReason(signal);
       const annotationCapabilities = await waitForAnnotationCapabilities(
         pdf,
         runtime.pdfjsLib.PermissionFlag,
-        loadingTask,
         signal,
       );
       signal.throwIfAborted();
-      return new PdfDocumentSession(file, pdf, runtime.pdfjsViewer, {
+      const session = new PdfDocumentSession(file, pdf, runtime.pdfjsViewer, {
         annotationCapabilities,
         viewportFactory: this.viewportFactory,
       });
+      signal.throwIfAborted();
+      ownedLoadingTask = null;
+      return session;
     } catch (cause) {
+      if (ownedLoadingTask !== null) {
+        try {
+          await ownedLoadingTask.destroy();
+        } catch {
+          // The open/cancellation failure remains primary at this boundary.
+        }
+      }
       const originalCause =
         cause instanceof PdfLoadingRejection || cause instanceof PdfCapabilityRejection
           ? cause.original

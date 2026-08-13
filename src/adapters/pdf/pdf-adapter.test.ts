@@ -54,6 +54,7 @@ function pdf(overrides: Partial<PDFDocumentProxy> = {}): PDFDocumentProxy {
 }
 
 function adapterFixture(options: {
+  destroyFailure?: unknown;
   pdf?: PDFDocumentProxy;
   loadFailure?: unknown;
   loadingPromise?: Promise<PDFDocumentProxy>;
@@ -61,6 +62,7 @@ function adapterFixture(options: {
   const bytes = new Uint8Array([1, 2, 3]).buffer;
   const vault = { readBinary: vi.fn(async () => bytes) } as unknown as Pick<Vault, 'readBinary'>;
   const destroy = vi.fn(async () => undefined);
+  if (options.destroyFailure !== undefined) destroy.mockRejectedValue(options.destroyFailure);
   let defaultLoadingPromise: Promise<PDFDocumentProxy>;
   if (options.loadFailure === undefined) {
     defaultLoadingPromise = Promise.resolve(options.pdf ?? pdf());
@@ -103,6 +105,7 @@ describe('PdfDocumentAdapter', () => {
 
     expect(fixture.vault.readBinary).toHaveBeenCalledWith(source);
     expect(fixture.getDocument).toHaveBeenCalledWith({ data: fixture.bytes });
+    expect(fixture.destroy).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -213,6 +216,24 @@ describe('PdfDocumentAdapter', () => {
     permissions.resolve(null);
   });
 
+  it('destroys instead of transferring ownership when abort wins session construction', async () => {
+    const controller = new AbortController();
+    const document = pdf();
+    Object.defineProperty(document, 'fingerprints', {
+      configurable: true,
+      get: () => {
+        controller.abort();
+        return ['fingerprint', null];
+      },
+    });
+    const fixture = adapterFixture({ pdf: document });
+
+    await expect(fixture.adapter.open(file('Guide.pdf'), controller.signal)).rejects.toMatchObject({
+      name: 'DocumentCancelledError',
+    });
+    expect(fixture.destroy).toHaveBeenCalledOnce();
+  });
+
   it('preserves a non-Error PDF.js loading rejection as the typed cause', async () => {
     const { adapter } = adapterFixture({ loadFailure: 'raw loading rejection' });
 
@@ -224,15 +245,42 @@ describe('PdfDocumentAdapter', () => {
   it.each([new Error('permission worker failed'), 'raw permission rejection'])(
     'preserves an annotation capability rejection as the typed cause: %s',
     async (cause) => {
-      const { adapter } = adapterFixture({
+      const fixture = adapterFixture({
         pdf: pdf({ getPermissions: vi.fn(() => rejectedWith<number[] | null>(cause)) }),
       });
 
       await expect(
-        adapter.open(file('Guide.pdf'), AbortSignal.timeout(1_000)),
+        fixture.adapter.open(file('Guide.pdf'), AbortSignal.timeout(1_000)),
       ).rejects.toMatchObject({ name: 'DocumentOpenError', cause });
+      expect(fixture.destroy).toHaveBeenCalledOnce();
     },
   );
+
+  it('destroys once when signatures reject during capability resolution', async () => {
+    const cause = new Error('signature worker failed');
+    const fixture = adapterFixture({
+      pdf: pdf({ getSignatures: vi.fn(() => rejectedWith<object[] | null>(cause)) }),
+    });
+
+    await expect(
+      fixture.adapter.open(file('Guide.pdf'), AbortSignal.timeout(1_000)),
+    ).rejects.toMatchObject({ name: 'DocumentOpenError', cause });
+    expect(fixture.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('keeps capability failure primary when owned loading-task destruction rejects', async () => {
+    const cause = new Error('permission worker failed');
+    const destroyFailure = new Error('destroy failed');
+    const fixture = adapterFixture({
+      destroyFailure,
+      pdf: pdf({ getPermissions: vi.fn(() => rejectedWith<number[] | null>(cause)) }),
+    });
+
+    await expect(
+      fixture.adapter.open(file('Guide.pdf'), AbortSignal.timeout(1_000)),
+    ).rejects.toMatchObject({ name: 'DocumentOpenError', cause });
+    expect(fixture.destroy).toHaveBeenCalledOnce();
+  });
 
   it('keeps cancellation primary when destroying an aborted loading task also fails', async () => {
     const pending = deferred<PDFDocumentProxy>();
