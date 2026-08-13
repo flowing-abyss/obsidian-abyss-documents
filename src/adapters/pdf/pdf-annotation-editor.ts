@@ -50,6 +50,7 @@ interface PdfAnnotationModeRequest extends PdfAnnotationToolOptions {
 }
 
 interface PdfAnnotationUiManager {
+  delete(): void;
   endCurrentEditing(): void;
   redo(): void;
   undo(): void;
@@ -150,12 +151,22 @@ export class PdfAnnotationEditor {
     this.requireManager().redo();
   }
 
+  deleteSelection(): void {
+    this.requireManager().delete();
+  }
+
   onDirty(listener: (dirty: boolean) => void): () => void {
     if (this.destroyed) return () => undefined;
     this.dirtyListeners.add(listener);
     return () => {
       this.dirtyListeners.delete(listener);
     };
+  }
+
+  /** Signals that PDF.js successfully mutated a native editor object outside AnnotationStorage. */
+  notifyNativeMutation(): void {
+    this.requireManager();
+    this.emitDirty(true);
   }
 
   async save(signal: AbortSignal): Promise<Uint8Array> {
@@ -338,6 +349,7 @@ export class PdfAnnotationEditor {
     const data = record(value);
     return (
       typeof data?.['endCurrentEditing'] === 'function' &&
+      typeof data['delete'] === 'function' &&
       typeof data['updateParams'] === 'function' &&
       typeof data['undo'] === 'function' &&
       typeof data['redo'] === 'function'

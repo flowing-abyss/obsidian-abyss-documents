@@ -76,6 +76,7 @@ function pdf(pageCount = 700): PDFDocumentProxy {
 
 function annotationManager() {
   return {
+    delete: vi.fn(),
     endCurrentEditing: vi.fn(),
     redo: vi.fn(),
     undo: vi.fn(),
@@ -226,6 +227,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
         supportsPinchToZoom: boolean;
         maxCanvasPixels: number;
         pageColors: object;
+        commentManager?: unknown;
       },
     ) {
       this.pageColors = options.pageColors;
@@ -383,6 +385,12 @@ describe('PdfDocumentViewport', () => {
       maxCanvasPixels: 16_777_216,
       pageColors: { background: '#fafafa', foreground: '#202020' },
     });
+    const commentManager = viewer.options.commentManager;
+    expect(commentManager).toBeTypeOf('object');
+    expect((commentManager as { dialogElement?: unknown }).dialogElement).toBeInstanceOf(
+      HTMLElement,
+    );
+    expect((commentManager as { showDialog?: unknown }).showDialog).toBeTypeOf('function');
     expect(fixture.runtime.state.linkService?.viewer).toBe(viewer);
     expect(viewer.documents).toEqual([fixture.documentProxy]);
     expect(viewer.findDocumentsBeforeViewerOwnership).toEqual([[]]);
@@ -398,6 +406,60 @@ describe('PdfDocumentViewport', () => {
     expect(marks).toEqual(expect.arrayContaining(['first-text-layer', 'first-usable-page']));
     expect(marks.filter((name) => name === 'text-layer')).toHaveLength(2);
     expect(marks.filter((name) => name === 'usable-page')).toHaveLength(2);
+  });
+
+  it('routes successful native comment mutation to dirty autosave and failures to a viewport event', async () => {
+    const fixture = await mountedViewport(3);
+    const viewer = fixture.runtime.state.viewer;
+    const eventBus = fixture.runtime.state.eventBus;
+    const annotationEditor = fixture.viewport.annotationEditor;
+    if (viewer === undefined || eventBus === undefined || annotationEditor === null)
+      throw new Error('Expected mounted native annotation runtime.');
+    const dirty = vi.fn();
+    annotationEditor.onDirty(dirty);
+    const native = {
+      comment: 'Original',
+      editorType: 'highlight',
+      getData: () => ({ color: [255, 212, 0], contentsObj: { str: 'Original' } }),
+      mode: 9,
+      propertiesToUpdate: [],
+      select: vi.fn(),
+      uid: 'native-highlight',
+    };
+    const uiManager = {
+      ...annotationManager(),
+      deleteComment: vi.fn(),
+      firstSelectedEditor: native,
+      setSelected: vi.fn(),
+    };
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    const commentManager = viewer.options.commentManager as {
+      showDialog(manager: unknown, editor: typeof native, x: number, y: number): Promise<void>;
+    };
+
+    await commentManager.showDialog(uiManager, native, 0, 0);
+    fixture.host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+    expect(dirty).toHaveBeenCalledWith(true);
+
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    Object.defineProperty(native, 'comment', {
+      configurable: true,
+      get: () => 'Original',
+      set: () => {
+        throw new Error('comment setter rejected');
+      },
+    });
+    await commentManager.showDialog(uiManager, native, 0, 0);
+    fixture.host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+
+    const failure = events.find((event) => event.type === 'annotation-mutation-error');
+    expect(failure?.type).toBe('annotation-mutation-error');
+    if (failure?.type !== 'annotation-mutation-error')
+      throw new Error('Expected native annotation mutation failure.');
+    expect(failure.action).toBe('save-comment');
+    expect(failure.cause).toMatchObject({ message: 'comment setter rejected' });
+    expect(dirty).toHaveBeenCalledTimes(1);
   });
 
   it('maps only the supported PDF.js viewer events into core viewport events', async () => {

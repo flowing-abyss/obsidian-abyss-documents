@@ -1,10 +1,14 @@
+import type { AnnotationPaletteEntry } from '../settings.js';
 import { FocusReturn, PoliteAnnouncer } from './a11y.js';
+import { AnnotationToolbar, type AnnotationToolbarIntent } from './annotation-toolbar.js';
 import type { ObsidianTheme } from './reading-profiles.js';
 import { ReaderSidebar, type ReaderSidebarCallbacks, type ReaderSidebarTab } from './sidebar.js';
 import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
 
 export type ReaderShellIntent =
-  ReaderToolbarIntent | { readonly type: 'open-sidebar'; readonly tab: ReaderSidebarTab };
+  | ReaderToolbarIntent
+  | AnnotationToolbarIntent
+  | { readonly type: 'open-sidebar'; readonly tab: ReaderSidebarTab };
 
 export interface ReaderShellOptions {
   readonly sidebarWidth?: number;
@@ -19,10 +23,13 @@ export class ReaderShell {
   readonly documentHost: HTMLElement;
   readonly toolbar: ReaderToolbar;
 
+  private annotationToolbarValue: AnnotationToolbar | null = null;
+
   private readonly cleanups: Array<() => void> = [];
   private readonly announcer: PoliteAnnouncer;
   private readonly body: HTMLElement;
   private readonly focusReturn = new FocusReturn();
+  private readonly intentHandler: (intent: ReaderShellIntent) => void;
   private sidebarValue: ReaderSidebar | null = null;
   private destroyed = false;
 
@@ -31,6 +38,7 @@ export class ReaderShell {
     onIntent: (intent: ReaderShellIntent) => void = () => undefined,
     options: ReaderShellOptions = {},
   ) {
+    this.intentHandler = onIntent;
     this.root = host.createDiv({ cls: 'abyss-documents' });
     this.root.dataset['abyssDocument'] = '';
     this.root.dataset['readingProfile'] = 'default';
@@ -53,15 +61,18 @@ export class ReaderShell {
     this.documentHost = this.body.createDiv({ attr: { 'data-region': 'document' } });
     this.documentHost.tabIndex = -1;
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (
-        event.key.toLocaleLowerCase() !== 'f' ||
-        (!event.ctrlKey && !event.metaKey) ||
-        event.altKey
-      )
+      if ((!event.ctrlKey && !event.metaKey) || event.altKey) return;
+      const key = event.key.toLocaleLowerCase();
+      if (key === 'f') {
+        event.preventDefault();
+        event.stopPropagation();
+        onIntent({ type: 'open-sidebar', tab: 'search' });
         return;
+      }
+      if (key !== 'z' || isTextEditingTarget(event.target, this.root)) return;
       event.preventDefault();
       event.stopPropagation();
-      onIntent({ type: 'open-sidebar', tab: 'search' });
+      onIntent({ type: event.shiftKey ? 'redo-annotation' : 'undo-annotation' });
     };
     this.root.addEventListener('keydown', onKeyDown, true);
     this.cleanups.push(() => {
@@ -71,6 +82,26 @@ export class ReaderShell {
 
   get sidebar(): ReaderSidebar | null {
     return this.sidebarValue;
+  }
+
+  get annotationToolbar(): AnnotationToolbar | null {
+    return this.annotationToolbarValue;
+  }
+
+  configureAnnotationToolbar(
+    palette: readonly AnnotationPaletteEntry[],
+    readOnlyReason: string | null,
+  ): AnnotationToolbar {
+    this.annotationToolbarValue?.destroy();
+    this.annotationToolbarValue = new AnnotationToolbar(
+      this.toolbar.root,
+      palette,
+      readOnlyReason,
+      (intent) => {
+        this.intentHandler(intent);
+      },
+    );
+    return this.annotationToolbarValue;
   }
 
   get obsidianTheme(): ObsidianTheme {
@@ -136,6 +167,8 @@ export class ReaderShell {
     this.sidebarValue = null;
     this.focusReturn.clear();
     this.announcer.destroy();
+    this.annotationToolbarValue?.destroy();
+    this.annotationToolbarValue = null;
     this.toolbar.destroy();
     this.root.remove();
   }
@@ -154,6 +187,12 @@ export class ReaderShell {
         : this.toolbar.sidebarButton;
     this.focusReturn.capture(invoker);
   }
+}
+
+function isTextEditingTarget(target: EventTarget | null, root: HTMLElement): boolean {
+  const owner = root.ownerDocument.defaultView;
+  if (owner === null || !(target instanceof owner.Element)) return false;
+  return target.closest('input, textarea, select, [contenteditable="true"]') !== null;
 }
 
 function boundedSidebarWidth(value: number | undefined): number {

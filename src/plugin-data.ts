@@ -394,19 +394,30 @@ function palette(
   }
   return DEFAULT_SETTINGS.annotations.palette.map((fallback, index) => {
     const entry: unknown = value[index];
-    if (!isRecord(entry) || entry['name'] !== fallback.name || entry['color'] !== fallback.color) {
+    if (!isRecord(entry)) {
       diagnostics.push({
         path: `settings.annotations.palette.${index}`,
-        message: 'Expected the standard palette entry.',
+        message: 'Expected an annotation palette entry.',
       });
       return fallback;
     }
+    const colorValue = entry['color'];
+    const color =
+      typeof colorValue === 'string' && /^#[\da-f]{6}$/iu.test(colorValue)
+        ? colorValue.toLocaleLowerCase()
+        : invalid(`settings.annotations.palette.${index}.color`, fallback.color, diagnostics);
     return {
-      ...fallback,
+      color,
       meaning: string(
         entry['meaning'],
         fallback.meaning,
         `settings.annotations.palette.${index}.meaning`,
+        diagnostics,
+      ),
+      name: string(
+        entry['name'],
+        fallback.name,
+        `settings.annotations.palette.${index}.name`,
         diagnostics,
       ),
     };

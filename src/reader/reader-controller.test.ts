@@ -1,6 +1,10 @@
 import type { TFile } from 'obsidian';
 import { App, TFile as MockTFile, Notice } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
+import type {
+  PdfAnnotationEditor,
+  PdfAnnotationTool,
+} from '../adapters/pdf/pdf-annotation-editor.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
 import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
 import { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
@@ -32,7 +36,6 @@ import {
 import type { ReaderShellIntent } from './reader-shell.js';
 import { ReaderShell } from './reader-shell.js';
 import { BUILTIN_PROFILES } from './reading-profiles.js';
-import type { ReaderToolbarIntent } from './toolbar.js';
 
 function files(...paths: string[]): TFile[] {
   const app = App.createConfigured__({
@@ -104,6 +107,36 @@ function viewport(pageCount = 3) {
     unsubscribe,
     value,
   };
+}
+
+function editableViewport(pageCount = 3) {
+  const created = viewport(pageCount);
+  const deleteSelection = vi.fn();
+  const redo = vi.fn();
+  const setParameter = vi.fn();
+  const setTool = vi.fn(async (_tool: PdfAnnotationTool): Promise<void> => undefined);
+  const undo = vi.fn();
+  const editor = {
+    onDirty: vi.fn(() => () => undefined),
+    redo,
+    deleteSelection,
+    save: vi.fn(async () => new Uint8Array([37, 80, 68, 70])),
+    setParameter,
+    setTool,
+    undo,
+  } as unknown as PdfAnnotationEditor;
+  Object.assign(created.value, { annotationEditor: editor });
+  return { ...created, deleteSelection, editor, redo, setParameter, setTool, undo };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (cause?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 function session(path: string, createdViewport = viewport()) {
@@ -188,7 +221,7 @@ function capturingShellFactory() {
       if (createdShell === null) throw new Error('Expected the reader shell to be created.');
       return createdShell;
     },
-    send(intent: ReaderToolbarIntent) {
+    send(intent: ReaderShellIntent) {
       if (sendIntent === null) throw new Error('Expected the reader shell to be created.');
       sendIntent(intent);
     },
@@ -196,6 +229,304 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('configures the native annotation toolbar and forwards only supported tools and colors', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['outline', 'text-search', 'existing-annotations', 'annotation-write']),
+    });
+    const state = profileState();
+    Object.assign(state.value, {
+      annotations: {
+        author: '',
+        markdownTemplate: '',
+        palette: [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      state.value,
+    );
+
+    await controller.open(pdf, createDiv());
+    shell.created.annotationToolbar?.root
+      .querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')
+      ?.click();
+    shell.created.annotationToolbar?.root
+      .querySelector<HTMLButtonElement>('[data-annotation-color="#ffd400"]')
+      ?.click();
+    shell.send({ type: 'undo-annotation' });
+    shell.send({ type: 'redo-annotation' });
+    shell.send({ type: 'delete-annotation' });
+
+    await vi.waitFor(() => {
+      expect(createdViewport.setTool).toHaveBeenCalled();
+    });
+    expect(createdViewport.setTool).toHaveBeenCalledWith('highlight');
+    expect(createdViewport.setParameter).toHaveBeenCalledWith('highlight-color', '#ffd400');
+    expect(createdViewport.undo).toHaveBeenCalledOnce();
+    expect(createdViewport.redo).toHaveBeenCalledOnce();
+    expect(createdViewport.deleteSelection).toHaveBeenCalledOnce();
+  });
+
+  it('refreshes the annotation palette and meanings in an already open reader', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['existing-annotations', 'annotation-write']),
+    });
+    const state = profileState();
+    Object.assign(state.value, {
+      annotations: {
+        author: '',
+        markdownTemplate: '',
+        palette: [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    Object.assign(state.value.annotations as object, {
+      palette: [{ color: '#123456', meaning: 'Question to revisit', name: 'Ocean' }],
+    });
+
+    controller.refreshReadingSettings();
+
+    const refreshed = shell.created.annotationToolbar;
+    expect(refreshed?.root.querySelector('[data-annotation-color="#ffd400"]')).toBeNull();
+    const ocean = refreshed?.root.querySelector<HTMLElement>('[data-annotation-color="#123456"]');
+    expect(ocean?.title).toBe('Ocean — Question to revisit');
+    expect(refreshed?.color).toBe('#123456');
+  });
+
+  it('renders the exact read-only reason and never calls a missing native editor', async () => {
+    const [pdf] = files('Books/Signed.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: {
+        readOnlyReason: {
+          code: 'signed-document',
+          message: 'Signed PDF documents are opened read-only to preserve signatures.',
+        },
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+
+    await controller.open(pdf, createDiv());
+
+    expect(shell.created.annotationToolbar?.root.getAttribute('aria-description')).toContain(
+      'Signed PDF',
+    );
+    expect(
+      shell.created.annotationToolbar?.root.querySelector<HTMLButtonElement>(
+        '[data-annotation-tool="highlight"]',
+      )?.disabled,
+    ).toBe(true);
+  });
+
+  it('maps Ink and FreeText colors and contains one failure boundary per annotation action', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'set-annotation-tool', tool: 'ink' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setTool).toHaveBeenCalledWith('ink');
+    });
+    shell.created.annotationToolbar?.setTool('ink');
+    shell.send({ type: 'set-annotation-color', color: '#111111' });
+    expect(createdViewport.setParameter).toHaveBeenLastCalledWith('ink-color', '#111111');
+    shell.send({ type: 'set-annotation-tool', tool: 'freetext' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setTool).toHaveBeenCalledWith('freetext');
+    });
+    shell.created.annotationToolbar?.setTool('freetext');
+    shell.send({ type: 'set-annotation-color', color: '#222222' });
+    expect(createdViewport.setParameter).toHaveBeenLastCalledWith('freetext-color', '#222222');
+
+    createdViewport.setTool
+      .mockRejectedValueOnce(new Error('tool failed'))
+      .mockRejectedValueOnce(new Error('tool failed'));
+    createdViewport.setParameter.mockImplementationOnce(() => {
+      throw new Error('color failed');
+    });
+    createdViewport.undo.mockImplementationOnce(() => {
+      throw new Error('undo failed');
+    });
+    createdViewport.deleteSelection.mockImplementationOnce(() => {
+      throw new Error('delete failed');
+    });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledTimes(1);
+    });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledTimes(2);
+    });
+    shell.send({ type: 'set-annotation-color', color: '#333333' });
+    shell.send({ type: 'undo-annotation' });
+    shell.send({ type: 'delete-annotation' });
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledTimes(5);
+    });
+    expect(notices).toHaveBeenCalledTimes(4);
+  });
+
+  it('commits tool UI only after native mode success and reapplies the selected palette color', async () => {
+    const [pdf] = files('Books/Transactional.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    const highlight = deferred<void>();
+    const ink = deferred<void>();
+    createdViewport.setTool.mockImplementation((tool) => {
+      if (tool === 'highlight') return highlight.promise;
+      if (tool === 'ink') return ink.promise;
+      return Promise.resolve();
+    });
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'set-annotation-color', color: '#ff6666' });
+
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="select"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    shell.send({ type: 'set-annotation-tool', tool: 'ink' });
+    highlight.reject(new DOMException('Superseded', 'AbortError'));
+    ink.resolve();
+
+    await vi.waitFor(() => {
+      expect(
+        shell.created.annotationToolbar?.root
+          .querySelector('[data-annotation-tool="ink"]')
+          ?.getAttribute('aria-pressed'),
+      ).toBe('true');
+    });
+    expect(createdViewport.setParameter).toHaveBeenLastCalledWith('ink-color', '#ff6666');
+  });
+
+  it('rolls back failed tool/color UI and keeps superseded AbortError silent', async () => {
+    const [pdf] = files('Books/Failure.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    createdViewport.setTool.mockRejectedValueOnce(new DOMException('Superseded', 'AbortError'));
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    await new Promise((resolve) => {
+      queueMicrotask(() => {
+        resolve(undefined);
+      });
+    });
+    expect(notices).not.toHaveBeenCalled();
+    expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="select"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
+    createdViewport.setTool.mockRejectedValueOnce(new Error('mode failed'));
+    shell.send({ type: 'set-annotation-tool', tool: 'ink' });
+    await vi.waitFor(() => {
+      expect(notices).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="select"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+  });
+
+  it('rolls native mode back when applying the committed tool color fails', async () => {
+    const [pdf] = files('Books/Color-rollback.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    createdViewport.setParameter.mockImplementationOnce(() => {
+      throw new Error('color failed');
+    });
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+
+    await vi.waitFor(() => {
+      expect(createdViewport.setTool.mock.calls).toEqual([['highlight'], ['select']]);
+      expect(notices).toHaveBeenCalledWith(
+        'Could not change annotation tool: color failed',
+        undefined,
+      );
+    });
+    expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="select"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+  });
   it('does zero annotation work until Annotations is explicitly requested and cancels stale work', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -846,6 +1177,93 @@ describe('ReaderController', () => {
     expect(notices).toHaveBeenCalledWith('Could not change zoom: step failed', undefined);
     expect(notices).toHaveBeenCalledWith('Could not change page layout: layout failed', undefined);
     expect(log).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports a native comment mutation failure once at the reader Notice boundary', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(3);
+    const createdSession = session(pdf.path, createdViewport);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+    );
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    const event = {
+      type: 'annotation-mutation-error',
+      action: 'save-comment',
+      cause: new Error('comment setter rejected'),
+    } as const;
+
+    createdViewport.emit(event);
+    createdViewport.emit(event);
+
+    expect(notices).toHaveBeenCalledOnce();
+    expect(notices).toHaveBeenCalledWith(
+      'Could not save PDF annotation comment: comment setter rejected',
+      undefined,
+    );
+    expect(log).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['change-color', 'Could not change PDF annotation color: native rejected'],
+    ['delete-comment', 'Could not delete PDF annotation comment: native rejected'],
+    ['delete-annotation', 'Could not delete PDF annotation: native rejected'],
+  ] as const)('labels the %s native failure action precisely', async (action, message) => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(3);
+    const createdSession = session(pdf.path, createdViewport);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+    );
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+
+    createdViewport.emit({
+      type: 'annotation-mutation-error',
+      action,
+      cause: new Error('native rejected'),
+    });
+
+    expect(notices).toHaveBeenCalledWith(message, undefined);
+  });
+
+  it('retains the active annotation color when it remains in a refreshed palette', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const state = profileState();
+    Object.assign(state.value, {
+      annotations: {
+        author: '',
+        markdownTemplate: '',
+        palette: [
+          { color: '#ffd400', meaning: '', name: 'Yellow' },
+          { color: '#123456', meaning: '', name: 'Ocean' },
+        ],
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'set-annotation-color', color: '#123456' });
+
+    controller.refreshReadingSettings();
+
+    expect(shell.created.annotationToolbar?.color).toBe('#123456');
   });
 
   it('uses the global default and leaves the fingerprint map untouched when remembering is off', async () => {

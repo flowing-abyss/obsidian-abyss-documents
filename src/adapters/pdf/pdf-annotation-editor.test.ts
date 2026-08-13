@@ -46,6 +46,7 @@ function storage(): MutableAnnotationStorage {
 
 function manager() {
   return {
+    delete: vi.fn(),
     endCurrentEditing: vi.fn(),
     redo: vi.fn(),
     undo: vi.fn(),
@@ -121,6 +122,17 @@ function deferred<T>() {
 }
 
 describe('PdfAnnotationEditor lifecycle', () => {
+  it('signals a successful native comment mutation without writing parallel annotation state', () => {
+    const { annotationStorage, editor, eventBus, viewer } = fixture();
+    const dirty = vi.fn();
+    editor.onDirty(dirty);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+
+    (editor as PdfAnnotationEditor & { notifyNativeMutation(): void }).notifyNativeMutation();
+
+    expect(dirty).toHaveBeenCalledWith(true);
+    expect(annotationStorage.resetModified).not.toHaveBeenCalled();
+  });
   it('does not expose target-edit options in the public tool contract', () => {
     expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('editId');
     expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('editComment');
@@ -180,6 +192,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     for (const [parameter, value] of parameters) editor.setParameter(parameter, value);
     editor.undo();
     editor.redo();
+    editor.deleteSelection();
 
     expect(changedModes).toEqual([9, 3, 0]);
     expect(uiManager.updateParams.mock.calls).toEqual([
@@ -195,6 +208,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ]);
     expect(uiManager.undo).toHaveBeenCalledOnce();
     expect(uiManager.redo).toHaveBeenCalledOnce();
+    expect(uiManager.delete).toHaveBeenCalledOnce();
   });
 
   it('does not request a mode change when the requested tool is already active', async () => {
@@ -241,10 +255,11 @@ describe('PdfAnnotationEditor lifecycle', () => {
   it.each([
     null,
     {},
-    { endCurrentEditing: vi.fn(), redo: vi.fn(), undo: vi.fn() },
-    { endCurrentEditing: vi.fn(), redo: vi.fn(), updateParams: vi.fn() },
-    { endCurrentEditing: vi.fn(), undo: vi.fn(), updateParams: vi.fn() },
-    { redo: vi.fn(), undo: vi.fn(), updateParams: vi.fn() },
+    { delete: vi.fn(), endCurrentEditing: vi.fn(), redo: vi.fn(), undo: vi.fn() },
+    { delete: vi.fn(), endCurrentEditing: vi.fn(), redo: vi.fn(), updateParams: vi.fn() },
+    { delete: vi.fn(), endCurrentEditing: vi.fn(), undo: vi.fn(), updateParams: vi.fn() },
+    { delete: vi.fn(), redo: vi.fn(), undo: vi.fn(), updateParams: vi.fn() },
+    { endCurrentEditing: vi.fn(), redo: vi.fn(), undo: vi.fn(), updateParams: vi.fn() },
   ])('ignores an invalid UI manager payload %#', async (uiManager) => {
     const { editor, eventBus, viewer } = fixture();
 

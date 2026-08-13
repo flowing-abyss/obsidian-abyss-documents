@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AbyssDocumentsPlugin from './main.js';
 import { PluginDataStore } from './plugin-data.js';
 import { AbyssDocumentsSettingTab } from './settings-tab.js';
+import { DEFAULT_SETTINGS } from './settings.js';
 
 const manifest: PluginManifest = {
   id: 'abyss-documents',
@@ -190,6 +191,16 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(onSettingsChange).toHaveBeenCalledTimes(3);
   });
 
+  it('does not claim that PDF.js applies the reserved annotation author preference', () => {
+    const controls = captureControls();
+    const { tab } = fixture();
+    tab.render();
+    const { body } = expandSection(controls, tab, 'Annotations');
+
+    expect(body.textContent).toContain('Used when a document format supports annotation authors.');
+    expect(body.textContent).not.toContain('Stored as the author for new PDF annotations.');
+  });
+
   it('expands and collapses both native settings sections', () => {
     const controls = captureControls();
     const { tab } = fixture();
@@ -247,6 +258,50 @@ describe('AbyssDocumentsSettingTab', () => {
       meaning: 'Important',
     });
     expect(onSettingsChange).toHaveBeenCalledTimes(8);
+  });
+
+  it('persists an arbitrary annotation palette color, name, and meaning', async () => {
+    const controls = captureControls();
+    const { persistence, store, tab } = fixture();
+    tab.render();
+    expandSection(controls, tab, 'Annotations');
+
+    requiredControl(controls.colors, 'Yellow color').setValue('#123456');
+    requiredControl(controls.texts, 'Yellow name').setValue('Thesis');
+    requiredControl(controls.texts, 'Yellow meaning').setValue('Central claim');
+
+    await vi.waitFor(() => {
+      expect(persistence.saveData).toHaveBeenCalledTimes(3);
+    });
+    expect(store.snapshot.settings.annotations.palette[0]).toEqual({
+      color: '#123456',
+      meaning: 'Central claim',
+      name: 'Thesis',
+    });
+  });
+
+  it('restores failed arbitrary palette color, name, and meaning fields in place', async () => {
+    const controls = captureControls();
+    const { persistence, store, tab } = fixture();
+    persistence.saveData.mockRejectedValue(new Error('palette failed'));
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    tab.render();
+
+    const color = requiredControl(controls.colors, 'Yellow color');
+    const name = requiredControl(controls.texts, 'Yellow name');
+    const meaning = requiredControl(controls.texts, 'Yellow meaning');
+    color.setValue('#123456');
+    name.setValue('Thesis');
+    meaning.setValue('Central claim');
+    await vi.waitFor(() => {
+      expect(persistence.saveData).toHaveBeenCalledTimes(3);
+      expect(color.getValue()).toBe('#ffd400');
+      expect(name.getValue()).toBe('Yellow');
+      expect(meaning.getValue()).toBe('');
+    });
+    expect(store.snapshot.settings.annotations.palette[0]).toEqual(
+      DEFAULT_SETTINGS.annotations.palette[0],
+    );
   });
 
   it('persists renderer-bounded custom appearance values and updates live readers', async () => {

@@ -41,6 +41,11 @@ export type ViewportEvent =
   | { readonly type: 'page-change'; readonly pageIndex: number }
   | { readonly type: 'scale-change'; readonly scale: ReaderScale }
   | { readonly type: 'search-results'; readonly results: SearchResultSet }
+  | {
+      readonly type: 'annotation-mutation-error';
+      readonly action: 'change-color' | 'delete-annotation' | 'delete-comment' | 'save-comment';
+      readonly cause: unknown;
+    }
   | { readonly type: 'render-error'; readonly pageIndex: number; readonly cause: unknown };
 
 export interface DocumentViewport {

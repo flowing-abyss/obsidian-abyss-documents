@@ -1,5 +1,8 @@
 export interface ReaderOwnerWindow extends Window {
   readonly Element: typeof Element;
+  readonly Event: typeof Event;
+  readonly HTMLElement: typeof HTMLElement;
+  readonly HTMLButtonElement: typeof HTMLButtonElement;
   createDiv(): HTMLDivElement;
   createEl<K extends keyof HTMLElementTagNameMap>(tag: K): HTMLElementTagNameMap[K];
   createFragment(): DocumentFragment;

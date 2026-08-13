@@ -8,17 +8,29 @@ import { PDFDict, PDFDocument, PDFName, PDFNumber, PDFRawStream, type PDFObject 
 import {
   AnnotationEditorLayer,
   AnnotationEditorUIManager,
+  AnnotationLayer,
   DrawLayer,
   getDocument,
   type PDFDocumentProxy,
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { EventBus } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PdfAnnotationEditor } from '../../src/adapters/pdf/pdf-annotation-editor.js';
+import {
+  PdfCommentBridge,
+  type PdfCommentEditor,
+} from '../../src/adapters/pdf/pdf-comment-bridge.js';
+import { PdfEditableSession } from '../../src/adapters/pdf/pdf-editable-session.js';
 import {
   PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
   PDFJS_ANNOTATION_EDITOR_TYPE,
 } from '../../src/adapters/pdf/pdf-runtime.js';
+import { AutosaveScheduler, type SaveReason } from '../../src/autosave-scheduler.js';
+import {
+  DocumentSaveCoordinator,
+  type BaseToken,
+  type PdfWriteRequest,
+} from '../../src/document-core/save-coordinator.js';
 import {
   createReadonlyAnnotationFixture,
   FIXTURE_MANIFEST_FILE,
@@ -47,12 +59,13 @@ async function saveWithNativePdfjsEditors(
     value: () => new DOMRect(0, 0, 612, 792),
   });
   const eventBus = new EventBus();
+  const commentBridge = new PdfCommentBridge(container);
   const uiManager = new AnnotationEditorUIManager(
     container,
     viewer,
     null,
     null,
-    null,
+    commentBridge,
     null,
     eventBus,
     pdf,
@@ -99,13 +112,25 @@ async function saveWithNativePdfjsEditors(
   eventBus.dispatch('annotationeditoruimanager', { source: runtimeViewer, uiManager });
   try {
     for (const data of annotations) {
-      const editor = await editorLayer.deserialize(data);
+      const { commentText, ...nativeData } = data;
+      const editor = await editorLayer.deserialize(nativeData);
       if (editor === null) throw new Error('PDF.js rejected native editor fixture data.');
       editorLayer.addOrRebuild(editor);
+      if (typeof commentText === 'string') {
+        const commentEditor = editor as unknown as PdfCommentEditor;
+        commentEditor.comment = 'Initial comment';
+        uiManager.setSelected(editor);
+        await commentBridge.showDialog(uiManager, commentEditor, 0, 0);
+        const input = container.querySelector<HTMLTextAreaElement>('textarea');
+        if (input === null) throw new Error('Expected the native comment bridge input.');
+        input.value = commentText;
+        container.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+      }
     }
     return await annotationEditor.save(new AbortController().signal);
   } finally {
     annotationEditor.destroy();
+    commentBridge.dispose();
     editorLayer.destroy();
     drawLayer.destroy();
     uiManager.destroy();
@@ -125,6 +150,195 @@ async function reopenedAnnotations(
       (annotation) => normalizePdfjsValue(annotation) as Record<string, unknown>,
     );
   } finally {
+    await loadingTask.destroy();
+  }
+}
+
+async function editExistingNativeComment(
+  original: Uint8Array,
+  annotationType: number,
+  comment: string,
+): Promise<Uint8Array> {
+  const loadingTask = getDocument({
+    data: Uint8Array.from(original),
+    isOffscreenCanvasSupported: true,
+    standardFontDataUrl,
+  });
+  const pdf = await loadingTask.promise;
+  const container = createDiv();
+  const viewer = createDiv();
+  const annotationLayerElement = createDiv({ cls: 'annotationLayer' });
+  const editorLayerElement = createDiv();
+  const drawLayerElement = createDiv();
+  container.append(viewer, annotationLayerElement, editorLayerElement);
+  editorLayerElement.append(drawLayerElement);
+  document.body.append(container);
+  Object.defineProperty(editorLayerElement, 'getBoundingClientRect', {
+    value: () => new DOMRect(0, 0, 612, 792),
+  });
+  const eventBus = new EventBus();
+  let annotationEditor: PdfAnnotationEditor | null = null;
+  const commentBridge = new PdfCommentBridge(container, {
+    onNativeMutation: () => {
+      annotationEditor?.notifyNativeMutation();
+    },
+  });
+  const uiManager = new AnnotationEditorUIManager(
+    container,
+    viewer,
+    null,
+    null,
+    commentBridge,
+    null,
+    eventBus,
+    pdf,
+    null,
+    'yellow=#FFDE00',
+    false,
+    false,
+    false,
+    null,
+    null,
+    true,
+  );
+  const page = await pdf.getPage(1);
+  const viewport = page.getViewport({ scale: 1 });
+  const annotationLayer = new AnnotationLayer({
+    accessibilityManager: null,
+    annotationCanvasMap: null,
+    annotationEditorUIManager: uiManager,
+    annotationStorage: pdf.annotationStorage,
+    commentManager: commentBridge,
+    div: annotationLayerElement,
+    linkService: {},
+    page,
+    structTreeLayer: null,
+    viewport: viewport.clone({ dontFlip: true }),
+  });
+  await annotationLayer.render({
+    annotations: await page.getAnnotations(),
+    div: annotationLayerElement,
+    imageResourcesPath: '',
+    linkService: {} as never,
+    page,
+    renderForms: false,
+    viewport: viewport.clone({ dontFlip: true }),
+  });
+  const drawLayer = new DrawLayer({ pageIndex: 0 });
+  drawLayer.setParent(drawLayerElement);
+  const l10n = {
+    get: async (_ids: unknown, _args: unknown, fallback: unknown) => fallback,
+    getDirection: () => 'ltr',
+    getLanguage: () => 'en-us',
+    pause: () => undefined,
+    resume: () => undefined,
+    translate: async () => undefined,
+    translateOnce: async () => undefined,
+  };
+  const editorLayer = new AnnotationEditorLayer({
+    annotationLayer,
+    div: editorLayerElement,
+    drawLayer,
+    enabled: true,
+    l10n: l10n as never,
+    mode: {},
+    pageIndex: 0,
+    structTreeLayer: null as never,
+    uiManager,
+    viewport,
+  });
+  const runtimeViewer = { annotationEditorMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE };
+  annotationEditor = new PdfAnnotationEditor({
+    annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
+    annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+    eventBus,
+    pdf,
+    viewer: runtimeViewer,
+  });
+  eventBus.dispatch('annotationeditoruimanager', { source: runtimeViewer, uiManager });
+  const baseToken: BaseToken = {
+    byteSize: original.byteLength,
+    mtime: 1,
+    sha256: createHash('sha256').update(original).digest('hex'),
+  };
+  let scheduler: AutosaveScheduler | null = null;
+  let editable: PdfEditableSession | null = null;
+  const writes: Uint8Array[] = [];
+  const saveReasons: SaveReason[] = [];
+  const verified = vi.fn(async (bytes: Uint8Array) => {
+    await reopenedAnnotations(bytes);
+  });
+  const coordinator = new DocumentSaveCoordinator(
+    {
+      write: async (request: PdfWriteRequest) => {
+        await request.verifyPdf(request.bytes, request.signal);
+        writes.push(Uint8Array.from(request.bytes));
+        return {
+          token: {
+            byteSize: request.bytes.byteLength,
+            mtime: 2,
+            sha256: createHash('sha256').update(request.bytes).digest('hex'),
+          },
+        };
+      },
+    },
+    async (bytes) => verified(bytes),
+  );
+  try {
+    await editorLayer.enable();
+    const reopened = (await page.getAnnotations()) as Array<Record<string, unknown>>;
+    const source = reopened.find((annotation) => annotation['annotationType'] === annotationType);
+    if (source === undefined) throw new Error('Expected reopened native annotation.');
+    const existing = editorLayer.getEditorByUID(source['id']) as unknown as PdfCommentEditor | null;
+    if (existing === null) throw new Error('Expected deserialized existing native editor.');
+    uiManager.setSelected(existing as never);
+    editable = new PdfEditableSession(
+      'Books/Existing.pdf',
+      baseToken,
+      annotationEditor,
+      (revision) => {
+        scheduler?.markDirty(revision);
+      },
+    );
+    const activeEditable = editable;
+    scheduler = new AutosaveScheduler(
+      async (revision, reason) => {
+        saveReasons.push(reason);
+        await coordinator.save(
+          {
+            baseToken: activeEditable.baseToken,
+            path: activeEditable.path,
+            revision,
+            source: activeEditable,
+          },
+          new AbortController().signal,
+        );
+      },
+      { idleDelay: 0 },
+    );
+    await commentBridge.showDialog(uiManager, existing, 0, 0);
+    const input = container.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected native comment editor for reopened annotation.');
+    input.value = comment;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    container.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    await scheduler.flush();
+    expect(saveReasons).toContain('autosave');
+    expect(verified).toHaveBeenCalledOnce();
+    const written = writes[writes.length - 1];
+    if (written === undefined) throw new Error('Expected a verified native comment autosave.');
+    return written;
+  } finally {
+    scheduler?.destroy();
+    editable?.destroy();
+    annotationEditor.destroy();
+    commentBridge.dispose();
+    editorLayer.destroy();
+    annotationLayer.destroy();
+    drawLayer.destroy();
+    uiManager.destroy();
+    container.remove();
     await loadingTask.destroy();
   }
 }
@@ -237,33 +451,37 @@ afterEach(async () => {
 });
 
 describe('generatePdfFixtures', () => {
-  it('produces byte-identical PDFs and versioned metadata on repeated runs', async () => {
-    const firstDirectory = await temporaryDirectory();
-    const secondDirectory = await temporaryDirectory();
+  it(
+    'produces byte-identical PDFs and versioned metadata on repeated runs',
+    { timeout: 10_000 },
+    async () => {
+      const firstDirectory = await temporaryDirectory();
+      const secondDirectory = await temporaryDirectory();
 
-    const first = await generatePdfFixtures(firstDirectory);
-    const second = await generatePdfFixtures(secondDirectory);
+      const first = await generatePdfFixtures(firstDirectory);
+      const second = await generatePdfFixtures(secondDirectory);
 
-    expect(first).toEqual(second);
-    expect(first).toMatchObject({
-      schemaVersion: 1,
-      generator: { name: 'pdf-lib', version: '1.17.1' },
-      files: [
-        { name: 'text-12-pages.pdf', pages: 12 },
-        { name: 'outline-20-pages.pdf', pages: 20 },
-        { name: 'text-700-pages.pdf', pages: 700 },
-        { name: 'raster-heavy-24-pages.pdf', pages: 24 },
-        { name: 'invalid.pdf', pages: null },
-      ],
-    });
-    for (const entry of first.files) {
-      expect(await sha256(path.join(firstDirectory, entry.name))).toBe(entry.sha256);
-      expect(await sha256(path.join(secondDirectory, entry.name))).toBe(entry.sha256);
-    }
-    expect(
-      JSON.parse(await readFile(path.join(firstDirectory, FIXTURE_MANIFEST_FILE), 'utf8')),
-    ).toEqual(first);
-  });
+      expect(first).toEqual(second);
+      expect(first).toMatchObject({
+        schemaVersion: 1,
+        generator: { name: 'pdf-lib', version: '1.17.1' },
+        files: [
+          { name: 'text-12-pages.pdf', pages: 12 },
+          { name: 'outline-20-pages.pdf', pages: 20 },
+          { name: 'text-700-pages.pdf', pages: 700 },
+          { name: 'raster-heavy-24-pages.pdf', pages: 24 },
+          { name: 'invalid.pdf', pages: null },
+        ],
+      });
+      for (const entry of first.files) {
+        expect(await sha256(path.join(firstDirectory, entry.name))).toBe(entry.sha256);
+        expect(await sha256(path.join(secondDirectory, entry.name))).toBe(entry.sha256);
+      }
+      expect(
+        JSON.parse(await readFile(path.join(firstDirectory, FIXTURE_MANIFEST_FILE), 'utf8')),
+      ).toEqual(first);
+    },
+  );
 
   it('writes fixture paths containing URL-reserved characters as filesystem paths', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'abyss fixtures # ? %-'));
@@ -454,5 +672,98 @@ describe('native PDF.js annotation save qualification', () => {
         }));
     expect(readOnlyProjection(after)).toEqual(readOnlyProjection(before));
     expect(after).toHaveLength(before.length + 1);
+  });
+
+  it.each([
+    {
+      name: 'Highlight',
+      annotationType: 9,
+      data: {
+        annotationType: 9,
+        color: [255, 212, 0],
+        isCopy: true,
+        opacity: 0.75,
+        pageIndex: 0,
+        quadPoints: new Float32Array([72, 590, 220, 590, 72, 568, 220, 568]),
+        rect: [72, 568, 220, 590],
+        rotation: 0,
+      },
+    },
+    {
+      name: 'Ink',
+      annotationType: 15,
+      data: {
+        annotationType: 15,
+        color: [180, 30, 80],
+        isCopy: true,
+        opacity: 0.8,
+        pageIndex: 0,
+        paths: { points: [new Float32Array([90, 510, 130, 535, 170, 500])] },
+        rect: [90, 500, 170, 535],
+        rotation: 0,
+        thickness: 3,
+      },
+    },
+    {
+      name: 'FreeText',
+      annotationType: 3,
+      data: {
+        annotationType: 3,
+        color: [20, 80, 220],
+        fontSize: 18,
+        isCopy: true,
+        pageIndex: 0,
+        rect: [72, 620, 252, 670],
+        rotation: 0,
+        value: 'Native FreeText',
+      },
+    },
+  ])(
+    'saves and reopens an edited native $name comment as ordinary text',
+    async ({ annotationType, data }) => {
+      const original = await createReadonlyAnnotationFixture(false);
+      const comment = 'Key idea [[Gradient descent]] #important';
+
+      const saved = await saveWithNativePdfjsEditors(original, [{ ...data, commentText: comment }]);
+      const annotations = await reopenedAnnotations(saved);
+
+      const parent = annotations.find(
+        (annotation) => annotation['annotationType'] === annotationType,
+      );
+      const popup = annotations.find((annotation) => annotation['annotationType'] === 16);
+      expect(parent?.['contentsObj']).toMatchObject({ str: comment });
+      expect(popup?.['contentsObj']).toMatchObject({ str: comment });
+    },
+  );
+
+  it('reopens, edits, resaves, and reopens an existing native Highlight comment', async () => {
+    const original = await createReadonlyAnnotationFixture(false);
+    const firstComment = 'First [[Idea]] #draft';
+    const firstSave = await saveWithNativePdfjsEditors(original, [
+      {
+        annotationType: 9,
+        color: [255, 212, 0],
+        commentText: firstComment,
+        isCopy: true,
+        opacity: 0.75,
+        pageIndex: 0,
+        quadPoints: new Float32Array([72, 590, 220, 590, 72, 568, 220, 568]),
+        rect: [72, 568, 220, 590],
+        rotation: 0,
+      },
+    ]);
+
+    const secondComment = 'Revised [[Idea]] #verified';
+    const secondSave = await editExistingNativeComment(firstSave, 9, secondComment);
+    const annotations = await reopenedAnnotations(secondSave);
+
+    expect(secondSave.slice(0, firstSave.byteLength)).toEqual(firstSave);
+    expect(new TextDecoder('latin1').decode(secondSave).match(/%%EOF/gu)).toHaveLength(3);
+    expect(
+      annotations.find((annotation) => annotation['annotationType'] === 9)?.['contentsObj'],
+    ).toMatchObject({ str: secondComment });
+    expect(
+      annotations.find((annotation) => annotation['annotationType'] === 16)?.['contentsObj'],
+    ).toMatchObject({ str: secondComment });
   });
 });

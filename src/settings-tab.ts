@@ -29,7 +29,9 @@ type SettingFieldId =
   | 'layout.rememberPerDocument'
   | 'annotations.author'
   | 'annotations.markdownTemplate'
-  | `annotations.palette.${number}.meaning`;
+  | `annotations.palette.${number}.color`
+  | `annotations.palette.${number}.meaning`
+  | `annotations.palette.${number}.name`;
 
 interface CustomReadingSettingOptions<Value> {
   readonly change: (value: Value) => Partial<ResolvedReadingColors>;
@@ -301,7 +303,7 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     const palette: readonly AnnotationPaletteEntry[] = annotations.palette;
     new Setting(container)
       .setName('Annotation author')
-      .setDesc('Stored as the author for new PDF annotations.')
+      .setDesc('Used when a document format supports annotation authors.')
       .addText((text) => {
         text.setValue(annotations.author).onChange((author) => {
           this.updateSettings(
@@ -317,11 +319,37 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       });
     for (const [index, entry] of palette.entries()) {
       new Setting(container)
+        .setName(`${entry.name} color`)
+        .setDesc('Color used by this annotation palette entry.')
+        .addColorPicker((picker) => {
+          picker.setValue(entry.color).onChange((color) => {
+            this.updateSettings((settings) => this.withPaletteEntry(settings, index, { color }), {
+              field: `annotations.palette.${index}.color`,
+              synchronize: (settings) => {
+                picker.setValue(settings.annotations.palette[index]?.color ?? entry.color);
+              },
+            });
+          });
+        });
+      new Setting(container)
+        .setName(`${entry.name} name`)
+        .setDesc('Short label shown in annotation color tooltips.')
+        .addText((text) => {
+          text.setValue(entry.name).onChange((name) => {
+            this.updateSettings((settings) => this.withPaletteEntry(settings, index, { name }), {
+              field: `annotations.palette.${index}.name`,
+              synchronize: (settings) => {
+                text.setValue(settings.annotations.palette[index]?.name ?? entry.name);
+              },
+            });
+          });
+        });
+      new Setting(container)
         .setName(`${entry.name} meaning`)
         .setDesc(`${entry.color} annotation palette color.`)
         .addText((text) => {
           text.setValue(entry.meaning).onChange((meaning) => {
-            this.updateSettings((settings) => this.withPaletteMeaning(settings, index, meaning), {
+            this.updateSettings((settings) => this.withPaletteEntry(settings, index, { meaning }), {
               field: `annotations.palette.${index}.meaning`,
               synchronize: (settings) => {
                 text.setValue(settings.annotations.palette[index]?.meaning ?? '');
@@ -351,17 +379,17 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       });
   }
 
-  private withPaletteMeaning(
+  private withPaletteEntry(
     settings: PluginSettings,
     index: number,
-    meaning: string,
+    change: Partial<AnnotationPaletteEntry>,
   ): PluginSettings {
     return {
       ...settings,
       annotations: {
         ...settings.annotations,
         palette: settings.annotations.palette.map((paletteEntry, paletteIndex) =>
-          paletteIndex === index ? { ...paletteEntry, meaning } : paletteEntry,
+          paletteIndex === index ? { ...paletteEntry, ...change } : paletteEntry,
         ),
       },
     };

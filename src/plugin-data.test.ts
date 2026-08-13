@@ -219,6 +219,26 @@ describe('PluginDataStore', () => {
     });
   });
 
+  it('preserves customized palette names and valid arbitrary colors', () => {
+    const palette = DEFAULT_DATA.settings.annotations.palette.map((entry, index) =>
+      index === 0 ? { color: '#123456', meaning: 'Central claim', name: 'Thesis' } : entry,
+    );
+    const result = migratePluginData({
+      ...DEFAULT_DATA,
+      settings: {
+        ...DEFAULT_DATA.settings,
+        annotations: { ...DEFAULT_DATA.settings.annotations, palette },
+      },
+    });
+
+    expect(result.diagnostics).toEqual([]);
+    expect(result.data.settings.annotations.palette[0]).toEqual({
+      color: '#123456',
+      meaning: 'Central claim',
+      name: 'Thesis',
+    });
+  });
+
   it('repairs malformed V2 layout maps and palette entries independently', () => {
     const result = migratePluginData({
       ...DEFAULT_DATA,

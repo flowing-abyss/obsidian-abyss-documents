@@ -20,6 +20,7 @@ import {
 } from '../../reader-performance.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import { PdfAnnotationEditor } from './pdf-annotation-editor.js';
+import { PdfCommentBridge, type PdfJsCommentManagerRuntime } from './pdf-comment-bridge.js';
 import {
   PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
   PDFJS_ANNOTATION_EDITOR_TYPE,
@@ -47,6 +48,23 @@ type ScaleRequest = ReaderScale;
 
 interface RebindablePdfViewer {
   setDocument(document: PDFDocumentProxy | null): void;
+}
+
+interface PdfViewerWithCommentManagerOptions {
+  new (
+    options: ConstructorParameters<PdfRuntime['pdfjsViewer']['PDFViewer']>[0] & {
+      readonly commentManager?: PdfJsCommentManagerRuntime | undefined;
+    },
+  ): PdfViewer;
+}
+
+interface ViewerCreationContext {
+  readonly eventBus: PdfEventBus;
+  readonly findController: PdfFindController;
+  readonly linkService: PdfLinkService;
+  readonly pageColors: { readonly background: string; readonly foreground: string };
+  readonly root: HTMLDivElement;
+  readonly viewerElement: HTMLDivElement;
 }
 
 type PreservedScale =
@@ -98,6 +116,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private findController: PdfFindController | null = null;
   private viewer: PdfViewer | null = null;
   private annotationEditorInstance: PdfAnnotationEditor | null = null;
+  private commentBridge: PdfCommentBridge | null = null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
@@ -157,7 +176,45 @@ export class PdfDocumentViewport implements DocumentViewport {
     });
     this.findController = findController;
     const pageColors = resolvedPageColors(host);
-    const viewer = new this.pdfjsViewer.PDFViewer({
+    const viewer = this.createViewer({
+      eventBus,
+      findController,
+      linkService,
+      pageColors,
+      root,
+      viewerElement,
+    });
+
+    this.viewer = viewer;
+    this.annotationEditorInstance = this.createAnnotationEditor(eventBus, viewer);
+    this.bindEvents();
+    root.addEventListener('click', this.onRootClick);
+    if (typeof ResizeObserver === 'function') {
+      this.resizeObserver = new ResizeObserver(this.onResize);
+      this.resizeObserver.observe(root);
+    }
+
+    linkService.setViewer(viewer);
+    linkService.setDocument(this.pdf);
+    viewer.setDocument(this.pdf);
+  }
+
+  private createViewer(context: ViewerCreationContext): PdfViewer {
+    const { eventBus, findController, linkService, pageColors, root, viewerElement } = context;
+    const commentBridge =
+      this.annotationCapabilities.readOnlyReason === null
+        ? new PdfCommentBridge(root, {
+            onFailure: ({ action, cause }) => {
+              this.events.emit({ type: 'annotation-mutation-error', action, cause });
+            },
+            onNativeMutation: () => {
+              this.annotationEditorInstance?.notifyNativeMutation();
+            },
+          })
+        : null;
+    this.commentBridge = commentBridge;
+    const Viewer = this.pdfjsViewer.PDFViewer as PdfViewerWithCommentManagerOptions;
+    return new Viewer({
       container: root,
       viewer: viewerElement,
       eventBus,
@@ -173,20 +230,8 @@ export class PdfDocumentViewport implements DocumentViewport {
       supportsPinchToZoom: true,
       maxCanvasPixels: MAX_CANVAS_PIXELS,
       pageColors,
+      ...(commentBridge === null ? {} : { commentManager: commentBridge }),
     });
-
-    this.viewer = viewer;
-    this.annotationEditorInstance = this.createAnnotationEditor(eventBus, viewer);
-    this.bindEvents();
-    root.addEventListener('click', this.onRootClick);
-    if (typeof ResizeObserver === 'function') {
-      this.resizeObserver = new ResizeObserver(this.onResize);
-      this.resizeObserver.observe(root);
-    }
-
-    linkService.setViewer(viewer);
-    linkService.setDocument(this.pdf);
-    viewer.setDocument(this.pdf);
   }
 
   async goTo(location: DocumentLocation): Promise<void> {
@@ -363,9 +408,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       }
     };
     this.abortSearches();
-    attempt(() => {
-      this.annotationEditorInstance?.destroy();
-    });
+    this.destroyEditorBridges(attempt);
     const eventBus = this.eventBus;
     this.clearPendingPagesInit();
     this.colorRebindActive = false;
@@ -415,10 +458,20 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (failure !== undefined) throw failure;
   }
 
+  private destroyEditorBridges(attempt: (operation: () => void) => void): void {
+    attempt(() => {
+      this.annotationEditorInstance?.destroy();
+    });
+    attempt(() => {
+      this.commentBridge?.dispose();
+    });
+  }
+
   private clearOwnedViewerReferences(): void {
     this.findController = null;
     this.viewer = null;
     this.annotationEditorInstance = null;
+    this.commentBridge = null;
   }
 
   private createAnnotationEditor(

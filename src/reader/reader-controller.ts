@@ -1,4 +1,8 @@
 import { Notice, type TFile } from 'obsidian';
+import type {
+  PdfAnnotationEditor,
+  PdfAnnotationTool,
+} from '../adapters/pdf/pdf-annotation-editor.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
 import { AutosaveScheduler, type SaveReason } from '../autosave-scheduler.js';
 import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
@@ -28,6 +32,7 @@ import {
 } from '../document-core/save-coordinator.js';
 import { markReaderPerformance, markReaderPerformanceOnce } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
+import type { AnnotationToolbarIntent } from './annotation-toolbar.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
 import type { SaveConflictAction } from './save-conflict-modal.js';
@@ -79,6 +84,19 @@ interface NativeEditableSessionFactory extends DocumentSession {
   ): NativeEditableSaveSession | null;
 }
 
+interface AnnotationEditorViewport extends DocumentViewport {
+  readonly annotationEditor: PdfAnnotationEditor | null;
+}
+
+interface AnnotationToolRequest {
+  readonly editor: PdfAnnotationEditor;
+  readonly previous: PdfAnnotationTool;
+  readonly revision: number;
+  readonly shell: ReaderShell;
+  readonly tool: PdfAnnotationTool;
+  readonly viewport: DocumentViewport;
+}
+
 class SaveDiscardedError extends SaveConflictError {
   constructor(conflict: SaveConflictError) {
     super(conflict.path, conflict.expected, conflict.actual);
@@ -115,6 +133,10 @@ export class ReaderController {
   private recoveryAbort: AbortController | null = null;
   private unregisterSaveBroadcast: (() => void) | null = null;
   private lastAutosaveFailureKey: string | null = null;
+  private lastAnnotationFailureKey: string | null = null;
+  private annotationToolRequestRevision = 0;
+  private currentAnnotationTool: PdfAnnotationTool = 'select';
+  private currentAnnotationColor = DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400';
   private readonly saveFailureOwner = {};
   private currentFile: TFile | null = null;
   private currentHost: HTMLElement | null = null;
@@ -158,7 +180,8 @@ export class ReaderController {
   refreshReadingSettings(): void {
     const viewport = this.viewport;
     const shell = this.shell;
-    if (viewport === null || shell === null) return;
+    const session = this.session;
+    if (viewport === null || shell === null || session === null) return;
     this.profileService.setCustom(this.profileState.reading.custom);
     try {
       viewport.setReadingColors(
@@ -171,6 +194,7 @@ export class ReaderController {
       this.currentLayout = layout;
       shell.toolbar.setLayout(layout);
       shell.toolbar.setProfile(this.currentProfile);
+      this.refreshAnnotationToolbar(session, viewport, shell);
     } catch (cause) {
       console.error('[abyss-documents] Failed to refresh PDF reading settings', {
         profile: this.currentProfile,
@@ -280,15 +304,13 @@ export class ReaderController {
     this.currentProfile = this.initialProfile(session.descriptor.fingerprint);
     this.currentLayout = this.initialLayout(session.descriptor.fingerprint);
     this.layoutPolicy = captureLayoutPolicy(this.profileState.layout);
-    this.profileService.setCustom(this.profileState.reading.custom);
+    this.applyInitialReadingState(viewport, shell);
     viewport.setLayout(this.currentLayout);
-    viewport.setReadingColors(
-      this.profileService.resolve(this.currentProfile, shell.obsidianTheme),
-    );
     shell.toolbar.setPageCount(viewport.pageCount);
     shell.toolbar.setCurrentPage(this.currentPageIndex);
     shell.toolbar.setProfile(this.currentProfile);
     shell.toolbar.setLayout(this.currentLayout);
+    this.configureAnnotationToolbar(session, viewport, shell);
     shell.root.dataset['readingProfile'] = this.currentProfile;
     const unsubscribeViewport = viewport.onEvent((event) => {
       this.handleViewportEvent(viewport, shell, event);
@@ -362,6 +384,13 @@ export class ReaderController {
     this.nativeSaveSession = native;
     this.autosave = scheduler;
     this.registerNativeSaveBroadcast(session, native, scheduler);
+  }
+
+  private applyInitialReadingState(viewport: DocumentViewport, shell: ReaderShell): void {
+    this.profileService.setCustom(this.profileState.reading.custom);
+    viewport.setReadingColors(
+      this.profileService.resolve(this.currentProfile, shell.obsidianTheme),
+    );
   }
 
   private registerNativeSaveBroadcast(
@@ -587,6 +616,8 @@ export class ReaderController {
     this.navigationPageIndex = 0;
     this.pendingNavigationPageIndex = null;
     this.navigationRequestRevision += 1;
+    this.annotationToolRequestRevision += 1;
+    this.currentAnnotationTool = 'select';
     this.currentFile = null;
     this.currentHost = null;
   }
@@ -629,6 +660,16 @@ export class ReaderController {
   }
 
   private handleToolbarIntent(intent: ReaderShellIntent): void {
+    if (isAnnotationToolbarIntent(intent)) {
+      this.handleAnnotationToolbarIntent(intent);
+      return;
+    }
+    this.handleReaderToolbarIntent(intent);
+  }
+
+  private handleReaderToolbarIntent(
+    intent: Exclude<ReaderShellIntent, AnnotationToolbarIntent>,
+  ): void {
     switch (intent.type) {
       case 'toggle-sidebar':
         this.toggleSidebar();
@@ -656,7 +697,190 @@ export class ReaderController {
         return;
       case 'set-profile':
         this.setProfile(intent.profile);
+        return;
     }
+  }
+
+  private handleAnnotationToolbarIntent(intent: AnnotationToolbarIntent): void {
+    switch (intent.type) {
+      case 'set-annotation-tool':
+        this.setAnnotationTool(intent.tool);
+        return;
+      case 'set-annotation-color':
+        this.setAnnotationColor(intent.color);
+        return;
+      case 'undo-annotation':
+        this.runAnnotationHistory('undo');
+        return;
+      case 'redo-annotation':
+        this.runAnnotationHistory('redo');
+        return;
+      case 'delete-annotation':
+        this.deleteSelectedAnnotation();
+        return;
+    }
+  }
+
+  private configureAnnotationToolbar(
+    session: DocumentSession,
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+  ): void {
+    const annotationEditor = annotationEditorOf(viewport);
+    const palette = this.profileState.annotations?.palette ?? DEFAULT_SETTINGS.annotations.palette;
+    this.currentAnnotationTool = 'select';
+    this.currentAnnotationColor = palette[0]?.color ?? '#ffd400';
+    shell.configureAnnotationToolbar(palette, annotationReadOnlyReason(session, annotationEditor));
+  }
+
+  private refreshAnnotationToolbar(
+    session: DocumentSession,
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+  ): void {
+    const editor = annotationEditorOf(viewport);
+    const palette = this.profileState.annotations?.palette ?? DEFAULT_SETTINGS.annotations.palette;
+    shell.configureAnnotationToolbar(palette, annotationReadOnlyReason(session, editor));
+    shell.annotationToolbar?.setTool(this.currentAnnotationTool);
+    const selectedColor = palette.some(
+      ({ color }) => color.toLocaleLowerCase() === this.currentAnnotationColor.toLocaleLowerCase(),
+    )
+      ? this.currentAnnotationColor
+      : (palette[0]?.color ?? '#ffd400');
+    this.setAnnotationColor(selectedColor);
+  }
+
+  private setAnnotationTool(tool: PdfAnnotationTool): void {
+    const editor = annotationEditorOf(this.viewport);
+    const shell = this.shell;
+    const viewport = this.viewport;
+    if (editor === null || shell === null || viewport === null) return;
+    const previous = this.currentAnnotationTool;
+    const revision = ++this.annotationToolRequestRevision;
+    this.commitAnnotationTool({ editor, previous, revision, shell, tool, viewport }).catch(
+      (cause: unknown) => {
+        console.error('[abyss-documents] Unexpected annotation tool transaction failure', {
+          cause,
+        });
+      },
+    );
+  }
+
+  private setAnnotationColor(color: string): void {
+    const editor = annotationEditorOf(this.viewport);
+    const toolbar = this.shell?.annotationToolbar;
+    const tool = this.currentAnnotationTool;
+    if (editor === null || toolbar === undefined || toolbar === null) return;
+    if (tool === 'select') {
+      this.currentAnnotationColor = color;
+      toolbar.setColor(color);
+      return;
+    }
+    try {
+      editor.setParameter(annotationColorParameter(tool), color);
+      this.currentAnnotationColor = color;
+      toolbar.setColor(color);
+      this.lastAnnotationFailureKey = null;
+    } catch (cause) {
+      this.reportAnnotationFailure('change annotation color', cause, { color, tool });
+    }
+  }
+
+  private async commitAnnotationTool(request: AnnotationToolRequest): Promise<void> {
+    const { editor, tool } = request;
+    let nativeModeChanged = false;
+    try {
+      await editor.setTool(tool);
+      nativeModeChanged = true;
+      this.finishAnnotationTool(request);
+    } catch (cause) {
+      await this.rejectAnnotationTool(request, cause, nativeModeChanged);
+    }
+  }
+
+  private finishAnnotationTool(request: AnnotationToolRequest): void {
+    const { editor, revision, shell, tool, viewport } = request;
+    if (!this.isCurrentAnnotationRequest(viewport, revision)) return;
+    if (tool !== 'select') {
+      editor.setParameter(annotationColorParameter(tool), this.currentAnnotationColor);
+    }
+    if (!this.isCurrentAnnotationRequest(viewport, revision)) return;
+    this.currentAnnotationTool = tool;
+    shell.annotationToolbar?.setTool(tool);
+    this.lastAnnotationFailureKey = null;
+  }
+
+  private async rejectAnnotationTool(
+    request: AnnotationToolRequest,
+    cause: unknown,
+    nativeModeChanged: boolean,
+  ): Promise<void> {
+    const { editor, previous, revision, shell, tool, viewport } = request;
+    if (isAbortFailure(cause) || !this.isCurrentAnnotationRequest(viewport, revision)) return;
+    if (nativeModeChanged) await this.rollbackAnnotationTool(editor, previous);
+    if (!this.isCurrentAnnotationRequest(viewport, revision)) return;
+    shell.annotationToolbar?.setTool(previous);
+    this.reportAnnotationFailure('change annotation tool', cause, { tool });
+  }
+
+  private async rollbackAnnotationTool(
+    editor: PdfAnnotationEditor,
+    previous: PdfAnnotationTool,
+  ): Promise<void> {
+    try {
+      await editor.setTool(previous);
+    } catch (rollbackCause) {
+      console.error('[abyss-documents] Failed to roll back PDF annotation tool', {
+        previous,
+        rollbackCause,
+      });
+    }
+  }
+
+  private isCurrentAnnotationRequest(viewport: DocumentViewport, revision: number): boolean {
+    return this.viewport === viewport && this.annotationToolRequestRevision === revision;
+  }
+
+  private runAnnotationHistory(action: 'redo' | 'undo'): void {
+    const editor = annotationEditorOf(this.viewport);
+    if (editor === null) return;
+    try {
+      editor[action]();
+      this.lastAnnotationFailureKey = null;
+    } catch (cause) {
+      this.reportAnnotationFailure(`${action} PDF annotation`, cause, { action });
+    }
+  }
+
+  private deleteSelectedAnnotation(): void {
+    const editor = annotationEditorOf(this.viewport);
+    if (editor === null) return;
+    try {
+      editor.deleteSelection();
+      this.lastAnnotationFailureKey = null;
+    } catch (cause) {
+      this.reportAnnotationFailure('delete selected annotation', cause, {});
+    }
+  }
+
+  private reportAnnotationFailure(
+    action: string,
+    cause: unknown,
+    context: Readonly<Record<string, unknown>>,
+  ): void {
+    const path = this.session?.descriptor.path ?? '';
+    const reason = this.reason(cause);
+    const key = `${path}\u0000${action}\u0000${reason}`;
+    if (key !== this.lastAnnotationFailureKey) {
+      new Notice(`Could not ${action}: ${reason}`);
+      this.lastAnnotationFailureKey = key;
+    }
+    console.error('[abyss-documents] Failed to edit PDF annotation', {
+      action,
+      path,
+      ...context,
+      cause,
+    });
   }
 
   private toggleSidebar(): void {
@@ -978,6 +1202,11 @@ export class ReaderController {
       case 'search-results':
         this.handleSearchResults(shell, event.results);
         return;
+      case 'annotation-mutation-error':
+        this.reportAnnotationFailure(annotationMutationAction(event.action), event.cause, {
+          mutation: event.action,
+        });
+        return;
       case 'render-error':
         return;
     }
@@ -1165,6 +1394,15 @@ function annotationFailurePage(cause: unknown): number | null {
   return null;
 }
 
+function annotationMutationAction(
+  action: Extract<ViewportEvent, { readonly type: 'annotation-mutation-error' }>['action'],
+): string {
+  if (action === 'save-comment') return 'save PDF annotation comment';
+  if (action === 'delete-comment') return 'delete PDF annotation comment';
+  if (action === 'change-color') return 'change PDF annotation color';
+  return 'delete PDF annotation';
+}
+
 function isReadingProfileId(value: unknown): value is ReadingProfileId {
   return (
     value === 'default' ||
@@ -1190,4 +1428,41 @@ function captureLayoutPolicy(layout: PluginSettings['layout']): LayoutPolicySnap
     default: { ...layout.default },
     rememberPerDocument: layout.rememberPerDocument,
   };
+}
+
+function annotationEditorOf(viewport: DocumentViewport | null): PdfAnnotationEditor | null {
+  if (viewport === null || !('annotationEditor' in viewport)) return null;
+  return (viewport as AnnotationEditorViewport).annotationEditor;
+}
+
+function annotationReadOnlyReason(
+  session: DocumentSession,
+  editor: PdfAnnotationEditor | null,
+): string | null {
+  if ('annotationCapabilities' in session) {
+    const capabilities = session.annotationCapabilities as {
+      readonly readOnlyReason?: { readonly message?: unknown } | null;
+    };
+    const message = capabilities.readOnlyReason?.message;
+    if (typeof message === 'string' && message.length > 0) return message;
+  }
+  return editor === null ? 'PDF annotation editing is not available for this document.' : null;
+}
+
+function annotationColorParameter(
+  tool: Exclude<PdfAnnotationTool, 'select'>,
+): 'freetext-color' | 'highlight-color' | 'ink-color' {
+  if (tool === 'highlight') return 'highlight-color';
+  if (tool === 'ink') return 'ink-color';
+  return 'freetext-color';
+}
+
+function isAnnotationToolbarIntent(intent: ReaderShellIntent): intent is AnnotationToolbarIntent {
+  return (
+    intent.type === 'set-annotation-tool' ||
+    intent.type === 'set-annotation-color' ||
+    intent.type === 'undo-annotation' ||
+    intent.type === 'redo-annotation' ||
+    intent.type === 'delete-annotation'
+  );
 }

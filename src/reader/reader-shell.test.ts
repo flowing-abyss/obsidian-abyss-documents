@@ -2,6 +2,43 @@ import { describe, expect, it, vi } from 'vitest';
 import { ReaderShell } from './reader-shell.js';
 
 describe('ReaderShell', () => {
+  it('adds a minimal annotation toolbar only after document capabilities are known', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    expect(shell.annotationToolbar).toBeNull();
+
+    shell.configureAnnotationToolbar(
+      [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      null,
+    );
+    shell.annotationToolbar?.root
+      .querySelector<HTMLButtonElement>('[data-annotation-tool="ink"]')
+      ?.click();
+
+    expect(intents).toContainEqual({ type: 'set-annotation-tool', tool: 'ink' });
+    shell.destroy();
+    host.remove();
+  });
+
+  it('keeps undo and redo reader-scoped and ignores focused text controls', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar([], null);
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true, key: 'z' }),
+    );
+    const input = shell.root.createEl('textarea');
+    input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true, key: 'z' }));
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true, key: 'Z', shiftKey: true }),
+    );
+
+    expect(intents).toEqual([{ type: 'undo-annotation' }, { type: 'redo-annotation' }]);
+    shell.destroy();
+    host.remove();
+  });
   it('starts with the sidebar absent from layout', () => {
     const host = createDiv();
 
