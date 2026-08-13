@@ -5,6 +5,7 @@ import { ownerWindow } from './owner-dom.js';
 const MAX_CARDS = 80;
 const ESTIMATED_CARD_HEIGHT = 112;
 const SCROLL_OVERSCAN = 10;
+const HEIGHT_EPSILON = 0.5;
 
 export interface AnnotationPanelFilter {
   readonly query: string;
@@ -30,13 +31,28 @@ export class AnnotationsPanel {
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
   private currentPage = 0;
   private windowStart = 0;
+  private estimatedCardHeight = ESTIMATED_CARD_HEIGHT;
+  private offsets: number[] = [0];
+  private readonly measuredHeights = new Map<string, number>();
+  private rowIds = new WeakMap<DocumentAnnotation, string>();
+  private nextRowId = 0;
+  private measurementFrame: number | null = null;
+  private estimateCalibrated = false;
+  private focusedRowId: string | null = null;
   private destroyed = false;
   private readonly onScroll = (): void => {
     if (this.destroyed || !this.updateWindowFromScroll()) return;
     this.render();
   };
   private readonly onResize = (): void => {
-    if (!this.destroyed) this.render();
+    if (!this.destroyed) this.invalidateMeasurements(true);
+  };
+  private readonly onDocumentFocusIn = (event: FocusEvent): void => {
+    const target = event.target;
+    if (!(target instanceof ownerWindow(this.root).Element)) return;
+    this.focusedRowId = this.root.contains(target)
+      ? target.getAttribute('data-annotation-row-id')
+      : null;
   };
 
   constructor(
@@ -79,6 +95,11 @@ export class AnnotationsPanel {
     this.destroyed = true;
     this.root.removeEventListener('scroll', this.onScroll);
     ownerWindow(this.root).removeEventListener('resize', this.onResize);
+    ownerWindow(this.root).document.removeEventListener('focusin', this.onDocumentFocusIn);
+    if (this.measurementFrame !== null) {
+      ownerWindow(this.root).cancelAnimationFrame(this.measurementFrame);
+      this.measurementFrame = null;
+    }
   }
 
   private configureRoot(): void {
@@ -90,10 +111,11 @@ export class AnnotationsPanel {
   private bindEvents(): void {
     this.root.addEventListener('scroll', this.onScroll);
     ownerWindow(this.root).addEventListener('resize', this.onResize);
+    ownerWindow(this.root).document.addEventListener('focusin', this.onDocumentFocusIn);
     this.query.addEventListener('input', () => {
       this.filter = { ...this.filter, query: this.query.value };
       this.resetVirtualScroll();
-      this.applyFilter();
+      this.applyFilter(true);
     });
   }
 
@@ -109,6 +131,9 @@ export class AnnotationsPanel {
 
   setAnnotations(annotations: readonly DocumentAnnotation[]): void {
     this.annotations = [...annotations];
+    this.rowIds = new WeakMap();
+    this.nextRowId = 0;
+    this.clearMeasurements();
     this.resetVirtualScroll();
     this.status.removeAttribute('role');
     this.status.textContent = `${annotations.length} ${annotations.length === 1 ? 'annotation' : 'annotations'}`;
@@ -121,7 +146,7 @@ export class AnnotationsPanel {
     this.query.value = filter.query;
     this.resetVirtualScroll();
     this.renderFacets();
-    this.applyFilter();
+    this.applyFilter(true);
   }
 
   visibleIds(): string[] {
@@ -137,16 +162,14 @@ export class AnnotationsPanel {
       selected >= 0 &&
       (selected < this.windowStart || selected >= this.windowStart + MAX_CARDS)
     ) {
-      this.root.scrollTop = selected * ESTIMATED_CARD_HEIGHT;
-      this.windowStart = clampWindowStart(
-        selected - Math.floor(MAX_CARDS / 2),
-        this.filtered.length,
-      );
+      this.root.scrollTop = this.scrollTopForIndex(selected);
+      this.windowStart = clampWindowStart(selected - SCROLL_OVERSCAN, this.filtered.length);
     }
     this.render();
   }
 
-  private applyFilter(): void {
+  private applyFilter(invalidateMeasurements = false): void {
+    if (invalidateMeasurements) this.clearMeasurements();
     const query = normalize(this.filter.query.trim());
     const colors = new Set(Array.from(this.filter.colors, normalize));
     const tags = new Set(Array.from(this.filter.tags, normalize));
@@ -167,6 +190,7 @@ export class AnnotationsPanel {
           .join(' '),
       ).includes(query);
     });
+    this.rebuildOffsets();
     this.windowStart = clampWindowStart(this.windowStart, this.filtered.length);
     this.render();
   }
@@ -192,7 +216,7 @@ export class AnnotationsPanel {
         else selected.delete(color);
         this.filter = { ...this.filter, colors: selected };
         this.resetVirtualScroll();
-        this.applyFilter();
+        this.applyFilter(true);
       });
       label.append(input, this.options.colorMeanings?.[color] ?? color);
       this.colors.append(label);
@@ -220,7 +244,7 @@ export class AnnotationsPanel {
         else if (previous !== undefined) selected.delete(previous);
         this.filter = { ...this.filter, tags: selected };
         this.resetVirtualScroll();
-        this.applyFilter();
+        this.applyFilter(true);
       });
       label.append(input, `#${display}`);
       this.tags.append(label);
@@ -228,27 +252,31 @@ export class AnnotationsPanel {
   }
 
   private render(): void {
+    const focusedRowId = this.activeRowId();
     this.list.replaceChildren();
     const visible = this.filtered.slice(this.windowStart, this.windowStart + MAX_CARDS);
-    if (visible.length > 0) this.list.append(this.spacer(this.windowStart, 'top'));
+    if (visible.length > 0) this.list.append(this.spacer(this.offsetAt(this.windowStart), 'top'));
     for (const [offset, annotation] of visible.entries())
       this.list.append(this.card(annotation, this.windowStart + offset));
-    const remaining = this.filtered.length - this.windowStart - visible.length;
-    if (visible.length > 0) this.list.append(this.spacer(remaining, 'bottom'));
+    const end = this.windowStart + visible.length;
+    const remainingHeight = this.offsetAt(this.filtered.length) - this.offsetAt(end);
+    if (visible.length > 0) this.list.append(this.spacer(remainingHeight, 'bottom'));
     if (this.filtered.length === 0) {
       const empty = ownerWindow(this.root).createEl('p');
       empty.className = 'abyss-reader-sidebar-empty';
       empty.textContent = 'No annotations match the current filters.';
       this.list.append(empty);
     }
+    this.restoreFocusedRow(focusedRowId);
+    this.scheduleMeasurement();
   }
 
-  private spacer(rows: number, edge: 'top' | 'bottom'): HTMLElement {
+  private spacer(height: number, edge: 'top' | 'bottom'): HTMLElement {
     const spacer = ownerWindow(this.root).createDiv();
     spacer.className = 'abyss-annotation-virtual-spacer';
     spacer.dataset['virtualSpacer'] = edge;
     spacer.setAttribute('aria-hidden', 'true');
-    spacer.style.height = `${rows * ESTIMATED_CARD_HEIGHT}px`;
+    spacer.style.height = `${height}px`;
     return spacer;
   }
 
@@ -258,6 +286,7 @@ export class AnnotationsPanel {
     button.type = 'button';
     button.className = 'abyss-annotation-card';
     button.dataset['annotationId'] = annotationId(annotation);
+    button.dataset['annotationRowId'] = this.rowId(annotation);
     button.setAttribute('role', 'listitem');
     button.setAttribute('aria-posinset', String(index + 1));
     button.setAttribute('aria-setsize', String(this.filtered.length));
@@ -293,8 +322,8 @@ export class AnnotationsPanel {
     if (target === null) return;
     event.preventDefault();
     if (target < this.windowStart || target >= this.windowStart + MAX_CARDS) {
-      this.root.scrollTop = target * ESTIMATED_CARD_HEIGHT;
-      this.windowStart = clampWindowStart(target - Math.floor(MAX_CARDS / 2), this.filtered.length);
+      this.root.scrollTop = this.scrollTopForIndex(target);
+      this.windowStart = clampWindowStart(target - SCROLL_OVERSCAN, this.filtered.length);
     }
     this.render();
     const annotation = this.filtered[target];
@@ -310,12 +339,169 @@ export class AnnotationsPanel {
   }
 
   private updateWindowFromScroll(): boolean {
-    const target = Math.floor(this.root.scrollTop / ESTIMATED_CARD_HEIGHT) - SCROLL_OVERSCAN;
+    const target = this.indexAtOffset(this.virtualScrollTop()) - SCROLL_OVERSCAN;
     const next = clampWindowStart(target, this.filtered.length);
     if (next === this.windowStart) return false;
     this.windowStart = next;
     return true;
   }
+
+  private rowId(annotation: DocumentAnnotation): string {
+    const existing = this.rowIds.get(annotation);
+    if (existing !== undefined) return existing;
+    const id = `${annotationId(annotation)}:${this.nextRowId}`;
+    this.nextRowId += 1;
+    this.rowIds.set(annotation, id);
+    return id;
+  }
+
+  private clearMeasurements(): void {
+    this.measuredHeights.clear();
+    this.estimatedCardHeight = ESTIMATED_CARD_HEIGHT;
+    this.estimateCalibrated = false;
+  }
+
+  private rebuildOffsets(): void {
+    const offsets = new Array<number>(this.filtered.length + 1);
+    offsets[0] = 0;
+    for (let index = 0; index < this.filtered.length; index += 1) {
+      const annotation = this.filtered[index];
+      const previous = offsets[index] ?? 0;
+      offsets[index + 1] =
+        previous +
+        (annotation === undefined
+          ? this.estimatedCardHeight
+          : (this.measuredHeights.get(this.rowId(annotation)) ?? this.estimatedCardHeight));
+    }
+    this.offsets = offsets;
+  }
+
+  private offsetAt(index: number): number {
+    return this.offsets[Math.max(0, Math.min(index, this.filtered.length))] ?? 0;
+  }
+
+  private indexAtOffset(offset: number): number {
+    if (this.filtered.length === 0) return 0;
+    if (!Number.isFinite(offset) || offset >= this.offsetAt(this.filtered.length))
+      return this.filtered.length - 1;
+    let low = 0;
+    let high = this.filtered.length;
+    while (low < high) {
+      const middle = Math.floor((low + high + 1) / 2);
+      if (this.offsetAt(middle) <= Math.max(0, offset)) low = middle;
+      else high = middle - 1;
+    }
+    return Math.min(low, this.filtered.length - 1);
+  }
+
+  private scheduleMeasurement(): void {
+    if (this.destroyed || this.measurementFrame !== null || this.filtered.length === 0) return;
+    this.measurementFrame = ownerWindow(this.root).requestAnimationFrame(() => {
+      this.measurementFrame = null;
+      this.measureRenderedRows();
+    });
+  }
+
+  private measureRenderedRows(): void {
+    if (this.destroyed) return;
+    const activeRowId = this.activeRowId();
+    const virtualScrollTop = this.virtualScrollTop();
+    const anchorIndex = this.indexAtOffset(virtualScrollTop);
+    const anchorDelta = virtualScrollTop - this.offsetAt(anchorIndex);
+    const measurements = this.collectMeasurements();
+    let { changed } = measurements;
+    const { newlyMeasured } = measurements;
+    if (!this.estimateCalibrated && newlyMeasured.length > 0) {
+      this.estimatedCardHeight = Math.max(
+        ESTIMATED_CARD_HEIGHT,
+        newlyMeasured.reduce((sum, height) => sum + height, 0) / newlyMeasured.length,
+      );
+      this.estimateCalibrated = true;
+      changed = true;
+    }
+    if (!changed) return;
+    this.rebuildOffsets();
+    this.root.scrollTop = this.scrollTopForIndex(anchorIndex) + anchorDelta;
+    this.windowStart = this.windowStartForAnchor(anchorIndex, activeRowId);
+    this.render();
+  }
+
+  private collectMeasurements(): { readonly changed: boolean; readonly newlyMeasured: number[] } {
+    let changed = false;
+    const newlyMeasured: number[] = [];
+    const cards = Array.from(this.list.querySelectorAll<HTMLElement>('[data-annotation-row-id]'));
+    for (const card of cards) {
+      const height = measuredCardHeight(card);
+      const rowId = card.dataset['annotationRowId'];
+      if (rowId === undefined || height <= 0) continue;
+      const previous = this.measuredHeights.get(rowId);
+      if (previous === undefined) newlyMeasured.push(height);
+      if (previous !== undefined && Math.abs(previous - height) <= HEIGHT_EPSILON) continue;
+      this.measuredHeights.set(rowId, height);
+      changed = true;
+    }
+    return { changed, newlyMeasured };
+  }
+
+  private invalidateMeasurements(preserveAnchor: boolean): void {
+    const focusedRowId = this.activeRowId();
+    const virtualScrollTop = this.virtualScrollTop();
+    const anchorIndex = this.indexAtOffset(virtualScrollTop);
+    const anchor = preserveAnchor ? this.filtered[anchorIndex] : undefined;
+    const delta = preserveAnchor ? virtualScrollTop - this.offsetAt(anchorIndex) : 0;
+    this.clearMeasurements();
+    this.rebuildOffsets();
+    if (anchor !== undefined) {
+      const index = this.filtered.indexOf(anchor);
+      this.root.scrollTop = this.scrollTopForIndex(Math.max(0, index)) + delta;
+      this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
+    }
+    this.render();
+    this.restoreFocusedRow(focusedRowId);
+  }
+
+  private restoreFocusedRow(rowId: string | undefined): void {
+    if (rowId === undefined) return;
+    const target = Array.from(
+      this.list.querySelectorAll<HTMLElement>('[data-annotation-row-id]'),
+    ).find((candidate) => candidate.dataset['annotationRowId'] === rowId);
+    if (target === undefined) return;
+    const scrollTop = this.root.scrollTop;
+    target.focus();
+    this.root.scrollTop = scrollTop;
+  }
+
+  private activeRowId(): string | undefined {
+    const activeElement = ownerWindow(this.root).document.activeElement;
+    return activeElement?.getAttribute('data-annotation-row-id') ?? this.focusedRowId ?? undefined;
+  }
+
+  private virtualScrollTop(): number {
+    return Math.max(0, this.root.scrollTop - this.list.offsetTop);
+  }
+
+  private scrollTopForIndex(index: number): number {
+    return this.list.offsetTop + this.offsetAt(index);
+  }
+
+  private windowStartForAnchor(anchorIndex: number, focusedRowId: string | undefined): number {
+    let start = clampWindowStart(anchorIndex - SCROLL_OVERSCAN, this.filtered.length);
+    if (focusedRowId === undefined) return start;
+    const focusedIndex = this.filtered.findIndex(
+      (annotation) => this.rowId(annotation) === focusedRowId,
+    );
+    if (focusedIndex < start) start = focusedIndex;
+    if (focusedIndex >= start + MAX_CARDS) start = focusedIndex - MAX_CARDS + 1;
+    return clampWindowStart(start, this.filtered.length);
+  }
+}
+
+function measuredCardHeight(card: HTMLElement): number {
+  const measuredHeight = card.getBoundingClientRect().height;
+  const rectHeight = measuredHeight === 0 ? card.offsetHeight : measuredHeight;
+  if (!Number.isFinite(rectHeight) || rectHeight <= 0) return 0;
+  const margin = Number.parseFloat(ownerWindow(card).getComputedStyle(card).marginBlockEnd);
+  return rectHeight + (Number.isFinite(margin) ? margin : 0);
 }
 
 function clampWindowStart(start: number, length: number): number {

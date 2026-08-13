@@ -41,6 +41,99 @@ function annotation(
 }
 
 describe('AnnotationsPanel', () => {
+  it('maps mixed-height rows through measured prefix offsets without losing scroll anchoring', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const owner = ownerWindow(host);
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(owner, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const heights = [64, 112, 240];
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      const id = this.dataset['annotationId'];
+      const index = id === undefined ? -1 : Number(id.slice('annotation-'.length));
+      const height = index < 0 ? 0 : (heights[index % heights.length] ?? 0);
+      return DOMRect.fromRect({ height });
+    });
+    const panel = new AnnotationsPanel(host, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
+    frames.shift()?.(0);
+    const bottomBefore = Number.parseFloat(
+      host.querySelector<HTMLElement>('[data-virtual-spacer="bottom"]')?.style.height ?? '0',
+    );
+
+    const target = 5000;
+    const cycles = Math.floor(target / 3);
+    const remainder = target % 3;
+    const exactOffset =
+      cycles * 416 + heights.slice(0, remainder).reduce((sum, value) => sum + value, 0);
+    panel.root.scrollTop = exactOffset;
+    panel.root.dispatchEvent(new Event('scroll'));
+    const firstMiddle = Number(panel.visibleIds()[0]?.slice('annotation-'.length));
+    expect(Math.abs(firstMiddle - target)).toBeLessThanOrEqual(50);
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+
+    const anchoredId = panel.visibleIds()[10];
+    frames.shift()?.(1);
+    expect(panel.visibleIds()).toContain(anchoredId);
+    panel.root.scrollTop = 0;
+    panel.root.dispatchEvent(new Event('scroll'));
+    const bottomAfter = Number.parseFloat(
+      host.querySelector<HTMLElement>('[data-virtual-spacer="bottom"]')?.style.height ?? '0',
+    );
+    expect(bottomAfter).not.toBe(bottomBefore);
+
+    const focused = host.querySelector<HTMLElement>('[data-annotation-id="annotation-10"]');
+    focused?.focus();
+    expect(owner.document.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-10');
+    heights[0] = 320;
+    owner.dispatchEvent(new Event('resize'));
+    expect(owner.document.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-10');
+    frames.shift()?.(2);
+    expect(owner.document.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-10');
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+    frames.shift()?.(3);
+
+    const outside = owner.createEl('button');
+    owner.document.body.append(outside);
+    outside.focus();
+    owner.dispatchEvent(new Event('resize'));
+    expect(owner.document.activeElement).toBe(outside);
+
+    panel.root.scrollTop = Number.MAX_SAFE_INTEGER;
+    panel.root.dispatchEvent(new Event('scroll'));
+    expect(panel.visibleIds()).toContain('annotation-9999');
+    host.remove();
+  });
+
+  it('falls back for zero-height DOM measurements and cancels coalesced measurement on destroy', () => {
+    const host = createDiv();
+    const owner = ownerWindow(host);
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(owner, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return 42;
+    });
+    const cancel = vi.spyOn(owner, 'cancelAnimationFrame');
+    const panel = new AnnotationsPanel(host, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    frames.shift()?.(0);
+    panel.root.scrollTop = 50 * 112;
+    panel.root.dispatchEvent(new Event('scroll'));
+    expect(panel.visibleIds()).toContain('annotation-50');
+
+    panel.destroy();
+    expect(cancel).toHaveBeenCalledWith(42);
+    frames.forEach((frame) => {
+      frame(0);
+    });
+    expect(panel.visibleIds()).toContain('annotation-50');
+  });
+
   it('keeps a 10,000-item virtual list at 80 cards or fewer and filters metadata', () => {
     const root = createDiv();
     const onNavigate = vi.fn();

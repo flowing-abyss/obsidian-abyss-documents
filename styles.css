@@ -6510,7 +6510,6 @@
 .abyss-documents .abyss-annotations-list {
   display: flex;
   flex-direction: column;
-  gap: var(--size-2-1);
   padding: var(--size-4-2);
 }
 
@@ -6531,6 +6530,7 @@
   color: var(--text-normal);
   text-align: start;
   white-space: normal;
+  margin-block-end: var(--size-2-1);
 }
 
 .abyss-documents .abyss-annotation-card:hover,
