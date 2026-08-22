@@ -145,7 +145,7 @@ describe('ReaderToolbar', () => {
     );
     expect(buttons.every((button) => button.textContent.trim() === '')).toBe(true);
     expect(host.querySelector('[data-control="selection"]')).toBeNull();
-    expect(host.querySelector('[data-control="overflow"]')).toBeNull();
+    expect(host.querySelector('[data-control="overflow"]')).not.toBeNull();
     expect(host.querySelector('[data-control="sidebar"]')?.getAttribute('aria-pressed')).toBe(
       'false',
     );
@@ -273,6 +273,20 @@ describe('ReaderToolbar', () => {
     entries.find((entry) => entry.title === 'Sepia')?.click();
 
     expect(intents).toContainEqual({ type: 'set-profile', profile: 'sepia' });
+  });
+
+  it('exposes only the functional annotation export operation in overflow', () => {
+    const entries = captureMenuItems();
+    const { host, intents } = fixture();
+    const overflow = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
+    if (overflow === null) throw new Error('Expected overflow control.');
+
+    overflow.click();
+    expect(entries.map(({ title }) => title)).toEqual(['Export annotations…']);
+    expect(entries.map(({ title }) => title)).not.toContain('Recognize page');
+    expect(entries.map(({ title }) => title)).not.toContain('Recognize document');
+    entries[0]?.click();
+    expect(intents).toEqual([{ type: 'export-annotations' }]);
   });
 
   it('removes owned listeners when destroyed', () => {

@@ -4,6 +4,7 @@ import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
 import { PdfWriteBoundary } from './adapters/pdf/pdf-write-boundary.js';
 import { AnnotationCache } from './annotation-cache.js';
+import { AnnotationExportFlow } from './annotation-export.js';
 import { DocumentAdapterRegistry } from './document-core/document-adapter.js';
 import { DocumentSaveCoordinator } from './document-core/save-coordinator.js';
 import { PluginDataStore, type MigrationDiagnostic, type PluginDataV2 } from './plugin-data.js';
@@ -154,6 +155,12 @@ export default class AbyssDocumentsPlugin extends Plugin {
     const annotationCache = new AnnotationCache(this.app.vault.adapter, this.app.vault.configDir);
     this.registerAnnotationCacheInvalidation(annotationCache);
     const annotationTransfer = this.createAnnotationIntegration(store);
+    const annotationExporter = new AnnotationExportFlow({
+      app: this.app,
+      vault: this.app.vault,
+      fileManager: this.app.fileManager,
+      template: () => store.snapshot.settings.annotations.markdownTemplate,
+    });
     const profileState = this.createReaderState(store);
     const saveFailureBoundary = new SaveFailureNoticeBoundary();
     const services = {
@@ -167,6 +174,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
           profileState,
           {
             annotationCache,
+            annotationExporter,
             annotationTransfer,
             saveFailureBoundary,
             saveCoordinator: this.saveCoordinator,

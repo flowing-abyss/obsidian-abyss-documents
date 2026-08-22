@@ -5,7 +5,11 @@ import type {
 } from '../adapters/pdf/pdf-annotation-editor.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
 import { AutosaveScheduler, type SaveReason } from '../autosave-scheduler.js';
-import type { AnnotationSink, DocumentAnnotation } from '../document-core/annotations.js';
+import type {
+  AnnotationExportRecord,
+  AnnotationSink,
+  DocumentAnnotation,
+} from '../document-core/annotations.js';
 import type { DocumentAdapterRegistry } from '../document-core/document-adapter.js';
 import type {
   DocumentLocation,
@@ -87,6 +91,9 @@ interface ReaderControllerServices {
     AnnotationTransferService,
     'build' | 'copyAnnotationLink' | 'insertAnnotationIntoActiveMarkdown'
   >;
+  readonly annotationExporter?: {
+    run(source: TFile, records: readonly AnnotationExportRecord[]): Promise<TFile | null>;
+  };
 }
 
 interface NativeEditableSessionFactory extends DocumentSession {
@@ -123,6 +130,19 @@ interface VerifiedAnnotationRefresh {
   readonly marker: VerifiedAnnotationMarker;
 }
 
+type AnnotationExportPreparationStage = 'save' | 'annotation-load' | 'verified-refresh';
+
+class AnnotationExportPreparationError extends Error {
+  constructor(
+    readonly path: string,
+    readonly stage: AnnotationExportPreparationStage,
+    readonly cause: unknown,
+  ) {
+    super(`Could not prepare PDF annotations for export during ${stage}.`);
+    this.name = 'AnnotationExportPreparationError';
+  }
+}
+
 class SaveDiscardedError extends SaveConflictError {
   constructor(conflict: SaveConflictError) {
     super(conflict.path, conflict.expected, conflict.actual);
@@ -153,6 +173,7 @@ export class ReaderController {
   private annotationsLoadingFor: DocumentSession | null = null;
   private currentAnnotations: readonly DocumentAnnotation[] = [];
   private verifiedAnnotationAbort: AbortController | null = null;
+  private verifiedAnnotationFailureCause: unknown = null;
   private verifiedAnnotationFailedMarker: VerifiedAnnotationMarker | null = null;
   private verifiedAnnotationInvalidation: Promise<void> | null = null;
   private verifiedAnnotationInvalidationFor: DocumentSession | null = null;
@@ -170,6 +191,7 @@ export class ReaderController {
   private unregisterSaveBroadcast: (() => void) | null = null;
   private lastAutosaveFailureKey: string | null = null;
   private lastAnnotationFailureKey: string | null = null;
+  private lastAnnotationExportPreparationFailureKey: string | null = null;
   private annotationToolRequestRevision = 0;
   private currentAnnotationTool: PdfAnnotationTool = 'select';
   private currentAnnotationColor = DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400';
@@ -410,6 +432,7 @@ export class ReaderController {
     this.annotationAbort = null;
     this.verifiedAnnotationAbort?.abort();
     this.verifiedAnnotationAbort = null;
+    this.verifiedAnnotationFailureCause = null;
     this.verifiedAnnotationFailedMarker = null;
     this.verifiedAnnotationInvalidation = null;
     this.verifiedAnnotationInvalidationFor = null;
@@ -420,6 +443,7 @@ export class ReaderController {
     this.annotationsLoadedFor = null;
     this.annotationsLoadingFor = null;
     this.currentAnnotations = [];
+    this.lastAnnotationExportPreparationFailureKey = null;
   }
 
   private activateNativeSave(session: DocumentSession): void {
@@ -540,6 +564,7 @@ export class ReaderController {
       token,
     });
     this.verifiedAnnotationMarker = marker;
+    this.verifiedAnnotationFailureCause = null;
     this.verifiedAnnotationFailedMarker = null;
     this.annotationAbort?.abort(
       new DOMException('The saved PDF superseded the live annotation index.', 'AbortError'),
@@ -564,6 +589,7 @@ export class ReaderController {
       })
       .catch((cause: unknown) => {
         if (!this.isCurrentAnnotationMarker(marker)) return;
+        this.verifiedAnnotationFailureCause = cause;
         this.verifiedAnnotationFailedMarker = marker;
         this.reportVerifiedAnnotationRefreshFailure(marker, cause);
       })
@@ -596,6 +622,7 @@ export class ReaderController {
         const annotations = await this.reextractVerifiedAnnotations(refresh);
         if (!this.isCurrentAnnotationRefresh(refresh)) return;
         this.verifiedAnnotationMarker = null;
+        this.verifiedAnnotationFailureCause = null;
         this.annotationsLoadedFor = session;
         this.annotationsLoadingFor = null;
         this.currentAnnotations = annotations;
@@ -609,7 +636,10 @@ export class ReaderController {
       .catch((cause: unknown) => {
         if (attemptedMarker === null || this.verifiedAnnotationMarker !== attemptedMarker) return;
         this.reportVerifiedAnnotationRefreshFailure(attemptedMarker, cause);
-        if (!isAbortFailure(cause)) this.verifiedAnnotationFailedMarker = attemptedMarker;
+        if (!isAbortFailure(cause)) {
+          this.verifiedAnnotationFailureCause = cause;
+          this.verifiedAnnotationFailedMarker = attemptedMarker;
+        }
       })
       .finally(() => {
         if (this.verifiedAnnotationRefresh !== promise) return;
@@ -641,6 +671,17 @@ export class ReaderController {
         if (!isAbortFailure(cause)) throw cause;
       }
     }
+    this.throwIfVerifiedAnnotationRefreshFailed();
+  }
+
+  private throwIfVerifiedAnnotationRefreshFailed(): void {
+    const failed = this.verifiedAnnotationFailedMarker;
+    if (failed !== null && failed === this.verifiedAnnotationMarker)
+      throw new AnnotationExportPreparationError(
+        failed.session.descriptor.path,
+        'verified-refresh',
+        this.verifiedAnnotationFailureCause,
+      );
   }
 
   private async reextractVerifiedAnnotations(
@@ -942,6 +983,10 @@ export class ReaderController {
   }
 
   private handleToolbarIntent(intent: ReaderShellIntent): void {
+    if (intent.type === 'export-annotations') {
+      this.exportAnnotations();
+      return;
+    }
     if (isAnnotationToolbarIntent(intent)) {
       this.handleAnnotationToolbarIntent(intent);
       return;
@@ -950,7 +995,10 @@ export class ReaderController {
   }
 
   private handleReaderToolbarIntent(
-    intent: Exclude<ReaderShellIntent, AnnotationToolbarIntent>,
+    intent: Exclude<
+      ReaderShellIntent,
+      AnnotationToolbarIntent | { readonly type: 'export-annotations' }
+    >,
   ): void {
     switch (intent.type) {
       case 'toggle-sidebar':
@@ -981,6 +1029,74 @@ export class ReaderController {
         this.setProfile(intent.profile);
         return;
     }
+  }
+
+  private exportAnnotations(): void {
+    const file = this.currentFile;
+    const session = this.session;
+    const shell = this.shell;
+    const exporter = this.services.annotationExporter;
+    if (file === null || shell === null || session === null || exporter === undefined) return;
+    void this.exportAnnotationsFromSession(file, session, shell, exporter).catch(
+      (cause: unknown) => {
+        if (isAbortFailure(cause)) return;
+        if (Object.is(this.session, session) && Object.is(this.shell, shell)) {
+          this.annotationsLoadingFor = null;
+          shell.sidebar?.annotationsPanel.setError(
+            'Could not prepare annotations for export. Try again.',
+          );
+        }
+        this.reportAnnotationExportPreparationFailure(file, cause);
+      },
+    );
+  }
+
+  private async exportAnnotationsFromSession(
+    file: TFile,
+    session: DocumentSession,
+    shell: ReaderShell,
+    exporter: NonNullable<ReaderControllerServices['annotationExporter']>,
+  ): Promise<void> {
+    try {
+      await this.saveDocument();
+    } catch (cause) {
+      if (isAbortFailure(cause)) throw cause;
+      throw new AnnotationExportPreparationError(file.path, 'save', cause);
+    }
+    if (!hasAnnotationListing(session)) return;
+    let annotations: readonly DocumentAnnotation[];
+    try {
+      annotations = await this.ensureAnnotationsLoaded(session, shell);
+    } catch (cause) {
+      if (isAbortFailure(cause) || cause instanceof AnnotationExportPreparationError) throw cause;
+      throw new AnnotationExportPreparationError(file.path, 'annotation-load', cause);
+    }
+    if (this.session !== session || this.currentFile !== file) return;
+    const records: AnnotationExportRecord[] = annotations.map((annotation) => ({
+      documentPath: file.path,
+      documentFingerprint: session.descriptor.fingerprint,
+      annotation,
+    }));
+    this.lastAnnotationExportPreparationFailureKey = null;
+    await exporter.run(file, records);
+  }
+
+  private reportAnnotationExportPreparationFailure(file: TFile, cause: unknown): void {
+    const failure =
+      cause instanceof AnnotationExportPreparationError
+        ? cause
+        : new AnnotationExportPreparationError(file.path, 'annotation-load', cause);
+    const reason = this.reason(failure.cause);
+    const key = `${file.path}\u0000${failure.stage}\u0000${reason}`;
+    if (failure.stage !== 'save' && key !== this.lastAnnotationExportPreparationFailureKey) {
+      this.lastAnnotationExportPreparationFailureKey = key;
+      new Notice(`Could not prepare annotations for export: ${reason}`);
+    }
+    console.error('[abyss-documents] Failed to prepare PDF annotations for export', {
+      path: file.path,
+      stage: failure.stage,
+      cause: failure,
+    });
   }
 
   private handleAnnotationToolbarIntent(intent: AnnotationToolbarIntent): void {
@@ -1302,6 +1418,7 @@ export class ReaderController {
 
   private requestPendingVerifiedAnnotations(session: DocumentSession, shell: ReaderShell): boolean {
     if (!this.hasPendingVerifiedAnnotations(session)) return false;
+    this.verifiedAnnotationFailureCause = null;
     this.verifiedAnnotationFailedMarker = null;
     shell.sidebar?.annotationsPanel.setLoading();
     void this.awaitVerifiedAnnotationRefresh(session).catch((cause: unknown) => {
@@ -1323,6 +1440,7 @@ export class ReaderController {
     shell: ReaderShell,
   ): Promise<readonly DocumentAnnotation[] | null> {
     if (!this.hasPendingVerifiedAnnotations(session)) return null;
+    this.verifiedAnnotationFailureCause = null;
     this.verifiedAnnotationFailedMarker = null;
     shell.sidebar?.annotationsPanel.setLoading();
     await this.awaitVerifiedAnnotationRefresh(session);

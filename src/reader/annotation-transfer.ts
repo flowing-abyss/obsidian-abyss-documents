@@ -225,19 +225,28 @@ function renderAnnotationTransfer(
 ): AnnotationTransfer {
   const { href, link, template } = options;
   const quote = annotation.selectedText ?? '';
+  const markdown = renderAnnotationMarkdown(annotation, template, link);
+  const plain = [quote, annotation.comment, `${file.path}${href}`]
+    .filter((part) => part.length > 0)
+    .join('\n\n');
+  return Object.freeze({ href, markdown, plain });
+}
+
+export function renderAnnotationMarkdown(
+  annotation: DocumentAnnotation,
+  template: string,
+  link: string,
+): string {
+  const quote = annotation.selectedText ?? '';
   const values = {
     quote: escapeTemplateValue(quote),
     comment: escapeTemplateValue(annotation.comment),
     link,
   };
-  const markdown = template.replace(
+  return template.replace(
     /\{\{(quote|comment|link)\}\}/gu,
     (_match, key: keyof typeof values) => values[key],
   );
-  const plain = [quote, annotation.comment, `${file.path}${href}`]
-    .filter((part) => part.length > 0)
-    .join('\n\n');
-  return Object.freeze({ href, markdown, plain });
 }
 
 function vaultAbsoluteAnnotationLink(file: TFile, href: string, embed: boolean): string {

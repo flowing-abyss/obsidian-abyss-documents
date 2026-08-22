@@ -256,6 +256,193 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('exports lazily loaded canonical annotations only after explicit toolbar intent', async () => {
+    const [pdf] = files('Books/Export.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const createdSession = session(pdf.path);
+    const record = annotationRecord('export-id', 1, {
+      kind: 'rectangle',
+      rectangle: { x: 1, y: 2, width: 3, height: 4 },
+    });
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      sink([record]);
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const exporter = { run: vi.fn(async () => null) };
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationExporter: exporter },
+    );
+    await controller.open(pdf, createDiv());
+    expect(listAnnotations).not.toHaveBeenCalled();
+
+    shell.send({ type: 'export-annotations' });
+    await vi.waitFor(() => {
+      expect(exporter.run).toHaveBeenCalledWith(pdf, [
+        {
+          documentPath: pdf.path,
+          documentFingerprint: createdSession.value.descriptor.fingerprint,
+          annotation: record,
+        },
+      ]);
+    });
+    expect(listAnnotations).toHaveBeenCalledOnce();
+  });
+
+  it('contains export preparation failures once, clears loading, and allows a panel retry', async () => {
+    const [pdf] = files('Books/Export-failure.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const createdSession = session(pdf.path);
+    const recovered = annotationRecord('recovered-id', 0, {
+      kind: 'point',
+      point: { x: 1, y: 2 },
+    });
+    const listAnnotations = vi
+      .fn<(signal: AbortSignal, sink: AnnotationSink) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('annotation index failed'))
+      .mockRejectedValueOnce(new Error('annotation index failed'))
+      .mockImplementationOnce(async (_signal, sink) => {
+        sink([recovered]);
+      });
+    Object.assign(createdSession.value, { listAnnotations });
+    const exporter = { run: vi.fn(async () => null) };
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationExporter: exporter },
+    );
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'export-annotations' });
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledTimes(1);
+    });
+    shell.send({ type: 'export-annotations' });
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledTimes(2);
+    });
+    expect(exporter.run).not.toHaveBeenCalled();
+    expect(notices).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith(
+      '[abyss-documents] Failed to prepare PDF annotations for export',
+      expect.objectContaining({ path: pdf.path }),
+    );
+    const diagnostic = log.mock.calls.find(
+      ([message]) => message === '[abyss-documents] Failed to prepare PDF annotations for export',
+    )?.[1] as { readonly cause?: unknown } | undefined;
+    expect(diagnostic?.cause).toBeInstanceOf(Error);
+
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['recovered-id']);
+    });
+  });
+
+  it('keeps a superseded export preparation cancellation silent', async () => {
+    const [pdf] = files('Books/Cancelled-export.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const createdSession = session(pdf.path);
+    const listAnnotations = vi.fn(async (signal: AbortSignal) => {
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('Superseded', 'AbortError'));
+        });
+      });
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationExporter: { run: vi.fn(async () => null) } },
+    );
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'export-annotations' });
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledOnce();
+    });
+    await controller.close();
+    await Promise.resolve();
+
+    expect(notices).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('never opens export after a failed persisted annotation refresh', async () => {
+    const [pdf] = files('Books/Failed-refresh-export.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const active = session(pdf.path);
+    Object.assign(active.value, {
+      listAnnotations: vi.fn(async () => {
+        throw new Error('The live pre-save session must never be exported.');
+      }),
+    });
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      pendingRevision: 1,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    let broadcast: VerifiedReloadListener | undefined;
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open
+      .mockResolvedValueOnce(active.value)
+      .mockRejectedValue(new Error('persisted reopen failed'));
+    const cache = {
+      generation: vi.fn(() => 1),
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => true),
+      invalidate: vi.fn(async () => undefined),
+    } as unknown as AnnotationCache;
+    const exporter = { run: vi.fn(async () => null) };
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        annotationCache: cache,
+        annotationExporter: exporter,
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    const notices = vi.spyOn(Notice.prototype, 'constructor__');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    if (broadcast === undefined) throw new Error('Expected save listener.');
+    await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
+
+    shell.send({ type: 'export-annotations' });
+    await vi.waitFor(() => {
+      expect(adapter.open).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => {
+      expect(notices).toHaveBeenCalledOnce();
+    });
+    expect(exporter.run).not.toHaveBeenCalled();
+  });
+
   it('opens annotations lazily and resolves id first or unique geometry fallback without arbitrary navigation', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected PDF.');

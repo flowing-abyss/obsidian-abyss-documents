@@ -11,6 +11,7 @@ export type ReaderToolbarIntent =
   | { readonly type: 'go-to-page'; readonly pageIndex: number }
   | { readonly type: 'previous-page' }
   | { readonly type: 'next-page' }
+  | { readonly type: 'export-annotations' }
   | { readonly type: 'zoom-step'; readonly direction: -1 | 1 }
   | {
       readonly type: 'set-scale';
@@ -126,6 +127,11 @@ export class ReaderToolbar {
     this.profileButton = this.iconButton('profile', 'Reading profile: Default', 'sun-moon');
     this.listen(this.profileButton, 'click', (event) => {
       this.showProfileMenu(event);
+    });
+    const overflow = this.iconButton('overflow', 'More options', 'ellipsis');
+    overflow.setAttribute('aria-haspopup', 'menu');
+    this.listen(overflow, 'click', (event) => {
+      this.showOverflowMenu(event);
     });
     this.refreshPageState();
   }
@@ -278,6 +284,19 @@ export class ReaderToolbar {
   private showProfileMenu(event: MouseEvent): void {
     const menu = this.createMenu();
     this.addProfileChoices(menu);
+    menu.showAtMouseEvent(event);
+  }
+
+  private showOverflowMenu(event: MouseEvent): void {
+    const menu = this.createMenu();
+    menu.addItem((item) => {
+      item
+        .setTitle('Export annotations…')
+        .setIcon('download')
+        .onClick(() => {
+          this.onIntent({ type: 'export-annotations' });
+        });
+    });
     menu.showAtMouseEvent(event);
   }
 
