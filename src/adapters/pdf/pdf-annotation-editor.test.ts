@@ -6,6 +6,7 @@ import {
   readerPerformanceSnapshot,
 } from '../../reader-performance.js';
 import { PdfAnnotationEditor, type PdfAnnotationToolOptions } from './pdf-annotation-editor.js';
+import type { PdfCommentDialogReservation } from './pdf-comment-bridge.js';
 
 type Listener = (event: unknown) => void;
 
@@ -51,8 +52,10 @@ function storage(): MutableAnnotationStorage {
 
 function manager() {
   return {
+    commentSelection: vi.fn(),
     delete: vi.fn(),
     endCurrentEditing: vi.fn(),
+    highlightSelection: vi.fn(),
     redo: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
@@ -87,6 +90,19 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
       });
     },
   });
+  const selectionObserver = {
+    invalidate: vi.fn(),
+    onSelection: vi.fn(() => () => undefined),
+    validate: vi.fn(() => 'current' as const),
+  };
+  const commentBridge = {
+    reserveNextDialog: vi.fn<
+      (seed: '' | '[[' | '#', signal?: AbortSignal) => PdfCommentDialogReservation
+    >(() => ({
+      closed: Promise.resolve('external' as const),
+      opened: Promise.resolve(),
+    })),
+  };
   const editor = new PdfAnnotationEditor({
     annotationEditorParamsType: {
       FREETEXT_COLOR: 12,
@@ -99,19 +115,23 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
       INK_OPACITY: 23,
       INK_THICKNESS: 22,
     },
-    annotationEditorType: { FREETEXT: 3, HIGHLIGHT: 9, INK: 15, NONE: 0 },
+    annotationEditorType: { DISABLE: -1, FREETEXT: 3, HIGHLIGHT: 9, INK: 15, NONE: 0 },
     eventBus,
     pdf,
+    commentBridge,
+    selectionObserver,
     viewer,
   });
   return {
     annotationStorage,
     changedModes,
+    commentBridge,
     editor,
     eventBus,
     modeRequests,
     pdf,
     saveDocument,
+    selectionObserver,
     viewer,
   };
 }
@@ -127,6 +147,302 @@ function deferred<T>() {
 }
 
 describe('PdfAnnotationEditor lifecycle', () => {
+  it('sets color before one-shot highlight or comment', async () => {
+    for (const kind of ['highlight', 'comment'] as const) {
+      const fixtureValue = fixture();
+      const calls: string[] = [];
+      const uiManager = manager();
+      uiManager.updateParams.mockImplementation(() => calls.push('color'));
+      uiManager.highlightSelection.mockImplementation(() => {
+        calls.push('highlight');
+        fixtureValue.annotationStorage.onSetModified?.();
+      });
+      uiManager.commentSelection.mockImplementation(() => calls.push('comment'));
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      const editor = fixtureValue.editor as PdfAnnotationEditor & {
+        commitSelection(
+          token: string,
+          action:
+            | { readonly kind: 'highlight'; readonly color: string }
+            | {
+                readonly kind: 'comment';
+                readonly color: string;
+                readonly seed: '' | '[[' | '#';
+              },
+        ): Promise<'created' | 'dismissed'>;
+      };
+
+      await expect(
+        editor.commitSelection(
+          'current',
+          kind === 'highlight' ? { kind, color: '#ffd400' } : { kind, color: '#ffd400', seed: '' },
+        ),
+      ).resolves.toBe('created');
+
+      expect(calls).toEqual(['color', kind]);
+    }
+  });
+
+  it('resolves highlight after dirty and NONE', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    let settled = false;
+    const committing = fixtureValue.editor
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }]);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 9,
+    });
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    expect(settled).toBe(false);
+
+    fixtureValue.annotationStorage.onSetModified?.();
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+    });
+    expect(settled).toBe(false);
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+
+    await expect(committing).resolves.toBe('created');
+  });
+
+  it('suppresses transient native highlight mode', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const modes: string[] = [];
+    const interaction = fixtureValue.editor as PdfAnnotationEditor & {
+      onMode(listener: (mode: string) => void): () => void;
+    };
+    interaction.onMode((mode) => modes.push(mode));
+
+    const committing = interaction.commitSelection('current', {
+      kind: 'highlight',
+      color: '#ffd400',
+    });
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }]);
+    });
+    expect(modes).toEqual(['neutral', 'one-shot']);
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 9,
+    });
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    expect(modes).toEqual(['neutral', 'one-shot']);
+    fixtureValue.annotationStorage.onSetModified?.();
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+
+    await committing;
+    expect(modes).toEqual(['neutral', 'one-shot', 'neutral']);
+  });
+
+  it('synchronizes external Ink Text neutral and disabled modes', () => {
+    const fixtureValue = fixture();
+    const modes: string[] = [];
+    fixtureValue.editor.onMode((mode) => modes.push(mode));
+
+    for (const mode of [15, 3, 0, -1]) {
+      fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+        source: fixtureValue.viewer,
+        mode,
+      });
+    }
+
+    expect(modes).toEqual(['neutral', 'ink', 'freetext', 'neutral', 'disabled']);
+  });
+
+  it('does not double-create while quick highlight is armed', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    await fixtureValue.editor.setQuickHighlight({ enabled: true, color: '#5fb236' });
+    await expect(
+      fixtureValue.editor.commitSelection('current', {
+        kind: 'highlight',
+        color: '#5fb236',
+      }),
+    ).resolves.toBe('dismissed');
+
+    expect(uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#5fb236');
+    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(9);
+  });
+
+  it('resolves comment after bridge open close and NONE', async () => {
+    const fixtureValue = fixture();
+    const opened = deferred<void>();
+    const closed = deferred<'escape'>();
+    fixtureValue.commentBridge.reserveNextDialog.mockReturnValue({
+      opened: opened.promise,
+      closed: closed.promise,
+    });
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    let settled = false;
+
+    const committing = fixtureValue.editor
+      .commitSelection('current', {
+        kind: 'comment',
+        color: '#a28ae5',
+        seed: '#',
+      })
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() => {
+      expect(uiManager.commentSelection).toHaveBeenCalledOnce();
+    });
+    expect(fixtureValue.commentBridge.reserveNextDialog).toHaveBeenCalledWith(
+      '#',
+      expect.any(AbortSignal),
+    );
+    expect(settled).toBe(false);
+    opened.resolve(undefined);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    closed.resolve('escape');
+
+    await expect(committing).resolves.toBe('created');
+    expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+  });
+
+  it('aborts pending transactions on lifecycle changes', async () => {
+    for (const lifecycle of ['detach', 'destroy', 'save'] as const) {
+      const fixtureValue = fixture();
+      const uiManager = manager();
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      let outcome: unknown = 'pending';
+      void fixtureValue.editor
+        .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+        .then(
+          () => {
+            outcome = new Error('Unexpected transaction resolution.');
+          },
+          (cause: unknown) => {
+            outcome = cause;
+          },
+        );
+      await vi.waitFor(() => {
+        expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+      });
+
+      let saving: Promise<Uint8Array> | null = null;
+      if (lifecycle === 'detach') fixtureValue.editor.detachFromDocument();
+      else if (lifecycle === 'destroy') fixtureValue.editor.destroy();
+      else saving = fixtureValue.editor.save(new AbortController().signal);
+
+      await vi.waitFor(() => {
+        expect(outcome).not.toBe('pending');
+      });
+      expect(outcome).toMatchObject({ name: 'AbortError' });
+      expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
+      if (saving !== null)
+        await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
+    }
+  });
+
+  it('aborts the reserved comment dialog with its transaction', async () => {
+    const fixtureValue = fixture();
+    let reservationSignal: AbortSignal | undefined;
+    fixtureValue.commentBridge.reserveNextDialog.mockImplementation(
+      (_seed: string, signal?: AbortSignal) => {
+        reservationSignal = signal;
+        return {
+          opened: new Promise<void>(() => undefined),
+          closed: new Promise<'external'>(() => undefined),
+        };
+      },
+    );
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const abortController = new AbortController();
+
+    const committing = fixtureValue.editor.commitSelection(
+      'current',
+      { kind: 'comment', color: '#ffd400', seed: '[[' },
+      abortController.signal,
+    );
+    const rejected = expect(committing).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => {
+      expect(uiManager.commentSelection).toHaveBeenCalledOnce();
+    });
+    abortController.abort(new DOMException('cancelled', 'AbortError'));
+
+    await rejected;
+    expect(reservationSignal?.aborted).toBe(true);
+  });
+
+  it('rejects a native transaction timeout and restores neutral', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixtureValue = fixture();
+      const uiManager = manager();
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      let outcome: unknown = 'pending';
+      void fixtureValue.editor
+        .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+        .catch((cause: unknown) => {
+          outcome = cause;
+        });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+      expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('signals a successful native comment mutation without writing parallel annotation state', () => {
     const { annotationStorage, editor, eventBus, viewer } = fixture();
     const dirty = vi.fn();
@@ -223,7 +539,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     await editor.setTool('select');
 
     expect(changedModes).toEqual([]);
-    expect(eventBus.listeners.get('annotationeditormodechanged')).toBeUndefined();
+    expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
   });
 
   it('ignores unrelated mode events and rejects a superseded tool request', async () => {
@@ -239,7 +555,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 15 });
 
     await ink;
-    expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(0);
+    expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
   });
 
   it('propagates a mode setter failure and removes the pending listener', async () => {
@@ -254,7 +570,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     });
 
     await expect(editor.setTool('highlight')).rejects.toThrow('mode setter failed');
-    expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(0);
+    expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
   });
 
   it.each([

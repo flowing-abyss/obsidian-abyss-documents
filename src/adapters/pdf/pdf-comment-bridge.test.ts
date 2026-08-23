@@ -46,6 +46,109 @@ function uiManager(selected: PdfCommentEditor | null = null) {
 }
 
 describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
+  it('reserves and seeds the next comment dialog', async () => {
+    const host = document.body.createDiv();
+    const bridge = new PdfCommentBridge(host);
+    const native = editor();
+    const manager = uiManager(native);
+    const reservation = (
+      bridge as PdfCommentBridge & {
+        reserveNextDialog(seed: '[['): {
+          readonly closed: Promise<string>;
+          readonly opened: Promise<void>;
+        };
+      }
+    ).reserveNextDialog('[[');
+
+    await bridge.showDialog(manager, native, 20, 30);
+    await reservation.opened;
+
+    expect(native.comment).toBe('[[');
+    expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('[[');
+    bridge.destroyPopup();
+    await expect(reservation.closed).resolves.toBe('external');
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('clears an unopened comment reservation on abort', async () => {
+    const host = document.body.createDiv();
+    const bridge = new PdfCommentBridge(host);
+    const abortController = new AbortController();
+    const reservation = bridge.reserveNextDialog('#', abortController.signal);
+    let opened: unknown = 'pending';
+    let closed: unknown = 'pending';
+    void reservation.opened.catch((cause: unknown) => {
+      opened = cause;
+    });
+    void reservation.closed.catch((cause: unknown) => {
+      closed = cause;
+    });
+
+    abortController.abort(new DOMException('cancelled', 'AbortError'));
+    await Promise.resolve();
+
+    expect(opened).toMatchObject({ name: 'AbortError' });
+    expect(closed).toMatchObject({ name: 'AbortError' });
+    const native = editor('Existing');
+    await bridge.showDialog(uiManager(native), native, 0, 0);
+    expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Existing');
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('clears an unopened comment reservation on timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const host = document.body.createDiv();
+      const bridge = new PdfCommentBridge(host);
+      const reservation = bridge.reserveNextDialog('[[');
+      let opened: unknown = 'pending';
+      let closed: unknown = 'pending';
+      void reservation.opened.catch((cause: unknown) => {
+        opened = cause;
+      });
+      void reservation.closed.catch((cause: unknown) => {
+        closed = cause;
+      });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(opened).toMatchObject({ name: 'TimeoutError' });
+      expect(closed).toMatchObject({ name: 'TimeoutError' });
+      const native = editor('Existing');
+      await bridge.showDialog(uiManager(native), native, 0, 0);
+      expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Existing');
+      bridge.dispose();
+      host.remove();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('persists comment changes live without Save or Cancel', async () => {
+    const host = document.body.createDiv();
+    const onNativeMutation = vi.fn();
+    const bridge = new PdfCommentBridge(host, { onNativeMutation });
+    const native = editor('Draft');
+    const manager = uiManager(native);
+
+    await bridge.showDialog(manager, native, 20, 30);
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected native comment input.');
+    input.value = 'Draft updated';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(native.comment).toBe('Draft updated');
+    expect(onNativeMutation).toHaveBeenCalledOnce();
+    expect(host.querySelector('[data-action="save-comment"]')).toBeNull();
+    expect(host.querySelector('[data-action="cancel-comment"]')).toBeNull();
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    expect(native.comment).toBe('Draft updated');
+    bridge.dispose();
+    host.remove();
+  });
+
   it('implements only the runtime manager surface and commits ordinary text to the native editor', async () => {
     const host = document.body.createDiv();
     const bridge = new PdfCommentBridge(host);
@@ -58,10 +161,9 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     if (input === null) throw new Error('Expected native comment input.');
     input.value = 'Key idea [[Gradient descent]] #important';
     input.dispatchEvent(new Event('input', { bubbles: true }));
-    host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
 
     expect(native.comment).toBe('Key idea [[Gradient descent]] #important');
-    expect(focusCommentButton).toHaveBeenCalledOnce();
+    expect(focusCommentButton).not.toHaveBeenCalled();
     expect(bridge.dialogElement.ownerDocument).toBe(host.ownerDocument);
     expect(() => {
       bridge.setSidebarUiManager({});
@@ -106,18 +208,19 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     host.remove();
   });
 
-  it('restores the editor value on cancel and deletes through native PDF.js comment history', async () => {
+  it('keeps live editor changes on blur and deletes through native PDF.js comment history', async () => {
     const host = document.body.createDiv();
     const bridge = new PdfCommentBridge(host);
     const native = editor('Existing #tag');
-    const cancelManager = uiManager(native);
+    const liveManager = uiManager(native);
 
-    await bridge.showDialog(cancelManager, native, 0, 0);
+    await bridge.showDialog(liveManager, native, 0, 0);
     const input = host.querySelector<HTMLTextAreaElement>('textarea');
     if (input === null) throw new Error('Expected native comment input.');
     input.value = 'Changed';
-    host.querySelector<HTMLButtonElement>('[data-action="cancel-comment"]')?.click();
-    expect(native.comment).toBe('Existing #tag');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    expect(native.comment).toBe('Changed');
 
     const savedData = { text: 'Existing #tag' };
     native.comment = savedData;
@@ -351,7 +454,7 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     host.remove();
   });
 
-  it.each(['save-comment', 'cancel-comment'] as const)(
+  it.each(['blur', 'Escape'] as const)(
     'clears selected passive state through %s so one standalone toggle reopens preview',
     async (action) => {
       const host = document.body.createDiv();
@@ -368,7 +471,15 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
 
       expect(states).toHaveBeenLastCalledWith({ hasPopup: false, selected: false });
       expect(host.querySelector<HTMLTextAreaElement>('textarea')?.hidden).toBe(false);
-      host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
+      if (action === 'blur') {
+        host
+          .querySelector<HTMLTextAreaElement>('textarea')
+          ?.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+      } else {
+        host
+          .querySelector<HTMLTextAreaElement>('textarea')
+          ?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+      }
       expect(bridge.dialogElement.hidden).toBe(true);
 
       bridge.toggleCommentPopup(native, true, undefined, true);
@@ -382,7 +493,7 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     },
   );
 
-  it.each(['cancel-comment', 'Escape'] as const)(
+  it.each(['Escape'] as const)(
     'restores the standalone comment invoker after Edit and %s',
     (action) => {
       const host = document.body.createDiv();
@@ -401,13 +512,9 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
         host.querySelector<HTMLTextAreaElement>('textarea'),
       );
 
-      if (action === 'Escape') {
-        host
-          .querySelector<HTMLTextAreaElement>('textarea')
-          ?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
-      } else {
-        host.querySelector<HTMLButtonElement>('[data-action="cancel-comment"]')?.click();
-      }
+      host
+        .querySelector<HTMLTextAreaElement>('textarea')
+        ?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: action }));
 
       expect(bridge.dialogElement.hidden).toBe(true);
       expect(host.ownerDocument.activeElement).toBe(invoker);
@@ -458,7 +565,7 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
   });
 
   it.each([
-    ['save comment', 'save-comment'],
+    ['change comment', 'change-comment'],
     ['delete comment', 'delete-comment'],
     ['delete annotation', 'delete-annotation'],
   ])('reports a failed %s once and keeps the editor open', async (_label, action) => {
@@ -466,7 +573,7 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     const native = editor('Original');
     const manager = uiManager(native);
     const cause = new Error('native mutation failed');
-    if (action === 'save-comment') {
+    if (action === 'change-comment') {
       Object.defineProperty(native, 'comment', {
         configurable: true,
         get: () => 'Original',
@@ -487,7 +594,12 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     const bridge = new PdfCommentBridge(host, { onFailure });
     await bridge.showDialog(manager, native, 0, 0);
 
-    host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
+    if (action === 'change-comment') {
+      const input = host.querySelector<HTMLTextAreaElement>('textarea');
+      if (input === null) throw new Error('Expected native comment input.');
+      input.value = 'Rejected';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    } else host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
 
     expect(onFailure).toHaveBeenCalledOnce();
     expect(onFailure.mock.calls[0]?.[0]).toMatchObject({ cause });

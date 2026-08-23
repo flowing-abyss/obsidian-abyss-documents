@@ -21,7 +21,7 @@ import {
 } from '../../reader-performance.js';
 import { replacePdfAnnotationImageSources } from './pdf-annotation-assets.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
-import { PdfAnnotationEditor } from './pdf-annotation-editor.js';
+import { PdfAnnotationEditor, type PdfAnnotationInteraction } from './pdf-annotation-editor.js';
 import { PdfCommentBridge, type PdfJsCommentManagerRuntime } from './pdf-comment-bridge.js';
 import {
   PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
@@ -251,6 +251,9 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   async goTo(location: DocumentLocation): Promise<void> {
     this.requireMounted(this.linkService);
+    await this.annotationEditorInstance?.abortInteraction(
+      'PDF navigation cancelled the annotation interaction.',
+    );
     this.selectionObserverInstance?.invalidate();
     this.latestLocation = { ...location };
     if (!this.pagesInitialized || this.colorRebindActive) {
@@ -409,6 +412,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     return this.annotationEditorInstance;
   }
 
+  get annotationInteraction(): PdfAnnotationInteraction | null {
+    return this.annotationEditorInstance;
+  }
+
   get selectionObserver(): PdfSelectionObserver {
     return this.requireMounted(this.selectionObserverInstance);
   }
@@ -515,8 +522,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     return new PdfAnnotationEditor({
       annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
       annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+      commentBridge: this.requireMounted(this.commentBridge),
       eventBus,
       pdf: this.pdf,
+      selectionObserver: this.requireMounted(this.selectionObserverInstance),
       viewer,
     });
   }

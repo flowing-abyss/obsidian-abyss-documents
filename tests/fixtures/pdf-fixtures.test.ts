@@ -26,6 +26,7 @@ import {
   PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
   PDFJS_ANNOTATION_EDITOR_TYPE,
 } from '../../src/adapters/pdf/pdf-runtime.js';
+import type { PdfSelectionObserver } from '../../src/adapters/pdf/pdf-selection-observer.js';
 import { AutosaveScheduler, type SaveReason } from '../../src/autosave-scheduler.js';
 import {
   DocumentSaveCoordinator,
@@ -38,6 +39,14 @@ import {
   generatePdfFixtures,
   type PdfFixtureManifest,
 } from './pdf-fixtures.mjs';
+
+function inactiveSelectionObserver(): PdfSelectionObserver {
+  return {
+    invalidate: () => undefined,
+    onSelection: () => () => undefined,
+    validate: () => 'stale',
+  };
+}
 
 async function saveWithNativePdfjsEditors(
   original: Uint8Array,
@@ -106,8 +115,10 @@ async function saveWithNativePdfjsEditors(
   const annotationEditor = new PdfAnnotationEditor({
     annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
     annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+    commentBridge,
     eventBus,
     pdf,
+    selectionObserver: inactiveSelectionObserver(),
     viewer: runtimeViewer,
   });
   eventBus.dispatch('annotationeditoruimanager', { source: runtimeViewer, uiManager });
@@ -125,7 +136,7 @@ async function saveWithNativePdfjsEditors(
         const input = container.querySelector<HTMLTextAreaElement>('textarea');
         if (input === null) throw new Error('Expected the native comment bridge input.');
         input.value = commentText;
-        container.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       }
     }
     return await annotationEditor.save(new AbortController().signal);
@@ -252,8 +263,10 @@ async function editExistingNativeComment(
   annotationEditor = new PdfAnnotationEditor({
     annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
     annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+    commentBridge,
     eventBus,
     pdf,
+    selectionObserver: inactiveSelectionObserver(),
     viewer: runtimeViewer,
   });
   eventBus.dispatch('annotationeditoruimanager', { source: runtimeViewer, uiManager });
@@ -322,7 +335,6 @@ async function editExistingNativeComment(
     if (input === null) throw new Error('Expected native comment editor for reopened annotation.');
     input.value = comment;
     input.dispatchEvent(new Event('input', { bubbles: true }));
-    container.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
     await scheduler.flush();
     expect(saveReasons).toContain('autosave');

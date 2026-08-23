@@ -240,9 +240,10 @@ describe('AbyssDocumentsPlugin', () => {
     const popover = new AnnotationPopover(host, provider, 'Books/Guide.pdf');
     popover.open({
       comment: '[[con',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });

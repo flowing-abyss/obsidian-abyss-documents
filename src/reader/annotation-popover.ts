@@ -1,11 +1,15 @@
+export type AnnotationCommentCloseReason =
+  'blur' | 'escape' | 'delete-comment' | 'delete-annotation' | 'external';
+
 export interface AnnotationPopoverRequest {
   readonly canDeleteAnnotation?: boolean | undefined;
   readonly color?: string | undefined;
   readonly comment: string;
+  readonly onChange: (comment: string) => boolean | void;
   readonly onColor?: ((color: string) => void) | undefined;
+  readonly onClose: (reason: AnnotationCommentCloseReason) => void;
   readonly onDeleteAnnotation: () => boolean | void;
   readonly onDeleteComment: () => boolean | void;
-  readonly onSave: (comment: string) => boolean | void;
   readonly readOnlyReason?: string | undefined;
   readonly x: number;
   readonly y: number;
@@ -78,7 +82,7 @@ export class AnnotationPopover {
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        this.close(true);
+        this.close(true, 'escape');
         return;
       }
       if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -96,6 +100,7 @@ export class AnnotationPopover {
       const target = event.target;
       if (!(target instanceof ownerWindow(this.host).Element)) return;
       if (target === this.input) {
+        this.active?.onChange(this.input.value);
         this.updateSuggestions();
         return;
       }
@@ -104,6 +109,12 @@ export class AnnotationPopover {
     });
     this.listen(this.input, 'select', () => {
       this.updateSuggestions();
+    });
+    this.listen(this.input, 'focusout', (event) => {
+      const related = event.relatedTarget;
+      if (related instanceof ownerWindow(this.host).HTMLElement && this.element.contains(related))
+        return;
+      this.close(false, 'blur');
     });
   }
 
@@ -121,11 +132,9 @@ export class AnnotationPopover {
   open(request: AnnotationPopoverRequest): void {
     if (this.destroyed)
       throw new DOMException('Annotation popover destroyed.', 'InvalidStateError');
+    this.closeForReplacement();
     const owner = ownerWindow(this.host);
-    const active = this.host.ownerDocument.activeElement;
-    if (!(active instanceof owner.HTMLElement && this.element.contains(active))) {
-      this.previousFocus = active instanceof owner.HTMLElement ? active : null;
-    }
+    this.capturePreviousFocus(owner);
     this.active = request;
     this.passiveEdit = null;
     this.input.hidden = false;
@@ -145,11 +154,9 @@ export class AnnotationPopover {
   openPassive(request: AnnotationPassivePopupRequest): void {
     if (this.destroyed)
       throw new DOMException('Annotation popover destroyed.', 'InvalidStateError');
+    this.closeForReplacement();
     const owner = ownerWindow(this.host);
-    if (request.selected === true) {
-      const active = this.host.ownerDocument.activeElement;
-      this.previousFocus = active instanceof owner.HTMLElement ? active : null;
-    }
+    if (request.selected === true) this.capturePreviousFocus(owner);
     this.active = null;
     this.passiveEdit = request.onEdit ?? null;
     this.input.hidden = true;
@@ -175,14 +182,29 @@ export class AnnotationPopover {
     }
   }
 
-  close(restoreFocus = false): void {
+  close(restoreFocus = false, reason: AnnotationCommentCloseReason = 'external'): void {
     if (this.element.hidden) return;
+    const request = this.active;
     this.element.hidden = true;
     this.active = null;
     this.passiveEdit = null;
     if (restoreFocus) this.previousFocus?.focus();
     this.previousFocus = null;
     this.hideSuggestions();
+    request?.onClose(reason);
+  }
+
+  private closeForReplacement(): void {
+    if (this.element.hidden) return;
+    const previousFocus = this.previousFocus;
+    this.close(false, 'external');
+    this.previousFocus = previousFocus;
+  }
+
+  private capturePreviousFocus(owner: ReturnType<typeof ownerWindow>): void {
+    const active = this.host.ownerDocument.activeElement;
+    if (active instanceof owner.HTMLElement && this.element.contains(active)) return;
+    this.previousFocus = active instanceof owner.HTMLElement ? active : null;
   }
 
   destroy(): void {
@@ -226,8 +248,6 @@ export class AnnotationPopover {
       ...(request.canDeleteAnnotation === false
         ? []
         : [this.button('delete-annotation', 'Delete annotation', 'Delete annotation')]),
-      this.button('cancel-comment', 'Cancel', 'Cancel'),
-      this.button('save-comment', 'Save comment', 'Save'),
     );
   }
 
@@ -239,18 +259,19 @@ export class AnnotationPopover {
   private handleAction(action: string | undefined): void {
     if (action === 'insert-tag') this.insertText(' #tag');
     else if (action === 'insert-link') this.insertText(' [[Link]]');
-    else if (action === 'save-comment') this.commit(() => this.active?.onSave(this.input.value));
-    else if (action === 'delete-comment') this.commit(() => this.active?.onDeleteComment());
-    else if (action === 'delete-annotation') this.commit(() => this.active?.onDeleteAnnotation());
+    else if (action === 'delete-comment')
+      this.commit('delete-comment', () => this.active?.onDeleteComment());
+    else if (action === 'delete-annotation')
+      this.commit('delete-annotation', () => this.active?.onDeleteAnnotation());
     else if (action === 'edit-comment') {
       const request = this.passiveEdit;
       request?.();
     } else if (action === 'cancel-comment') this.close(true);
   }
 
-  private commit(action: () => boolean | void): void {
+  private commit(reason: AnnotationCommentCloseReason, action: () => boolean | void): void {
     if (action() === false) return;
-    this.close(true);
+    this.close(true, reason);
   }
 
   private place(x: number, y: number, owner: Window): void {

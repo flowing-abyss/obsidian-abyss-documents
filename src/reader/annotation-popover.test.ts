@@ -11,12 +11,13 @@ describe('AnnotationPopover', () => {
           : [],
     };
     const popover = new AnnotationPopover(host, provider, 'Books/Book.pdf');
-    const save = vi.fn();
+    const change = vi.fn();
     popover.open({
       comment: 'See [[con',
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: save,
+      onChange: change,
+      onClose: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -32,8 +33,7 @@ describe('AnnotationPopover', () => {
     );
     input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown' }));
     input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
-    host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
-    expect(save).toHaveBeenCalledWith('See [[Concept|Idea]]');
+    expect(change).toHaveBeenLastCalledWith('See [[Concept|Idea]]');
     popover.destroy();
     host.remove();
   });
@@ -46,9 +46,10 @@ describe('AnnotationPopover', () => {
     const popover = new AnnotationPopover(host, { suggest }, 'Books/Book.pdf');
     popover.open({
       comment: 'See [[con|Existing alias]] later',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -79,9 +80,10 @@ describe('AnnotationPopover', () => {
     );
     popover.open({
       comment: 'See [[con|Old alias]] later',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -103,9 +105,10 @@ describe('AnnotationPopover', () => {
     );
     popover.open({
       comment: '[[closed]] prose',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -132,9 +135,10 @@ describe('AnnotationPopover', () => {
     );
     popover.open({
       comment: 'See [[con]] later',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -153,13 +157,14 @@ describe('AnnotationPopover', () => {
   });
   it('edits ordinary comment text and inserts tags and wiki links without conversion controls', () => {
     const host = document.body.createDiv();
-    const save = vi.fn();
+    const change = vi.fn();
     const popover = new AnnotationPopover(host);
     popover.open({
       comment: 'Idea',
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: save,
+      onChange: change,
+      onClose: vi.fn(),
       x: 10,
       y: 20,
     });
@@ -168,9 +173,7 @@ describe('AnnotationPopover', () => {
     input.setSelectionRange(input.value.length, input.value.length);
     host.querySelector<HTMLButtonElement>('[data-action="insert-tag"]')?.click();
     host.querySelector<HTMLButtonElement>('[data-action="insert-link"]')?.click();
-    host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
-
-    expect(save).toHaveBeenCalledWith('Idea #tag [[Link]]');
+    expect(change).toHaveBeenLastCalledWith('Idea #tag [[Link]]');
     expect(host.querySelector('[data-action="convert-annotation"]')).toBeNull();
     popover.destroy();
     expect(host.childElementCount).toBe(0);
@@ -185,9 +188,10 @@ describe('AnnotationPopover', () => {
     const popover = new AnnotationPopover(host);
     popover.open({
       comment: '',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: onDelete,
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -197,9 +201,10 @@ describe('AnnotationPopover', () => {
 
     popover.open({
       comment: '',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: onDelete,
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -209,14 +214,88 @@ describe('AnnotationPopover', () => {
     host.remove();
   });
 
+  it('fires one close reason for blur Escape delete and external close', () => {
+    const cases = [
+      ['blur', 'blur'],
+      ['Escape', 'escape'],
+      ['delete-comment', 'delete-comment'],
+      ['delete-annotation', 'delete-annotation'],
+      ['external', 'external'],
+    ] as const;
+
+    for (const [action, reason] of cases) {
+      const host = document.body.createDiv();
+      const onClose = vi.fn();
+      const popover = new AnnotationPopover(host);
+      popover.open({
+        comment: 'Live comment',
+        onChange: vi.fn(),
+        onClose,
+        onDeleteAnnotation: vi.fn(),
+        onDeleteComment: vi.fn(),
+        x: 0,
+        y: 0,
+      });
+
+      if (action === 'blur') {
+        host
+          .querySelector<HTMLTextAreaElement>('textarea')
+          ?.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+      } else if (action === 'Escape') {
+        popover.element.dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }),
+        );
+      } else if (action === 'external') {
+        popover.close(false);
+      } else {
+        host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
+      }
+      popover.close(false);
+      popover.destroy();
+
+      expect(onClose).toHaveBeenCalledExactlyOnceWith(reason);
+      host.remove();
+    }
+  });
+
+  it('closes a replaced comment exactly once as external', () => {
+    const host = document.body.createDiv();
+    const onClose = vi.fn();
+    const popover = new AnnotationPopover(host);
+    popover.open({
+      comment: 'First',
+      onChange: vi.fn(),
+      onClose,
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+
+    popover.open({
+      comment: 'Second',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+
+    expect(onClose).toHaveBeenCalledExactlyOnceWith('external');
+    popover.destroy();
+    host.remove();
+  });
+
   it('clamps position, cancels, ignores non-element clicks, and rejects reopening after destroy', () => {
     const host = document.body.createDiv();
     const popover = new AnnotationPopover(host);
     const request = {
       comment: '',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: -2,
       y: -3,
     };
@@ -225,7 +304,6 @@ describe('AnnotationPopover', () => {
     expect(popover.element.style.top).toBe('0px');
     popover.element.append(document.createTextNode('text target'));
     popover.element.lastChild?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    host.querySelector<HTMLButtonElement>('[data-action="cancel-comment"]')?.click();
     popover.close();
     popover.destroy();
     popover.destroy();
@@ -243,10 +321,11 @@ describe('AnnotationPopover', () => {
     popover.open({
       color: '#ffd400',
       comment: 'Supported highlight',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onColor,
       onDeleteAnnotation,
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -269,9 +348,10 @@ describe('AnnotationPopover', () => {
     const popover = new AnnotationPopover(host);
     popover.open({
       comment: 'Imported note',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       readOnlyReason: 'Underline annotations are read-only in this PDF.js version.',
       x: 0,
       y: 0,
@@ -301,9 +381,10 @@ describe('AnnotationPopover', () => {
     });
     popover.open({
       comment: '',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 780,
       y: 590,
     });
@@ -321,9 +402,10 @@ describe('AnnotationPopover', () => {
     const events: Event[] = [];
     popover.open({
       comment: '',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
       onDeleteAnnotation: vi.fn(),
       onDeleteComment: vi.fn(),
-      onSave: vi.fn(),
       x: 0,
       y: 0,
     });
@@ -348,14 +430,18 @@ describe('AnnotationPopover', () => {
     const popover = new AnnotationPopover(host);
     popover.open({
       comment: 'Retry me',
+      onChange: () => false,
+      onClose: vi.fn(),
       onDeleteAnnotation: () => false,
       onDeleteComment: () => false,
-      onSave: () => false,
       x: 0,
       y: 0,
     });
 
-    host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected annotation comment input.');
+    input.value = 'Retry changed';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
 
     expect(popover.element.hidden).toBe(false);
     popover.destroy();

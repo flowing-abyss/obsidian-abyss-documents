@@ -76,8 +76,10 @@ function pdf(pageCount = 700): PDFDocumentProxy {
 
 function annotationManager() {
   return {
+    commentSelection: vi.fn(),
     delete: vi.fn(),
     endCurrentEditing: vi.fn(),
+    highlightSelection: vi.fn(),
     redo: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
@@ -348,6 +350,68 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
 }
 
 describe('PdfDocumentViewport', () => {
+  it('dismisses stale tokens without a failure Notice', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) {
+      throw new Error('Expected a mounted PDF annotation runtime.');
+    }
+    const uiManager = annotationManager();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const interaction = (
+      fixture.viewport as PdfDocumentViewport & {
+        readonly annotationInteraction: {
+          commitSelection(
+            token: string,
+            action: { readonly kind: 'highlight'; readonly color: string },
+          ): Promise<'created' | 'dismissed'>;
+        } | null;
+      }
+    ).annotationInteraction;
+    if (interaction === null) throw new Error('Expected writable PDF annotation interaction.');
+
+    await expect(
+      interaction.commitSelection('stale-token', { kind: 'highlight', color: '#ffd400' }),
+    ).resolves.toBe('dismissed');
+
+    expect(uiManager.updateParams).not.toHaveBeenCalled();
+    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === 'annotation-mutation-error')).toEqual([]);
+  });
+
+  it('aborts a one-shot annotation interaction before navigation', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const interaction = fixture.viewport.annotationInteraction;
+    if (eventBus === undefined || viewer === undefined || interaction === null) {
+      throw new Error('Expected a mounted PDF annotation runtime.');
+    }
+    const uiManager = annotationManager();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    vi.spyOn(fixture.viewport.selectionObserver, 'validate').mockReturnValue('current');
+    let outcome: unknown = 'pending';
+    void interaction
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => {
+        outcome = cause;
+      });
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+
+    await fixture.viewport.goTo({ pageIndex: 1 });
+
+    await vi.waitFor(() => {
+      expect(outcome).not.toBe('pending');
+    });
+    expect(outcome).toMatchObject({ name: 'AbortError' });
+    expect(viewer.annotationEditorMode).toBe(0);
+  });
+
   it('invalidates on rerender zoom layout navigation save and session change', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
@@ -472,7 +536,10 @@ describe('PdfDocumentViewport', () => {
     };
 
     await commentManager.showDialog(uiManager, native, 0, 0);
-    fixture.host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+    const input = fixture.host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected native comment input.');
+    input.value = 'Updated';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
     expect(dirty).toHaveBeenCalledWith(true);
 
     const events: ViewportEvent[] = [];
@@ -485,7 +552,10 @@ describe('PdfDocumentViewport', () => {
       },
     });
     await commentManager.showDialog(uiManager, native, 0, 0);
-    fixture.host.querySelector<HTMLButtonElement>('[data-action="save-comment"]')?.click();
+    const failingInput = fixture.host.querySelector<HTMLTextAreaElement>('textarea');
+    if (failingInput === null) throw new Error('Expected native comment input.');
+    failingInput.value = 'Rejected';
+    failingInput.dispatchEvent(new Event('input', { bubbles: true }));
 
     const failure = events.find((event) => event.type === 'annotation-mutation-error');
     expect(failure?.type).toBe('annotation-mutation-error');

@@ -1,6 +1,11 @@
-import { AnnotationPopover } from '../../reader/annotation-popover.js';
+import {
+  AnnotationPopover,
+  type AnnotationCommentCloseReason,
+} from '../../reader/annotation-popover.js';
 import type { AnnotationLinkSuggestionProvider } from '../../reader/link-suggestions.js';
 import { PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE } from './pdf-runtime.js';
+
+const COMMENT_DIALOG_RESERVATION_TIMEOUT_MS = 2_000;
 
 interface PdfCommentData {
   readonly annotationType?: number | undefined;
@@ -48,6 +53,23 @@ export interface PdfCommentBridgeOptions {
   readonly onNativeMutation?: (() => void) | undefined;
 }
 
+export interface PdfCommentDialogReservation {
+  readonly closed: Promise<AnnotationCommentCloseReason>;
+  readonly opened: Promise<void>;
+}
+
+interface PendingCommentDialogReservation extends PdfCommentDialogReservation {
+  active: boolean;
+  settled: boolean;
+  readonly seed: '' | '[[' | '#';
+  readonly clearOpenTimeout: () => void;
+  readonly cleanup: () => void;
+  readonly rejectClosed: (cause: unknown) => void;
+  readonly rejectOpened: (cause: unknown) => void;
+  readonly resolveClosed: (reason: AnnotationCommentCloseReason) => void;
+  readonly resolveOpened: () => void;
+}
+
 export interface PdfJsCommentManagerRuntime {
   readonly dialogElement: HTMLElement;
   addComment(annotation: unknown): void;
@@ -86,6 +108,8 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   private popupSelected = false;
   private popupVisible = false;
   private sidebarUiManager: PdfCommentUiManager | null = null;
+  private activeDialogReservation: PendingCommentDialogReservation | null = null;
+  private nextDialogReservation: PendingCommentDialogReservation | null = null;
   private disposed = false;
 
   constructor(
@@ -98,8 +122,63 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     this.dialogElement = this.popover.element;
   }
 
+  reserveNextDialog(seed: '' | '[[' | '#', signal?: AbortSignal): PdfCommentDialogReservation {
+    if (this.disposed) throw new DOMException('PDF comment bridge disposed.', 'InvalidStateError');
+    if (this.nextDialogReservation !== null) {
+      this.cancelReservation(
+        this.nextDialogReservation,
+        new DOMException('The PDF comment reservation was superseded.', 'AbortError'),
+      );
+    }
+    const opened = deferred<void>();
+    const closed = deferred<AnnotationCommentCloseReason>();
+    void opened.promise.catch(() => undefined);
+    void closed.promise.catch(() => undefined);
+    const owner = this.dialogElement.ownerDocument.defaultView;
+    let timeoutId: number | null = null;
+    const clearOpenTimeout = (): void => {
+      if (timeoutId === null) return;
+      owner?.clearTimeout(timeoutId);
+      timeoutId = null;
+    };
+    const onAbort = (): void => {
+      this.cancelReservation(reservation, abortReason(signal));
+    };
+    const reservation: PendingCommentDialogReservation = {
+      active: false,
+      settled: false,
+      seed,
+      clearOpenTimeout,
+      opened: opened.promise,
+      closed: closed.promise,
+      cleanup: () => {
+        clearOpenTimeout();
+        signal?.removeEventListener('abort', onAbort);
+      },
+      rejectClosed: closed.reject,
+      rejectOpened: opened.reject,
+      resolveOpened: () => {
+        opened.resolve(undefined);
+      },
+      resolveClosed: closed.resolve,
+    };
+    this.nextDialogReservation = reservation;
+    if (signal?.aborted === true) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
+    if (!reservation.settled) {
+      timeoutId =
+        owner?.setTimeout(() => {
+          this.cancelReservation(
+            reservation,
+            new DOMException('The PDF comment dialog did not open in time.', 'TimeoutError'),
+          );
+        }, COMMENT_DIALOG_RESERVATION_TIMEOUT_MS) ?? null;
+    }
+    return reservation;
+  }
+
   // PDF.js 6.2.108 calls this exact five-argument manager seam.
-  // eslint-disable-next-line max-params -- exact upstream runtime callback arity
+  // eslint-disable-next-line complexity, max-params -- exact upstream callback and dialog transaction orchestration
   async showDialog(
     uiManager: unknown,
     editor: PdfCommentEditor,
@@ -109,14 +188,28 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   ): Promise<void> {
     if (this.disposed) throw new DOMException('PDF comment bridge disposed.', 'InvalidStateError');
     const data = editor.getData();
+    const reservation = this.nextDialogReservation;
+    this.nextDialogReservation = null;
+    if (reservation !== null) {
+      reservation.clearOpenTimeout();
+      reservation.active = true;
+      this.activeDialogReservation = reservation;
+    }
     const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
     const readOnlyReason = annotationReadOnlyReason(editor, manager);
     this.applyDialogHeight(options?.height);
     const editable = readOnlyReason === undefined && manager !== null;
+    const comment = reservation?.seed ?? data.contentsObj?.str ?? '';
+    if (reservation !== null) editor.comment = comment;
     this.popover.open({
       ...(editable ? this.colorActions(editor, data, manager) : {}),
       canDeleteAnnotation: editable,
-      comment: data.contentsObj?.str ?? '',
+      comment,
+      onChange: (comment) => {
+        return this.mutate('save-comment', () => {
+          editor.comment = comment;
+        });
+      },
       onDeleteAnnotation: () =>
         this.mutate('delete-annotation', () => {
           this.deleteAnnotation(manager, editor);
@@ -125,16 +218,14 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         this.mutate('delete-comment', () => {
           this.deleteComment(manager, editor);
         }),
-      onSave: (comment) => {
-        return this.mutate('save-comment', () => {
-          editor.comment = comment;
-          editor.focusCommentButton?.();
-        });
+      onClose: (reason) => {
+        this.closeReservation(reservation, reason);
       },
       ...(readOnlyReason === undefined ? {} : { readOnlyReason }),
       x: posX,
       y: posY,
     });
+    reservation?.resolveOpened();
   }
 
   toggleCommentPopup(
@@ -227,7 +318,36 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    const failure = new DOMException('PDF comment bridge disposed.', 'AbortError');
+    if (this.nextDialogReservation !== null) {
+      this.cancelReservation(this.nextDialogReservation, failure);
+    }
+    if (this.activeDialogReservation !== null) {
+      this.cancelReservation(this.activeDialogReservation, failure);
+    }
     this.popover.destroy();
+  }
+
+  private closeReservation(
+    reservation: PendingCommentDialogReservation | null,
+    reason: AnnotationCommentCloseReason,
+  ): void {
+    if (reservation === null || reservation.settled) return;
+    reservation.settled = true;
+    reservation.cleanup();
+    if (this.activeDialogReservation === reservation) this.activeDialogReservation = null;
+    reservation.resolveClosed(reason);
+  }
+
+  private cancelReservation(reservation: PendingCommentDialogReservation, cause: Error): void {
+    if (reservation.settled) return;
+    reservation.settled = true;
+    reservation.cleanup();
+    if (this.nextDialogReservation === reservation) this.nextDialogReservation = null;
+    if (this.activeDialogReservation === reservation) this.activeDialogReservation = null;
+    if (!reservation.active) reservation.rejectOpened(cause);
+    reservation.rejectClosed(cause);
+    if (reservation.active) this.popover.close(false, 'external');
   }
 
   private storeComment(value: unknown): void {
@@ -446,4 +566,26 @@ function clampByte(value: number): number {
 
 function clampOpacity(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly reject: (cause?: unknown) => void;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (cause?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function abortReason(signal: AbortSignal | undefined): Error {
+  const reason: unknown = signal?.reason;
+  if (typeof reason === 'object' && reason !== null && 'name' in reason && 'message' in reason) {
+    return reason as Error;
+  }
+  return new DOMException('The PDF comment reservation was cancelled.', 'AbortError');
 }
