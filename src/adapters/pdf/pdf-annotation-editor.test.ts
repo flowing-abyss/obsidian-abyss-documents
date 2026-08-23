@@ -812,6 +812,38 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('retries a rejected NONE confirmation and releases every contextual gate', async () => {
+    vi.useFakeTimers();
+    try {
+      const { editor, eventBus, modeRequests, viewer } = fixture({ dispatchModeChanges: false });
+      const uiManager = manager(selectedEditor('highlight-1', 9));
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+      let firstFailure: unknown = 'pending';
+      void editor
+        .editAnnotation({ editComment: false, id: 'highlight-1', kind: 'highlight' })
+        .catch((cause: unknown) => {
+          firstFailure = cause;
+        });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(firstFailure).toMatchObject({ name: 'TimeoutError' });
+      expect(eventBus.listeners.get('editorsrendered')?.size).toBe(1);
+
+      viewer.currentMode = 9;
+      const recovery = editor.abortInteraction('Retry contextual cleanup.');
+      await Promise.resolve();
+      expect(modeRequests[modeRequests.length - 1]).toEqual({ mode: 0 });
+      eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
+      await expect(recovery).resolves.toBeUndefined();
+
+      expect(editor.hasContextualEdit).toBe(false);
+      expect(uiManager.disableUserSelect).toHaveBeenLastCalledWith(false);
+      expect(eventBus.listeners.get('editorsrendered')?.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns neutral after the selected contextual editor tears down', async () => {
     const { editor, eventBus, modeRequests, viewer } = fixture();
     const uiManager = manager(selectedEditor('highlight-1', 9));

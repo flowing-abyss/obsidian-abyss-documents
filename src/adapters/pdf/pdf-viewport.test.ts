@@ -577,6 +577,54 @@ describe('PdfDocumentViewport', () => {
     expect(event.defaultPrevented).toBe(true);
   });
 
+  it.each(['navigation', 'pointer', 'layout', 'session', 'rebind'] as const)(
+    'invalidates deferred annotation qualification after a subsequent %s gesture',
+    async (invalidation) => {
+      const fixture = await mountedViewport(3);
+      const pendingAnnotations = deferred<readonly TestPdfAnnotation[]>();
+      const getPage = vi.spyOn(fixture.documentProxy, 'getPage').mockResolvedValue({
+        getAnnotations: vi.fn(() => pendingAnnotations.promise),
+      } as never);
+      const eventBus = fixture.runtime.state.eventBus;
+      const viewer = fixture.runtime.state.viewer;
+      if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+      eventBus.dispatch('annotationeditoruimanager', {
+        source: viewer,
+        uiManager: annotationManager({ editorType: 'highlight', mode: 9, uid: 'deferred-1' }),
+      });
+      const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+      if (root === null) throw new Error('Expected PDF root.');
+      const page = root.createDiv();
+      page.dataset['pageNumber'] = '1';
+      const annotation = page
+        .createDiv({ cls: 'annotationLayer' })
+        .createEl('section', { cls: 'highlightAnnotation' });
+      annotation.dataset['annotationId'] = 'deferred-1';
+      annotation.click();
+      await vi.waitFor(() => {
+        expect(getPage).toHaveBeenCalledWith(1);
+      });
+
+      if (invalidation === 'navigation') await fixture.viewport.goTo({ pageIndex: 1 });
+      else if (invalidation === 'pointer') {
+        root.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      } else if (invalidation === 'layout') {
+        fixture.viewport.setLayout({ pages: 'facing', scrolling: 'continuous' });
+      } else if (invalidation === 'session') eventBus.dispatch('pagesinit', { source: viewer });
+      else {
+        eventBus.dispatch('annotationeditoruimanager', {
+          source: viewer,
+          uiManager: annotationManager({ editorType: 'highlight', mode: 9, uid: 'deferred-1' }),
+        });
+      }
+      pendingAnnotations.resolve([{ annotationType: 9, id: 'deferred-1', isEditable: true }]);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+      expect(root.contains(annotation)).toBe(true);
+      expect(viewer.annotationEditorRequests).toEqual([]);
+    },
+  );
+
   it('dismisses stale tokens without a failure Notice', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;

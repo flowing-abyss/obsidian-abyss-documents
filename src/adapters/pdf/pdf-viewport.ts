@@ -323,6 +323,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   async goTo(location: DocumentLocation): Promise<void> {
+    this.invalidateAnnotationEditCandidate();
     this.requireMounted(this.linkService);
     await this.annotationEditorInstance?.abortInteraction(
       'PDF navigation cancelled the annotation interaction.',
@@ -339,6 +340,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   setScale(scale: ScaleRequest): void {
+    this.invalidateAnnotationEditCandidate();
     const viewer = this.requireMounted(this.viewer);
     this.selectionObserverInstance?.invalidate();
     this.requestedScale = scale;
@@ -368,6 +370,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   setLayout(layout: ReaderLayout): void {
+    this.invalidateAnnotationEditCandidate();
     const viewer = this.requireMounted(this.viewer);
     this.selectionObserverInstance?.invalidate();
     this.requestedLayout = { ...layout };
@@ -378,6 +381,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   setReadingColors(appearance: ReadingAppearance): void {
+    this.invalidateAnnotationEditCandidate();
     const root = this.requireMounted(this.root);
     this.selectionObserverInstance?.invalidate();
     const profile = readingProfile(appearance);
@@ -413,6 +417,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   search(query: string): void {
+    this.invalidateAnnotationEditCandidate();
     if (this.eventBus === null || this.destroyPromise !== null) return;
     const normalizedQuery = query.trim();
     this.selectionAbort?.abort();
@@ -436,11 +441,13 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   searchAgain(direction: 'next' | 'previous'): void {
+    this.invalidateAnnotationEditCandidate();
     if (this.lastQuery.length === 0 || this.eventBus === null) return;
     this.dispatchFind(this.lastQuery, direction === 'previous', 'again');
   }
 
   async selectSearchHit(hit: SearchHit, query: string): Promise<void> {
+    this.invalidateAnnotationEditCandidate();
     const normalizedQuery = query.trim();
     if (normalizedQuery.length === 0) {
       throw new DOMException('Cannot select a search hit without a query.', 'InvalidStateError');
@@ -597,12 +604,16 @@ export class PdfDocumentViewport implements DocumentViewport {
     root.addEventListener('click', this.onRootClick);
     root.addEventListener('keydown', this.onRootKeyDown);
     root.addEventListener('pointerdown', this.onRootPointerDown, true);
+    root.addEventListener('scroll', this.onRootReadingGesture);
+    root.addEventListener('wheel', this.onRootReadingGesture, { passive: true });
   }
 
   private unregisterRootListeners(root: HTMLElement): void {
     root.removeEventListener('click', this.onRootClick);
     root.removeEventListener('keydown', this.onRootKeyDown);
     root.removeEventListener('pointerdown', this.onRootPointerDown, true);
+    root.removeEventListener('scroll', this.onRootReadingGesture);
+    root.removeEventListener('wheel', this.onRootReadingGesture);
   }
 
   private createAnnotationEditor(
@@ -623,6 +634,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private bindEvents(): void {
     this.bind('pagesinit', () => {
+      this.invalidateAnnotationEditCandidate();
       this.pagesInitialized = true;
       if (this.colorRebindActive) return;
       if (this.viewer !== null) {
@@ -632,9 +644,11 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.flushPendingLocation();
     });
     this.bind('pagechanging', (event) => {
+      this.invalidateAnnotationEditCandidate();
       this.onPageChanging(event);
     });
     this.bind('scalechanging', (event) => {
+      this.invalidateAnnotationEditCandidate();
       this.onScaleChanging(event);
     });
     this.bind('pagerendered', (event) => {
@@ -652,6 +666,9 @@ export class PdfDocumentViewport implements DocumentViewport {
       if (pageNumber === null) return;
       const page = this.pageElement(pageNumber);
       if (page !== null) replacePdfAnnotationImageSources(page, annotationImageData);
+    });
+    this.bind('annotationeditoruimanager', () => {
+      this.invalidateAnnotationEditCandidate();
     });
   }
 
@@ -999,6 +1016,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private readonly onRootClick = (event: MouseEvent): void => {
+    this.invalidateAnnotationEditCandidate();
     const target = event.target;
     if (!isElementTarget(target)) return;
     const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
@@ -1013,6 +1031,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private readonly onRootPointerDown = (event: PointerEvent): void => {
+    this.invalidateAnnotationEditCandidate();
     const editor = this.annotationEditorInstance;
     const target = event.target;
     if (editor?.hasContextualEdit !== true || !isElementTarget(target)) return;
@@ -1032,10 +1051,15 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private readonly onRootKeyDown = (event: KeyboardEvent): void => {
+    this.invalidateAnnotationEditCandidate();
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const target = event.target;
     if (!isElementTarget(target) || !this.editClickedAnnotation(target)) return;
     event.preventDefault();
+  };
+
+  private readonly onRootReadingGesture = (): void => {
+    this.invalidateAnnotationEditCandidate();
   };
 
   private editClickedAnnotation(target: Element): boolean {
@@ -1044,7 +1068,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (editor === null || root === null) return false;
     const candidate = clickedAnnotationCandidate(target, root);
     if (candidate === null) return false;
-    const revision = ++this.annotationEditRevision;
+    const revision = this.invalidateAnnotationEditCandidate();
     void this.resolveEditableAnnotation(candidate)
       .then((kind) => {
         if (
@@ -1080,6 +1104,11 @@ export class PdfDocumentViewport implements DocumentViewport {
     }
     const annotation = (await annotations).find((item) => item.id === candidate.id);
     return annotation === undefined ? null : importedEditableAnnotationKind(annotation);
+  }
+
+  private invalidateAnnotationEditCandidate(): number {
+    this.annotationEditRevision += 1;
+    return this.annotationEditRevision;
   }
 
   private retryPage(

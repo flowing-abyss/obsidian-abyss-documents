@@ -783,10 +783,14 @@ export class PdfAnnotationEditor {
   private closeContextualEditSession(session: ContextualEditSession): Promise<void> {
     if (session.closing !== null) return session.closing;
     session.phase = 'closing';
-    session.closing = this.changeMode(this.dependencies.annotationEditorType.NONE).then(() => {
+    const transition = this.changeMode(this.dependencies.annotationEditorType.NONE).then(() => {
       this.releaseContextualEditSession(session);
     });
-    return session.closing;
+    const closing = transition.finally(() => {
+      if (session.closing === closing) session.closing = null;
+    });
+    session.closing = closing;
+    return closing;
   }
 
   private releaseContextualEditSession(session = this.contextualEditSession): void {
