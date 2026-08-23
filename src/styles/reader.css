@@ -158,6 +158,49 @@
   display: none;
 }
 
+.abyss-documents .abyss-selection-annotation-popover {
+  --abyss-selection-safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --abyss-selection-safe-area-left: env(safe-area-inset-left, 0px);
+  --abyss-selection-safe-area-right: env(safe-area-inset-right, 0px);
+  --abyss-selection-safe-area-top: env(safe-area-inset-top, 0px);
+
+  position: fixed;
+  z-index: var(--layer-popover);
+  display: flex;
+  max-width: calc(
+    100dvw - var(--abyss-selection-safe-area-left) - var(--abyss-selection-safe-area-right) -
+      var(--size-4-4)
+  );
+  align-items: center;
+  gap: var(--size-2-1);
+  padding: var(--size-2-1);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+
+.abyss-documents .abyss-selection-annotation-popover[hidden] {
+  display: none;
+}
+
+.abyss-documents .abyss-selection-annotation-popover-button {
+  width: var(--input-height);
+  min-width: var(--input-height);
+  min-height: var(--input-height);
+  padding: 0;
+}
+
+.abyss-documents .abyss-selection-annotation-swatch {
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: 50%;
+}
+
+.abyss-documents .abyss-selection-annotation-popover-button:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
 .abyss-documents .abyss-annotation-comment {
   min-height: var(--abyss-comment-height, 6rem);
   resize: vertical;
@@ -532,6 +575,7 @@
   .abyss-documents .abyss-annotation-color,
   .abyss-documents .abyss-annotation-popover-button,
   .abyss-documents .abyss-annotation-popover-color,
+  .abyss-documents .abyss-selection-annotation-popover-button,
   .abyss-documents .abyss-reader-sidebar-close,
   .abyss-documents .abyss-reader-search-button {
     width: 2.75rem;
