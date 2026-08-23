@@ -60,6 +60,10 @@ export class SelectionAnnotationPopover {
     });
   }
 
+  get isOpen(): boolean {
+    return this.active !== null;
+  }
+
   open(request: SelectionAnnotationPopoverRequest): void {
     if (this.destroyed)
       throw new DOMException('Selection annotation popover destroyed.', 'InvalidStateError');

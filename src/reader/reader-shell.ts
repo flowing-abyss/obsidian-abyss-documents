@@ -1,7 +1,15 @@
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { FocusReturn, PoliteAnnouncer } from './a11y.js';
+import type {
+  AnnotationInteractionHost,
+  QuickHighlightState,
+} from './annotation-interaction-controller.js';
 import { AnnotationToolbar, type AnnotationToolbarIntent } from './annotation-toolbar.js';
 import type { ObsidianTheme } from './reading-profiles.js';
+import {
+  SelectionAnnotationPopover,
+  type SelectionAnnotationPopoverRequest,
+} from './selection-annotation-popover.js';
 import { ReaderSidebar, type ReaderSidebarCallbacks, type ReaderSidebarTab } from './sidebar.js';
 import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
 
@@ -18,7 +26,7 @@ const DEFAULT_SIDEBAR_WIDTH = 320;
 const MINIMUM_SIDEBAR_WIDTH = 240;
 const MAXIMUM_SIDEBAR_WIDTH = 480;
 
-export class ReaderShell {
+export class ReaderShell implements AnnotationInteractionHost {
   readonly root: HTMLElement;
   readonly documentHost: HTMLElement;
   readonly toolbar: ReaderToolbar;
@@ -30,6 +38,8 @@ export class ReaderShell {
   private readonly body: HTMLElement;
   private readonly focusReturn = new FocusReturn();
   private readonly intentHandler: (intent: ReaderShellIntent) => void;
+  private readonly selectionPopover: SelectionAnnotationPopover;
+  private quickHighlightState: QuickHighlightState = { armed: false, color: '#ffd400' };
   private sidebarValue: ReaderSidebar | null = null;
   private destroyed = false;
 
@@ -60,23 +70,18 @@ export class ReaderShell {
     this.body = this.root.createDiv({ cls: 'abyss-reader-body' });
     this.documentHost = this.body.createDiv({ attr: { 'data-region': 'document' } });
     this.documentHost.tabIndex = -1;
+    this.selectionPopover = new SelectionAnnotationPopover(this.root);
     const onKeyDown = (event: KeyboardEvent): void => {
-      if ((!event.ctrlKey && !event.metaKey) || event.altKey) return;
-      const key = event.key.toLocaleLowerCase();
-      if (key === 'f') {
-        event.preventDefault();
-        event.stopPropagation();
-        onIntent({ type: 'open-sidebar', tab: 'search' });
-        return;
-      }
-      if (key !== 'z' || isTextEditingTarget(event.target, this.root)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      onIntent({ type: event.shiftKey ? 'redo-annotation' : 'undo-annotation' });
+      this.handleReaderShortcut(event);
+    };
+    const onEscape = (event: KeyboardEvent): void => {
+      if (!event.defaultPrevented) this.handleQuickHighlightEscape(event);
     };
     this.root.addEventListener('keydown', onKeyDown, true);
+    this.root.addEventListener('keydown', onEscape);
     this.cleanups.push(() => {
       this.root.removeEventListener('keydown', onKeyDown, true);
+      this.root.removeEventListener('keydown', onEscape);
     });
   }
 
@@ -101,7 +106,21 @@ export class ReaderShell {
         this.intentHandler(intent);
       },
     );
+    this.applyQuickHighlightState();
     return this.annotationToolbarValue;
+  }
+
+  setQuickHighlightState(state: QuickHighlightState): void {
+    this.quickHighlightState = state;
+    this.applyQuickHighlightState();
+  }
+
+  openSelectionPopover(request: SelectionAnnotationPopoverRequest): void {
+    this.selectionPopover.open(request);
+  }
+
+  closeSelectionPopover(): void {
+    this.selectionPopover.close();
   }
 
   get obsidianTheme(): ObsidianTheme {
@@ -167,6 +186,7 @@ export class ReaderShell {
     this.sidebarValue = null;
     this.focusReturn.clear();
     this.announcer.destroy();
+    this.selectionPopover.destroy();
     this.annotationToolbarValue?.destroy();
     this.annotationToolbarValue = null;
     this.toolbar.destroy();
@@ -177,6 +197,38 @@ export class ReaderShell {
     this.root
       .querySelector('[data-control="sidebar"]')
       ?.setAttribute('aria-pressed', String(pressed));
+  }
+
+  private applyQuickHighlightState(): void {
+    const toolbar = this.annotationToolbarValue;
+    if (toolbar === null) return;
+    toolbar.setColor(this.quickHighlightState.color);
+    if (this.quickHighlightState.armed) toolbar.setTool('highlight');
+    else if (toolbar.tool === 'highlight') toolbar.setTool('select');
+  }
+
+  private handleQuickHighlightEscape(event: KeyboardEvent): boolean {
+    if (event.key !== 'Escape' || !this.quickHighlightState.armed || this.selectionPopover.isOpen)
+      return false;
+    event.preventDefault();
+    event.stopPropagation();
+    this.intentHandler({ type: 'set-annotation-tool', tool: 'select' });
+    return true;
+  }
+
+  private handleReaderShortcut(event: KeyboardEvent): void {
+    if ((!event.ctrlKey && !event.metaKey) || event.altKey) return;
+    const key = event.key.toLocaleLowerCase();
+    if (key === 'f') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.intentHandler({ type: 'open-sidebar', tab: 'search' });
+      return;
+    }
+    if (key !== 'z' || isTextEditingTarget(event.target, this.root)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.intentHandler({ type: event.shiftKey ? 'redo-annotation' : 'undo-annotation' });
   }
 
   private captureSidebarInvoker(): void {

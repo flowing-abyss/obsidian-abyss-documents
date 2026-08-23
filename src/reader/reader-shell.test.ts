@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
 import { ReaderShell } from './reader-shell.js';
+
+function selection(): PdfTextSelection {
+  return {
+    clientRect: { bottom: 40, height: 20, left: 10, right: 110, top: 20, width: 100 },
+    input: 'pointer',
+    text: 'Selected text',
+    token: 'selection-token',
+  };
+}
 
 describe('ReaderShell', () => {
   it('adds a minimal annotation toolbar only after document capabilities are known', () => {
@@ -36,6 +46,84 @@ describe('ReaderShell', () => {
     );
 
     expect(intents).toEqual([{ type: 'undo-annotation' }, { type: 'redo-annotation' }]);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('hosts selection actions and gives their Escape handling precedence', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const selectionIntents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar(
+      [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      null,
+    );
+    shell.openSelectionPopover({
+      onIntent: (intent) => selectionIntents.push(intent),
+      palette: [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      selection: selection(),
+    });
+
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(selectionIntents).toEqual([{ type: 'dismiss' }]);
+    expect(intents).toEqual([]);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('reflects Quick Highlight state and lets Escape disarm it', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar(
+      [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      null,
+    );
+
+    shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(
+      shell.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="highlight"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(intents).toEqual([{ tool: 'select', type: 'set-annotation-tool' }]);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('lets a descendant comment surface consume Escape before Quick Highlight', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar([], null);
+    shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
+    const comment = shell.root.createDiv({ cls: 'abyss-annotation-popover' });
+    const textarea = comment.createEl('textarea');
+    textarea.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      comment.remove();
+    });
+
+    textarea.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(comment.isConnected).toBe(false);
+    expect(intents).toEqual([]);
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+    expect(intents).toEqual([{ tool: 'select', type: 'set-annotation-tool' }]);
     shell.destroy();
     host.remove();
   });

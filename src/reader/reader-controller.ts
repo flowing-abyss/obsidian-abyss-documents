@@ -1,6 +1,8 @@
 import { Notice, type TFile } from 'obsidian';
 import type {
   PdfAnnotationEditor,
+  PdfAnnotationInteraction,
+  PdfAnnotationLogicalMode,
   PdfAnnotationTool,
 } from '../adapters/pdf/pdf-annotation-editor.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
@@ -44,6 +46,7 @@ import {
   recordSuccessfulAnnotationSave,
 } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
+import { AnnotationInteractionController } from './annotation-interaction-controller.js';
 import type { AnnotationToolbarIntent } from './annotation-toolbar.js';
 import {
   applyAnnotationTransfer,
@@ -111,6 +114,10 @@ interface NativeEditableSessionFactory extends DocumentSession {
 
 interface AnnotationEditorViewport extends DocumentViewport {
   readonly annotationEditor: PdfAnnotationEditor | null;
+}
+
+interface AnnotationInteractionViewport extends DocumentViewport {
+  readonly annotationInteraction: PdfAnnotationInteraction | null;
 }
 
 interface AnnotationToolRequest {
@@ -210,6 +217,7 @@ export class ReaderController {
   private lastAnnotationFailureKey: string | null = null;
   private lastAnnotationExportPreparationFailureKey: string | null = null;
   private annotationToolRequestRevision = 0;
+  private annotationInteractionController: AnnotationInteractionController | null = null;
   private currentAnnotationTool: PdfAnnotationTool = 'select';
   private currentAnnotationColor = DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400';
   private readonly saveFailureOwner = {};
@@ -264,6 +272,7 @@ export class ReaderController {
     const shell = this.shell;
     const session = this.session;
     if (viewport === null || shell === null || session === null) return;
+    this.annotationInteractionController?.invalidate('layout');
     this.profileService.setCustom(this.profileState.reading.custom);
     try {
       viewport.setReadingColors(
@@ -286,6 +295,7 @@ export class ReaderController {
   }
 
   saveDocument(): Promise<void> {
+    this.annotationInteractionController?.invalidate('save');
     return this.autosave?.flush() ?? Promise.resolve();
   }
 
@@ -392,15 +402,20 @@ export class ReaderController {
     viewport: DocumentViewport | null,
     unsubscribeViewport: (() => void) | null,
   ): Promise<Error | undefined> {
+    const annotationInteraction = this.annotationInteractionController;
     if (this.session === session) {
       this.session = null;
       this.viewport = null;
       this.shell = null;
       this.unsubscribeViewport = null;
+      this.annotationInteractionController = null;
       this.resetReaderState();
       this.releaseSaveLifecycle();
     }
-    let failure = this.tryCleanup(unsubscribeViewport);
+    let failure = this.tryCleanup(() => {
+      annotationInteraction?.destroy();
+    });
+    failure ??= this.tryCleanup(unsubscribeViewport);
     failure ??= await this.releasePartial(viewport, session);
     try {
       shell.destroy();
@@ -449,6 +464,7 @@ export class ReaderController {
     this.session = session;
     this.viewport = viewport;
     this.unsubscribeViewport = unsubscribeViewport;
+    this.activateAnnotationInteraction(session, viewport, shell);
     this.activateNativeSave(session);
     return unsubscribeViewport;
   }
@@ -493,11 +509,43 @@ export class ReaderController {
     this.registerNativeSaveBroadcast(session, native, scheduler);
   }
 
+  private activateAnnotationInteraction(
+    session: DocumentSession,
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+  ): void {
+    const editor = annotationEditorOf(viewport);
+    const interaction = annotationInteractionOf(viewport);
+    if (interaction === null || annotationReadOnlyReason(session, editor) !== null) return;
+    const palette = this.profileState.annotations?.palette ?? DEFAULT_SETTINGS.annotations.palette;
+    this.annotationInteractionController = new AnnotationInteractionController(
+      interaction,
+      shell,
+      palette,
+      {
+        color: this.currentAnnotationColor,
+        onColorChange: (color) => {
+          this.currentAnnotationColor = color;
+        },
+        onFailure: (action, cause, context) => {
+          this.reportAnnotationFailure(action, cause, context);
+        },
+        onModeChange: (mode) => {
+          if (this.viewport !== viewport || this.shell !== shell) return;
+          const tool = annotationToolForMode(mode);
+          this.currentAnnotationTool = tool;
+          shell.annotationToolbar?.setTool(tool);
+        },
+      },
+    );
+  }
+
   private async saveNativeRevision(
     session: DocumentSession,
     native: NativeEditableSaveSession,
     revision: number,
   ): Promise<void> {
+    this.annotationInteractionController?.invalidate('save');
     const finishSave = beginReaderTimedOperation('annotation-save');
     const abort = new AbortController();
     let verified = false;
@@ -1036,14 +1084,19 @@ export class ReaderController {
     const session = this.session;
     const shell = this.shell;
     const unsubscribeViewport = this.unsubscribeViewport;
+    const annotationInteraction = this.annotationInteractionController;
     this.viewport = null;
     this.session = null;
     this.shell = null;
     this.unsubscribeViewport = null;
+    this.annotationInteractionController = null;
     this.resetReaderState();
     this.releaseSaveLifecycle();
 
-    let failure = this.tryCleanup(unsubscribeViewport);
+    let failure = this.tryCleanup(() => {
+      annotationInteraction?.destroy();
+    });
+    failure ??= this.tryCleanup(unsubscribeViewport);
     const lifecycleFailure = await this.releasePartial(viewport, session);
     failure ??= lifecycleFailure;
     try {
@@ -1275,6 +1328,12 @@ export class ReaderController {
     const palette = this.profileState.annotations?.palette ?? DEFAULT_SETTINGS.annotations.palette;
     shell.configureAnnotationToolbar(palette, annotationReadOnlyReason(session, editor));
     shell.annotationToolbar?.setTool(this.currentAnnotationTool);
+    const interactionController = this.annotationInteractionController;
+    if (interactionController !== null) {
+      interactionController.updatePalette(palette);
+      this.currentAnnotationColor = interactionController.color;
+      return;
+    }
     const selectedColor = palette.some(
       ({ color }) => color.toLocaleLowerCase() === this.currentAnnotationColor.toLocaleLowerCase(),
     )
@@ -1284,6 +1343,10 @@ export class ReaderController {
   }
 
   private setAnnotationTool(tool: PdfAnnotationTool): void {
+    if (this.annotationInteractionController?.requestTool(tool) === true) {
+      this.currentAnnotationTool = tool;
+      return;
+    }
     const editor = annotationEditorOf(this.viewport);
     const shell = this.shell;
     const viewport = this.viewport;
@@ -1300,6 +1363,11 @@ export class ReaderController {
   }
 
   private setAnnotationColor(color: string): void {
+    if (this.annotationInteractionController?.selectColor(color) === true) {
+      this.currentAnnotationColor = color;
+      this.lastAnnotationFailureKey = null;
+      return;
+    }
     const editor = annotationEditorOf(this.viewport);
     const toolbar = this.shell?.annotationToolbar;
     const tool = this.currentAnnotationTool;
@@ -1702,6 +1770,7 @@ export class ReaderController {
     const viewport = this.viewport;
     const shell = this.shell;
     if (viewport === null || shell === null || viewport.pageCount === 0) return;
+    this.annotationInteractionController?.invalidate('navigation');
     const target = Math.min(viewport.pageCount - 1, Math.max(0, Math.floor(location.pageIndex)));
     const destination: DocumentLocation = { ...location, pageIndex: target };
     this.navigationPageIndex = target;
@@ -1730,6 +1799,7 @@ export class ReaderController {
     const viewport = this.viewport;
     const shell = this.shell;
     if (viewport === null || shell === null) return;
+    this.annotationInteractionController?.invalidate('zoom');
     try {
       viewport.setScale(scale);
       shell.toolbar.setScale(scale);
@@ -1742,6 +1812,7 @@ export class ReaderController {
   private stepScale(direction: -1 | 1): void {
     const viewport = this.viewport;
     if (viewport === null) return;
+    this.annotationInteractionController?.invalidate('zoom');
     try {
       viewport.stepScale(direction);
     } catch (cause) {
@@ -1755,6 +1826,7 @@ export class ReaderController {
     const session = this.session;
     const shell = this.shell;
     if (viewport === null || session === null || shell === null) return;
+    this.annotationInteractionController?.invalidate('layout');
     try {
       viewport.setLayout(layout);
       this.currentLayout = { ...layout };
@@ -1819,6 +1891,7 @@ export class ReaderController {
     if (this.viewport !== viewport || this.shell !== shell) return;
     switch (event.type) {
       case 'page-change':
+        this.annotationInteractionController?.invalidate('navigation');
         this.handlePageChange(viewport, shell, event.pageIndex);
         return;
       case 'scale-change':
@@ -2080,6 +2153,20 @@ function captureLayoutPolicy(layout: PluginSettings['layout']): LayoutPolicySnap
 function annotationEditorOf(viewport: DocumentViewport | null): PdfAnnotationEditor | null {
   if (viewport === null || !('annotationEditor' in viewport)) return null;
   return (viewport as AnnotationEditorViewport).annotationEditor;
+}
+
+function annotationInteractionOf(
+  viewport: DocumentViewport | null,
+): PdfAnnotationInteraction | null {
+  if (viewport === null || !('annotationInteraction' in viewport)) return null;
+  return (viewport as AnnotationInteractionViewport).annotationInteraction;
+}
+
+function annotationToolForMode(mode: PdfAnnotationLogicalMode): PdfAnnotationTool {
+  if (mode === 'quick-highlight') return 'highlight';
+  if (mode === 'ink') return 'ink';
+  if (mode === 'freetext') return 'freetext';
+  return 'select';
 }
 
 function annotationReadOnlyReason(

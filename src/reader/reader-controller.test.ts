@@ -3,8 +3,12 @@ import { App, TFile as MockTFile, Notice } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   PdfAnnotationEditor,
+  PdfAnnotationInteraction,
+  PdfAnnotationLogicalMode,
   PdfAnnotationTool,
+  PdfSelectionAction,
 } from '../adapters/pdf/pdf-annotation-editor.js';
+import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
 import type {
   AnnotationGeometry,
@@ -156,6 +160,63 @@ function editableViewport(pageCount = 3) {
   return { ...created, deleteSelection, editor, redo, setParameter, setTool, undo };
 }
 
+function interactiveViewport(pageCount = 3) {
+  const created = editableViewport(pageCount);
+  let mode: PdfAnnotationLogicalMode = 'neutral';
+  const modeListeners = new Set<(value: PdfAnnotationLogicalMode) => void>();
+  const selectionListeners = new Set<(value: PdfTextSelection | null) => void>();
+  const commitSelection = vi.fn(
+    async (_token: string, _action: PdfSelectionAction): Promise<'created'> => 'created',
+  );
+  const setQuickHighlight = vi.fn(
+    async (state: { readonly enabled: boolean; readonly color: string }) => {
+      mode = state.enabled ? 'quick-highlight' : 'neutral';
+      for (const listener of modeListeners) listener(mode);
+    },
+  );
+  const interaction: PdfAnnotationInteraction = {
+    commitSelection,
+    onMode(listener) {
+      modeListeners.add(listener);
+      listener(mode);
+      return () => modeListeners.delete(listener);
+    },
+    onSelection(listener) {
+      selectionListeners.add(listener);
+      return () => selectionListeners.delete(listener);
+    },
+    setQuickHighlight,
+  };
+  created.setTool.mockImplementation(async (tool) => {
+    mode = 'neutral';
+    if (tool === 'ink') mode = 'ink';
+    if (tool === 'freetext') mode = 'freetext';
+    for (const listener of modeListeners) listener(mode);
+  });
+  Object.assign(created.value, { annotationInteraction: interaction });
+  return {
+    ...created,
+    commitSelection,
+    emitMode(next: PdfAnnotationLogicalMode) {
+      mode = next;
+      for (const listener of modeListeners) listener(next);
+    },
+    emitSelection(selection: PdfTextSelection | null) {
+      for (const listener of selectionListeners) listener(selection);
+    },
+    setQuickHighlight,
+  };
+}
+
+function pdfSelection(token = 'selection-token'): PdfTextSelection {
+  return {
+    clientRect: { bottom: 40, height: 20, left: 10, right: 110, top: 20, width: 100 },
+    input: 'pointer',
+    text: 'Selected text',
+    token,
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (cause?: unknown) => void;
@@ -256,6 +317,71 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('integrates selection-first actions and Quick Highlight without intercepting native drawing tools', async () => {
+    const [pdf] = files('Books/Selection-first.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+
+    createdViewport.emitSelection(pdfSelection());
+    shell.created.root.querySelector<HTMLButtonElement>('[data-selection-intent="link"]')?.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.commitSelection).toHaveBeenCalledExactlyOnceWith(
+        'selection-token',
+        { color: '#ffd400', kind: 'comment', seed: '[[' },
+        expect.any(AbortSignal),
+      );
+    });
+
+    shell.send({ tool: 'highlight', type: 'set-annotation-tool' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setQuickHighlight).toHaveBeenCalledWith({
+        color: '#ffd400',
+        enabled: true,
+      });
+    });
+    createdViewport.emitSelection(pdfSelection('quick-native'));
+    expect(createdViewport.commitSelection).toHaveBeenCalledOnce();
+
+    shell.send({ tool: 'ink', type: 'set-annotation-tool' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setTool).toHaveBeenCalledWith('ink');
+      expect(
+        shell.created.annotationToolbar?.root
+          .querySelector('[data-annotation-tool="ink"]')
+          ?.getAttribute('aria-pressed'),
+      ).toBe('true');
+    });
+    controller.refreshReadingSettings();
+    expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="ink"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    createdViewport.emitMode('freetext');
+    expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="freetext"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    createdViewport.emitMode('disabled');
+    expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="select"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    await controller.close();
+  });
   it('exports lazily loaded canonical annotations only after explicit toolbar intent', async () => {
     const [pdf] = files('Books/Export.pdf');
     if (pdf === undefined) throw new Error('Expected PDF.');
