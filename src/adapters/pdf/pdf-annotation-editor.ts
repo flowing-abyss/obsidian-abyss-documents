@@ -1,4 +1,5 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
+import { beginReaderTimedOperation } from '../../reader-performance.js';
 
 export type PdfAnnotationTool = 'select' | 'highlight' | 'ink' | 'freetext';
 
@@ -82,6 +83,21 @@ interface PendingModeChange {
   readonly listener: (event: unknown) => void;
 }
 
+interface QueuedToolIntent {
+  options: PdfAnnotationToolOptions;
+  tool: PdfAnnotationTool;
+  readonly waiters: Array<{
+    readonly reject: (reason: Error) => void;
+    readonly resolve: () => void;
+  }>;
+}
+
+interface QueuedMutation {
+  readonly apply: (manager: PdfAnnotationUiManager) => void;
+  readonly reject: (reason: Error) => void;
+  readonly resolve: () => void;
+}
+
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
 }
@@ -93,6 +109,8 @@ export class PdfAnnotationEditor {
   private manager: PdfAnnotationUiManager | null = null;
   private managerEventsEnabled = true;
   private pendingModeChange: PendingModeChange | null = null;
+  private queuedToolIntent: QueuedToolIntent | null = null;
+  private readonly queuedMutations: QueuedMutation[] = [];
   private readonly retiredManagers = new WeakSet<object>();
   private destroyed = false;
   private lifecycleRevision = 0;
@@ -105,9 +123,7 @@ export class PdfAnnotationEditor {
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
     this.requireManager();
-    if (this.saving) {
-      throw new DOMException('The PDF annotation editor is capturing a save.', 'InvalidStateError');
-    }
+    if (this.saving) return this.queueToolIntent(tool, options);
     const mode = this.modeFor(tool);
     await this.changeMode(mode, options);
   }
@@ -139,20 +155,28 @@ export class PdfAnnotationEditor {
     });
   }
 
-  setParameter(parameter: PdfAnnotationParameter, value: unknown): void {
-    this.requireManager().updateParams(this.parameterFor(parameter), value);
+  setParameter(parameter: PdfAnnotationParameter, value: unknown): Promise<void> {
+    return this.runOrQueueMutation((manager) => {
+      manager.updateParams(this.parameterFor(parameter), value);
+    });
   }
 
-  undo(): void {
-    this.requireManager().undo();
+  undo(): Promise<void> {
+    return this.runOrQueueMutation((manager) => {
+      manager.undo();
+    });
   }
 
-  redo(): void {
-    this.requireManager().redo();
+  redo(): Promise<void> {
+    return this.runOrQueueMutation((manager) => {
+      manager.redo();
+    });
   }
 
-  deleteSelection(): void {
-    this.requireManager().delete();
+  deleteSelection(): Promise<void> {
+    return this.runOrQueueMutation((manager) => {
+      manager.delete();
+    });
   }
 
   onDirty(listener: (dirty: boolean) => void): () => void {
@@ -172,6 +196,7 @@ export class PdfAnnotationEditor {
   async save(signal: AbortSignal): Promise<Uint8Array> {
     const manager = this.requireManager();
     this.beginSave(signal);
+    const finishSerialization = beginReaderTimedOperation('annotation-serialization');
     const revision = this.lifecycleRevision;
     let outcome: { bytes: Uint8Array | null; failure: Error | null } = {
       bytes: null,
@@ -184,13 +209,30 @@ export class PdfAnnotationEditor {
     } catch (cause) {
       outcome = { bytes: null, failure: asError(cause) };
     } finally {
-      outcome.failure = await this.restoreAfterSave(
-        manager,
-        revision,
-        restoredMode,
-        outcome.failure,
-      );
-      this.saving = false;
+      const queuedIntents: QueuedToolIntent[] = [];
+      let targetMode = restoredMode;
+      let targetOptions: PdfAnnotationToolOptions = {};
+      let restoreFailure: Error | null = null;
+      do {
+        const queued = this.takeQueuedToolIntent();
+        if (queued !== null) {
+          queuedIntents.push(queued);
+          targetMode = this.modeFor(queued.tool);
+          targetOptions = queued.options;
+        }
+        restoreFailure = await this.restoreAfterSave({
+          manager,
+          mode: targetMode,
+          options: targetOptions,
+          revision,
+        });
+      } while (restoreFailure === null && this.queuedToolIntent !== null);
+      const failedDuringRestore = this.takeQueuedToolIntent();
+      if (failedDuringRestore !== null) queuedIntents.push(failedDuringRestore);
+      this.releaseSave(manager, revision);
+      for (const queued of queuedIntents) this.settleQueuedToolIntent(queued, restoreFailure);
+      outcome.failure ??= restoreFailure;
+      finishSerialization();
     }
     if (outcome.failure !== null) throw outcome.failure;
     if (outcome.bytes === null) throw this.staleError();
@@ -230,28 +272,29 @@ export class PdfAnnotationEditor {
   ): Promise<Uint8Array> {
     const bytes = await this.dependencies.pdf.saveDocument();
     this.requireCurrentSave(manager, revision, signal);
-    return Uint8Array.from(bytes);
+    return ownPdfBytes(bytes);
   }
 
-  private async restoreAfterSave(
-    manager: PdfAnnotationUiManager,
-    revision: number,
-    mode: number | null,
-    failure: Error | null,
-  ): Promise<Error | null> {
+  private async restoreAfterSave(context: {
+    readonly manager: PdfAnnotationUiManager;
+    readonly mode: number | null;
+    readonly options?: PdfAnnotationToolOptions | undefined;
+    readonly revision: number;
+  }): Promise<Error | null> {
+    const { manager, mode, options = {}, revision } = context;
     if (
       mode === null ||
       manager !== this.manager ||
       revision !== this.lifecycleRevision ||
       this.destroyed
     ) {
-      return failure;
+      return null;
     }
     try {
-      await this.changeMode(mode);
-      return failure;
+      await this.changeMode(mode, options);
+      return null;
     } catch (cause) {
-      return failure ?? asError(cause);
+      return asError(cause);
     }
   }
 
@@ -269,6 +312,8 @@ export class PdfAnnotationEditor {
     this.managerEventsEnabled = false;
     this.lifecycleRevision += 1;
     this.cancelPendingModeChange('The PDF annotation editor was detached from its document.');
+    this.cancelQueuedToolIntent('The PDF annotation editor was detached from its document.');
+    this.cancelQueuedMutations();
     if (this.manager !== null) this.retiredManagers.add(this.manager);
     this.restoreCallbacks();
     this.manager = null;
@@ -284,6 +329,8 @@ export class PdfAnnotationEditor {
     this.lifecycleRevision += 1;
     this.dependencies.eventBus.off('annotationeditoruimanager', this.onManager);
     this.cancelPendingModeChange('The PDF annotation editor was destroyed.');
+    this.cancelQueuedToolIntent('The PDF annotation editor was destroyed.');
+    this.cancelQueuedMutations();
     this.restoreCallbacks();
     this.manager = null;
     this.dirtyListeners.clear();
@@ -298,6 +345,8 @@ export class PdfAnnotationEditor {
     if (this.retiredManagers.has(manager)) return;
     this.lifecycleRevision += 1;
     this.cancelPendingModeChange('The PDF annotation editor was rebound.');
+    this.cancelQueuedToolIntent('The PDF annotation editor was rebound.');
+    this.cancelQueuedMutations();
     this.restoreCallbacks();
     this.manager = manager;
     this.ownCallbacks();
@@ -333,6 +382,86 @@ export class PdfAnnotationEditor {
 
   private emitDirty(dirty: boolean): void {
     for (const listener of [...this.dirtyListeners]) listener(dirty);
+  }
+
+  private queueToolIntent(
+    tool: PdfAnnotationTool,
+    options: PdfAnnotationToolOptions,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const queued = this.queuedToolIntent;
+      if (queued === null) {
+        this.queuedToolIntent = { tool, options: { ...options }, waiters: [{ resolve, reject }] };
+        return;
+      }
+      queued.tool = tool;
+      queued.options = { ...options };
+      queued.waiters.push({ resolve, reject });
+    });
+  }
+
+  private settleQueuedToolIntent(queued: QueuedToolIntent | null, failure: Error | null): void {
+    if (queued === null) return;
+    for (const waiter of queued.waiters) {
+      if (failure === null) waiter.resolve();
+      else waiter.reject(failure);
+    }
+  }
+
+  private takeQueuedToolIntent(): QueuedToolIntent | null {
+    const queued = this.queuedToolIntent;
+    this.queuedToolIntent = null;
+    return queued;
+  }
+
+  private cancelQueuedToolIntent(message: string): void {
+    const queued = this.queuedToolIntent;
+    this.queuedToolIntent = null;
+    if (queued === null) return;
+    const failure = new DOMException(message, 'AbortError');
+    for (const waiter of queued.waiters) waiter.reject(failure);
+  }
+
+  private runOrQueueMutation(apply: (manager: PdfAnnotationUiManager) => void): Promise<void> {
+    const manager = this.requireManager();
+    if (!this.saving) {
+      apply(manager);
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.queuedMutations.push({ apply, resolve, reject });
+    });
+  }
+
+  private releaseSave(manager: PdfAnnotationUiManager, revision: number): void {
+    this.saving = false;
+    this.applyQueuedMutations(manager, revision);
+  }
+
+  private applyQueuedMutations(manager: PdfAnnotationUiManager, revision: number): void {
+    const mutations = this.queuedMutations.splice(0);
+    if (manager !== this.manager || revision !== this.lifecycleRevision || this.destroyed) {
+      const failure = new DOMException(
+        'The PDF annotation editor changed during save.',
+        'AbortError',
+      );
+      for (const mutation of mutations) mutation.reject(failure);
+      return;
+    }
+    for (const mutation of mutations) {
+      try {
+        mutation.apply(manager);
+        mutation.resolve();
+      } catch (cause) {
+        mutation.reject(asError(cause));
+      }
+    }
+  }
+
+  private cancelQueuedMutations(): void {
+    const mutations = this.queuedMutations.splice(0);
+    const failure = new DOMException('The PDF annotation editor lifecycle changed.', 'AbortError');
+    for (const mutation of mutations) mutation.reject(failure);
   }
 
   private requireManager(): PdfAnnotationUiManager {
@@ -410,4 +539,15 @@ function asError(cause: unknown): Error {
     return cause as Error;
   }
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function ownPdfBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength
+  ) {
+    return bytes as Uint8Array<ArrayBuffer>;
+  }
+  return Uint8Array.from(bytes);
 }

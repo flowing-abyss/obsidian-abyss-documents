@@ -6,8 +6,20 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { PDF_FIXTURE_NAMES } from '../tests/fixtures/pdf-fixture-names.mjs';
+import {
+  readCurrentBuildVersions,
+  requireMatchingBuildVersions,
+} from './current-build-versions.mjs';
+import {
+  parseObsidianVersionEvidence,
+  requireSuccessfulObsidianCliOutput,
+} from './obsidian-version.mjs';
 
 const execFileAsync = promisify(execFile);
+const DEVELOPMENT_VAULT_NAME = 'dev-documents-vault';
+const OBSIDIAN_CLI_TIMEOUT_MS = 10_000;
+const OBSIDIAN_READINESS_TIMEOUT_MS = 15_000;
+const PLUGIN_ID = 'abyss-documents';
 
 export type ReaderBudgetInput =
   | { readonly available: false; readonly reason: string }
@@ -70,9 +82,12 @@ export function evaluateReaderBudget(input: ReaderBudgetInput):
 
 async function main(): Promise<void> {
   const repoRoot = path.resolve(import.meta.dirname, '..');
-  const outputDirectory = path.join(repoRoot, 'artifacts', 'performance');
+  const output = path.resolve(
+    process.env['ABYSS_BENCHMARK_OUTPUT'] ??
+      path.join(repoRoot, 'artifacts', 'performance', 'reader-benchmark.json'),
+  );
+  const outputDirectory = path.dirname(output);
   await mkdir(outputDirectory, { recursive: true });
-  const output = path.join(outputDirectory, 'reader-benchmark.json');
   const device = process.env['ABYSS_BENCHMARK_DEVICE'];
   if (device !== 'desktop' && device !== 'android') {
     await writeUnavailable(
@@ -88,6 +103,7 @@ async function main(): Promise<void> {
         : await readAndroidSamples(
             process.env['ABYSS_BENCHMARK_RAW_INPUT'],
             await currentFixtureHashes(repoRoot),
+            await readCurrentBuildVersions(repoRoot),
           );
     const evaluation = evaluateReaderBudget({
       activationMs: raw.samples.activationMs,
@@ -101,7 +117,7 @@ async function main(): Promise<void> {
       recordedAt: new Date().toISOString(),
       status: evaluation.status,
       conditions: {
-        cold: 'Plugin reload followed by the first PDF open.',
+        cold: 'Plugin disable/enable activation followed by the first PDF open.',
         warm: 'Second PDF open with the same loaded PDF.js runtime and worker.',
       },
       ...raw,
@@ -143,9 +159,49 @@ interface RuntimeSnapshot {
   readonly versions: { readonly pdfjs: string | null; readonly plugin: string | null };
 }
 
+export interface PluginRuntimeState {
+  readonly enabled: boolean;
+  readonly loaded: boolean;
+  readonly manifestVersion: string | null;
+}
+
+export function parsePluginRuntimeState(output: string): PluginRuntimeState {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error('Obsidian plugin runtime state was not valid JSON.');
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Obsidian plugin runtime state must be an object.');
+  }
+  const state = parsed as Record<string, unknown>;
+  if (
+    typeof state['enabled'] !== 'boolean' ||
+    typeof state['loaded'] !== 'boolean' ||
+    (state['manifestVersion'] !== null && typeof state['manifestVersion'] !== 'string')
+  ) {
+    throw new Error('Obsidian plugin runtime state has invalid fields.');
+  }
+  return {
+    enabled: state['enabled'],
+    loaded: state['loaded'],
+    manifestVersion: state['manifestVersion'],
+  };
+}
+
+export function pluginRestartCommands(state: PluginRuntimeState): readonly (readonly string[])[] {
+  const enable = ['plugin:enable', `id=${PLUGIN_ID}`] as const;
+  return state.enabled
+    ? ([['plugin:disable', `id=${PLUGIN_ID}`] as const, enable] as const)
+    : ([enable] as const);
+}
+
 async function measureDesktop(repoRoot: string): Promise<MeasuredSamples> {
   const vaultPath = path.join(repoRoot, 'dev-documents-vault');
-  const vaultName = await registeredVaultName(vaultPath);
+  const vaultName = DEVELOPMENT_VAULT_NAME;
+  await verifyDevelopmentVault(vaultName, vaultPath);
+  await waitForObsidianReady(vaultName);
   const iterations = integerEnvironment('ABYSS_BENCHMARK_ITERATIONS', 10, 5);
   const activationMs: number[] = [];
   const coldFirstUsablePageMs: number[] = [];
@@ -156,7 +212,7 @@ async function measureDesktop(repoRoot: string): Promise<MeasuredSamples> {
 
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     await closeReaders(vaultName);
-    await obsidian(vaultName, ['plugin:reload', 'id=abyss-documents']);
+    await restartPlugin(vaultName);
     const activation = await snapshot(vaultName);
     if (activation.activationMs === null) throw new Error('Plugin activation mark did not settle.');
     activationMs.push(activation.activationMs);
@@ -172,9 +228,7 @@ async function measureDesktop(repoRoot: string): Promise<MeasuredSamples> {
   const fixtureManifest = JSON.parse(
     await readFile(path.join(vaultPath, 'Documents', 'fixtures.v1.json'), 'utf8'),
   ) as { readonly files: ReadonlyArray<{ readonly name: string; readonly sha256: string }> };
-  const obsidianVersion = (
-    await execFileAsync('obsidian', ['version'], { timeout: 5_000 })
-  ).stdout.trim();
+  const obsidianVersion = await readObsidianVersion(vaultName);
   return {
     environment: hardwareEnvironment(),
     fixtureHashes: Object.fromEntries(
@@ -189,6 +243,55 @@ async function measureDesktop(repoRoot: string): Promise<MeasuredSamples> {
     },
     versions: { obsidian: obsidianVersion, pdfjs: pdfjsVersion, plugin: pluginVersion },
   };
+}
+
+async function restartPlugin(vaultName: string): Promise<void> {
+  const state = await waitForObsidianReady(vaultName);
+  for (const command of pluginRestartCommands(state)) {
+    await obsidian(vaultName, [...command]);
+  }
+  const deadline = Date.now() + OBSIDIAN_READINESS_TIMEOUT_MS;
+  let lastState = state;
+  while (Date.now() < deadline) {
+    lastState = await readPluginRuntimeState(vaultName);
+    if (lastState.enabled && lastState.loaded) return;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(
+    `Plugin ${PLUGIN_ID} did not become ready within ${OBSIDIAN_READINESS_TIMEOUT_MS} ms; ` +
+      `last state: ${JSON.stringify(lastState)}.`,
+  );
+}
+
+async function waitForObsidianReady(vaultName: string): Promise<PluginRuntimeState> {
+  const deadline = Date.now() + OBSIDIAN_READINESS_TIMEOUT_MS;
+  let lastError = 'no response';
+  while (Date.now() < deadline) {
+    try {
+      return await readPluginRuntimeState(vaultName, 3_000);
+    } catch (error) {
+      lastError = reason(error);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  throw new Error(
+    `Obsidian CLI readiness probe did not succeed within ${OBSIDIAN_READINESS_TIMEOUT_MS} ms: ${lastError}`,
+  );
+}
+
+async function readPluginRuntimeState(
+  vaultName: string,
+  timeoutMs = OBSIDIAN_CLI_TIMEOUT_MS,
+): Promise<PluginRuntimeState> {
+  const output = await obsidian(
+    vaultName,
+    [
+      'eval',
+      `code=JSON.stringify({ enabled: app.plugins.enabledPlugins.has('${PLUGIN_ID}'), loaded: Boolean(app.plugins.plugins['${PLUGIN_ID}']), manifestVersion: app.plugins.plugins['${PLUGIN_ID}']?.manifest?.version ?? null })`,
+    ],
+    timeoutMs,
+  );
+  return parsePluginRuntimeState(parseObsidianEval(output));
 }
 
 async function measureOpen(vaultName: string): Promise<number> {
@@ -239,27 +342,45 @@ export function parseObsidianEval(output: string): string {
   return trimmed.startsWith('=> ') ? trimmed.slice(3).trim() : trimmed;
 }
 
-async function obsidian(vaultName: string, arguments_: string[]): Promise<string> {
+async function obsidian(
+  vaultName: string,
+  arguments_: string[],
+  timeoutMs = OBSIDIAN_CLI_TIMEOUT_MS,
+): Promise<string> {
   const { stdout } = await execFileAsync('obsidian', [`vault=${vaultName}`, ...arguments_], {
-    timeout: 30_000,
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
     maxBuffer: 4 * 1024 * 1024,
   });
-  return stdout.trim();
+  return requireSuccessfulObsidianCliOutput(stdout);
 }
 
-async function registeredVaultName(expectedPath: string): Promise<string> {
-  const { stdout } = await execFileAsync('obsidian', ['vaults', 'verbose'], { timeout: 5_000 });
-  for (const line of stdout.split(/\r?\n/u)) {
-    const [name, candidate] = line.split('\t');
-    if (name !== undefined && candidate !== undefined && path.resolve(candidate) === expectedPath)
-      return name;
+async function readObsidianVersion(vaultName: string): Promise<string> {
+  const documentedOutput = await obsidian(vaultName, ['version'], 5_000).catch(() => '');
+  if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(documentedOutput.trim())) {
+    return parseObsidianVersionEvidence(documentedOutput, '');
   }
-  throw new Error(`Development vault is not registered at ${expectedPath}. Run pnpm dev:vault.`);
+  const rendererUserAgent = await evaluateInObsidian(vaultName, 'navigator.userAgent');
+  return parseObsidianVersionEvidence(documentedOutput, rendererUserAgent);
+}
+
+async function verifyDevelopmentVault(vaultName: string, expectedPath: string): Promise<void> {
+  const output = await obsidian(vaultName, ['vault', 'info=path'], 5_000);
+  const candidates = output
+    .split(/\r?\n/u)
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => candidate.length > 0);
+  if (!candidates.some((candidate) => path.resolve(candidate) === expectedPath)) {
+    throw new Error(
+      `Development vault ${vaultName} resolved to ${JSON.stringify(output)}, not ${expectedPath}. Run pnpm dev:vault.`,
+    );
+  }
 }
 
 async function readAndroidSamples(
   input: string | undefined,
   expectedFixtureHashes: Readonly<Record<string, string>>,
+  expectedVersions: Readonly<{ pdfjs: string; plugin: string }>,
 ): Promise<MeasuredSamples> {
   if (input === undefined) {
     throw new Error(
@@ -269,12 +390,14 @@ async function readAndroidSamples(
   return parseMeasuredSamples(
     JSON.parse(await readFile(path.resolve(input), 'utf8')),
     expectedFixtureHashes,
+    expectedVersions,
   );
 }
 
 export function parseMeasuredSamples(
   input: unknown,
   expectedFixtureHashes?: Readonly<Record<string, string>>,
+  expectedVersions?: Readonly<{ pdfjs: string; plugin: string }>,
 ): MeasuredSamples {
   const root = requiredRecord(input, 'Android benchmark input');
   const environment = requiredRecord(root['environment'], 'environment');
@@ -324,12 +447,18 @@ export function parseMeasuredSamples(
     }
     return value;
   };
+  const versions = {
+    obsidian: parseObsidianVersionEvidence(version('obsidian'), ''),
+    pdfjs: version('pdfjs'),
+    plugin: version('plugin'),
+  };
+  requireMatchingBuildVersions(versions, expectedVersions);
   return {
     environment,
     fixtureHashes,
     iterationCount: iterationCount as number,
     samples,
-    versions: { obsidian: version('obsidian'), pdfjs: version('pdfjs'), plugin: version('plugin') },
+    versions,
   };
 }
 
@@ -426,7 +555,7 @@ async function writeUnavailable(output: string, unavailableReason: string): Prom
   };
   await writeFile(output, `${JSON.stringify(unavailable, null, 2)}\n`);
   console.info(`Reader benchmark unavailable: ${unavailable.reason} Raw status: ${output}`);
-  process.exitCode = process.env['ABYSS_ALLOW_UNAVAILABLE_BENCHMARK'] === '1' ? 0 : 1;
+  process.exitCode = 1;
 }
 
 function hardwareEnvironment(): Record<string, unknown> {

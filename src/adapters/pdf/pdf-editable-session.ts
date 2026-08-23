@@ -53,14 +53,8 @@ export class PdfEditableSession implements NativeEditableSaveSession, NativeSave
   async prepare(revision: number, signal: AbortSignal): Promise<PreparedNativeSave> {
     this.requireLiveRevision(revision);
     if (this.retained?.revision === revision) return this.retained;
-    const ownedBytes = Uint8Array.from(await this.editor.save(signal));
-    const prepared = Object.freeze({
-      revision,
-      baseToken: this.base,
-      get bytes() {
-        return Uint8Array.from(ownedBytes);
-      },
-    });
+    const ownedBytes = await this.editor.save(signal);
+    const prepared = Object.freeze({ revision, baseToken: this.base, bytes: ownedBytes });
     this.retained = prepared;
     return prepared;
   }

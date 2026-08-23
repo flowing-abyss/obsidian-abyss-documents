@@ -1,6 +1,13 @@
-import { FileView, Notice, Plugin, type WorkspaceLeaf } from 'obsidian';
+import {
+  FileView,
+  MarkdownView,
+  Notice,
+  Plugin,
+  type Workspace,
+  type WorkspaceLeaf,
+} from 'obsidian';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
-import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
+import { installPdfEditorDocumentMetrics, PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { createPdfDocumentViewport } from './adapters/pdf/pdf-viewport.js';
 import { PdfWriteBoundary } from './adapters/pdf/pdf-write-boundary.js';
 import { AnnotationCache } from './annotation-cache.js';
@@ -13,9 +20,14 @@ import {
   endPluginActivation,
   markReaderPerformance,
 } from './reader-performance.js';
-import { AnnotationTransferService } from './reader/annotation-transfer.js';
-import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
+import { AnnotationTransferService, parseAnnotationHref } from './reader/annotation-transfer.js';
+import {
+  AbyssDocumentView,
+  ANNOTATION_LINK_RESOLVED_EVENT,
+  DOCUMENT_VIEW_TYPE,
+} from './reader/document-view.js';
 import { LinkSuggestionService } from './reader/link-suggestions.js';
+import { ownerWindow, type ReaderOwnerWindow } from './reader/owner-dom.js';
 import { ReaderController, type ReaderProfileState } from './reader/reader-controller.js';
 import { ReaderShell } from './reader/reader-shell.js';
 import { SaveConflictModal } from './reader/save-conflict-modal.js';
@@ -30,11 +42,27 @@ class CorePdfLeafHandoff {
   private lifecycleGeneration = 0;
   private readonly handoffsInFlight = new Set<WorkspaceLeaf>();
   private timer: number | null = null;
+  private pendingAnnotationLink: {
+    path: string;
+    subpath: string;
+    capturedAt: number;
+    sourceLeaf: WorkspaceLeaf | null;
+    targetLeaf: WorkspaceLeaf | null;
+  } | null = null;
+  private pendingAnnotationLinkTimer: number | null = null;
 
   constructor(private readonly plugin: AbyssDocumentsPlugin) {}
 
   register(): void {
     const workspace = this.plugin.app.workspace;
+    this.registerAnnotationLinkCapture(workspace.containerEl.ownerDocument);
+    this.registerAnnotationLinkResolution(workspace.containerEl.ownerDocument);
+    this.plugin.registerEvent(
+      workspace.on('window-open', (_workspaceWindow, ownerWindow) => {
+        this.registerAnnotationLinkCapture(ownerWindow.document);
+        this.registerAnnotationLinkResolution(ownerWindow.document);
+      }),
+    );
     this.plugin.registerEvent(workspace.on('active-leaf-change', this.schedule));
     this.plugin.registerEvent(workspace.on('file-open', this.schedule));
     this.plugin.registerEvent(workspace.on('layout-change', this.schedule));
@@ -48,9 +76,84 @@ class CorePdfLeafHandoff {
     this.active = false;
     this.lifecycleGeneration += 1;
     if (this.timer !== null) window.clearTimeout(this.timer);
+    if (this.pendingAnnotationLinkTimer !== null)
+      window.clearTimeout(this.pendingAnnotationLinkTimer);
     this.timer = null;
+    this.pendingAnnotationLinkTimer = null;
     this.handoffsInFlight.clear();
+    this.pendingAnnotationLink = null;
   };
+
+  private registerAnnotationLinkCapture(ownerDocument: Document): void {
+    this.plugin.registerDomEvent(ownerDocument, 'click', this.captureAnnotationLink, {
+      capture: true,
+    });
+  }
+
+  private registerAnnotationLinkResolution(ownerDocument: Document): void {
+    this.plugin.registerDomEvent(
+      ownerDocument,
+      ANNOTATION_LINK_RESOLVED_EVENT,
+      (event) => {
+        this.acknowledgeAnnotationLink(event, ownerDocument);
+      },
+      { capture: true },
+    );
+  }
+
+  private readonly captureAnnotationLink = (event: MouseEvent): void => {
+    const target = canonicalAnnotationLink(event);
+    if (target === null) return;
+    const sourceLeaf = findContainingLeaf(this.plugin.app.workspace, target.link);
+    const containingView = sourceLeaf === null ? null : nullableLeafView(sourceLeaf);
+    const sourcePath =
+      containingView instanceof MarkdownView && containingView.file !== null
+        ? containingView.file.path
+        : (this.plugin.app.workspace.getActiveFile()?.path ?? '');
+    const file = this.plugin.app.metadataCache.getFirstLinkpathDest(target.linkpath, sourcePath);
+    if (file?.extension.toLocaleLowerCase() !== 'pdf') return;
+    const pending = {
+      path: file.path,
+      subpath: target.subpath,
+      capturedAt: Date.now(),
+      sourceLeaf,
+      targetLeaf: null,
+    };
+    this.pendingAnnotationLink = pending;
+    if (this.pendingAnnotationLinkTimer !== null)
+      window.clearTimeout(this.pendingAnnotationLinkTimer);
+    this.pendingAnnotationLinkTimer = window.setTimeout(() => {
+      if (this.pendingAnnotationLink === pending) this.pendingAnnotationLink = null;
+      this.pendingAnnotationLinkTimer = null;
+    }, 5_000);
+  };
+
+  private acknowledgeAnnotationLink(event: Event, ownerDocument: Document): void {
+    const pending = this.pendingAnnotationLink;
+    if (pending === null) return;
+    const acknowledgement = annotationLinkAcknowledgement(event, ownerWindow(ownerDocument.body));
+    if (acknowledgement?.path !== pending.path || acknowledgement.subpath !== pending.subpath)
+      return;
+    const leaf = findContainingLeaf(this.plugin.app.workspace, acknowledgement.target);
+    if (leaf === null || leaf !== pending.targetLeaf) return;
+    this.pendingAnnotationLink = null;
+    if (this.pendingAnnotationLinkTimer !== null)
+      window.clearTimeout(this.pendingAnnotationLinkTimer);
+    this.pendingAnnotationLinkTimer = null;
+  }
+
+  private annotationLinkFor(path: string, leaf: WorkspaceLeaf): string | undefined {
+    const pending = this.pendingAnnotationLink;
+    if (pending === null) return undefined;
+    if (Date.now() - pending.capturedAt > 5_000) {
+      this.pendingAnnotationLink = null;
+      return undefined;
+    }
+    if (pending.path !== path || (pending.sourceLeaf !== null && pending.sourceLeaf !== leaf))
+      return undefined;
+    pending.targetLeaf = leaf;
+    return pending.subpath;
+  }
 
   private readonly schedule = (): void => {
     if (!this.active || this.timer !== null) return;
@@ -70,10 +173,17 @@ class CorePdfLeafHandoff {
     const viewState = leaf.getViewState();
     const filePath = corePdfPath(leaf);
     if (viewState.type !== 'pdf' || filePath === undefined) return;
+    const originalView = nullableLeafView(leaf);
+    const originalEphemeralState = originalView?.getEphemeralState();
+    const annotationSubpath = this.annotationLinkFor(filePath, leaf);
     const originalViewState = { ...viewState, state: { ...viewState.state } };
     const handoffViewState = {
       ...viewState,
-      state: { ...viewState.state, file: filePath },
+      state: {
+        ...viewState.state,
+        file: filePath,
+        ...(annotationSubpath === undefined ? {} : { subpath: annotationSubpath }),
+      },
       type: DOCUMENT_VIEW_TYPE,
     };
     markReaderPerformance('pdf-handoff-start');
@@ -82,9 +192,13 @@ class CorePdfLeafHandoff {
     void leaf
       .setViewState(handoffViewState)
       .then(async () => {
-        if (lifecycleGeneration === this.lifecycleGeneration) return;
+        if (lifecycleGeneration === this.lifecycleGeneration) {
+          if (originalView !== null) setLeafEphemeralState(leaf, originalEphemeralState);
+          return;
+        }
         if (!isCompletedHandoffState(leaf.getViewState(), filePath)) return;
         await leaf.setViewState(originalViewState);
+        if (originalView !== null) setLeafEphemeralState(leaf, originalEphemeralState);
       })
       .catch((error: unknown) => {
         if (!this.active || lifecycleGeneration !== this.lifecycleGeneration) return;
@@ -97,6 +211,65 @@ class CorePdfLeafHandoff {
         if (lifecycleGeneration === this.lifecycleGeneration) this.handoffsInFlight.delete(leaf);
       });
   }
+}
+
+function annotationLinkAcknowledgement(
+  event: Event,
+  owner: ReaderOwnerWindow,
+): { path: string; subpath: string; target: Element } | null {
+  const detail = (event as CustomEvent<unknown>).detail as {
+    path?: unknown;
+    subpath?: unknown;
+  } | null;
+  if (
+    typeof detail?.path !== 'string' ||
+    typeof detail.subpath !== 'string' ||
+    !(event.target instanceof owner.Element)
+  )
+    return null;
+  return { path: detail.path, subpath: detail.subpath, target: event.target };
+}
+
+function canonicalAnnotationLink(
+  event: MouseEvent,
+): { link: HTMLAnchorElement; linkpath: string; subpath: string } | null {
+  if (event.button !== 0) return null;
+  const target = event.target as { closest?: (selector: string) => Element | null } | null;
+  const link = target?.closest?.('a.internal-link[data-href]');
+  if (link?.tagName !== 'A') return null;
+  const anchor = link as HTMLAnchorElement;
+  const href = anchor.dataset['href'];
+  if (href === undefined) return null;
+  const hashOffset = href.indexOf('#annotation=');
+  if (hashOffset <= 0) return null;
+  const subpath = href.slice(hashOffset);
+  if (parseAnnotationHref(subpath) === null) return null;
+  return { link: anchor, linkpath: href.slice(0, hashOffset), subpath };
+}
+
+function setLeafEphemeralState(leaf: WorkspaceLeaf, state: unknown): void {
+  const view = nullableLeafView(leaf);
+  view?.setEphemeralState(state);
+}
+
+function nullableLeafView(leaf: WorkspaceLeaf): WorkspaceLeaf['view'] | null {
+  return (leaf as unknown as { view: WorkspaceLeaf['view'] | null }).view;
+}
+
+function leafContains(leaf: WorkspaceLeaf, element: Element): boolean {
+  const view = (leaf as unknown as { view: { containerEl?: HTMLElement } | null }).view;
+  return view?.containerEl?.contains(element) === true;
+}
+
+function findContainingLeaf(
+  workspace: Pick<Workspace, 'iterateAllLeaves'>,
+  element: Element,
+): WorkspaceLeaf | null {
+  let result: WorkspaceLeaf | null = null;
+  workspace.iterateAllLeaves((leaf) => {
+    if (leafContains(leaf, element)) result = leaf;
+  });
+  return result;
 }
 
 function isCompletedHandoffState(
@@ -131,6 +304,7 @@ export default class AbyssDocumentsPlugin extends Plugin {
   }
 
   private async loadPlugin(): Promise<void> {
+    this.register(installPdfEditorDocumentMetrics(document));
     const store = new PluginDataStore(this);
     this.data = await store.load();
     this.reportMigrationDiagnostics(store.migrationResult.diagnostics);

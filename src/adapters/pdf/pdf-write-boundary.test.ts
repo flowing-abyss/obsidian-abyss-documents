@@ -2,6 +2,11 @@ import type { FileStats, TFile, Vault } from 'obsidian';
 import { App, TFile as MockTFile } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { SaveConflictError } from '../../document-core/save-coordinator.js';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../../reader-performance.js';
 import { PdfWriteBoundary, SaveVerificationError, baseTokenFor } from './pdf-write-boundary.js';
 
 function file(mtime = 10): TFile {
@@ -67,19 +72,24 @@ describe('PdfWriteBoundary', () => {
   });
 
   it('uses one authoritative preimage read plus one readback for a successful large save', async () => {
+    beginPluginActivation();
+    endPluginActivation();
     const test = fixture(new Uint8Array(8 * 1024 * 1024));
     const expected = await baseTokenFor(test.bytes, 10);
+    const prepared = new Uint8Array(8 * 1024 * 1024).fill(1);
 
     await test.boundary.write({
       path: test.source.path,
       expected,
-      bytes: new Uint8Array(8 * 1024 * 1024).fill(1),
+      bytes: prepared,
       overwrite: false,
       verifyPdf: vi.fn(async () => undefined),
       signal: new AbortController().signal,
     });
 
     expect(test.vault.readBinary).toHaveBeenCalledTimes(2);
+    expect(test.vault.modifyBinary).toHaveBeenCalledWith(test.source, prepared.buffer);
+    expect(readerPerformanceSnapshot().counters.maxConcurrentWrites).toBe(1);
   });
 
   it('rejects a foreign pre-write value before modifying the PDF', async () => {

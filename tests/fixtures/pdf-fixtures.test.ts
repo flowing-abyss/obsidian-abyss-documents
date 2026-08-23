@@ -11,6 +11,7 @@ import {
   AnnotationLayer,
   DrawLayer,
   getDocument,
+  PermissionFlag,
   type PDFDocumentProxy,
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { EventBus } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
@@ -453,7 +454,7 @@ afterEach(async () => {
 describe('generatePdfFixtures', () => {
   it(
     'produces byte-identical PDFs and versioned metadata on repeated runs',
-    { timeout: 10_000 },
+    { timeout: 20_000 },
     async () => {
       const firstDirectory = await temporaryDirectory();
       const secondDirectory = await temporaryDirectory();
@@ -471,6 +472,34 @@ describe('generatePdfFixtures', () => {
           { name: 'text-700-pages.pdf', pages: 700 },
           { name: 'raster-heavy-24-pages.pdf', pages: 24 },
           { name: 'invalid.pdf', pages: null },
+          {
+            annotations: 10_000,
+            bytes: 5_610_695,
+            name: 'annotations-10000.pdf',
+            pages: 100,
+            sha256: '9cf3103bf1dd962e91d37084eb5434653ec54d2c0fa6f8983334224f6cbe70c4',
+          },
+          {
+            annotations: 2,
+            bytes: 2_239,
+            name: 'annotation-qualification.pdf',
+            pages: 1,
+            sha256: '2973a59a35f36c273001e15b43e675144f6b10dc8ee6ac483d8fc394e5983bf3',
+          },
+          {
+            annotations: 1,
+            bytes: 2_992,
+            name: 'signed-document.pdf',
+            pages: 1,
+            sha256: 'b324ab63f23bef22dd7b8c4fb213f5e12e40af7798ea456f7031b8f26908bb53',
+          },
+          {
+            annotations: 1,
+            bytes: 1_280,
+            name: 'permission-restricted.pdf',
+            pages: 1,
+            sha256: 'f6926536e20e23bb9005257d95e3ec0d3e1ab5b804e6816391d501bd8e85a03f',
+          },
         ],
       });
       for (const entry of first.files) {
@@ -483,52 +512,70 @@ describe('generatePdfFixtures', () => {
     },
   );
 
-  it('writes fixture paths containing URL-reserved characters as filesystem paths', async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), 'abyss fixtures # ? %-'));
-    temporaryDirectories.push(directory);
+  it(
+    'writes fixture paths containing URL-reserved characters as filesystem paths',
+    {
+      timeout: 15_000,
+    },
+    async () => {
+      const directory = await mkdtemp(path.join(tmpdir(), 'abyss fixtures # ? %-'));
+      temporaryDirectories.push(directory);
 
-    const manifest = await generatePdfFixtures(directory);
+      const manifest = await generatePdfFixtures(directory);
 
-    expect(await sha256(path.join(directory, 'text-12-pages.pdf'))).toBe(
-      fixture(manifest, 'text-12-pages.pdf').sha256,
-    );
-    expect(JSON.parse(await readFile(path.join(directory, FIXTURE_MANIFEST_FILE), 'utf8'))).toEqual(
-      manifest,
-    );
-  });
+      expect(await sha256(path.join(directory, 'text-12-pages.pdf'))).toBe(
+        fixture(manifest, 'text-12-pages.pdf').sha256,
+      );
+      expect(
+        JSON.parse(await readFile(path.join(directory, FIXTURE_MANIFEST_FILE), 'utf8')),
+      ).toEqual(manifest);
+    },
+  );
 
-  it('places the known search term only on pages 2, 7, and 11 of the search fixture', async () => {
-    const directory = await temporaryDirectory();
-    await generatePdfFixtures(directory);
+  it(
+    'places the known search term only on pages 2, 7, and 11 of the search fixture',
+    {
+      timeout: 15_000,
+    },
+    async () => {
+      const directory = await temporaryDirectory();
+      await generatePdfFixtures(directory);
 
-    const pages = pageText(path.join(directory, 'text-12-pages.pdf'));
+      const pages = pageText(path.join(directory, 'text-12-pages.pdf'));
 
-    expect(
-      pages.flatMap((text, index) =>
-        text.toLocaleLowerCase().includes('gradient') ? [index + 1] : [],
-      ),
-    ).toEqual([2, 7, 11]);
-  });
+      expect(
+        pages.flatMap((text, index) =>
+          text.toLocaleLowerCase().includes('gradient') ? [index + 1] : [],
+        ),
+      ).toEqual([2, 7, 11]);
+    },
+  );
 
-  it('writes a linked two-level outline dictionary with explicit page destinations', async () => {
-    const directory = await temporaryDirectory();
-    await generatePdfFixtures(directory);
-    const document = await PDFDocument.load(
-      Uint8Array.from(await readFile(path.join(directory, 'outline-20-pages.pdf'))),
-    );
+  it(
+    'writes a linked two-level outline dictionary with explicit page destinations',
+    {
+      timeout: 15_000,
+    },
+    async () => {
+      const directory = await temporaryDirectory();
+      await generatePdfFixtures(directory);
+      const document = await PDFDocument.load(
+        Uint8Array.from(await readFile(path.join(directory, 'outline-20-pages.pdf'))),
+      );
 
-    const outlines = document.catalog.lookup(PDFName.of('Outlines'), PDFDict);
-    const firstChapter = outlines.lookup(PDFName.of('First'), PDFDict);
-    const firstSection = firstChapter.lookup(PDFName.of('First'), PDFDict);
+      const outlines = document.catalog.lookup(PDFName.of('Outlines'), PDFDict);
+      const firstChapter = outlines.lookup(PDFName.of('First'), PDFDict);
+      const firstSection = firstChapter.lookup(PDFName.of('First'), PDFDict);
 
-    expect(outlines.lookup(PDFName.of('Count'), PDFNumber).asNumber()).toBe(12);
-    expect(firstChapter.get(PDFName.of('Parent'))).toBe(
-      document.catalog.get(PDFName.of('Outlines')),
-    );
-    expect(firstSection.get(PDFName.of('Parent'))).toBe(outlines.get(PDFName.of('First')));
-    const destination = firstSection.lookup(PDFName.of('Dest')) as PDFObject;
-    expect(destination.toString()).toMatch(/^\[ \d+ 0 R \/Fit \]$/u);
-  });
+      expect(outlines.lookup(PDFName.of('Count'), PDFNumber).asNumber()).toBe(12);
+      expect(firstChapter.get(PDFName.of('Parent'))).toBe(
+        document.catalog.get(PDFName.of('Outlines')),
+      );
+      expect(firstSection.get(PDFName.of('Parent'))).toBe(outlines.get(PDFName.of('First')));
+      const destination = firstSection.lookup(PDFName.of('Dest')) as PDFObject;
+      expect(destination.toString()).toMatch(/^\[ \d+ 0 R \/Fit \]$/u);
+    },
+  );
 
   it('embeds one raster image and reuses it across all 24 pages', async () => {
     const directory = await temporaryDirectory();
@@ -557,6 +604,52 @@ describe('generatePdfFixtures', () => {
     expect(bytes.toString('utf8')).toBe('ABYSS-DOCUMENTS INVALID PDF FIXTURE v1\n');
     await expect(PDFDocument.load(Uint8Array.from(bytes))).rejects.toThrow();
   });
+
+  it(
+    'produces rendered signed and permission-restricted PDFs that public PDF.js marks read-only',
+    {
+      timeout: 15_000,
+    },
+    async () => {
+      const directory = await temporaryDirectory();
+      await generatePdfFixtures(directory);
+      const signedTask = getDocument({
+        data: Uint8Array.from(await readFile(path.join(directory, 'signed-document.pdf'))),
+        standardFontDataUrl,
+      });
+      const restrictedTask = getDocument({
+        data: Uint8Array.from(await readFile(path.join(directory, 'permission-restricted.pdf'))),
+        standardFontDataUrl,
+      });
+      try {
+        const signed = await signedTask.promise;
+        const restricted = await restrictedTask.promise;
+        expect(await signed.getSignatures()).toEqual([
+          expect.objectContaining({
+            coversWholeDocument: true,
+            reason: 'Read-only qualification',
+            signerName: 'Fixture Signer',
+          }),
+        ]);
+        const permissions = await restricted.getPermissions();
+        expect(permissions).toContain(PermissionFlag.PRINT);
+        expect(permissions).toContain(PermissionFlag.COPY);
+        expect(permissions).not.toContain(PermissionFlag.MODIFY_CONTENTS);
+        expect(permissions).not.toContain(PermissionFlag.MODIFY_ANNOTATIONS);
+        expect(pageText(path.join(directory, 'signed-document.pdf'))[0]).toContain(
+          'Signed document fixture',
+        );
+        expect(pageText(path.join(directory, 'permission-restricted.pdf'))[0]).toContain(
+          'Permission restricted fixture',
+        );
+        expect(await (await restricted.getPage(1)).getAnnotations()).toEqual([
+          expect.objectContaining({ contentsObj: { dir: 'ltr', str: 'Restricted #secure' } }),
+        ]);
+      } finally {
+        await Promise.all([signedTask.destroy(), restrictedTask.destroy()]);
+      }
+    },
+  );
 });
 
 describe('native PDF.js annotation save qualification', () => {

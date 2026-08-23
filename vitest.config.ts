@@ -7,6 +7,7 @@ export default defineConfig({
     // re-transforms source files through Vite directly (bypassing `vi.mock`) to
     // remap coverage, so it needs its own alias here too.
     alias: {
+      'pdfjs-dist/web/images/annotation-assets?data-url-map': `${import.meta.dirname}/tests/mocks/pdf-annotation-image-data.ts`,
       obsidian: 'obsidian-test-mocks/obsidian',
     },
   },

@@ -1,5 +1,12 @@
 import type { Command, PluginManifest, TFile } from 'obsidian';
-import { App, Menu, TFile as MockTFile, Notice, WorkspaceLeaf } from 'obsidian-test-mocks/obsidian';
+import {
+  App,
+  Menu,
+  MarkdownView as MockMarkdownView,
+  TFile as MockTFile,
+  Notice,
+  WorkspaceLeaf,
+} from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
@@ -12,7 +19,11 @@ import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1, type PluginDataV2 } from './plugin-data.js';
 import { readerPerformanceSnapshot } from './reader-performance.js';
 import { AnnotationPopover } from './reader/annotation-popover.js';
-import { AbyssDocumentView, DOCUMENT_VIEW_TYPE } from './reader/document-view.js';
+import {
+  AbyssDocumentView,
+  DOCUMENT_VIEW_TYPE,
+  type ReaderViewController,
+} from './reader/document-view.js';
 import { LinkSuggestionService } from './reader/link-suggestions.js';
 import { BUILTIN_PROFILES } from './reader/reading-profiles.js';
 import { SaveConflictModal, type SaveConflictAction } from './reader/save-conflict-modal.js';
@@ -50,6 +61,18 @@ function pdfFile(app: App, path = 'Books/Guide.pdf'): TFile {
   const source = app.vault.getAbstractFileByPath(path);
   if (!(source instanceof MockTFile)) throw new Error(`Expected a test file at ${path}.`);
   return source.asOriginalType2__();
+}
+
+function resolvingViewController(): ReaderViewController {
+  return {
+    close: vi.fn(async () => undefined),
+    open: vi.fn(async () => undefined),
+    refreshReadingSettings: vi.fn(),
+    resolveAnnotationLink: vi.fn(async () => true),
+    saveDocument: vi.fn(async () => undefined),
+    searchDocument: vi.fn(),
+    showOutline: vi.fn(),
+  };
 }
 
 function documentSession(fingerprint: string) {
@@ -343,6 +366,299 @@ describe('AbyssDocumentsPlugin', () => {
     app.workspace.trigger('file-open', pdfFile(app));
     await new Promise((resolve) => window.setTimeout(resolve, 0));
     expect(setViewState).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a public annotation subpath across the core PDF handoff', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    const ephemeral = {
+      subpath: '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4',
+    };
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    Object.defineProperty(leaf, 'view', {
+      configurable: true,
+      value: { getEphemeralState: () => ephemeral },
+      writable: true,
+    });
+    const applyViewState = leaf.setViewState.bind(leaf);
+    const setEphemeralState = vi.fn();
+    vi.spyOn(leaf, 'setViewState').mockImplementation(async (state) => {
+      await applyViewState(state);
+      if (state.type !== DOCUMENT_VIEW_TYPE) return;
+      Object.defineProperty(leaf, 'view', {
+        configurable: true,
+        value: { setEphemeralState },
+        writable: true,
+      });
+    });
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(leaf.getViewState().type).toBe(DOCUMENT_VIEW_TYPE);
+    });
+    expect(setEphemeralState).toHaveBeenCalledWith(ephemeral);
+  });
+
+  it('carries a canonical internal annotation-link click into the matching PDF handoff', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+    const subpath = '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
+    const sourceContainer = document.body.createDiv();
+    const link = sourceContainer.createEl('a');
+    link.className = 'internal-link';
+    link.dataset['href'] = `Books/Guide.pdf${subpath}`;
+    Object.defineProperty(leaf, 'view', {
+      configurable: true,
+      value: {
+        containerEl: sourceContainer,
+        getEphemeralState: () => ({}),
+        setEphemeralState: vi.fn(),
+      },
+      writable: true,
+    });
+
+    await plugin.onload();
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf', subpath },
+      });
+    });
+    sourceContainer.remove();
+  });
+
+  it('consumes an exact annotation-link intent after the document view resolves it', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+    const subpath = '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
+    const sourceContainer = document.body.createDiv();
+    const link = sourceContainer.createEl('a');
+    link.className = 'internal-link';
+    link.dataset['href'] = `Books/Guide.pdf${subpath}`;
+    Object.defineProperty(leaf, 'view', {
+      configurable: true,
+      value: {
+        containerEl: sourceContainer,
+        getEphemeralState: () => ({}),
+        setEphemeralState: vi.fn(),
+      },
+      writable: true,
+    });
+
+    await plugin.onload();
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf', subpath },
+      });
+    });
+
+    sourceContainer.dispatchEvent(
+      new CustomEvent('abyss-documents:annotation-link-resolved', {
+        bubbles: true,
+        detail: { path: 'Books/Guide.pdf', subpath: `${subpath}-stale` },
+      }),
+    );
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      const handoffs = setViewState.mock.calls.filter(
+        ([state]) => state.type === DOCUMENT_VIEW_TYPE,
+      );
+      expect(handoffs).toHaveLength(2);
+      expect(handoffs[1]?.[0]).toEqual({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf', subpath },
+      });
+    });
+
+    const foreignLeaf = WorkspaceLeaf.create2__(app).asOriginalType3__();
+    const foreignView = new AbyssDocumentView(foreignLeaf, {
+      createController: resolvingViewController,
+    });
+    Object.defineProperty(foreignLeaf, 'view', {
+      configurable: true,
+      value: foreignView,
+      writable: true,
+    });
+    document.body.append(foreignView.containerEl);
+    await foreignView.setState({ file: 'Books/Guide.pdf', subpath }, { history: false });
+    await foreignView.onLoadFile(pdfFile(app));
+
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      const handoffs = setViewState.mock.calls.filter(
+        ([state]) => state.type === DOCUMENT_VIEW_TYPE,
+      );
+      expect(handoffs).toHaveLength(3);
+      expect(handoffs[2]?.[0]).toEqual({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf', subpath },
+      });
+    });
+
+    const intendedView = new AbyssDocumentView(leaf.asOriginalType3__(), {
+      createController: resolvingViewController,
+    });
+    Object.defineProperty(leaf, 'view', {
+      configurable: true,
+      value: intendedView,
+      writable: true,
+    });
+    document.body.append(intendedView.containerEl);
+    await intendedView.setState({ file: 'Books/Guide.pdf', subpath }, { history: false });
+    await intendedView.onLoadFile(pdfFile(app));
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    app.workspace.trigger('file-open', pdfFile(app));
+    await vi.waitFor(() => {
+      const handoffs = setViewState.mock.calls.filter(
+        ([state]) => state.type === DOCUMENT_VIEW_TYPE,
+      );
+      expect(handoffs).toHaveLength(4);
+      expect(handoffs[3]?.[0]).toEqual({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf' },
+      });
+    });
+    foreignView.containerEl.remove();
+    intendedView.containerEl.remove();
+    sourceContainer.remove();
+  });
+
+  it('ignores non-primary, malformed, and non-PDF internal-link clicks', async () => {
+    const app = App.createConfigured__({
+      files: { 'Books/Guide.pdf': '', 'Notes/Guide.md': '' },
+    });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+    const link = document.body.createEl('a');
+    link.className = 'internal-link';
+
+    await plugin.onload();
+    link.dataset['href'] =
+      'Books/Guide.pdf#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 1 }));
+    document.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    link.dataset['href'] = 'Books/Guide.pdf#annotation=&page=2&fingerprint=x';
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    link.dataset['href'] = 'Notes/Guide.md#annotation=12R&page=2&fingerprint=x';
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf' },
+      });
+    });
+    link.remove();
+  });
+
+  it('resolves a relative annotation link from its containing Markdown leaf, not the active file', async () => {
+    const app = App.createConfigured__({
+      files: {
+        'Books/Guide.pdf': '',
+        'Notes/Active.md': '',
+        'Notes/Source.md': '',
+      },
+    });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const sourceLeaf = app.workspace.getLeaf(false);
+    const sourceView = MockMarkdownView.create2__(sourceLeaf);
+    const sourceFile = app.vault.getAbstractFileByPath('Notes/Source.md');
+    if (!(sourceFile instanceof MockTFile)) throw new Error('Expected source note fixture.');
+    sourceView.file = sourceFile;
+    Object.defineProperty(sourceLeaf, 'view', { configurable: true, value: sourceView });
+    document.body.append(sourceView.containerEl);
+    const link = sourceView.containerEl.createEl('a');
+    link.className = 'internal-link';
+    link.dataset['href'] =
+      '../Books/Guide.pdf#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
+    const resolve = vi.spyOn(app.metadataCache, 'getFirstLinkpathDest');
+    await app.workspace.getLeaf(true).setViewState({
+      type: 'markdown',
+      state: { file: 'Notes/Active.md' },
+    });
+
+    await plugin.onload();
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+
+    expect(resolve).toHaveBeenCalledWith('../Books/Guide.pdf', 'Notes/Source.md');
+    sourceView.containerEl.remove();
+  });
+
+  it.each([
+    ['foreign fragment', 'Books/Guide.pdf#heading', false],
+    [
+      'missing target',
+      'Books/Missing.pdf#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4',
+      false,
+    ],
+    [
+      'stale intent',
+      'Books/Guide.pdf#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4',
+      true,
+    ],
+  ])('does not carry a %s into a later PDF handoff', async (_case, href, stale) => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+    const link = document.body.createEl('a');
+    link.className = 'internal-link';
+    link.dataset['href'] = href;
+
+    await plugin.onload();
+    let nowMs = 0;
+    const now = stale ? vi.spyOn(Date, 'now').mockImplementation(() => nowMs) : null;
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    nowMs = 5_001;
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf' },
+      });
+    });
+    now?.mockRestore();
+    link.remove();
+  });
+
+  it('unregisters annotation-link capture during plugin cleanup', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const resolve = vi.spyOn(app.metadataCache, 'getFirstLinkpathDest');
+    const link = document.body.createEl('a');
+    link.className = 'internal-link';
+    link.dataset['href'] =
+      'Books/Guide.pdf#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
+
+    await plugin.onload();
+    const cleanups = (plugin as unknown as { cleanups__: Array<() => unknown> }).cleanups__;
+    for (const cleanup of [...cleanups].reverse()) cleanup();
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+
+    expect(resolve).not.toHaveBeenCalled();
+    link.remove();
   });
 
   it('hands an already-open core PDF over after the workspace layout becomes ready', async () => {

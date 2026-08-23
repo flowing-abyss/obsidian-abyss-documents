@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentAnnotation } from '../../document-core/annotations.js';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../../reader-performance.js';
 import { extractAnnotations } from './pdf-annotations.js';
 
 function page(annotations: Array<Record<string, unknown>>) {
@@ -119,9 +124,11 @@ describe('extractAnnotations', () => {
   });
 
   it('flushes a large page in time-bounded batches without rendering it', async () => {
+    beginPluginActivation();
+    endPluginActivation();
     const now = vi.spyOn(performance, 'now');
     let tick = 0;
-    now.mockImplementation(() => (tick += 30));
+    now.mockImplementation(() => (tick += 10));
     const getAnnotations = vi.fn(async () =>
       Array.from({ length: 6 }, (_, index) => ({
         annotationType: 1,
@@ -142,6 +149,10 @@ describe('extractAnnotations', () => {
     expect(batches.length).toBeGreaterThan(1);
     expect(batches.reduce((sum, length) => sum + length, 0)).toBe(6);
     expect(getAnnotations).toHaveBeenCalledWith({ intent: 'display' });
+    const metrics = readerPerformanceSnapshot();
+    expect(metrics.counters.annotationExtractionBatches).toBe(batches.length);
+    expect(metrics.samples.extractionBatchMs).toHaveLength(batches.length);
+    expect(Math.max(...metrics.samples.extractionBatchMs)).toBeLessThanOrEqual(50);
   });
 
   it('maps all supported geometry branches and tolerates malformed optional metadata', async () => {

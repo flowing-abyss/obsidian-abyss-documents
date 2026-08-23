@@ -1,6 +1,10 @@
 import { $, $$, browser, expect } from '@wdio/globals';
 import { afterEach, beforeEach, describe, it } from 'mocha';
 import { Key } from 'webdriverio';
+import {
+  isVerifiedAnnotationSaveSettled,
+  type AnnotationSaveBaseline,
+} from './annotation-save-oracle.js';
 
 const pluginId = 'abyss-documents';
 
@@ -25,6 +29,19 @@ async function openPdf(path: string): Promise<void> {
   );
   try {
     await $('[data-abyss-document]').waitForDisplayed({ timeout: 15_000 });
+    await browser.executeObsidian(({ app }) => {
+      const host = window as Window & {
+        __abyssClosedReaderControllers?: WeakSet<object>;
+      };
+      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+        controller?: object;
+      };
+      if (
+        view.controller !== undefined &&
+        host.__abyssClosedReaderControllers?.has(view.controller) === true
+      )
+        throw new Error('PDF reopen reused a controller from the closed reader session.');
+    });
   } catch (error) {
     const diagnostics = await browser.execute(() => {
       const root = document.querySelector<HTMLElement>('[data-abyss-document]');
@@ -55,14 +72,33 @@ async function openPdf(path: string): Promise<void> {
 }
 
 async function closeReaderLeaves(): Promise<void> {
-  await browser.executeObsidian(({ app }) => {
-    for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) leaf.detach();
+  await browser.executeObsidian(async ({ app }) => {
+    const host = window as Window & {
+      __abyssClosedReaderControllers?: WeakSet<object>;
+    };
+    const closed = host.__abyssClosedReaderControllers ?? new WeakSet<object>();
+    host.__abyssClosedReaderControllers = closed;
+    for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
+      const view = leaf.view as unknown as { controller?: object };
+      if (view.controller !== undefined) closed.add(view.controller);
+      await leaf.setViewState({ type: 'empty', state: {} });
+    }
   });
+}
+
+async function activateLeaf(id: string): Promise<void> {
+  await browser.executeObsidian(({ app }, leafId) => {
+    const leaf = app.workspace.getLeafById(leafId);
+    if (leaf === null) throw new Error(`Reader leaf unavailable: ${leafId}`);
+    app.workspace.setActiveLeaf(leaf, { focus: true });
+  }, id);
 }
 
 async function waitForFirstPage(): Promise<void> {
   try {
-    await $('[data-page-number="1"] canvas').waitForExist({ timeout: 15_000 });
+    await $('.workspace-leaf.mod-active [data-page-number="1"] canvas').waitForExist({
+      timeout: 15_000,
+    });
   } catch (error) {
     const diagnostics = await browser.execute(() => ({
       errorBoundary: document.querySelector<HTMLElement>('[data-reader-error]')?.innerText ?? null,
@@ -79,6 +115,261 @@ async function waitForFirstPage(): Promise<void> {
       `First PDF page did not become usable: ${JSON.stringify(diagnostics)}; ${String(error)}`,
     );
   }
+}
+
+async function waitForNativeHighlightReadiness(): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      browser.executeObsidian(({ app }) => {
+        const leaf = app.workspace.getMostRecentLeaf();
+        const view = leaf?.view as unknown as
+          | {
+              containerEl?: HTMLElement;
+              controller?: {
+                viewport?: {
+                  annotationEditorInstance?: {
+                    manager?: {
+                      getLayer?(pageIndex: number):
+                        | {
+                            hasTextLayer?(layer: HTMLElement): boolean;
+                          }
+                        | undefined;
+                    };
+                  };
+                };
+              };
+            }
+          | undefined;
+        const root = view?.containerEl?.querySelector<HTMLElement>('[data-abyss-document]');
+        const textLayer = root?.querySelector<HTMLElement>('[data-page-number="1"] .textLayer');
+        const pageLayer =
+          view?.controller?.viewport?.annotationEditorInstance?.manager?.getLayer?.(0);
+        return (
+          textLayer instanceof HTMLElement &&
+          root?.querySelectorAll('[data-page-number="1"] .textLayer span')[1] !== undefined &&
+          pageLayer?.hasTextLayer?.(textLayer) === true
+        );
+      }),
+    {
+      timeout: 10_000,
+      timeoutMsg: 'PDF.js annotation editor did not bind to the selectable page text.',
+    },
+  );
+}
+
+async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<void> {
+  await browser.executeObsidian(
+    async ({ app }, input) => {
+      const bytes = await app.vault.adapter.readBinary(input.sourcePath);
+      const existing = app.vault.getAbstractFileByPath(input.targetPath);
+      if (existing !== null) {
+        await app.fileManager.trashFile(existing);
+      }
+      await app.vault.createBinary(input.targetPath, bytes);
+    },
+    { sourcePath, targetPath },
+  );
+}
+
+async function waitForAnnotationSave(baseline: AnnotationSaveBaseline): Promise<void> {
+  try {
+    await browser.waitUntil(
+      async () => {
+        const snapshot = await browser.executeObsidian(({ app }) => {
+          const metrics = (
+            window as Window & {
+              __abyssDocumentsPerformance?: {
+                activeAnnotationOperations?: { serializations?: number; writes?: number };
+                counters?: {
+                  annotationSaveFailures?: number;
+                  annotationSaveRecoveries?: number;
+                  annotationSaves?: number;
+                };
+              };
+            }
+          ).__abyssDocumentsPerformance;
+          const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+            controller?: Record<string, unknown>;
+          };
+          const controller = view.controller;
+          const native = controller?.['nativeSaveSession'] as {
+            committedRevision?: number;
+            isDirty?: boolean;
+            pendingRevision?: number;
+          } | null;
+          const autosave = controller?.['autosave'] as Record<string, unknown> | null;
+          return {
+            activeSerializations: metrics?.activeAnnotationOperations?.serializations ?? 0,
+            activeWrites: metrics?.activeAnnotationOperations?.writes ?? 0,
+            committedRevision: native?.committedRevision ?? Number.NaN,
+            failures: metrics?.counters?.annotationSaveFailures ?? 0,
+            isDirty: native?.isDirty ?? true,
+            newestGeneration: Number(autosave?.['newestGeneration'] ?? Number.NaN),
+            paused: autosave?.['paused'] !== false,
+            pendingRevision: native?.pendingRevision ?? Number.NaN,
+            recoveries: metrics?.counters?.annotationSaveRecoveries ?? 0,
+            savedGeneration: Number(autosave?.['savedGeneration'] ?? Number.NaN),
+            saves: metrics?.counters?.annotationSaves ?? 0,
+          };
+        });
+        return isVerifiedAnnotationSaveSettled(snapshot, baseline);
+      },
+      { timeout: 15_000 },
+    );
+  } catch (cause) {
+    const diagnostics = await browser.executeObsidian(({ app }) => {
+      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+        controller?: Record<string, unknown>;
+      };
+      const controller = view.controller;
+      const native = controller?.['nativeSaveSession'] as {
+        committedRevision?: number;
+        isDirty?: boolean;
+        pendingRevision?: number;
+      } | null;
+      const autosave = controller?.['autosave'] as Record<string, unknown> | null;
+      const viewport = controller?.['viewport'] as Record<string, unknown> | null;
+      const editor = viewport?.['annotationEditorInstance'] as Record<string, unknown> | null;
+      return {
+        autosave:
+          autosave === null
+            ? null
+            : {
+                inFlight: autosave['inFlight'] !== null,
+                newestGeneration: autosave['newestGeneration'],
+                paused: autosave['paused'],
+                savedGeneration: autosave['savedGeneration'],
+              },
+        editor:
+          editor === null
+            ? null
+            : {
+                hasManager: editor['manager'] !== null,
+                saving: editor['saving'],
+              },
+        native:
+          native === null
+            ? null
+            : {
+                committedRevision: native.committedRevision,
+                isDirty: native.isDirty,
+                pendingRevision: native.pendingRevision,
+              },
+        notices: Array.from(document.querySelectorAll<HTMLElement>('.notice')).map(
+          (notice) => notice.innerText,
+        ),
+        performance: (window as Window & { __abyssDocumentsPerformance?: unknown })
+          .__abyssDocumentsPerformance,
+      };
+    });
+    throw new Error(
+      `Expected at least ${baseline.minimumSaves} completed annotation save(s): ${JSON.stringify(diagnostics)}; ${String(cause)}`,
+    );
+  }
+}
+
+async function vaultFileSha256(path: string): Promise<string> {
+  return browser.executeObsidian(async ({ app }, filePath) => {
+    const bytes = await app.vault.adapter.readBinary(filePath);
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }, path);
+}
+
+async function captureAnnotationSaveBaseline(): Promise<AnnotationSaveBaseline> {
+  const counters = await browser.execute(
+    () =>
+      (
+        window as Window & {
+          __abyssDocumentsPerformance?: {
+            counters?: {
+              annotationSaveFailures?: number;
+              annotationSaveRecoveries?: number;
+              annotationSaves?: number;
+            };
+          };
+        }
+      ).__abyssDocumentsPerformance?.counters,
+  );
+  return {
+    failures: counters?.annotationSaveFailures ?? 0,
+    minimumSaves: (counters?.annotationSaves ?? 0) + 1,
+    recoveries: counters?.annotationSaveRecoveries ?? 0,
+  };
+}
+
+async function createFreeText(text: string): Promise<void> {
+  await $('[data-annotation-tool="freetext"]').click();
+  await expect($('[data-annotation-tool="freetext"]')).toHaveAttribute('aria-pressed', 'true');
+  const layer = $('[data-page-number="1"] .annotationEditorLayer');
+  await layer.waitForDisplayed({ timeout: 5_000 });
+  await browser.execute(() => {
+    const editorLayer = document.querySelector<HTMLElement>(
+      '[data-page-number="1"] .annotationEditorLayer',
+    );
+    if (editorLayer === null) throw new Error('FreeText editor layer unavailable.');
+    editorLayer.focus();
+  });
+  await browser.keys(Key.Enter);
+  await browser.waitUntil(
+    async () =>
+      browser.execute(
+        () => document.querySelector('.freeTextEditor [contenteditable="true"]') !== null,
+      ),
+    { timeout: 5_000, timeoutMsg: 'FreeText content editor did not become available.' },
+  );
+  const input = $('.freeTextEditor [contenteditable="true"]');
+  await input.click();
+  await browser.keys(text);
+  await expect(input).toHaveText(text);
+  await browser.keys(Key.Escape);
+  await expect(input).toHaveAttribute('contenteditable', 'false');
+  await $('[data-annotation-tool="select"]').click();
+}
+
+async function createInk(): Promise<void> {
+  await $('[data-annotation-tool="ink"]').click();
+  await expect($('[data-annotation-tool="ink"]')).toHaveAttribute('aria-pressed', 'true');
+  const layer = $('[data-page-number="1"] .annotationEditorLayer');
+  await browser
+    .action('pointer')
+    .move({ origin: layer, x: -120, y: 30 })
+    .down()
+    .move({ duration: 120, origin: layer, x: -40, y: 60 })
+    .move({ duration: 120, origin: layer, x: 40, y: 35 })
+    .up()
+    .perform();
+  await $('[data-annotation-tool="select"]').click();
+  await expect($('[data-annotation-tool="select"]')).toHaveAttribute('aria-pressed', 'true');
+  await $('.inkEditor').waitForExist({ timeout: 5_000 });
+}
+
+async function selectNativeEditor(selector: string): Promise<void> {
+  await browser.execute((editorSelector) => {
+    const editor = document.querySelector<HTMLElement>(editorSelector);
+    if (editor === null) throw new Error(`Native editor unavailable: ${editorSelector}`);
+    const bounds = editor.getBoundingClientRect();
+    const init = {
+      bubbles: true,
+      button: 0,
+      clientX: bounds.left + bounds.width / 2,
+      clientY: bounds.top + bounds.height / 2,
+      isPrimary: true,
+      pointerId: 19,
+      pointerType: 'mouse',
+    };
+    editor.dispatchEvent(new PointerEvent('pointerdown', init));
+    window.dispatchEvent(new PointerEvent('pointerup', init));
+  }, selector);
+  await browser.waitUntil(
+    async () =>
+      browser.execute(
+        (editorSelector) =>
+          document.querySelector(editorSelector)?.classList.contains('selectedEditor') === true,
+        selector,
+      ),
+    { timeout: 5_000, timeoutMsg: `Native editor was not selected: ${selector}` },
+  );
 }
 
 describe('PDF reader foundation', () => {
@@ -128,7 +419,8 @@ describe('PDF reader foundation', () => {
     await expect($('[data-tab="search"][aria-selected="true"]')).toExist();
     await $('[data-document-search]').setValue('gradient');
     await expect($('[data-search-count]')).toHaveText(/^[1-9]/);
-    await expect($('[data-annotation-search]')).not.toExist();
+    await expect($('[data-sidebar-panel="annotations"]')).not.toBeDisplayed();
+    await expect($('[data-document-search]')).toBeFocused();
   });
 
   it('opens a two-level outline and navigates to its destination', async () => {
@@ -235,5 +527,545 @@ describe('PDF reader foundation', () => {
     expect(maximum).not.toBeNull();
     expect(maximum).toBeGreaterThan(0);
     expect(maximum).toBeLessThanOrEqual(7);
+  });
+
+  it('keeps the lazy left sidebar ordered and a ten-thousand-annotation list bounded', async () => {
+    await openPdf('Documents/annotations-10000.pdf');
+    await waitForFirstPage();
+    await expect($('[data-region="sidebar"]')).not.toExist();
+
+    await $('[data-control="sidebar"]').click();
+    const tabLabels = await $$('[data-tab]').map(async (tab) => tab.getText());
+    expect(tabLabels).toEqual(['Outline', 'Annotations', 'Search']);
+    await $('[data-tab="annotations"]').click();
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() => document.querySelectorAll('.abyss-annotation-card').length)) >
+        0,
+      {
+        timeout: 20_000,
+        timeoutMsg: 'High-annotation cards did not become available.',
+      },
+    );
+    await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 80 });
+
+    const annotationSearch = $('[data-annotation-search]');
+    await annotationSearch.setValue('Annotation 07500');
+    await expect($('.abyss-annotation-card')).toHaveText(expect.stringContaining('07500'));
+    await annotationSearch.clearValue();
+    await browser.execute(() => {
+      const input = document.querySelector<HTMLInputElement>('[data-annotation-search]');
+      if (input === null) throw new Error('Annotation search input unavailable.');
+      input.dispatchEvent(
+        new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }),
+      );
+    });
+    const filteredSize = async (): Promise<number> => {
+      const value = await $('.abyss-annotation-card-row').getAttribute('aria-setsize');
+      return Number(value);
+    };
+    await browser.waitUntil(async () => (await filteredSize()) === 10_000);
+
+    const colorFacets = $$(
+      '[data-sidebar-panel="annotations"] .abyss-annotation-colors [data-annotation-color]',
+    );
+    await expect(colorFacets).toBeElementsArrayOfSize(2);
+    await colorFacets[0]?.click();
+    await browser.waitUntil(async () => (await filteredSize()) === 5_000);
+
+    await $('.abyss-reader-annotations details > summary').click();
+    const topic = $('[data-annotation-tag="topic-0"]');
+    await expect(topic).toExist();
+    await topic.click();
+    await browser.waitUntil(async () => (await filteredSize()) === 200);
+    expect(
+      await browser.execute(() => {
+        const cards = Array.from(document.querySelectorAll('.abyss-annotation-card'));
+        return cards.length > 0 && cards.every((card) => card.textContent.includes('#topic-0'));
+      }),
+    ).toBe(true);
+    await colorFacets[0]?.click();
+    await browser.waitUntil(async () => (await filteredSize()) === 400);
+    await topic.click();
+    await browser.waitUntil(async () => (await filteredSize()) === 10_000);
+
+    const metrics = await browser.execute(
+      () =>
+        (window as Window & { __abyssDocumentsPerformance?: unknown }).__abyssDocumentsPerformance,
+    );
+    expect(metrics).toMatchObject({ counters: { maxAnnotationCards: 48 } });
+  });
+
+  it('starts in Default, Single + Continuous and exposes all four layout combinations', async () => {
+    await openPdf('Documents/text-12-pages.pdf');
+    await waitForFirstPage();
+
+    await expect($('[data-control="profile"]')).toHaveAttribute(
+      'aria-label',
+      'Reading profile: Default',
+    );
+    await expect($('[data-control="layout"]')).toHaveAttribute(
+      'aria-label',
+      'Layout: Single, continuous',
+    );
+
+    for (const [pages, scrolling, label] of [
+      ['Facing', 'Continuous', 'Layout: Facing, continuous'],
+      ['Facing', 'Page by page', 'Layout: Facing, page by page'],
+      ['Single', 'Page by page', 'Layout: Single, page by page'],
+      ['Single', 'Continuous', 'Layout: Single, continuous'],
+    ] as const) {
+      await $('[data-control="layout"]').click();
+      await $(`//*[contains(@class, "menu-item-title") and normalize-space(.)="${pages}"]`).click();
+      await $('[data-control="layout"]').click();
+      await $(
+        `//*[contains(@class, "menu-item-title") and normalize-space(.)="${scrolling}"]`,
+      ).click();
+      await expect($('[data-control="layout"]')).toHaveAttribute('aria-label', label);
+    }
+  });
+
+  it('round-trips a native highlight and keeps annotation controls operable after save', async () => {
+    const workingPath = 'Documents/e2e-native-annotations.pdf';
+    await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    const saveBaseline = await captureAnnotationSaveBaseline();
+
+    await $('[data-annotation-tool="highlight"]').click();
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
+    await waitForNativeHighlightReadiness();
+    await browser.execute(() => {
+      const text = document.querySelectorAll('[data-page-number="1"] .textLayer span')[1];
+      if (text === undefined) throw new Error('Expected selectable text on fixture page 1.');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      text.dispatchEvent(
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          clientX: 200,
+          clientY: 200,
+          pointerType: 'mouse',
+        }),
+      );
+    });
+    await expect($('.highlightEditor')).toExist();
+    await waitForAnnotationSave(saveBaseline);
+
+    await $('[data-annotation-tool="freetext"]').click();
+    await expect($('[data-annotation-tool="freetext"]')).toHaveAttribute('aria-pressed', 'true');
+    await closeReaderLeaves();
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    await $('.annotationLayer .highlightAnnotation').waitForExist({ timeout: 10_000 });
+    const reopenedGeometry = await browser.execute(() => {
+      const annotation = document.querySelector<HTMLElement>(
+        '.annotationLayer .highlightAnnotation',
+      );
+      const bounds = annotation?.getBoundingClientRect();
+      return { height: bounds?.height ?? 0, width: bounds?.width ?? 0 };
+    });
+    expect(reopenedGeometry.height).toBeGreaterThan(0);
+    expect(reopenedGeometry.width).toBeGreaterThan(0);
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await expect(
+      $(
+        '[data-sidebar-panel="annotations"] .abyss-annotation-colors ' +
+          '[data-annotation-color="#ffd400"]',
+      ),
+    ).toExist();
+  });
+
+  it('serializes two live views and reloads each clean peer in verified write order', async () => {
+    const workingPath = 'Documents/e2e-two-view.pdf';
+    const active = '.workspace-leaf.mod-active';
+    await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    const leaves = await browser.executeObsidian(async ({ app }) => {
+      const primary = app.workspace.getMostRecentLeaf();
+      if (primary === null) throw new Error('Primary reader leaf unavailable.');
+      const secondary = app.workspace.getLeaf('split', 'vertical');
+      await secondary.setViewState(primary.getViewState());
+      return {
+        primary: (primary as unknown as { id: string }).id,
+        secondary: (secondary as unknown as { id: string }).id,
+      };
+    });
+    await browser.waitUntil(async () => (await $$('[data-abyss-document]').length) === 2, {
+      timeout: 10_000,
+      timeoutMsg: 'Second live PDF view did not open.',
+    });
+    let saveBaseline = await captureAnnotationSaveBaseline();
+
+    await activateLeaf(leaves.primary);
+    await $(`${active} [data-annotation-tool="highlight"]`).click();
+    await expect($(`${active} [data-annotation-tool="highlight"]`)).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await waitForNativeHighlightReadiness();
+    await browser.execute((scope) => {
+      const text = document.querySelectorAll(`${scope} [data-page-number="1"] .textLayer span`)[1];
+      if (text === undefined) throw new Error('Primary view text unavailable.');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      getSelection()?.removeAllRanges();
+      getSelection()?.addRange(range);
+      text.dispatchEvent(
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          clientX: 200,
+          clientY: 200,
+          pointerType: 'mouse',
+        }),
+      );
+    }, active);
+    await waitForAnnotationSave(saveBaseline);
+
+    await activateLeaf(leaves.secondary);
+    await $(`${active} [data-page-number="1"] canvas`).waitForExist({ timeout: 10_000 });
+    await $(`${active} .annotationLayer .highlightAnnotation`).waitForExist({ timeout: 10_000 });
+    saveBaseline = await captureAnnotationSaveBaseline();
+    await $(`${active} [data-annotation-tool="ink"]`).click();
+    const layer = $(`${active} [data-page-number="1"] .annotationEditorLayer`);
+    await browser
+      .action('pointer')
+      .move({ origin: layer, x: -120, y: 30 })
+      .down()
+      .move({ duration: 120, origin: layer, x: -40, y: 60 })
+      .move({ duration: 120, origin: layer, x: 40, y: 35 })
+      .up()
+      .perform();
+    await $(`${active} [data-annotation-tool="select"]`).click();
+    await waitForAnnotationSave(saveBaseline);
+
+    await activateLeaf(leaves.primary);
+    await $(`${active} [data-page-number="1"] canvas`).waitForExist({ timeout: 10_000 });
+    await $(`${active} .annotationLayer .highlightAnnotation`).waitForExist({ timeout: 10_000 });
+    await $(`${active} .annotationLayer .inkAnnotation`).waitForExist({ timeout: 10_000 });
+  });
+
+  it('creates, saves, and reopens a native FreeText annotation', async () => {
+    const workingPath = 'Documents/e2e-freetext.pdf';
+    await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    const saveBaseline = await captureAnnotationSaveBaseline();
+
+    await createFreeText('Native FreeText round trip');
+    await waitForAnnotationSave(saveBaseline);
+    await expect($('.freeTextEditor')).toExist();
+
+    await closeReaderLeaves();
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    await expect($('.freeTextEditor, .freeTextAnnotation')).toExist();
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await $('[data-annotation-search]').setValue('Native FreeText round trip');
+    await expect($('.abyss-annotation-card-text')).toHaveText('Native FreeText round trip');
+  });
+
+  it('creates, saves, and reopens a native Ink annotation', async () => {
+    const workingPath = 'Documents/e2e-ink.pdf';
+    await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    const saveBaseline = await captureAnnotationSaveBaseline();
+
+    await createInk();
+    await waitForAnnotationSave(saveBaseline);
+    await expect($('.inkEditor')).toExist();
+
+    await closeReaderLeaves();
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    await $('.inkEditor, .inkAnnotation').waitForExist({ timeout: 10_000 });
+    expect(
+      await browser.execute(() => {
+        const annotation = document.querySelector<HTMLElement>('.inkEditor, .inkAnnotation');
+        const bounds = annotation?.getBoundingClientRect();
+        const strokes = Array.from(
+          annotation?.querySelectorAll<SVGElement>('path[d], polyline[points]') ?? [],
+        ).map((stroke) => stroke.getAttribute('d') ?? stroke.getAttribute('points') ?? '');
+        return {
+          height: bounds?.height ?? 0,
+          strokes,
+          width: bounds?.width ?? 0,
+        };
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        height: expect.any(Number),
+        strokes: expect.arrayContaining([expect.stringMatching(/\S/u)]),
+        width: expect.any(Number),
+      }),
+    );
+  });
+
+  it('creates, edits, saves, and reopens an ordinary native Highlight comment', async () => {
+    const workingPath = 'Documents/e2e-comment.pdf';
+    await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    let saveBaseline = await captureAnnotationSaveBaseline();
+
+    await $('[data-annotation-tool="highlight"]').click();
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
+    await waitForNativeHighlightReadiness();
+    await browser.execute(() => {
+      const text = document.querySelectorAll('[data-page-number="1"] .textLayer span')[1];
+      if (text === undefined) throw new Error('Expected selectable comment fixture text.');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      getSelection()?.removeAllRanges();
+      getSelection()?.addRange(range);
+      text.dispatchEvent(
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          clientX: 200,
+          clientY: 200,
+          pointerType: 'mouse',
+        }),
+      );
+    });
+    await $('.highlightEditor').waitForExist({ timeout: 5_000 });
+    await waitForAnnotationSave(saveBaseline);
+    saveBaseline = await captureAnnotationSaveBaseline();
+    await selectNativeEditor('.highlightEditor');
+    const commentButton = $('.highlightEditor .editToolbar .comment');
+    await commentButton.waitForClickable({ timeout: 5_000 });
+    await commentButton.click();
+    await $('[data-annotation-popover] textarea').setValue('Comment [[Linked note]] #review');
+    await $('[data-action="save-comment"]').click();
+    await waitForAnnotationSave(saveBaseline);
+
+    await closeReaderLeaves();
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await $('[data-annotation-search]').setValue('review');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          Array.from(document.querySelectorAll<HTMLElement>('.abyss-annotation-card-text')).some(
+            (card) => card.innerText.includes('#review'),
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: 'Saved native comment did not appear in annotation search.' },
+    );
+
+    await $('[data-control="sidebar"]').click();
+    await $('[data-annotation-tool="highlight"]').click();
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
+    await $('.highlightEditor').waitForExist({ timeout: 5_000 });
+    await selectNativeEditor('.highlightEditor');
+    const standaloneComment = $('.highlightEditor .annotationCommentButton');
+    await standaloneComment.waitForClickable({ timeout: 5_000 });
+    saveBaseline = await captureAnnotationSaveBaseline();
+    await standaloneComment.click();
+    const editComment = $('[data-action="edit-comment"]');
+    await editComment.waitForClickable({
+      timeout: 5_000,
+      timeoutMsg: 'Selected native comment did not expose its Edit action.',
+    });
+    await editComment.click();
+    await $('[data-annotation-popover] textarea').waitForDisplayed({ timeout: 5_000 });
+    await $('[data-annotation-popover] textarea').setValue('Revised [[Linked note]] #verified');
+    await $('[data-action="save-comment"]').click();
+    await waitForAnnotationSave(saveBaseline);
+
+    await closeReaderLeaves();
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await $('[data-annotation-search]').setValue('verified');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() =>
+          Array.from(document.querySelectorAll<HTMLElement>('.abyss-annotation-card-text')).some(
+            (card) => card.innerText.includes('#verified'),
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: 'Edited native comment did not reopen in annotation search.' },
+    );
+  });
+
+  it('preserves imported Underline and Text Note annotations across a supported save', async () => {
+    const workingPath = 'Documents/e2e-readonly-existing.pdf';
+    await resetWorkingPdf('Documents/annotation-qualification.pdf', workingPath);
+    await openPdf(workingPath);
+    await waitForFirstPage();
+    await expect($('.underlineAnnotation')).toExist();
+    await expect($('.textAnnotation')).toExist();
+    const saveBaseline = await captureAnnotationSaveBaseline();
+
+    await $('[data-annotation-tool="highlight"]').click();
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
+    await waitForNativeHighlightReadiness();
+    await browser.execute(() => {
+      const text = document.querySelectorAll('[data-page-number="1"] .textLayer span')[1];
+      if (text === undefined) throw new Error('Expected qualification fixture text.');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      getSelection()?.removeAllRanges();
+      getSelection()?.addRange(range);
+      text.dispatchEvent(
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          clientX: 200,
+          clientY: 200,
+          pointerType: 'mouse',
+        }),
+      );
+    });
+    await $('.highlightEditor').waitForExist({
+      timeout: 5_000,
+      timeoutMsg: 'Supported Highlight was not created beside imported read-only annotations.',
+    });
+    await waitForAnnotationSave(saveBaseline);
+    await closeReaderLeaves();
+    await openPdf(workingPath);
+    await waitForFirstPage();
+
+    await expect($('.underlineAnnotation')).toExist();
+    await expect($('.textAnnotation')).toExist();
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await expect($('[data-sidebar-panel="annotations"]')).toHaveText(
+      expect.stringContaining('Existing underline'),
+    );
+    await expect($('[data-sidebar-panel="annotations"]')).toHaveText(
+      expect.stringContaining('Existing text note'),
+    );
+  });
+
+  for (const qualification of [
+    {
+      comment: 'Signed #secure',
+      message: 'Signed PDF documents are opened read-only to preserve signatures.',
+      path: 'Documents/signed-document.pdf',
+    },
+    {
+      comment: 'Restricted #secure',
+      message: 'This PDF does not grant permission to modify its contents.',
+      path: 'Documents/permission-restricted.pdf',
+    },
+  ]) {
+    it(`opens ${qualification.path} read-only without mutating its bytes`, async () => {
+      const before = await vaultFileSha256(qualification.path);
+      await openPdf(qualification.path);
+      await waitForFirstPage();
+
+      await expect($('[data-region="annotation-read-only-reason"]')).toHaveText(
+        qualification.message,
+      );
+      expect(
+        await browser.execute(() => {
+          const buttons = Array.from(
+            document.querySelectorAll<HTMLButtonElement>(
+              '[data-region="annotation-toolbar"] button',
+            ),
+          );
+          return buttons.length > 0 && buttons.every((button) => button.disabled);
+        }),
+      ).toBe(true);
+      await $('[data-control="sidebar"]').click();
+      await $('[data-tab="annotations"]').click();
+      await expect($('[data-sidebar-panel="annotations"]')).toHaveText(
+        expect.stringContaining(qualification.comment),
+      );
+      await browser.keys([process.platform === 'darwin' ? Key.Command : Key.Control, 's']);
+      expect(await vaultFileSha256(qualification.path)).toBe(before);
+    });
+  }
+
+  it('exports verified native annotations to a real vault file', async () => {
+    const exportPath = 'Documents/e2e-annotation-export.md';
+    await browser.executeObsidian(async ({ app }, path) => {
+      const existing = app.vault.getAbstractFileByPath(path);
+      if (existing !== null) {
+        await app.fileManager.trashFile(existing);
+      }
+    }, exportPath);
+    await openPdf('Documents/annotation-qualification.pdf');
+    await waitForFirstPage();
+
+    await $('[data-control="overflow"]').click();
+    await $(
+      '//*[contains(@class, "menu-item-title") and normalize-space(.)="Export annotations…"]',
+    ).click();
+    const destination = $('input[aria-label="Vault destination"]');
+    await destination.setValue(exportPath);
+    await $('[data-action="export"]').click();
+    await browser.waitUntil(
+      async () =>
+        browser.executeObsidian(
+          ({ app }, path) => app.vault.getAbstractFileByPath(path) !== null,
+          exportPath,
+        ),
+      { timeout: 10_000, timeoutMsg: 'Annotation export did not create its vault file.' },
+    );
+    const exported = await browser.executeObsidian(
+      async ({ app }, path) => app.vault.adapter.read(path),
+      exportPath,
+    );
+    expect(exported).toContain('![[annotation-qualification.pdf#annotation=');
+    expect(exported).toContain('Existing underline');
+    expect(exported).toContain('Existing text note');
+    const link = /!\[\[([^\]]+#annotation=[^\]]+)\]\]/u.exec(exported)?.[1];
+    expect(link).toBeDefined();
+    await browser.executeObsidian(
+      async ({ app }, input) => {
+        app.workspace.detachLeavesOfType('abyss-document-view');
+        await app.vault.adapter.write(
+          input.sourcePath,
+          `${await app.vault.adapter.read(input.sourcePath)}\n\n[Open annotation](${input.link})\n`,
+        );
+        const leaf = app.workspace.getLeaf(true);
+        await leaf.setViewState({
+          type: 'markdown',
+          state: { file: input.sourcePath, mode: 'preview' },
+        });
+        app.workspace.setActiveLeaf(leaf, { focus: true });
+      },
+      { link: link ?? '', sourcePath: exportPath },
+    );
+    const renderedLink = $('a.internal-link[data-href*="#annotation="]');
+    await renderedLink.waitForClickable({ timeout: 10_000 });
+    await renderedLink.click();
+    try {
+      await browser.waitUntil(
+        async () =>
+          browser.execute(
+            () =>
+              document.querySelectorAll('.abyss-annotation-card[aria-current="true"]').length === 1,
+          ),
+        { timeout: 10_000, timeoutMsg: 'Exported annotation deep link did not select its target.' },
+      );
+    } catch (cause) {
+      const diagnostics = await browser.executeObsidian(({ app }) => ({
+        activeFile: app.workspace.getActiveFile()?.path ?? null,
+        leaves: app.workspace
+          .getLeavesOfType('abyss-document-view')
+          .map((leaf) => leaf.getViewState()),
+        panel: document.querySelector('[data-sidebar-panel="annotations"]')?.textContent ?? null,
+        selected: Array.from(
+          document.querySelectorAll<HTMLElement>('.abyss-annotation-card[aria-current="true"]'),
+        ).map((card) => card.dataset['annotationId']),
+      }));
+      throw new Error(
+        `Exported annotation deep link ${JSON.stringify(link)} did not select its target: ` +
+          `${JSON.stringify(diagnostics)}; ${String(cause)}`,
+      );
+    }
+    await expect($('[data-control="page-field"]')).toHaveValue('1');
   });
 });

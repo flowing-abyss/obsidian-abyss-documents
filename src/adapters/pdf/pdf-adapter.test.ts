@@ -118,9 +118,11 @@ describe('PdfDocumentAdapter', () => {
       promise: Promise.resolve(document),
       destroy,
     });
+    const savedBytes = new Uint8Array([1, 2, 3]);
 
-    await fixture.adapter.verifySavedBytes(new Uint8Array([1, 2, 3]), new AbortController().signal);
+    await fixture.adapter.verifySavedBytes(savedBytes, new AbortController().signal);
 
+    expect(fixture.getDocument).toHaveBeenCalledWith({ data: savedBytes });
     expect(getDownloadInfo).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
     expect(destroy).toHaveBeenCalledOnce();

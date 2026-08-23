@@ -24,6 +24,7 @@ const INVALID_BYTES = Buffer.from('ABYSS-DOCUMENTS INVALID PDF FIXTURE v1\n', 'u
 export interface PdfFixtureMetadata {
   readonly name: string;
   readonly pages: number | null;
+  readonly annotations?: number;
   readonly purpose: string;
   readonly bytes: number;
   readonly sha256: string;
@@ -65,6 +66,34 @@ export async function generatePdfFixtures(outputDirectory: string): Promise<PdfF
       'Deterministic invalid bytes for retry coverage.',
       INVALID_BYTES,
     ),
+    fixture(
+      PDF_FIXTURE_NAMES[5],
+      100,
+      'Ten thousand deterministic native highlight annotations for bounded extraction and list qualification.',
+      highAnnotationFixture(),
+      10_000,
+    ),
+    fixture(
+      PDF_FIXTURE_NAMES[6],
+      1,
+      'Existing native Underline and Text Note annotations for read-only interoperability qualification.',
+      createReadonlyAnnotationFixture(true),
+      2,
+    ),
+    fixture(
+      PDF_FIXTURE_NAMES[7],
+      1,
+      'Structurally signed PDF opened read-only to preserve its signature.',
+      signedDocumentFixture(),
+      1,
+    ),
+    fixture(
+      PDF_FIXTURE_NAMES[8],
+      1,
+      'Standard Security Handler permissions deny content and annotation modification.',
+      permissionRestrictedFixture(),
+      1,
+    ),
   ]);
   const files: PdfFixtureMetadata[] = [];
   for (const entry of generated) {
@@ -72,6 +101,7 @@ export async function generatePdfFixtures(outputDirectory: string): Promise<PdfF
     files.push({
       name: entry.name,
       pages: entry.pages,
+      ...(entry.annotations === undefined ? {} : { annotations: entry.annotations }),
       purpose: entry.purpose,
       bytes: entry.bytes.byteLength,
       sha256: createHash('sha256').update(entry.bytes).digest('hex'),
@@ -95,8 +125,9 @@ async function fixture(
   pages: number | null,
   purpose: string,
   bytes: Uint8Array | Promise<Uint8Array>,
+  annotations?: number,
 ) {
-  return { name, pages, purpose, bytes: await bytes };
+  return { name, pages, purpose, bytes: await bytes, annotations };
 }
 
 async function createDocument(title: string): Promise<{ document: PDFDocument; font: PDFFont }> {
@@ -154,6 +185,200 @@ export async function createReadonlyAnnotationFixture(
   return document.save({ addDefaultPage: false, useObjectStreams: false });
 }
 
+async function signedDocumentFixture(): Promise<Uint8Array> {
+  const { document, font } = await createDocument('Signed document qualification fixture');
+  const page = document.addPage(PAGE_SIZE);
+  drawPage(
+    page,
+    font,
+    'Signed document fixture',
+    'The signature metadata makes annotation editing read-only.',
+  );
+  const annotation = document.context.register(
+    document.context.obj({
+      Type: 'Annot',
+      Subtype: 'Highlight',
+      Rect: [72, 540, 240, 562],
+      QuadPoints: [72, 562, 240, 562, 72, 540, 240, 540],
+      C: [1, 0.831, 0],
+      Contents: PDFHexString.fromText('Signed #secure'),
+      NM: PDFHexString.fromText('signed-highlight'),
+      P: page.ref,
+    }),
+  );
+  page.node.set(PDFName.of('Annots'), document.context.obj([annotation]));
+  const byteRangePlaceholder = 9_999_999_999;
+  const signature = document.context.register(
+    document.context.obj({
+      Type: 'Sig',
+      Filter: 'Adobe.PPKLite',
+      SubFilter: 'adbe.pkcs7.detached',
+      ByteRange: [0, byteRangePlaceholder, byteRangePlaceholder, byteRangePlaceholder],
+      Contents: PDFHexString.of('a5'.repeat(256)),
+      Name: PDFHexString.fromText('Fixture Signer'),
+      Reason: PDFHexString.fromText('Read-only qualification'),
+      M: 'D:20260101000000Z',
+    }),
+  );
+  const field = document.context.register(
+    document.context.obj({
+      FT: 'Sig',
+      T: PDFHexString.fromText('Fixture Signature'),
+      V: signature,
+    }),
+  );
+  const acroForm = document.context.register(
+    document.context.obj({ Fields: [field], SigFlags: 3 }),
+  );
+  document.catalog.set(PDFName.of('AcroForm'), acroForm);
+  const bytes = Uint8Array.from(
+    await document.save({ addDefaultPage: false, useObjectStreams: false }),
+  );
+  const source = Buffer.from(bytes).toString('latin1');
+  const placeholder = '[ 0 9999999999 9999999999 9999999999 ]';
+  const byteRangeOffset = source.indexOf(placeholder);
+  if (byteRangeOffset < 0) throw new Error('Signed fixture ByteRange placeholder is unavailable.');
+  const contentsPrefix = '/Contents <';
+  const contentsStart = source.indexOf(contentsPrefix, byteRangeOffset) + contentsPrefix.length;
+  const contentsEnd = contentsStart + 512;
+  if (contentsStart < contentsPrefix.length || source[contentsEnd] !== '>') {
+    throw new Error('Signed fixture Contents placeholder is unavailable.');
+  }
+  const excludedStart = contentsStart - 1;
+  const excludedEnd = contentsEnd + 1;
+  const replacement = `[ 0 ${String(excludedStart).padStart(10)} ${String(excludedEnd).padStart(10)} ${String(bytes.byteLength - excludedEnd).padStart(10)} ]`;
+  if (replacement.length !== placeholder.length) {
+    throw new Error('Signed fixture ByteRange replacement changed the file length.');
+  }
+  Buffer.from(replacement, 'ascii').copy(bytes, byteRangeOffset);
+  return bytes;
+}
+
+function permissionRestrictedFixture(): Uint8Array {
+  const fileId = Buffer.from('00112233445566778899AABBCCDDEEFF', 'hex');
+  const permissions = -44;
+  const owner = paddedPassword('owner');
+  const user = paddedPassword('');
+  const ownerKey = md5(owner).subarray(0, 5);
+  const ownerEntry = rc4(ownerKey, user);
+  const permissionBytes = Buffer.alloc(4);
+  permissionBytes.writeInt32LE(permissions);
+  const fileKey = md5(Buffer.concat([user, ownerEntry, permissionBytes, fileId])).subarray(0, 5);
+  const userEntry = rc4(fileKey, PDF_PASSWORD_PADDING);
+  const encrypt = (objectNumber: number, bytes: Uint8Array): Buffer => {
+    const objectSuffix = Buffer.from([
+      objectNumber & 0xff,
+      (objectNumber >>> 8) & 0xff,
+      (objectNumber >>> 16) & 0xff,
+      0,
+      0,
+    ]);
+    const key = md5(Buffer.concat([fileKey, objectSuffix])).subarray(0, 10);
+    return rc4(key, bytes);
+  };
+  const content = encrypt(
+    5,
+    Buffer.from(
+      'BT /F1 20 Tf 54 724 Td (Permission restricted fixture) Tj 0 -44 Td /F1 12 Tf (Editing is disabled by standard PDF permissions.) Tj ET\n',
+      'ascii',
+    ),
+  );
+  const annotationContents = encrypt(6, Buffer.from('Restricted #secure', 'utf8'));
+  const annotationName = encrypt(6, Buffer.from('restricted-highlight', 'utf8'));
+  const objects = [
+    Buffer.from('<< /Type /Catalog /Pages 2 0 R >>', 'ascii'),
+    Buffer.from('<< /Type /Pages /Kids [3 0 R] /Count 1 >>', 'ascii'),
+    Buffer.from(
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R] >>',
+      'ascii',
+    ),
+    Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>', 'ascii'),
+    Buffer.concat([
+      Buffer.from(`<< /Length ${content.byteLength} >>\nstream\n`, 'ascii'),
+      content,
+      Buffer.from('\nendstream', 'ascii'),
+    ]),
+    Buffer.from(
+      `<< /Type /Annot /Subtype /Highlight /Rect [72 540 240 562] /QuadPoints [72 562 240 562 72 540 240 540] /C [1 0.831 0] /Contents <${annotationContents.toString('hex')}> /NM <${annotationName.toString('hex')}> /P 3 0 R >>`,
+      'ascii',
+    ),
+    Buffer.from(
+      `<< /Filter /Standard /V 1 /Length 40 /O <${ownerEntry.toString('hex')}> /U <${userEntry.toString('hex')}> /P ${permissions} /R 2 >>`,
+      'ascii',
+    ),
+  ];
+  const chunks: Buffer[] = [Buffer.from('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n', 'latin1')];
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(chunks.reduce((length, chunk) => length + chunk.byteLength, 0));
+    chunks.push(
+      Buffer.from(`${index + 1} 0 obj\n`, 'ascii'),
+      object,
+      Buffer.from('\nendobj\n', 'ascii'),
+    );
+  }
+  const xrefOffset = chunks.reduce((length, chunk) => length + chunk.byteLength, 0);
+  const xref = [
+    'xref',
+    `0 ${objects.length + 1}`,
+    '0000000000 65535 f ',
+    ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n `),
+  ].join('\n');
+  chunks.push(
+    Buffer.from(
+      `${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R /Encrypt 7 0 R /ID [<${fileId.toString('hex')}> <${fileId.toString('hex')}>] >>\nstartxref\n${xrefOffset}\n%%EOF\n`,
+      'ascii',
+    ),
+  );
+  return Uint8Array.from(Buffer.concat(chunks));
+}
+
+const PDF_PASSWORD_PADDING = Buffer.from(
+  '28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE6453697A',
+  'hex',
+);
+
+function paddedPassword(value: string): Buffer {
+  return Buffer.concat([Buffer.from(value, 'latin1'), PDF_PASSWORD_PADDING]).subarray(0, 32);
+}
+
+function md5(value: Uint8Array): Buffer {
+  // eslint-disable-next-line sonarjs/hashing -- Test-only PDF R2 fixtures require the legacy Standard Security Handler algorithm.
+  return createHash('md5').update(value).digest();
+}
+
+function rc4(key: Uint8Array, value: Uint8Array): Buffer {
+  const state = Uint8Array.from({ length: 256 }, (_unused, index) => index);
+  let right = 0;
+  for (let left = 0; left < state.length; left += 1) {
+    right = (right + requiredByte(state, left) + requiredByte(key, left % key.length)) & 0xff;
+    swapBytes(state, left, right);
+  }
+  const output = Buffer.alloc(value.byteLength);
+  let left = 0;
+  right = 0;
+  for (const [index, byte] of value.entries()) {
+    left = (left + 1) & 0xff;
+    right = (right + requiredByte(state, left)) & 0xff;
+    swapBytes(state, left, right);
+    output[index] =
+      byte ^ requiredByte(state, (requiredByte(state, left) + requiredByte(state, right)) & 0xff);
+  }
+  return output;
+}
+
+function requiredByte(bytes: Uint8Array, index: number): number {
+  const value = bytes[index];
+  if (value === undefined) throw new Error(`Missing byte at ${index}.`);
+  return value;
+}
+
+function swapBytes(bytes: Uint8Array, left: number, right: number): void {
+  const value = requiredByte(bytes, left);
+  bytes[left] = requiredByte(bytes, right);
+  bytes[right] = value;
+}
+
 function drawPage(page: PDFPage, font: PDFFont, heading: string, body: string): void {
   page.drawText(heading, { color: rgb(0.1, 0.1, 0.1), font, size: 20, x: 54, y: 724 });
   page.drawText(body, {
@@ -191,6 +416,51 @@ async function longTextFixture(): Promise<Uint8Array> {
       `Repeated long-document marker ${String(pageNumber).padStart(3, '0')}. ` +
         'This page exists to exercise distant navigation and bounded rendering.',
     );
+  }
+  return document.save({ addDefaultPage: false, useObjectStreams: false });
+}
+
+async function highAnnotationFixture(): Promise<Uint8Array> {
+  const { document, font } = await createDocument('Deterministic high annotation fixture');
+  for (let pageNumber = 1; pageNumber <= 100; pageNumber += 1) {
+    const page = document.addPage(PAGE_SIZE);
+    drawPage(
+      page,
+      font,
+      `Annotation fixture page ${pageNumber} of 100`,
+      'Ten rows by ten columns provide deterministic native highlight records.',
+    );
+    const annotations: PDFRef[] = [];
+    for (let localIndex = 0; localIndex < 100; localIndex += 1) {
+      const annotationNumber = (pageNumber - 1) * 100 + localIndex;
+      const column = localIndex % 10;
+      const row = Math.floor(localIndex / 10);
+      const left = 54 + column * 50;
+      const bottom = 560 - row * 28;
+      const right = left + 42;
+      const top = bottom + 14;
+      const color = annotationNumber % 2 === 0 ? [1, 0.831, 0] : [0.18, 0.659, 0.898];
+      annotations.push(
+        document.context.register(
+          document.context.obj({
+            Type: 'Annot',
+            Subtype: 'Highlight',
+            Rect: [left - 1, bottom - 1, right + 1, top + 1],
+            QuadPoints: [left, top, right, top, left, bottom, right, bottom],
+            C: color,
+            CA: 0.75,
+            Contents: PDFHexString.fromText(
+              `Annotation ${annotationNumber.toString().padStart(5, '0')} #topic-${annotationNumber % 25} [[Topic ${annotationNumber % 100}]]`,
+            ),
+            T: PDFHexString.fromText('Abyss Documents'),
+            NM: PDFHexString.fromText(`high-annotation-${annotationNumber}`),
+            M: 'D:20260101000000Z',
+            P: page.ref,
+          }),
+        ),
+      );
+    }
+    page.node.set(PDFName.of('Annots'), document.context.obj(annotations));
   }
   return document.save({ addDefaultPage: false, useObjectStreams: false });
 }

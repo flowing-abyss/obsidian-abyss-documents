@@ -9,6 +9,7 @@ import type {
   WriteCapability,
 } from '../../document-core/save-coordinator.js';
 import { SaveConflictError, tokensEqual } from '../../document-core/save-coordinator.js';
+import { beginReaderTimedOperation } from '../../reader-performance.js';
 
 type BinaryVault = Pick<Vault, 'getFileByPath' | 'readBinary' | 'modifyBinary'>;
 
@@ -130,7 +131,7 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
         cause: new Error('The explicitly restored PDF differs from the last verified copy.'),
       });
     }
-    await verifyPdf(Uint8Array.from(readback), new AbortController().signal);
+    await verifyPdf(readback, new AbortController().signal);
     return actual;
   }
 
@@ -200,6 +201,7 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
     request: PdfWriteRequest,
     preimage: Uint8Array,
   ): Promise<void> {
+    const finishWrite = beginReaderTimedOperation('annotation-write');
     try {
       await this.vault.modifyBinary(file, exactArrayBuffer(request.bytes));
     } catch (cause) {
@@ -214,6 +216,8 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
           cause,
         }),
       );
+    } finally {
+      finishWrite();
     }
   }
 
@@ -284,7 +288,7 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
     verified: { readonly readback: Uint8Array; readonly token: BaseToken },
   ): Promise<void> {
     try {
-      await request.verifyPdf(Uint8Array.from(verified.readback), new AbortController().signal);
+      await request.verifyPdf(verified.readback, new AbortController().signal);
     } catch (cause) {
       await this.failAfterPossibleMutation(
         file,
@@ -314,7 +318,7 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
       const currentToken = await baseTokenFor(current, file.stat.mtime);
       const preimageToken = await baseTokenFor(authority.preimage, file.stat.mtime);
       if (contentTokensEqual(currentToken, preimageToken)) {
-        await request.verifyPdf(Uint8Array.from(current), recoverySignal);
+        await request.verifyPdf(current, recoverySignal);
         throw new RestoredPreimage();
       }
       const attemptedToken = await baseTokenFor(request.bytes, file.stat.mtime);
@@ -328,7 +332,7 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
       if (expected.sha256 !== actual.sha256 || expected.byteSize !== actual.byteSize) {
         throw new Error('The restored PDF preimage did not match readback.');
       }
-      await request.verifyPdf(Uint8Array.from(readback), recoverySignal);
+      await request.verifyPdf(readback, recoverySignal);
     } catch (restoreCause) {
       if (restoreCause instanceof RestoredPreimage) {
         throw reconciled(failure, true);
@@ -389,6 +393,12 @@ function digestInput(bytes: Uint8Array): ArrayBuffer {
 }
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength
+  )
+    return bytes.buffer;
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 

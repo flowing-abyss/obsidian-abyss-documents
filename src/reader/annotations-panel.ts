@@ -1,9 +1,12 @@
 import { setIcon } from 'obsidian';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation } from '../document-core/document.js';
-import { ownerWindow } from './owner-dom.js';
+import { maximizeReaderCounter, recordReaderPerformanceSample } from '../reader-performance.js';
+import { ownerWindow, type ReaderOwnerWindow } from './owner-dom.js';
 
-const MAX_CARDS = 80;
+const MAX_CARDS = 48;
+const MAX_COLOR_FACETS = 16;
+const MAX_TAG_FACETS = 48;
 const ESTIMATED_CARD_HEIGHT = 112;
 const SCROLL_OVERSCAN = 10;
 const HEIGHT_EPSILON = 0.5;
@@ -30,7 +33,13 @@ export class AnnotationsPanel {
   private readonly status: HTMLElement;
   private readonly query: HTMLInputElement;
   private readonly colors: HTMLElement;
+  private readonly colorSearch: HTMLInputElement;
+  private readonly colorRows: HTMLElement;
   private readonly tags: HTMLDetailsElement;
+  private readonly tagSearch: HTMLInputElement;
+  private readonly tagRows: HTMLElement;
+  private displayTags: ReadonlyArray<readonly [string, string]> = [];
+  private displayColors: readonly string[] = [];
   private annotations: readonly DocumentAnnotation[] = [];
   private filtered: readonly DocumentAnnotation[] = [];
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
@@ -52,6 +61,15 @@ export class AnnotationsPanel {
   };
   private readonly onResize = (): void => {
     if (!this.destroyed) this.invalidateMeasurements(true);
+  };
+  private readonly onTagsToggle = (): void => {
+    if (!this.destroyed) this.renderTagFacets();
+  };
+  private readonly onTagSearchInput = (): void => {
+    if (!this.destroyed) this.renderTagRows();
+  };
+  private readonly onColorSearchInput = (): void => {
+    if (!this.destroyed) this.renderColorRows();
   };
   private readonly onDocumentFocusIn = (event: FocusEvent): void => {
     const target = event.target;
@@ -78,16 +96,15 @@ export class AnnotationsPanel {
     this.query.placeholder = 'Filter annotations';
     this.query.setAttribute('aria-label', 'Filter annotations');
     this.query.dataset['annotationSearch'] = '';
-    this.colors = owner.createDiv();
-    this.colors.className = 'abyss-annotation-colors';
-    this.colors.setAttribute('aria-label', 'Annotation colors');
+    const colorControls = createColorFacetControls(owner);
+    this.colors = colorControls.colors;
+    this.colorSearch = colorControls.search;
+    this.colorRows = colorControls.rows;
     controls.append(this.query, this.colors);
-    this.tags = owner.createEl('details');
-    this.tags.className = 'abyss-annotation-tags';
-    this.tags.dataset['section'] = 'tags';
-    const summary = owner.createEl('summary');
-    summary.textContent = 'Tags';
-    this.tags.append(summary);
+    const tagControls = createTagFacetControls(owner);
+    this.tags = tagControls.tags;
+    this.tagSearch = tagControls.search;
+    this.tagRows = tagControls.rows;
     this.list = owner.createDiv();
     this.list.className = 'abyss-annotations-list';
     this.list.setAttribute('role', 'list');
@@ -102,6 +119,9 @@ export class AnnotationsPanel {
     this.root.removeEventListener('scroll', this.onScroll);
     ownerWindow(this.root).removeEventListener('resize', this.onResize);
     ownerWindow(this.root).document.removeEventListener('focusin', this.onDocumentFocusIn);
+    this.tags.removeEventListener('toggle', this.onTagsToggle);
+    this.tagSearch.removeEventListener('input', this.onTagSearchInput);
+    this.colorSearch.removeEventListener('input', this.onColorSearchInput);
     if (this.measurementFrame !== null) {
       ownerWindow(this.root).cancelAnimationFrame(this.measurementFrame);
       this.measurementFrame = null;
@@ -118,6 +138,9 @@ export class AnnotationsPanel {
     this.root.addEventListener('scroll', this.onScroll);
     ownerWindow(this.root).addEventListener('resize', this.onResize);
     ownerWindow(this.root).document.addEventListener('focusin', this.onDocumentFocusIn);
+    this.tags.addEventListener('toggle', this.onTagsToggle);
+    this.tagSearch.addEventListener('input', this.onTagSearchInput);
+    this.colorSearch.addEventListener('input', this.onColorSearchInput);
     this.query.addEventListener('input', () => {
       this.filter = { ...this.filter, query: this.query.value };
       this.resetVirtualScroll();
@@ -194,6 +217,7 @@ export class AnnotationsPanel {
   }
 
   private applyFilter(invalidateMeasurements = false): void {
+    const startedAt = ownerWindow(this.root).performance.now();
     if (invalidateMeasurements) this.clearMeasurements();
     const query = normalize(this.filter.query.trim());
     const colors = new Set(Array.from(this.filter.colors, normalize));
@@ -218,50 +242,97 @@ export class AnnotationsPanel {
     this.rebuildOffsets();
     this.windowStart = clampWindowStart(this.windowStart, this.filtered.length);
     this.render();
+    recordReaderPerformanceSample(
+      query.length === 0 ? 'annotationFilterMs' : 'annotationSearchMs',
+      ownerWindow(this.root).performance.now() - startedAt,
+    );
   }
 
   private renderFacets(): void {
-    this.colors.replaceChildren();
-    const colorValues = Array.from(
+    this.displayColors = Array.from(
       new Set(
         this.annotations.flatMap((annotation) =>
           annotation.color === null ? [] : [annotation.color],
         ),
       ),
     ).sort((left, right) => left.localeCompare(right));
-    for (const color of colorValues) {
+    this.renderColorFacets();
+
+    const displayTags = new Map<string, string>();
+    for (const annotation of this.annotations)
+      for (const tag of annotation.tags) displayTags.set(normalize(tag), tag);
+    this.displayTags = Array.from(displayTags.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+    this.renderTagFacets();
+  }
+
+  private renderColorFacets(): void {
+    this.colorSearch.hidden = this.displayColors.length <= MAX_COLOR_FACETS;
+    this.renderColorRows();
+  }
+
+  private renderColorRows(): void {
+    this.colorRows.replaceChildren();
+    const query = normalize(this.colorSearch.value.trim());
+    const selected = new Set(Array.from(this.filter.colors, normalize));
+    const matching = this.displayColors.filter(
+      (color) => query.length === 0 || normalize(color).includes(query),
+    );
+    const visible = [
+      ...this.displayColors.filter((color) => selected.has(normalize(color))),
+      ...matching.filter((color) => !selected.has(normalize(color))),
+    ].slice(0, MAX_COLOR_FACETS);
+    for (const color of visible) {
       const label = ownerWindow(this.root).createEl('label');
+      label.dataset['annotationColorRow'] = '';
       const input = ownerWindow(this.root).createEl('input');
       input.type = 'checkbox';
       input.dataset['annotationColor'] = color;
-      input.checked = this.filter.colors.has(color);
+      input.checked = selected.has(normalize(color));
       input.addEventListener('change', () => {
         const selected = new Set(this.filter.colors);
+        const previous = Array.from(selected).find(
+          (candidate) => normalize(candidate) === normalize(color),
+        );
         if (input.checked) selected.add(color);
-        else selected.delete(color);
+        else if (previous !== undefined) selected.delete(previous);
         this.filter = { ...this.filter, colors: selected };
         this.resetVirtualScroll();
         this.applyFilter(true);
       });
       label.append(input, this.options.colorMeanings?.[color] ?? color);
-      this.colors.append(label);
+      this.colorRows.append(label);
     }
+    this.recordPanelDomMaximum();
+  }
 
-    this.tags.querySelectorAll('[data-annotation-tag-row]').forEach((row) => {
-      row.remove();
-    });
-    const displayTags = new Map<string, string>();
-    for (const annotation of this.annotations)
-      for (const tag of annotation.tags) displayTags.set(normalize(tag), tag);
-    for (const [key, display] of Array.from(displayTags.entries()).sort((a, b) =>
-      a[1].localeCompare(b[1]),
-    )) {
+  private renderTagFacets(): void {
+    this.tagSearch.hidden = !this.tags.open || this.displayTags.length <= MAX_TAG_FACETS;
+    if (!this.tags.open) {
+      this.tagRows.replaceChildren();
+      return;
+    }
+    this.renderTagRows();
+  }
+
+  private renderTagRows(): void {
+    this.tagRows.replaceChildren();
+    const query = normalize(this.tagSearch.value.trim());
+    const selected = new Set(Array.from(this.filter.tags, normalize));
+    const matching = this.displayTags.filter(
+      ([key, display]) =>
+        query.length === 0 || key.includes(query) || normalize(display).includes(query),
+    );
+    const visible = [
+      ...this.displayTags.filter(([key]) => selected.has(key)),
+      ...matching.filter(([key]) => !selected.has(key)),
+    ].slice(0, MAX_TAG_FACETS);
+    for (const [key, display] of visible) {
       const label = ownerWindow(this.root).createEl('label');
       label.dataset['annotationTagRow'] = '';
       const input = ownerWindow(this.root).createEl('input');
       input.type = 'checkbox';
       input.dataset['annotationTag'] = key;
-      input.checked = Array.from(this.filter.tags, normalize).includes(key);
+      input.checked = selected.has(key);
       input.addEventListener('change', () => {
         const selected = new Set(this.filter.tags);
         const previous = Array.from(selected).find((tag) => normalize(tag) === key);
@@ -272,8 +343,9 @@ export class AnnotationsPanel {
         this.applyFilter(true);
       });
       label.append(input, `#${display}`);
-      this.tags.append(label);
+      this.tagRows.append(label);
     }
+    this.recordPanelDomMaximum();
   }
 
   private render(): void {
@@ -293,6 +365,11 @@ export class AnnotationsPanel {
       this.list.append(empty);
     }
     this.restoreFocusedRow(focusedRowId);
+    maximizeReaderCounter(
+      'maxAnnotationCards',
+      this.list.querySelectorAll('.abyss-annotation-card').length,
+    );
+    this.recordPanelDomMaximum();
     this.scheduleMeasurement();
   }
 
@@ -303,6 +380,10 @@ export class AnnotationsPanel {
     spacer.setAttribute('aria-hidden', 'true');
     spacer.style.height = `${height}px`;
     return spacer;
+  }
+
+  private recordPanelDomMaximum(): void {
+    maximizeReaderCounter('maxAnnotationPanelNodes', this.root.querySelectorAll('*').length);
   }
 
   private card(annotation: DocumentAnnotation, index: number): HTMLElement {
@@ -577,6 +658,48 @@ export class AnnotationsPanel {
     if (focusedIndex >= start + MAX_CARDS) start = focusedIndex - MAX_CARDS + 1;
     return clampWindowStart(start, this.filtered.length);
   }
+}
+
+function createColorFacetControls(owner: ReaderOwnerWindow): {
+  readonly colors: HTMLElement;
+  readonly rows: HTMLElement;
+  readonly search: HTMLInputElement;
+} {
+  const colors = owner.createDiv();
+  colors.className = 'abyss-annotation-colors';
+  colors.setAttribute('aria-label', 'Annotation colors');
+  const search = owner.createEl('input');
+  search.type = 'search';
+  search.placeholder = 'Filter colors';
+  search.setAttribute('aria-label', 'Filter annotation colors');
+  search.dataset['annotationColorSearch'] = '';
+  search.hidden = true;
+  const rows = owner.createDiv();
+  rows.className = 'abyss-annotation-color-rows';
+  colors.append(search, rows);
+  return { colors, rows, search };
+}
+
+function createTagFacetControls(owner: ReaderOwnerWindow): {
+  readonly rows: HTMLElement;
+  readonly search: HTMLInputElement;
+  readonly tags: HTMLDetailsElement;
+} {
+  const tags = owner.createEl('details');
+  tags.className = 'abyss-annotation-tags';
+  tags.dataset['section'] = 'tags';
+  const summary = owner.createEl('summary');
+  summary.textContent = 'Tags';
+  const search = owner.createEl('input');
+  search.type = 'search';
+  search.placeholder = 'Filter tags';
+  search.setAttribute('aria-label', 'Filter annotation tags');
+  search.dataset['annotationTagSearch'] = '';
+  search.hidden = true;
+  const rows = owner.createDiv();
+  rows.className = 'abyss-annotation-tag-rows';
+  tags.append(summary, search, rows);
+  return { rows, search, tags };
 }
 
 function measuredCardHeight(card: HTMLElement): number {

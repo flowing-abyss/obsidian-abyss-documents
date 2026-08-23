@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   assertLocalOnlyBundle,
+  assertNoProductionPdfLibImports,
   prepareSmokeVault,
   stageCommunityPackage,
 } from './smoke-community-package.mjs';
@@ -17,6 +18,24 @@ afterEach(async () => {
 });
 
 describe('stageCommunityPackage', () => {
+  it('rejects a production source graph that imports the fixture-only pdf-lib dependency', () => {
+    expect(() => {
+      assertNoProductionPdfLibImports({
+        'src/main.ts': "import { PDFDocument } from 'pdf-lib';",
+      });
+    }).toThrow('pdf-lib');
+    expect(() => {
+      assertNoProductionPdfLibImports({
+        'src/main.ts': "import('pdf-lib');",
+      });
+    }).toThrow('pdf-lib');
+    expect(() => {
+      assertNoProductionPdfLibImports({
+        'src/main.ts': "import type { PDFDocumentProxy } from 'pdfjs-dist';",
+      });
+    }).not.toThrow();
+  });
+
   it('copies only the three files delivered by the Community installer', async () => {
     const source = await mkdtemp(path.join(tmpdir(), 'abyss-package-source-'));
     const destination = await mkdtemp(path.join(tmpdir(), 'abyss-package-destination-'));
@@ -35,18 +54,24 @@ describe('stageCommunityPackage', () => {
     expect(await readdir(destination)).toEqual(['main.js', 'manifest.json', 'styles.css']);
   });
 
-  it('prepares the minimum Obsidian vault configuration required by the real-app harness', async () => {
-    const vault = await mkdtemp(path.join(tmpdir(), 'abyss-package-vault-'));
-    temporaryDirectories.push(vault);
+  it(
+    'prepares the minimum Obsidian vault configuration required by the real-app harness',
+    {
+      timeout: 15_000,
+    },
+    async () => {
+      const vault = await mkdtemp(path.join(tmpdir(), 'abyss-package-vault-'));
+      temporaryDirectories.push(vault);
 
-    await prepareSmokeVault(vault);
+      await prepareSmokeVault(vault);
 
-    expect(await readFile(path.join(vault, '.obsidian', 'app.json'), 'utf8')).toBe('{}\n');
-    expect(await readFile(path.join(vault, '.obsidian', 'community-plugins.json'), 'utf8')).toBe(
-      '[]\n',
-    );
-    expect(await readdir(path.join(vault, 'Documents'))).toContain('text-12-pages.pdf');
-  });
+      expect(await readFile(path.join(vault, '.obsidian', 'app.json'), 'utf8')).toBe('{}\n');
+      expect(await readFile(path.join(vault, '.obsidian', 'community-plugins.json'), 'utf8')).toBe(
+        '[]\n',
+      );
+      expect(await readdir(path.join(vault, 'Documents'))).toContain('text-12-pages.pdf');
+    },
+  );
 
   it('rejects packaged Node transport imports that renderer interception cannot observe', () => {
     expect(() => {

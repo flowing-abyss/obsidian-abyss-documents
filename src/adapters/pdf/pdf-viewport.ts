@@ -1,4 +1,5 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
+import annotationImageData from 'pdfjs-dist/web/images/annotation-assets?data-url-map';
 import type {
   DocumentLocation,
   DocumentViewport,
@@ -18,6 +19,7 @@ import {
   markReaderPerformanceOnce,
   maximizeReaderCounter,
 } from '../../reader-performance.js';
+import { replacePdfAnnotationImageSources } from './pdf-annotation-assets.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import { PdfAnnotationEditor } from './pdf-annotation-editor.js';
 import { PdfCommentBridge, type PdfJsCommentManagerRuntime } from './pdf-comment-bridge.js';
@@ -38,6 +40,8 @@ const MAX_SCALE = 25;
 const SCALE_DELTA = 1.1;
 const VERTICAL_PADDING = 5;
 const PDF_TO_CSS_UNITS = 96 / 72;
+const ANNOTATION_HIGHLIGHT_COLORS =
+  'yellow=#ffd400,red=#ff6666,green=#5fb236,blue=#2ea8e5,purple=#a28ae5,magenta=#e56eee,orange=#f19837,gray=#aaaaaa';
 
 type PdfEventBus = InstanceType<PdfRuntime['pdfjsViewer']['EventBus']>;
 type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
@@ -235,6 +239,7 @@ export class PdfDocumentViewport implements DocumentViewport {
         this.annotationCapabilities.readOnlyReason === null
           ? PDFJS_ANNOTATION_EDITOR_TYPE.NONE
           : PDFJS_ANNOTATION_EDITOR_TYPE.DISABLE,
+      annotationEditorHighlightColors: ANNOTATION_HIGHLIGHT_COLORS,
       enablePermissions: true,
       supportsPinchToZoom: true,
       maxCanvasPixels: MAX_CANVAS_PIXELS,
@@ -520,6 +525,12 @@ export class PdfDocumentViewport implements DocumentViewport {
       incrementReaderCounter('firstTextLayers');
       markReaderPerformanceOnce('first-text-layer');
       markReaderPerformance('text-layer');
+    });
+    this.bind('annotationlayerrendered', (event) => {
+      const pageNumber = positiveInteger(record(event)?.['pageNumber']);
+      if (pageNumber === null) return;
+      const page = this.pageElement(pageNumber);
+      if (page !== null) replacePdfAnnotationImageSources(page, annotationImageData);
     });
   }
 

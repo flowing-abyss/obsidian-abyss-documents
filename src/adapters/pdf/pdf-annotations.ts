@@ -9,6 +9,7 @@ import type {
   UtcTimestamp,
 } from '../../document-core/annotations.js';
 import { asAnnotationId, asUtcTimestamp } from '../../document-core/annotations.js';
+import { recordReaderPerformanceSample } from '../../reader-performance.js';
 
 type AnnotationBatch = (batch: readonly DocumentAnnotation[]) => void;
 
@@ -103,20 +104,31 @@ async function extractPageAnnotations(
   throwIfAborted(signal);
   const raw = (await page.getAnnotations({ intent: 'display' })) as PdfAnnotationData[];
   let batch: DocumentAnnotation[] = [];
+  let batchStartedAt = performance.now();
   for (const [index, annotation] of raw.entries()) {
     throwIfAborted(signal);
     batch.push(mapPdfAnnotation(annotation, page, pageNumber - 1, index));
     if (performance.now() < nextDeadline) continue;
-    onBatch(batch);
+    flushBatch(batch, onBatch, batchStartedAt);
     batch = [];
     await yieldToMainThread(signal);
-    nextDeadline = performance.now() + 50;
+    batchStartedAt = performance.now();
+    nextDeadline = batchStartedAt + 50;
   }
-  if (batch.length > 0) onBatch(batch);
+  if (batch.length > 0) flushBatch(batch, onBatch, batchStartedAt);
   throwIfAborted(signal);
   if (performance.now() < nextDeadline) return nextDeadline;
   await yieldToMainThread(signal);
   return performance.now() + 50;
+}
+
+function flushBatch(
+  batch: readonly DocumentAnnotation[],
+  onBatch: AnnotationBatch,
+  startedAt: number,
+): void {
+  onBatch(batch);
+  recordReaderPerformanceSample('extractionBatchMs', performance.now() - startedAt);
 }
 
 function mapPdfAnnotation(

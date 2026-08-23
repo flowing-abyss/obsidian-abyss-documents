@@ -38,6 +38,7 @@
     "scripts/**/*.ts",
     "tests/fixtures/**/*.mts",
     "tests/fixtures/**/*.ts",
+    "tests/mocks/**/*.ts",
     "tests/performance/**/*.ts"
   ]
 }

@@ -147,7 +147,7 @@ export class PdfDocumentAdapter implements DocumentAdapter {
     signal.throwIfAborted();
     const runtime = await this.runtimeLoader.load();
     signal.throwIfAborted();
-    const loadingTask = runtime.pdfjsLib.getDocument({ data: Uint8Array.from(bytes) });
+    const loadingTask = runtime.pdfjsLib.getDocument({ data: bytes });
     let pdf: PDFDocumentProxy | null = null;
     let primaryFailure: unknown;
     try {

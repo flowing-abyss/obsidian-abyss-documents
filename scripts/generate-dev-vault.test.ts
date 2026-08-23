@@ -27,33 +27,43 @@ afterEach(async () => {
 });
 
 describe('generateDevVault', () => {
-  it('recreates only managed fixture, config, and plugin paths while preserving vault data', async () => {
-    const repository = await temporaryRepository();
-    const vault = path.join(repository, 'dev-documents-vault');
-    await mkdir(path.join(vault, '.obsidian'), { recursive: true });
-    await writeFile(path.join(vault, 'keep-me.md'), 'user-owned');
-    await writeFile(path.join(vault, '.obsidian', 'keep-me.json'), '{}');
+  it(
+    'recreates only managed fixture, config, and plugin paths while preserving vault data',
+    {
+      timeout: 15_000,
+    },
+    async () => {
+      const repository = await temporaryRepository();
+      const vault = path.join(repository, 'dev-documents-vault');
+      await mkdir(path.join(vault, '.obsidian'), { recursive: true });
+      await writeFile(path.join(vault, 'keep-me.md'), 'user-owned');
+      await writeFile(path.join(vault, '.obsidian', 'keep-me.json'), '{}');
 
-    const result = await generateDevVault({ launch: false, repoRoot: repository });
+      const result = await generateDevVault({ launch: false, repoRoot: repository });
 
-    expect(result.vaultPath).toBe(vault);
-    expect(await readFile(path.join(vault, 'keep-me.md'), 'utf8')).toBe('user-owned');
-    expect(await readFile(path.join(vault, '.obsidian', 'keep-me.json'), 'utf8')).toBe('{}');
-    expect(await readdir(path.join(vault, '.obsidian', 'plugins', 'abyss-documents'))).toEqual([
-      'main.js',
-      'manifest.json',
-      'styles.css',
-    ]);
-    expect(await readdir(path.join(vault, 'Documents'))).toEqual([
-      'fixtures.v1.json',
-      'invalid.pdf',
-      'outline-20-pages.pdf',
-      'raster-heavy-24-pages.pdf',
-      'text-12-pages.pdf',
-      'text-700-pages.pdf',
-    ]);
-    expect(await readdir(path.join(repository, 'artifacts', 'manual-qa'))).toEqual([]);
-  });
+      expect(result.vaultPath).toBe(vault);
+      expect(await readFile(path.join(vault, 'keep-me.md'), 'utf8')).toBe('user-owned');
+      expect(await readFile(path.join(vault, '.obsidian', 'keep-me.json'), 'utf8')).toBe('{}');
+      expect(await readdir(path.join(vault, '.obsidian', 'plugins', 'abyss-documents'))).toEqual([
+        'main.js',
+        'manifest.json',
+        'styles.css',
+      ]);
+      expect(await readdir(path.join(vault, 'Documents'))).toEqual([
+        'annotation-qualification.pdf',
+        'annotations-10000.pdf',
+        'fixtures.v1.json',
+        'invalid.pdf',
+        'outline-20-pages.pdf',
+        'permission-restricted.pdf',
+        'raster-heavy-24-pages.pdf',
+        'signed-document.pdf',
+        'text-12-pages.pdf',
+        'text-700-pages.pdf',
+      ]);
+      expect(await readdir(path.join(repository, 'artifacts', 'manual-qa'))).toEqual([]);
+    },
+  );
 
   it('adds one exact vault registry entry without changing existing global configuration', async () => {
     const repository = await temporaryRepository();

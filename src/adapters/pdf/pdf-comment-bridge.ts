@@ -67,8 +67,8 @@ export interface PdfJsCommentManagerRuntime {
   ): Promise<void>;
   showSidebar(annotations: readonly unknown[]): void;
   toggleCommentPopup(
-    editor: PdfCommentEditor,
-    isSelected: boolean,
+    editor: PdfCommentEditor | null,
+    isSelected?: boolean,
     visibility?: boolean,
     isEditable?: boolean,
   ): void;
@@ -138,11 +138,15 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   toggleCommentPopup(
-    editor: PdfCommentEditor,
-    isSelected: boolean,
+    editor: PdfCommentEditor | null,
+    isSelected = false,
     visibility?: boolean,
     isEditable = true,
   ): void {
+    if (editor === null) {
+      this.destroyPopup();
+      return;
+    }
     if (!isSelected && this.popupSelected) return;
     const nextVisibility = this.resolvePopupVisibility(editor, isSelected, visibility);
     if (!nextVisibility) {
@@ -150,13 +154,16 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       return;
     }
     this.activatePopupSource(editor, isSelected);
-    const rect = popupAnchor(editor)?.getBoundingClientRect();
     this.openPassivePopup(editor, {
       isEditable,
       isSelected,
-      x: rect?.x ?? 0,
-      y: rect?.bottom ?? 0,
+      ...this.popupPosition(editor),
     });
+  }
+
+  private popupPosition(editor: PdfCommentEditor): { readonly x: number; readonly y: number } {
+    const rect = popupAnchor(editor)?.getBoundingClientRect();
+    return { x: rect?.x ?? 0, y: rect?.bottom ?? 0 };
   }
 
   destroyPopup(): void {

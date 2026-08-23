@@ -49,18 +49,18 @@ describe('PdfEditableSession', () => {
     expect([...prepared.bytes]).toEqual([1, 2, 3, 4]);
   });
 
-  it('retains one copied PDF.js snapshot for retry after modified state reset', async () => {
+  it('retains one owned PDF.js snapshot for retry after modified state reset', async () => {
     const native = editor();
     const session = new PdfEditableSession('Books/Guide.pdf', baseToken, native.bridge);
     native.dirty();
 
     const first = await session.prepare(1, new AbortController().signal);
     native.reset();
-    native.savedBytes[0] = 99;
-    first.bytes[0] = 88;
     const retry = await session.prepare(1, new AbortController().signal);
 
     expect(retry).toBe(first);
+    expect(retry.bytes).toBe(first.bytes);
+    expect(first.bytes).toBe(native.savedBytes);
     expect(native.save).toHaveBeenCalledOnce();
     expect(retry.bytes[0]).toBe(1);
   });

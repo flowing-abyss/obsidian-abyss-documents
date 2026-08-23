@@ -1,5 +1,10 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../../reader-performance.js';
 import { PdfAnnotationEditor, type PdfAnnotationToolOptions } from './pdf-annotation-editor.js';
 
 type Listener = (event: unknown) => void;
@@ -189,10 +194,10 @@ describe('PdfAnnotationEditor lifecycle', () => {
       ['highlight-thickness', 12],
       ['highlight-free', true],
     ] as const;
-    for (const [parameter, value] of parameters) editor.setParameter(parameter, value);
-    editor.undo();
-    editor.redo();
-    editor.deleteSelection();
+    for (const [parameter, value] of parameters) await editor.setParameter(parameter, value);
+    await editor.undo();
+    await editor.redo();
+    await editor.deleteSelection();
 
     expect(changedModes).toEqual([9, 3, 0]);
     expect(uiManager.updateParams.mock.calls).toEqual([
@@ -325,6 +330,214 @@ describe('PdfAnnotationEditor lifecycle', () => {
 });
 
 describe('PdfAnnotationEditor save boundary', () => {
+  it.each(['parameter', 'undo', 'redo', 'delete'] as const)(
+    'defers %s mutations until the active PDF.js snapshot has settled',
+    async (mutation) => {
+      const fixtureValue = fixture();
+      const pending = deferred<Uint8Array<ArrayBuffer>>();
+      const uiManager = manager();
+      const dirty = vi.fn();
+      fixtureValue.editor.onDirty(dirty);
+      uiManager.updateParams.mockImplementation(() => {
+        fixtureValue.annotationStorage.onSetModified?.();
+      });
+      uiManager.undo.mockImplementation(() => {
+        fixtureValue.annotationStorage.onSetModified?.();
+      });
+      uiManager.redo.mockImplementation(() => {
+        fixtureValue.annotationStorage.onSetModified?.();
+      });
+      uiManager.delete.mockImplementation(() => {
+        fixtureValue.annotationStorage.onSetModified?.();
+      });
+      fixtureValue.saveDocument.mockReturnValue(pending.promise);
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      const saving = fixtureValue.editor.save(new AbortController().signal);
+      await vi.waitFor(() => {
+        expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+      });
+
+      let mutationPromise: Promise<void>;
+      switch (mutation) {
+        case 'parameter':
+          mutationPromise = fixtureValue.editor.setParameter('highlight-color', '#ffee00');
+          break;
+        case 'undo':
+          mutationPromise = fixtureValue.editor.undo();
+          break;
+        case 'redo':
+          mutationPromise = fixtureValue.editor.redo();
+          break;
+        case 'delete':
+          mutationPromise = fixtureValue.editor.deleteSelection();
+          break;
+      }
+      let mutationSettled = false;
+      const mutationOutcome = mutationPromise.finally(() => {
+        mutationSettled = true;
+      });
+      await Promise.resolve();
+      expect(uiManager.updateParams).not.toHaveBeenCalled();
+      expect(uiManager.undo).not.toHaveBeenCalled();
+      expect(uiManager.redo).not.toHaveBeenCalled();
+      expect(uiManager.delete).not.toHaveBeenCalled();
+      expect(dirty).not.toHaveBeenCalled();
+      expect(mutationSettled).toBe(false);
+
+      pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+      await Promise.all([saving, mutationOutcome]);
+
+      const expected = {
+        parameter: [uiManager.updateParams, [31, '#ffee00']],
+        undo: [uiManager.undo, []],
+        redo: [uiManager.redo, []],
+        delete: [uiManager.delete, []],
+      } as const;
+      const [operation, argumentsValue] = expected[mutation];
+      expect(operation).toHaveBeenCalledOnce();
+      expect(operation).toHaveBeenCalledWith(...argumentsValue);
+      expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+    },
+  );
+
+  it('replays deferred native mutations in user order after byte capture', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const uiManager = manager();
+    const calls: string[] = [];
+    uiManager.updateParams.mockImplementation(() => calls.push('parameter'));
+    uiManager.undo.mockImplementation(() => calls.push('undo'));
+    uiManager.redo.mockImplementation(() => calls.push('redo'));
+    uiManager.delete.mockImplementation(() => calls.push('delete'));
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    const mutations = [
+      fixtureValue.editor.setParameter('ink-thickness', 5),
+      fixtureValue.editor.undo(),
+      fixtureValue.editor.redo(),
+      fixtureValue.editor.deleteSelection(),
+    ];
+    expect(calls).toEqual([]);
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await Promise.all([saving, ...mutations]);
+    expect(calls).toEqual(['parameter', 'undo', 'redo', 'delete']);
+  });
+
+  it('rejects a deferred mutation instead of replaying it into a replacement manager', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const originalManager = manager();
+    const replacementManager = manager();
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: originalManager,
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+    const mutation = fixtureValue.editor.undo();
+    const rejectedMutation = expect(mutation).rejects.toMatchObject({ name: 'AbortError' });
+
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: replacementManager,
+    });
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await rejectedMutation;
+    await expect(saving).rejects.toMatchObject({ name: 'InvalidStateError' });
+    expect(originalManager.undo).not.toHaveBeenCalled();
+    expect(replacementManager.undo).not.toHaveBeenCalled();
+  });
+
+  it('queues the latest tool intent while native bytes are being captured', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    await fixtureValue.editor.setTool('highlight');
+    fixtureValue.modeRequests.splice(0);
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+    const toolChange = fixtureValue.editor.setTool('freetext');
+    const toolOutcome = toolChange.then(
+      () => 'resolved',
+      (cause: unknown) => cause,
+    );
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await expect(saving).resolves.toHaveLength(3);
+    await expect(toolOutcome).resolves.toBe('resolved');
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(3);
+    expect(fixtureValue.modeRequests).toEqual([{ mode: 0 }, { mode: 3 }]);
+  });
+
+  it('drains and coalesces tool intents that arrive while the save tool is restoring', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    fixtureValue.viewer.currentMode = 9;
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 0 }]);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+    const firstTool = fixtureValue.editor.setTool('freetext');
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests[fixtureValue.modeRequests.length - 1]).toEqual({ mode: 3 });
+    });
+    const latestTool = fixtureValue.editor.setTool('ink');
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 3,
+    });
+
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests[fixtureValue.modeRequests.length - 1]).toEqual({ mode: 15 });
+    });
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 15,
+    });
+    await expect(saving).resolves.toHaveLength(3);
+    await expect(firstTool).resolves.toBeUndefined();
+    await expect(latestTool).resolves.toBeUndefined();
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(15);
+  });
+
   it('pauses the selected native tool only while PDF.js captures bytes and restores it afterward', async () => {
     const fixtureValue = fixture();
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
@@ -360,7 +573,7 @@ describe('PdfAnnotationEditor save boundary', () => {
     expect(fixtureValue.viewer.annotationEditorMode).toBe(9);
   });
 
-  it('ends the current edit, calls saveDocument once, and copies returned bytes', async () => {
+  it('ends the current edit and takes ownership of the full-span PDF.js bytes without copying', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
     const upstream = new Uint8Array([37, 80, 68, 70, 45, 49]);
@@ -375,7 +588,7 @@ describe('PdfAnnotationEditor save boundary', () => {
     expect(uiManager.endCurrentEditing).toHaveBeenCalledOnce();
     expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
     expect(saved).toEqual(upstream);
-    expect(saved).not.toBe(upstream);
+    expect(saved).toBe(upstream);
   });
 
   it('forwards the PDF.js modified reset before resolving saved bytes', async () => {
@@ -436,6 +649,8 @@ describe('PdfAnnotationEditor save boundary', () => {
   });
 
   it('rejects a concurrent save while preserving the active save', async () => {
+    beginPluginActivation();
+    endPluginActivation();
     const fixtureValue = fixture();
     const pending = deferred<Uint8Array<ArrayBuffer>>();
     fixtureValue.saveDocument.mockReturnValue(pending.promise);
@@ -452,6 +667,7 @@ describe('PdfAnnotationEditor save boundary', () => {
 
     await expect(firstSave).resolves.toHaveLength(3);
     expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    expect(readerPerformanceSnapshot().counters.maxConcurrentSerializations).toBe(1);
   });
 
   it('rejects cancellation that occurs while saveDocument is pending', async () => {

@@ -4,6 +4,7 @@ import { builtinModules } from 'node:module';
 import { gzipSync } from 'node:zlib';
 import process from 'process';
 import { createBuildStylesPlugin } from './scripts/build-styles-plugin.mjs';
+import { createPdfjsAnnotationAssetsPlugin } from './scripts/pdfjs-annotation-assets-plugin.mjs';
 import { createPdfjsViewerPlugin } from './scripts/pdfjs-viewer-plugin.mjs';
 
 // Shared with release-check.mjs, which re-checks the same threshold against an
@@ -26,6 +27,7 @@ const prod = args.includes('production');
 const analyze = args.includes('analyze');
 
 const buildStylesPlugin = createBuildStylesPlugin();
+const pdfjsAnnotationAssetsPlugin = createPdfjsAnnotationAssetsPlugin();
 const pdfjsViewerPlugin = createPdfjsViewerPlugin();
 
 const gzipBase64Plugin = {
@@ -90,7 +92,13 @@ const context = await esbuild.context({
   outfile: 'main.js',
   minify: prod,
   metafile: prod || analyze,
-  plugins: [buildStylesPlugin, pdfjsViewerPlugin, gzipBase64Plugin, nosourcemapPlugin],
+  plugins: [
+    buildStylesPlugin,
+    pdfjsViewerPlugin,
+    pdfjsAnnotationAssetsPlugin,
+    gzipBase64Plugin,
+    nosourcemapPlugin,
+  ],
 });
 
 if (prod) {

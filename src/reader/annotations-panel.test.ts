@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import { asAnnotationId } from '../document-core/annotations.js';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../reader-performance.js';
 import { AnnotationsPanel } from './annotations-panel.js';
 import { ownerWindow } from './owner-dom.js';
 
@@ -75,7 +80,7 @@ describe('AnnotationsPanel', () => {
     panel.root.dispatchEvent(new Event('scroll'));
     const firstMiddle = Number(panel.visibleIds()[0]?.slice('annotation-'.length));
     expect(Math.abs(firstMiddle - target)).toBeLessThanOrEqual(50);
-    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
 
     const anchoredId = panel.visibleIds()[10];
     frames.shift()?.(1);
@@ -95,7 +100,7 @@ describe('AnnotationsPanel', () => {
     expect(owner.document.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-10');
     frames.shift()?.(2);
     expect(owner.document.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-10');
-    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
     frames.shift()?.(3);
 
     const outside = owner.createEl('button');
@@ -134,20 +139,29 @@ describe('AnnotationsPanel', () => {
     expect(panel.visibleIds()).toContain('annotation-50');
   });
 
-  it('keeps a 10,000-item virtual list at 80 cards or fewer and filters metadata', () => {
+  it('keeps a 10,000-item virtual list at 48 cards or fewer and filters metadata', () => {
+    beginPluginActivation();
+    endPluginActivation();
     const root = createDiv();
     const onNavigate = vi.fn();
     const panel = new AnnotationsPanel(root, { onNavigate });
     panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
 
-    expect(root.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+    expect(root.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
     panel.setFilter({ query: 'concept', colors: new Set(['#ffd400']), tags: new Set(['theory']) });
     expect(panel.visibleIds().slice(0, 3)).toEqual([
       'annotation-0',
       'annotation-2',
       'annotation-4',
     ]);
-    expect(root.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+    expect(root.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
+    expect(readerPerformanceSnapshot()).toMatchObject({
+      counters: { maxAnnotationCards: 48 },
+      samples: {
+        annotationFilterMs: [expect.any(Number)],
+        annotationSearchMs: [expect.any(Number)],
+      },
+    });
   });
 
   it('moves its bounded virtual window on scroll, resize, filters, and page sync', () => {
@@ -164,12 +178,12 @@ describe('AnnotationsPanel', () => {
     expect(middleIds[0]).not.toBe('annotation-0');
     expect(middleIds.some((id) => id === 'annotation-5000')).toBe(true);
     expect(host.querySelectorAll('.abyss-annotation-card')).toHaveLength(middleIds.length);
-    expect(middleIds.length).toBeLessThanOrEqual(80);
+    expect(middleIds.length).toBeLessThanOrEqual(48);
 
     panel.root.scrollTop = Number.MAX_SAFE_INTEGER;
     panel.root.dispatchEvent(new Event('scroll'));
     expect(panel.visibleIds()).toContain('annotation-9999');
-    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(80);
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
 
     ownerWindow(panel.root).dispatchEvent(new Event('resize'));
     expect(panel.visibleIds()).toContain('annotation-9999');
@@ -215,7 +229,12 @@ describe('AnnotationsPanel', () => {
     color.checked = true;
     color.dispatchEvent(new Event('change', { bubbles: true }));
     expect(panel.visibleIds()).toEqual(['annotation-0']);
-    expect(root.querySelector<HTMLDetailsElement>('[data-section="tags"]')?.open).toBe(false);
+    const tagSection = root.querySelector<HTMLDetailsElement>('[data-section="tags"]');
+    expect(tagSection?.open).toBe(false);
+    expect(root.querySelector('[data-annotation-tag-row]')).toBeNull();
+    if (tagSection === null) throw new Error('Expected Tags section.');
+    tagSection.open = true;
+    tagSection.dispatchEvent(new Event('toggle'));
     const tag = root.querySelector<HTMLInputElement>('[data-annotation-tag="theory"]');
     if (tag === null) throw new Error('Expected Theory tag filter.');
     tag.checked = true;
@@ -224,6 +243,62 @@ describe('AnnotationsPanel', () => {
     tag.checked = false;
     tag.dispatchEvent(new Event('change', { bubbles: true }));
     expect(panel.visibleIds()).toEqual(['annotation-0']);
+  });
+
+  it('keeps unique tag facets bounded and finds a late tag on demand', () => {
+    beginPluginActivation();
+    endPluginActivation();
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(
+      Array.from({ length: 10_000 }, (_, index) =>
+        annotation(index, { tags: [`Unique-${String(index).padStart(5, '0')}`] }),
+      ),
+    );
+    const tagSection = root.querySelector<HTMLDetailsElement>('[data-section="tags"]');
+    if (tagSection === null) throw new Error('Expected Tags section.');
+    expect(root.querySelectorAll('[data-annotation-tag-row]')).toHaveLength(0);
+
+    tagSection.open = true;
+    tagSection.dispatchEvent(new Event('toggle'));
+    expect(root.querySelectorAll('[data-annotation-tag-row]').length).toBeLessThanOrEqual(48);
+    const search = root.querySelector<HTMLInputElement>('[data-annotation-tag-search]');
+    if (search === null) throw new Error('Expected tag search for a high-cardinality facet.');
+    search.value = 'unique-09999';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    const lateTag = root.querySelector<HTMLInputElement>('[data-annotation-tag="unique-09999"]');
+    if (lateTag === null) throw new Error('Expected the searched late tag.');
+    lateTag.checked = true;
+    lateTag.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(panel.visibleIds()).toEqual(['annotation-9999']);
+    expect(root.querySelectorAll('[data-annotation-tag-row]').length).toBeLessThanOrEqual(48);
+    expect(readerPerformanceSnapshot().counters.maxAnnotationPanelNodes).toBeLessThanOrEqual(1_024);
+  });
+
+  it('keeps imported color facets bounded and finds a late color on demand', () => {
+    beginPluginActivation();
+    endPluginActivation();
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(
+      Array.from({ length: 10_000 }, (_, index) =>
+        annotation(index, { color: `#${index.toString(16).padStart(6, '0')}` }),
+      ),
+    );
+    expect(root.querySelectorAll('[data-annotation-color-row]').length).toBeLessThanOrEqual(16);
+    const search = root.querySelector<HTMLInputElement>('[data-annotation-color-search]');
+    if (search === null) throw new Error('Expected color search for a high-cardinality facet.');
+    search.value = '#00270f';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    const lateColor = root.querySelector<HTMLInputElement>('[data-annotation-color="#00270f"]');
+    if (lateColor === null) throw new Error('Expected the searched late color.');
+    lateColor.checked = true;
+    lateColor.dispatchEvent(new Event('change', { bubbles: true }));
+
+    expect(panel.visibleIds()).toEqual(['annotation-9999']);
+    expect(root.querySelectorAll('[data-annotation-color-row]').length).toBeLessThanOrEqual(16);
+    expect(readerPerformanceSnapshot().counters.maxAnnotationPanelNodes).toBeLessThanOrEqual(1_024);
   });
 
   it('renders color meanings, starts Tags collapsed, supports arrows, and syncs current page', () => {

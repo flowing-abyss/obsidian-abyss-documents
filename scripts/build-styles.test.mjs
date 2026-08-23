@@ -70,6 +70,16 @@ describe('PDF.js style build', () => {
     expect(output).not.toContain('.abyss-documents :root');
   });
 
+  it('leaves PDF.js module-global editor metrics to lifecycle-managed runtime styles', async () => {
+    const output = await readFile('styles.css', 'utf8');
+    const root = postcss.parse(output);
+    const declarations = topLevelDeclarations(root, ':root:has(.abyss-documents)');
+
+    expect(declarations).toEqual({});
+    expect(output).not.toContain(':root:has(.abyss-documents)');
+    expect(() => assertScopedSelectors(output)).not.toThrow();
+  });
+
   it('keeps production messageBar and text-layer nesting intact with no relative assets', async () => {
     const output = await readFile('styles.css', 'utf8');
     const root = postcss.parse(output);

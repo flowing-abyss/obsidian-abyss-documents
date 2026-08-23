@@ -223,6 +223,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
         textLayerMode: number;
         annotationMode: number;
         annotationEditorMode: number;
+        annotationEditorHighlightColors?: string;
         enablePermissions: boolean;
         supportsPinchToZoom: boolean;
         maxCanvasPixels: number;
@@ -386,6 +387,8 @@ describe('PdfDocumentViewport', () => {
       textLayerMode: 1,
       annotationMode: 2,
       annotationEditorMode: 0,
+      annotationEditorHighlightColors:
+        'yellow=#ffd400,red=#ff6666,green=#5fb236,blue=#2ea8e5,purple=#a28ae5,magenta=#e56eee,orange=#f19837,gray=#aaaaaa',
       enablePermissions: true,
       supportsPinchToZoom: true,
       maxCanvasPixels: 16_777_216,
@@ -408,6 +411,11 @@ describe('PdfDocumentViewport', () => {
     fixture.runtime.state.eventBus?.dispatch('pagerendered', { pageNumber: 1 });
     fixture.runtime.state.eventBus?.dispatch('textlayerrendered', { pageNumber: 2 });
     fixture.runtime.state.eventBus?.dispatch('pagerendered', { pageNumber: 2 });
+    const annotationImage = createEl('img');
+    annotationImage.src = 'annotation-comment.svg';
+    fixture.host.querySelector<HTMLElement>('.page[data-page-number="1"]')?.append(annotationImage);
+    fixture.runtime.state.eventBus?.dispatch('annotationlayerrendered', { pageNumber: 1 });
+    expect(annotationImage.src).toBe('data:image/svg+xml;base64,Y29tbWVudA==');
     const marks = readerPerformanceSnapshot().marks.map(({ name }) => name);
     expect(marks).toEqual(expect.arrayContaining(['first-text-layer', 'first-usable-page']));
     expect(marks.filter((name) => name === 'text-layer')).toHaveLength(2);
@@ -823,15 +831,15 @@ describe('PdfDocumentViewport', () => {
 
     await expect(editor.setTool('ink')).rejects.toThrow('not ready');
     expect(() => {
-      editor.setParameter('ink-thickness', 3);
+      editor.setParameter('ink-thickness', 3).catch(() => undefined);
     }).toThrow('not ready');
     expect(() => {
-      editor.undo();
+      editor.undo().catch(() => undefined);
     }).toThrow('not ready');
     await expect(editor.save(new AbortController().signal)).rejects.toThrow('not ready');
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: retiredManager });
     expect(() => {
-      editor.redo();
+      editor.redo().catch(() => undefined);
     }).toThrow('not ready');
 
     const replacementManager = annotationManager();
@@ -839,7 +847,7 @@ describe('PdfDocumentViewport', () => {
       source: viewer,
       uiManager: replacementManager,
     });
-    editor.setParameter('ink-thickness', 5);
+    await editor.setParameter('ink-thickness', 5);
 
     expect(replacementManager.updateParams).toHaveBeenCalledWith(22, 5);
   });
@@ -909,14 +917,14 @@ describe('PdfDocumentViewport', () => {
 
       eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: retiredManager });
       expect(() => {
-        editor.undo();
+        editor.undo().catch(() => undefined);
       }).toThrow('not ready');
       const replacementManager = annotationManager();
       eventBus.dispatch('annotationeditoruimanager', {
         source: viewer,
         uiManager: replacementManager,
       });
-      editor.undo();
+      await editor.undo();
       await fixture.viewport.destroy();
       eventBus.dispatch('annotationeditoruimanager', {
         source: viewer,

@@ -88,6 +88,24 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     host.remove();
   });
 
+  it('treats the null popup source used by PDF.js mode teardown as an idempotent clear', () => {
+    const host = document.body.createDiv();
+    const bridge = new PdfCommentBridge(host);
+    const native = editor('Selected');
+    const states = vi.fn();
+    native.setCommentButtonStates = states;
+    bridge.toggleCommentPopup(native, true, true);
+    bridge.destroyPopup();
+
+    expect(() => {
+      bridge.toggleCommentPopup(null);
+    }).not.toThrow();
+    expect(bridge.dialogElement.hidden).toBe(true);
+    expect(states).toHaveBeenLastCalledWith({ hasPopup: false, selected: false });
+    bridge.dispose();
+    host.remove();
+  });
+
   it('restores the editor value on cancel and deletes through native PDF.js comment history', async () => {
     const host = document.body.createDiv();
     const bridge = new PdfCommentBridge(host);

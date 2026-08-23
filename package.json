@@ -32,6 +32,8 @@
     "test:e2e:android": "pnpm dev:vault -- --no-launch && wdio run tests/e2e/wdio.mobile.conf.mts",
     "test:package": "pnpm run build && tsx scripts/smoke-community-package.mts",
     "benchmark:reader": "pnpm dev:vault -- --no-launch && tsx scripts/benchmark-reader.mts",
+    "benchmark:annotations": "tsx scripts/benchmark-annotations.mts",
+    "benchmark:annotations:android": "tsx scripts/benchmark-annotations.mts --platform=android",
     "deadcode": "knip",
     "arch": "depcruise src --config dependency-cruiser.config.cjs --output-type err-long",
     "release:check": "node release-check.mjs",

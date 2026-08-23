@@ -1,4 +1,5 @@
 export interface ReaderOwnerWindow extends Window {
+  readonly CustomEvent: typeof CustomEvent;
   readonly Element: typeof Element;
   readonly Event: typeof Event;
   readonly HTMLElement: typeof HTMLElement;

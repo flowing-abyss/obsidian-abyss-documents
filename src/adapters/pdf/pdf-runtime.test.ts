@@ -4,7 +4,7 @@ import {
   endPluginActivation,
   readerPerformanceSnapshot,
 } from '../../reader-performance.js';
-import { PdfRuntimeLoader } from './pdf-runtime.js';
+import { installPdfEditorDocumentMetrics, PdfRuntimeLoader } from './pdf-runtime.js';
 
 const PDFJS_VERSION = '6.2.108';
 const WORKER_PAYLOAD = btoa('compressed worker');
@@ -71,6 +71,26 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('PDF.js document editor metrics', () => {
+  it('installs module-global metrics before a pop-out-first editor and restores prior values', () => {
+    const root = document.documentElement;
+    root.setCssProps({ '--outline-width': '7px' });
+
+    const restore = installPdfEditorDocumentMetrics(document);
+
+    expect(root.style.getPropertyValue('--outline-width')).toBe('2px');
+    expect(root.style.getPropertyPriority('--outline-width')).toBe('');
+    expect(root.style.getPropertyValue('--freetext-padding')).toBe('2px');
+
+    restore();
+
+    expect(root.style.getPropertyValue('--outline-width')).toBe('7px');
+    expect(root.style.getPropertyPriority('--outline-width')).toBe('');
+    expect(root.style.getPropertyValue('--freetext-padding')).toBe('');
+    root.setCssProps({ '--outline-width': '' });
+  });
+});
+
 describe('PdfRuntimeLoader', () => {
   it('loads the packaged runtime through the default import boundary', async () => {
     const { createObjectURL } = stubWorkerUrls();
@@ -126,6 +146,31 @@ describe('PdfRuntimeLoader', () => {
 
     expect(importRuntime).toHaveBeenCalledTimes(2);
     loader.dispose();
+  });
+
+  it('recovers when worker URL allocation reports renderer memory pressure', async () => {
+    const activeUrls = new Set<string>();
+    const createObjectURL = vi
+      .fn<() => string>()
+      .mockImplementationOnce(() => {
+        throw new DOMException('Renderer allocation pressure.', 'QuotaExceededError');
+      })
+      .mockImplementationOnce(() => {
+        activeUrls.add('blob:pdf-worker-retry');
+        return 'blob:pdf-worker-retry';
+      });
+    vi.stubGlobal('URL', {
+      createObjectURL,
+      revokeObjectURL: vi.fn((url: string) => activeUrls.delete(url)),
+    });
+    const loader = new PdfRuntimeLoader(async () => runtimeDependencies());
+
+    await expect(loader.load()).rejects.toMatchObject({ name: 'QuotaExceededError' });
+    await expect(loader.load()).resolves.toMatchObject({ version: PDFJS_VERSION });
+
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    loader.dispose();
+    expect(activeUrls).toHaveLength(0);
   });
 
   it('revokes a worker URL created after dispose wins an in-flight race', async () => {

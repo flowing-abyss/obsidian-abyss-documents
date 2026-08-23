@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DocumentOpenError } from '../document-core/errors.js';
 import type { AnnotationHrefReference } from './annotation-transfer.js';
 import {
+  ANNOTATION_LINK_RESOLVED_EVENT,
   AbyssDocumentView,
   DOCUMENT_VIEW_TYPE,
   type ReaderViewController,
@@ -40,7 +41,7 @@ function controller() {
   const searchDocument = vi.fn();
   const refreshReadingSettings = vi.fn();
   const saveDocument = vi.fn(async () => undefined);
-  const resolveAnnotationLink = vi.fn(async (_reference: AnnotationHrefReference) => undefined);
+  const resolveAnnotationLink = vi.fn(async (_reference: AnnotationHrefReference) => true);
   const reader: ReaderViewController = {
     open,
     close,
@@ -82,6 +83,35 @@ describe('AbyssDocumentView', () => {
 
     fixture.view.setEphemeralState({ subpath: '#annotation=x&page=0&fingerprint=y' });
     expect(reader.resolveAnnotationLink).toHaveBeenCalledOnce();
+  });
+
+  it('acknowledges only a successfully resolved annotation link with its exact path and subpath', async () => {
+    const reader = controller();
+    const fixture = viewFixture(reader.reader);
+    const subpath = '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
+    const resolved = vi.fn();
+    const dispatchEvent = vi.spyOn(fixture.view.contentEl, 'dispatchEvent');
+    fixture.view.contentEl.ownerDocument.body.append(fixture.view.contentEl);
+    fixture.view.contentEl.ownerDocument.addEventListener(ANNOTATION_LINK_RESOLVED_EVENT, resolved);
+    reader.resolveAnnotationLink.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    await fixture.view.setState({ file: fixture.file.path, subpath }, { history: false });
+    await fixture.view.onLoadFile(fixture.file);
+    expect(resolved).not.toHaveBeenCalled();
+
+    fixture.view.setEphemeralState({ subpath });
+    await vi.waitFor(() => {
+      expect(reader.resolveAnnotationLink).toHaveBeenCalledTimes(2);
+      expect(dispatchEvent).toHaveBeenCalledOnce();
+      expect(resolved).toHaveBeenCalledOnce();
+    });
+    const event = resolved.mock.calls[0]?.[0] as CustomEvent<unknown> | undefined;
+    expect(event?.detail).toEqual({ path: fixture.file.path, subpath });
+    fixture.view.contentEl.ownerDocument.removeEventListener(
+      ANNOTATION_LINK_RESOLVED_EVENT,
+      resolved,
+    );
+    fixture.view.contentEl.remove();
   });
   it('identifies the PDF document view and uses the current basename as its title', async () => {
     const fixture = viewFixture(controller().reader);

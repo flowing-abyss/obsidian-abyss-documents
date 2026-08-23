@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -13,6 +13,31 @@ const EXTERNAL_REQUIRE = /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/gu;
 const OBSIDIAN_REQUIRE_ALIAS =
   /(?<![\w$])([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*['"]obsidian['"]\s*\)/gu;
 const OBSIDIAN_TRANSPORT_PROPERTY = 'request(?:Url)?';
+const PDF_LIB_MODULE_LITERAL = /(?:'pdf-lib'|"pdf-lib")/u;
+
+export function assertNoProductionPdfLibImports(sources: Readonly<Record<string, string>>): void {
+  for (const [file, source] of Object.entries(sources)) {
+    if (PDF_LIB_MODULE_LITERAL.test(source)) {
+      throw new Error(
+        `Production source ${file} imports fixture-only pdf-lib; native PDF editing must remain PDF.js-only.`,
+      );
+    }
+  }
+}
+
+async function verifyProductionSourceGraph(repoRoot: string): Promise<void> {
+  const sourceRoot = path.join(repoRoot, 'src');
+  const files = (await readdir(sourceRoot, { recursive: true })).filter((file) =>
+    /\.(?:ts|mts|js|mjs)$/u.test(file),
+  );
+  const sources = await Promise.all(
+    files.map(async (file): Promise<readonly [string, string]> => [
+      path.join('src', file),
+      await readFile(path.join(sourceRoot, file), 'utf8'),
+    ]),
+  );
+  assertNoProductionPdfLibImports(Object.fromEntries(sources));
+}
 
 export function assertLocalOnlyBundle(source: string): void {
   const match = NODE_NETWORK_TRANSPORT.exec(source);
@@ -95,6 +120,7 @@ async function main(): Promise<void> {
   const vaultDirectory = path.join(temporaryRoot, 'vault');
   const pluginDirectory = path.join(vaultDirectory, '.obsidian', 'plugins', 'abyss-documents');
   try {
+    await verifyProductionSourceGraph(repoRoot);
     await prepareSmokeVault(vaultDirectory);
     const staged = await stageCommunityPackage(repoRoot, pluginDirectory);
     await run(

@@ -3,6 +3,16 @@ import { parseAnnotationHref, type AnnotationHrefReference } from './annotation-
 import { ownerWindow } from './owner-dom.js';
 
 export const DOCUMENT_VIEW_TYPE = 'abyss-document-view';
+export const ANNOTATION_LINK_RESOLVED_EVENT = 'abyss-documents:annotation-link-resolved';
+
+declare global {
+  interface DocumentEventMap {
+    'abyss-documents:annotation-link-resolved': CustomEvent<{
+      path: string;
+      subpath: string;
+    }>;
+  }
+}
 
 export interface ReaderViewController {
   open(file: TFile, host: HTMLElement): Promise<void>;
@@ -10,7 +20,7 @@ export interface ReaderViewController {
   showOutline(): void;
   searchDocument(): void;
   refreshReadingSettings(): void;
-  resolveAnnotationLink(reference: AnnotationHrefReference): Promise<void>;
+  resolveAnnotationLink(reference: AnnotationHrefReference): Promise<boolean>;
   saveDocument(): Promise<void>;
 }
 
@@ -22,7 +32,10 @@ export class AbyssDocumentView extends FileView {
   private readonly controller: ReaderViewController;
   private loadGeneration = 0;
   private lastOpenFailureNoticeKey: string | null = null;
-  private pendingAnnotationReference: AnnotationHrefReference | null = null;
+  private pendingAnnotationReference: {
+    reference: AnnotationHrefReference;
+    subpath: string;
+  } | null = null;
 
   constructor(leaf: WorkspaceLeaf, services: AbyssDocumentViewServices) {
     super(leaf);
@@ -146,14 +159,23 @@ export class AbyssDocumentView extends FileView {
     if (typeof state !== 'object' || state === null) return;
     const subpath = (state as Record<string, unknown>)['subpath'];
     if (typeof subpath !== 'string') return;
-    this.pendingAnnotationReference = parseAnnotationHref(subpath);
+    const reference = parseAnnotationHref(subpath);
+    this.pendingAnnotationReference = reference === null ? null : { reference, subpath };
   }
 
   private async resolvePendingAnnotation(): Promise<void> {
-    const reference = this.pendingAnnotationReference;
-    if (reference === null || this.file === null) return;
+    const pending = this.pendingAnnotationReference;
+    const file = this.file;
+    const generation = this.loadGeneration;
+    if (pending === null || file === null) return;
     this.pendingAnnotationReference = null;
-    await this.controller.resolveAnnotationLink(reference);
+    const resolved = await this.controller.resolveAnnotationLink(pending.reference);
+    if (!resolved || generation !== this.loadGeneration || file !== this.file) return;
+    const event = new (ownerWindow(this.contentEl).CustomEvent)(ANNOTATION_LINK_RESOLVED_EVENT, {
+      bubbles: true,
+      detail: { path: file.path, subpath: pending.subpath },
+    });
+    this.contentEl.dispatchEvent(event);
   }
 
   private renderOpenFailure(reason: string): void {

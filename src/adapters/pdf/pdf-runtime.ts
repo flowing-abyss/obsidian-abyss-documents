@@ -8,6 +8,31 @@ import {
 } from '../../reader-performance.js';
 
 const PDFJS_VERSION = '6.2.108';
+const PDF_EDITOR_DOCUMENT_METRICS = {
+  '--freetext-padding': '2px',
+  '--outline-width': '2px',
+} as const;
+
+export function installPdfEditorDocumentMetrics(ownerDocument: Document): () => void {
+  const root = ownerDocument.documentElement;
+  const previous = Object.entries(PDF_EDITOR_DOCUMENT_METRICS).map(([name]) => ({
+    name,
+    priority: root.style.getPropertyPriority(name),
+    value: root.style.getPropertyValue(name),
+  }));
+  for (const [name, value] of Object.entries(PDF_EDITOR_DOCUMENT_METRICS)) {
+    root.style.setProperty(name, value);
+  }
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    for (const property of previous) {
+      if (property.value.length === 0) root.style.removeProperty(property.name);
+      else root.style.setProperty(property.name, property.value, property.priority);
+    }
+  };
+}
 
 export const PDFJS_ANNOTATION_EDITOR_TYPE = Object.freeze({
   DISABLE: -1,

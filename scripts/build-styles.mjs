@@ -11,6 +11,11 @@ const GENERATED_HEADER = `/*
  * Source: pdfjs-dist/web/pdf_viewer.css and src/styles/*.css.
  */\n`;
 const SCOPE_SELECTOR = '.abyss-documents';
+const PDFJS_STATIC_ROOT_SELECTOR = ':root:has(.abyss-documents)';
+const PDFJS_STATIC_ROOT_METRICS = new Map([
+  ['--freetext-padding', '2px'],
+  ['--outline-width', '2px'],
+]);
 const PDFJS_STYLES_PATH = 'node_modules/pdfjs-dist/web/pdf_viewer.css';
 const READER_STYLES_PATH = 'src/styles/reader.css';
 const SETTINGS_STYLES_PATH = 'src/styles/settings.css';
@@ -39,11 +44,27 @@ export function assertScopedSelectors(css) {
   root.walkRules((rule) => {
     if (isKeyframeStep(rule) || isNestedRule(rule)) return;
     for (const selector of rule.selectors) {
+      if (selector.trim() === PDFJS_STATIC_ROOT_SELECTOR) {
+        assertStaticRootMetrics(rule);
+        continue;
+      }
       if (!selector.trimStart().startsWith(SCOPE_SELECTOR)) {
         throw rule.error(`Unscoped selector: ${selector}`);
       }
     }
   });
+}
+
+function assertStaticRootMetrics(rule) {
+  if (rule.selectors.length !== 1) throw rule.error('PDF.js root metrics must use one selector.');
+  const declarations = new Map();
+  rule.walkDecls((declaration) => declarations.set(declaration.prop, declaration.value));
+  if (
+    declarations.size !== PDFJS_STATIC_ROOT_METRICS.size ||
+    [...PDFJS_STATIC_ROOT_METRICS].some(([property, value]) => declarations.get(property) !== value)
+  ) {
+    throw rule.error('PDF.js root metrics may expose only the required static values.');
+  }
 }
 
 export function assertNoRelativeUrls(css) {
