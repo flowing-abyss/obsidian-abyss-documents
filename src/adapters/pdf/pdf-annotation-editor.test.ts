@@ -996,7 +996,7 @@ describe('PdfAnnotationEditor save boundary', () => {
     expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
   });
 
-  it.each(['rebind', 'destroy'] as const)(
+  it.each(['rebind', 'same-manager rebind', 'destroy'] as const)(
     'revalidates the prepared save before native work when the editor %s occurs in its continuation',
     async (lifecycle) => {
       const fixtureValue = fixture({ dispatchModeChanges: false });
@@ -1026,7 +1026,7 @@ describe('PdfAnnotationEditor save boundary', () => {
               else {
                 fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
                   source: fixtureValue.viewer,
-                  uiManager: manager(),
+                  uiManager: lifecycle === 'same-manager rebind' ? initialManager : manager(),
                 });
               }
             });

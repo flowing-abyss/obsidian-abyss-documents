@@ -128,6 +128,11 @@ interface QueuedMutation {
   readonly resolve: () => void;
 }
 
+interface PreparedSave {
+  readonly manager: PdfAnnotationUiManager;
+  readonly revision: number;
+}
+
 interface PendingSelectionTransaction {
   readonly armTimeout: () => void;
   readonly controller: AbortController;
@@ -350,9 +355,9 @@ export class PdfAnnotationEditor {
 
   async save(signal: AbortSignal): Promise<Uint8Array> {
     const prepared = this.prepareSave(signal);
-    const manager = prepared instanceof Promise ? await prepared : prepared;
+    const context = prepared instanceof Promise ? await prepared : prepared;
+    const { manager, revision } = context;
     const finishSerialization = beginReaderTimedOperation('annotation-serialization');
-    const revision = this.lifecycleRevision;
     let outcome: { bytes: Uint8Array | null; failure: Error | null } = {
       bytes: null,
       failure: null,
@@ -401,9 +406,7 @@ export class PdfAnnotationEditor {
     return outcome.bytes;
   }
 
-  private prepareSave(
-    signal: AbortSignal,
-  ): PdfAnnotationUiManager | Promise<PdfAnnotationUiManager> {
+  private prepareSave(signal: AbortSignal): PreparedSave | Promise<PreparedSave> {
     const manager = this.requireManager();
     const revision = this.lifecycleRevision;
     const pendingAbort = this.abortInteractionForSave();
@@ -419,12 +422,12 @@ export class PdfAnnotationEditor {
     manager: PdfAnnotationUiManager,
     revision: number,
     signal: AbortSignal,
-  ): PdfAnnotationUiManager {
+  ): PreparedSave {
     if (manager !== this.manager || revision !== this.lifecycleRevision || this.destroyed) {
       throw this.staleError();
     }
     this.beginSave(signal);
-    return manager;
+    return { manager, revision };
   }
 
   private abortInteractionForSave(): Promise<void> | null {
