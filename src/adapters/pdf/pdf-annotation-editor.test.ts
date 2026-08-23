@@ -996,6 +996,65 @@ describe('PdfAnnotationEditor save boundary', () => {
     expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
   });
 
+  it.each(['rebind', 'destroy'] as const)(
+    'revalidates the prepared save before native work when the editor %s occurs in its continuation',
+    async (lifecycle) => {
+      const fixtureValue = fixture({ dispatchModeChanges: false });
+      const initialManager = manager();
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager: initialManager,
+      });
+      const committing = fixtureValue.editor
+        .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+        .catch((cause: unknown) => cause);
+      fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+        source: fixtureValue.viewer,
+        mode: 9,
+      });
+      await vi.waitFor(() => {
+        expect(initialManager.highlightSelection).toHaveBeenCalledOnce();
+      });
+      const controller = new AbortController();
+      let lifecycleScheduled = false;
+      const signal: AbortSignal = {
+        get aborted() {
+          if (!lifecycleScheduled) {
+            lifecycleScheduled = true;
+            queueMicrotask(() => {
+              if (lifecycle === 'destroy') fixtureValue.editor.destroy();
+              else {
+                fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+                  source: fixtureValue.viewer,
+                  uiManager: manager(),
+                });
+              }
+            });
+          }
+          return controller.signal.aborted;
+        },
+        addEventListener: controller.signal.addEventListener.bind(controller.signal),
+        dispatchEvent: controller.signal.dispatchEvent.bind(controller.signal),
+        onabort: null,
+        reason: undefined,
+        removeEventListener: controller.signal.removeEventListener.bind(controller.signal),
+        throwIfAborted: controller.signal.throwIfAborted.bind(controller.signal),
+      };
+
+      const saving = fixtureValue.editor.save(signal);
+      fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+        source: fixtureValue.viewer,
+        mode: 0,
+      });
+
+      await expect(saving).rejects.toMatchObject({ name: 'InvalidStateError' });
+      await committing;
+      expect(lifecycleScheduled).toBe(true);
+      expect(initialManager.endCurrentEditing).not.toHaveBeenCalled();
+      expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['parameter', 'undo', 'redo', 'delete'] as const)(
     'defers %s mutations until the active PDF.js snapshot has settled',
     async (mutation) => {

@@ -258,6 +258,71 @@ describe('AnnotationPopover', () => {
     }
   });
 
+  it.each(['delete-comment', 'delete-annotation'] as const)(
+    'reports %s only after a successful mutation survives synchronous native teardown',
+    (action) => {
+      const host = document.body.createDiv();
+      const onClose = vi.fn();
+      const popover = new AnnotationPopover(host);
+      const mutate = vi.fn(() => {
+        popover.close(false, 'external');
+        host
+          .querySelector<HTMLTextAreaElement>('textarea')
+          ?.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+      });
+      popover.open({
+        comment: 'Delete me',
+        onChange: vi.fn(),
+        onClose,
+        onDeleteAnnotation: action === 'delete-annotation' ? mutate : vi.fn(),
+        onDeleteComment: action === 'delete-comment' ? mutate : vi.fn(),
+        x: 0,
+        y: 0,
+      });
+
+      host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
+
+      expect(mutate).toHaveBeenCalledOnce();
+      expect(onClose).toHaveBeenCalledExactlyOnceWith(action);
+      expect(popover.element.hidden).toBe(true);
+      popover.destroy();
+      host.remove();
+    },
+  );
+
+  it.each(['delete-comment', 'delete-annotation'] as const)(
+    'rolls back synchronous %s teardown when its native mutation fails',
+    (action) => {
+      const host = document.body.createDiv();
+      const onClose = vi.fn();
+      const popover = new AnnotationPopover(host);
+      const mutate = vi.fn(() => {
+        popover.close(false, 'external');
+        host
+          .querySelector<HTMLTextAreaElement>('textarea')
+          ?.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+        return false;
+      });
+      popover.open({
+        comment: 'Retry me',
+        onChange: vi.fn(),
+        onClose,
+        onDeleteAnnotation: action === 'delete-annotation' ? mutate : vi.fn(),
+        onDeleteComment: action === 'delete-comment' ? mutate : vi.fn(),
+        x: 0,
+        y: 0,
+      });
+
+      host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
+
+      expect(mutate).toHaveBeenCalledOnce();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(popover.element.hidden).toBe(false);
+      popover.destroy();
+      host.remove();
+    },
+  );
+
   it('closes a replaced comment exactly once as external', () => {
     const host = document.body.createDiv();
     const onClose = vi.fn();

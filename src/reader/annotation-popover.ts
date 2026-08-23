@@ -41,6 +41,7 @@ export class AnnotationPopover {
   private passiveEdit: (() => void) | null = null;
   private previousFocus: HTMLElement | null = null;
   private destroyed = false;
+  private mutationClose: AnnotationCommentCloseReason | null = null;
   private suggestionItems: readonly LinkSuggestion[] = [];
   private suggestionIndex = -1;
   private suggestionStart = -1;
@@ -183,6 +184,7 @@ export class AnnotationPopover {
   }
 
   close(restoreFocus = false, reason: AnnotationCommentCloseReason = 'external'): void {
+    if (this.mutationClose !== null) return;
     if (this.element.hidden) return;
     const request = this.active;
     this.element.hidden = true;
@@ -270,7 +272,14 @@ export class AnnotationPopover {
   }
 
   private commit(reason: AnnotationCommentCloseReason, action: () => boolean | void): void {
-    if (action() === false) return;
+    this.mutationClose = reason;
+    let succeeded = false;
+    try {
+      succeeded = action() !== false;
+    } finally {
+      this.mutationClose = null;
+    }
+    if (!succeeded) return;
     this.close(true, reason);
   }
 

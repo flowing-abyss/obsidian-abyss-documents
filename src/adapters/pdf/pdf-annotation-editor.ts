@@ -449,6 +449,7 @@ export class PdfAnnotationEditor {
     revision: number,
     signal: AbortSignal,
   ): Promise<number> {
+    this.requireCurrentSave(manager, revision, signal);
     manager.endCurrentEditing();
     this.requireCurrentSave(manager, revision, signal);
     const currentMode = this.dependencies.viewer.annotationEditorMode;
@@ -501,7 +502,9 @@ export class PdfAnnotationEditor {
     signal: AbortSignal,
   ): void {
     this.throwIfAborted(signal);
-    if (manager !== this.manager || revision !== this.lifecycleRevision) throw this.staleError();
+    if (manager !== this.manager || revision !== this.lifecycleRevision || this.destroyed) {
+      throw this.staleError();
+    }
   }
 
   detachFromDocument(): void {

@@ -665,6 +665,48 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     host.remove();
   });
 
+  it.each(['delete-comment', 'delete-annotation'] as const)(
+    'keeps a reserved %s transaction pending when the native mutation fails',
+    async (action) => {
+      const host = document.body.createDiv();
+      const native = editor('Original');
+      const manager = uiManager(native);
+      const cause = new Error('native deletion failed');
+      if (action === 'delete-comment') {
+        manager.deleteComment.mockImplementation(() => {
+          throw cause;
+        });
+      } else {
+        manager.delete.mockImplementation(() => {
+          throw cause;
+        });
+      }
+      const bridge = new PdfCommentBridge(host, { onFailure: vi.fn() });
+      const reservation = bridge.reserveNextDialog('');
+      let closeOutcome: string = 'pending';
+      void reservation.closed.then(
+        (reason) => {
+          closeOutcome = reason;
+        },
+        () => {
+          closeOutcome = 'rejected';
+        },
+      );
+      await bridge.showDialog(manager, native, 0, 0);
+      await reservation.opened;
+
+      host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
+      await Promise.resolve();
+
+      expect(closeOutcome).toBe('pending');
+      expect(bridge.dialogElement.hidden).toBe(false);
+      bridge.destroyPopup();
+      await expect(reservation.closed).resolves.toBe('external');
+      bridge.dispose();
+      host.remove();
+    },
+  );
+
   it('keeps unsupported comment sources editable without exposing annotation mutation', async () => {
     const host = document.body.createDiv();
     const bridge = new PdfCommentBridge(host);

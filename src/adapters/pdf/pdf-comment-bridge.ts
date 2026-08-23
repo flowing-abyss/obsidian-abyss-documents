@@ -215,13 +215,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
           });
         },
         onDeleteAnnotation: () => {
-          this.closeReservation(reservation, 'delete-annotation');
           return this.mutate('delete-annotation', () => {
             this.deleteAnnotation(manager, editor);
           });
         },
         onDeleteComment: () => {
-          this.closeReservation(reservation, 'delete-comment');
           return this.mutate('delete-comment', () => {
             this.deleteComment(manager, editor);
           });
