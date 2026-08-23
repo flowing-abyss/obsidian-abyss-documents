@@ -412,6 +412,85 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.annotationEditorMode).toBe(0);
   });
 
+  it('does not navigate before source-confirmed native NONE', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const interaction = fixture.viewport.annotationInteraction;
+    if (eventBus === undefined || viewer === undefined || interaction === null) {
+      throw new Error('Expected a mounted PDF annotation runtime.');
+    }
+    const uiManager = annotationManager();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    vi.spyOn(fixture.viewport.selectionObserver, 'validate').mockReturnValue('current');
+    const committing = interaction
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => cause);
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    let currentMode = viewer.annotationEditorMode;
+    Object.defineProperty(viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: () => currentMode,
+      set: (request: number | { readonly mode: number }) => {
+        currentMode = typeof request === 'number' ? request : request.mode;
+      },
+    });
+    const invalidate = vi.spyOn(fixture.viewport.selectionObserver, 'invalidate');
+    let navigated = false;
+
+    const navigating = fixture.viewport.goTo({ pageIndex: 1 }).finally(() => {
+      navigated = true;
+    });
+    await Promise.resolve();
+
+    expect(currentMode).toBe(0);
+    expect(navigated).toBe(false);
+    expect(invalidate).not.toHaveBeenCalled();
+    eventBus.dispatch('annotationeditormodechanged', { source: {}, mode: 0 });
+    await Promise.resolve();
+    expect(navigated).toBe(false);
+
+    eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
+
+    await navigating;
+    await expect(committing).resolves.toMatchObject({ name: 'AbortError' });
+    expect(invalidate).toHaveBeenCalledOnce();
+  });
+
+  it('stops navigation when neutral mode restoration fails', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const interaction = fixture.viewport.annotationInteraction;
+    if (eventBus === undefined || viewer === undefined || interaction === null) {
+      throw new Error('Expected a mounted PDF annotation runtime.');
+    }
+    const uiManager = annotationManager();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    vi.spyOn(fixture.viewport.selectionObserver, 'validate').mockReturnValue('current');
+    const committing = interaction
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => cause);
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    const failure = new Error('neutral mode setter failed before navigation');
+    Object.defineProperty(viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: () => 9,
+      set: () => {
+        throw failure;
+      },
+    });
+    const invalidate = vi.spyOn(fixture.viewport.selectionObserver, 'invalidate');
+
+    await expect(fixture.viewport.goTo({ pageIndex: 1 })).rejects.toBe(failure);
+    await expect(committing).resolves.toBe(failure);
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
   it('invalidates on rerender zoom layout navigation save and session change', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;

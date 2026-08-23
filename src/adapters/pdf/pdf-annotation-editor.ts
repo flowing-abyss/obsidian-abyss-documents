@@ -84,6 +84,7 @@ interface PdfAnnotationUiManager {
 }
 
 interface MutableAnnotationStorage {
+  onAnnotationEditor: ((type: number | null) => void) | null;
   onResetModified: (() => void) | null;
   onSetModified: (() => void) | null;
 }
@@ -99,8 +100,10 @@ interface PdfAnnotationEditorDependencies {
 }
 
 interface CallbackOwnership {
+  readonly ownedEditor: (type: number | null) => void;
   readonly ownedReset: () => void;
   readonly ownedSet: () => void;
+  readonly previousEditor: ((type: number | null) => void) | null;
   readonly previousReset: (() => void) | null;
   readonly previousSet: (() => void) | null;
 }
@@ -126,10 +129,12 @@ interface QueuedMutation {
 }
 
 interface PendingSelectionTransaction {
+  readonly armTimeout: () => void;
   readonly controller: AbortController;
   readonly clearTimeout: () => void;
-  readonly settled: ReturnType<typeof deferred<void>>;
   readonly removeExternalAbort: () => void;
+  restoration: Promise<void> | null;
+  readonly settled: ReturnType<typeof deferred<void>>;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -138,6 +143,7 @@ function record(value: unknown): Record<string, unknown> | null {
 
 export class PdfAnnotationEditor {
   private readonly dirtyListeners = new Set<(dirty: boolean) => void>();
+  private readonly editorAddedListeners = new Set<(type: number | null) => void>();
   private readonly modeListeners = new Set<(mode: PdfAnnotationLogicalMode) => void>();
   private readonly storage: MutableAnnotationStorage;
   private callbackOwnership: CallbackOwnership | null = null;
@@ -184,8 +190,8 @@ export class PdfAnnotationEditor {
     action: PdfSelectionAction,
     signal?: AbortSignal,
   ): Promise<'created' | 'dismissed'> {
-    const manager = this.requireManager();
     if (this.dependencies.selectionObserver.validate(token) === 'stale') return 'dismissed';
+    const manager = this.requireManager();
     if (this.logicalMode !== 'neutral') return 'dismissed';
     if (signal?.aborted === true) throw abortReason(signal);
     const transaction = this.beginSelectionTransaction(signal);
@@ -207,24 +213,9 @@ export class PdfAnnotationEditor {
         return 'dismissed';
       }
       if (action.kind === 'highlight') {
-        const dirty = deferred<void>();
-        const unsubscribe = this.onDirty((value) => {
-          if (value) dirty.resolve(undefined);
-        });
-        try {
-          manager.highlightSelection('abyss-selection');
-          await waitWithSignal(dirty.promise, transaction.controller.signal);
-        } finally {
-          unsubscribe();
-        }
+        await this.createSelectionHighlight(manager, transaction);
       } else {
-        const reservation = this.dependencies.commentBridge.reserveNextDialog(
-          action.seed,
-          transaction.controller.signal,
-        );
-        manager.commentSelection('abyss-selection');
-        await waitWithSignal(reservation.opened, transaction.controller.signal);
-        await waitWithSignal(reservation.closed, transaction.controller.signal);
+        await this.createSelectionComment(manager, action.seed, transaction);
       }
       await waitWithSignal(
         this.changeMode(this.dependencies.annotationEditorType.NONE),
@@ -232,11 +223,46 @@ export class PdfAnnotationEditor {
       );
       return 'created';
     } catch (cause) {
-      this.abortSelectionTransaction(asError(cause));
-      throw cause;
+      const failure = asError(cause);
+      await this.abortSelectionTransaction(failure);
+      throw failure;
     } finally {
       this.finishSelectionTransaction(transaction);
     }
+  }
+
+  private async createSelectionHighlight(
+    manager: PdfAnnotationUiManager,
+    transaction: PendingSelectionTransaction,
+  ): Promise<void> {
+    const created = deferred<void>();
+    const unsubscribe = this.onEditorAdded((type) => {
+      if (type === this.dependencies.annotationEditorType.HIGHLIGHT) {
+        created.resolve(undefined);
+      }
+    });
+    try {
+      manager.highlightSelection('abyss-selection');
+      await waitWithSignal(created.promise, transaction.controller.signal);
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  private async createSelectionComment(
+    manager: PdfAnnotationUiManager,
+    seed: '' | '[[' | '#',
+    transaction: PendingSelectionTransaction,
+  ): Promise<void> {
+    const reservation = this.dependencies.commentBridge.reserveNextDialog(
+      seed,
+      transaction.controller.signal,
+    );
+    manager.commentSelection('abyss-selection');
+    await waitWithSignal(reservation.opened, transaction.controller.signal);
+    transaction.clearTimeout();
+    await waitWithSignal(reservation.closed, transaction.controller.signal);
+    transaction.armTimeout();
   }
 
   async setQuickHighlight(state: {
@@ -254,8 +280,7 @@ export class PdfAnnotationEditor {
   async abortInteraction(message: string): Promise<void> {
     const transaction = this.pendingSelectionTransaction;
     if (transaction === null) return;
-    this.abortSelectionTransaction(new DOMException(message, 'AbortError'));
-    await transaction.settled.promise;
+    await this.abortAndWaitForTransaction(transaction, new DOMException(message, 'AbortError'));
   }
 
   private async changeMode(mode: number, options: PdfAnnotationToolOptions = {}): Promise<void> {
@@ -380,24 +405,35 @@ export class PdfAnnotationEditor {
     signal: AbortSignal,
   ): PdfAnnotationUiManager | Promise<PdfAnnotationUiManager> {
     const manager = this.requireManager();
+    const revision = this.lifecycleRevision;
     const pendingAbort = this.abortInteractionForSave();
     if (pendingAbort === null) {
-      this.beginSave(signal);
-      return manager;
+      return this.beginPreparedSave(manager, revision, signal);
     }
     return pendingAbort.then(() => {
-      this.beginSave(signal);
-      return manager;
+      return this.beginPreparedSave(manager, revision, signal);
     });
+  }
+
+  private beginPreparedSave(
+    manager: PdfAnnotationUiManager,
+    revision: number,
+    signal: AbortSignal,
+  ): PdfAnnotationUiManager {
+    if (manager !== this.manager || revision !== this.lifecycleRevision || this.destroyed) {
+      throw this.staleError();
+    }
+    this.beginSave(signal);
+    return manager;
   }
 
   private abortInteractionForSave(): Promise<void> | null {
     const pendingSelection = this.pendingSelectionTransaction;
     if (pendingSelection === null) return null;
-    this.abortSelectionTransaction(
+    return this.abortAndWaitForTransaction(
+      pendingSelection,
       new DOMException('Saving aborted the PDF annotation interaction.', 'AbortError'),
     );
-    return pendingSelection.settled.promise;
   }
 
   private beginSave(signal: AbortSignal): void {
@@ -470,12 +506,15 @@ export class PdfAnnotationEditor {
 
   detachFromDocument(): void {
     if (this.destroyed) return;
-    this.abortSelectionTransaction(
+    const transaction = this.pendingSelectionTransaction;
+    void this.abortSelectionTransaction(
       new DOMException('The PDF annotation interaction was detached.', 'AbortError'),
-    );
+    ).catch(() => undefined);
     this.managerEventsEnabled = false;
     this.lifecycleRevision += 1;
-    this.cancelPendingModeChange('The PDF annotation editor was detached from its document.');
+    if (transaction === null) {
+      this.cancelPendingModeChange('The PDF annotation editor was detached from its document.');
+    }
     this.cancelQueuedToolIntent('The PDF annotation editor was detached from its document.');
     this.cancelQueuedMutations();
     if (this.manager !== null) this.retiredManagers.add(this.manager);
@@ -489,19 +528,23 @@ export class PdfAnnotationEditor {
 
   destroy(): void {
     if (this.destroyed) return;
-    this.abortSelectionTransaction(
+    const transaction = this.pendingSelectionTransaction;
+    void this.abortSelectionTransaction(
       new DOMException('The PDF annotation interaction was destroyed.', 'AbortError'),
-    );
+    ).catch(() => undefined);
     this.destroyed = true;
     this.lifecycleRevision += 1;
     this.dependencies.eventBus.off('annotationeditoruimanager', this.onManager);
     this.dependencies.eventBus.off('annotationeditormodechanged', this.onNativeMode);
-    this.cancelPendingModeChange('The PDF annotation editor was destroyed.');
+    if (transaction === null) {
+      this.cancelPendingModeChange('The PDF annotation editor was destroyed.');
+    }
     this.cancelQueuedToolIntent('The PDF annotation editor was destroyed.');
     this.cancelQueuedMutations();
     this.restoreCallbacks();
     this.manager = null;
     this.dirtyListeners.clear();
+    this.editorAddedListeners.clear();
     this.modeListeners.clear();
   }
 
@@ -512,11 +555,14 @@ export class PdfAnnotationEditor {
     const manager = data['uiManager'];
     if (!this.isUiManager(manager)) return;
     if (this.retiredManagers.has(manager)) return;
-    this.abortSelectionTransaction(
+    const transaction = this.pendingSelectionTransaction;
+    void this.abortSelectionTransaction(
       new DOMException('The PDF annotation interaction was rebound.', 'AbortError'),
-    );
+    ).catch(() => undefined);
     this.lifecycleRevision += 1;
-    this.cancelPendingModeChange('The PDF annotation editor was rebound.');
+    if (transaction === null) {
+      this.cancelPendingModeChange('The PDF annotation editor was rebound.');
+    }
     this.cancelQueuedToolIntent('The PDF annotation editor was rebound.');
     this.cancelQueuedMutations();
     this.restoreCallbacks();
@@ -548,27 +594,35 @@ export class PdfAnnotationEditor {
     const controller = new AbortController();
     let timeoutId: number | null = null;
     const onExternalAbort = (): void => {
-      this.abortSelectionTransaction(signal === undefined ? undefined : abortReason(signal));
+      void this.abortSelectionTransaction(
+        signal === undefined ? undefined : abortReason(signal),
+      ).catch(() => undefined);
     };
     if (signal !== undefined) signal.addEventListener('abort', onExternalAbort, { once: true });
+    const clearTransactionTimeout = (): void => {
+      if (timeoutId === null) return;
+      window.clearTimeout(timeoutId);
+      timeoutId = null;
+    };
     const transaction: PendingSelectionTransaction = {
-      controller,
-      clearTimeout: () => {
-        if (timeoutId === null) return;
-        window.clearTimeout(timeoutId);
-        timeoutId = null;
+      armTimeout: () => {
+        clearTransactionTimeout();
+        timeoutId = window.setTimeout(() => {
+          void this.abortSelectionTransaction(
+            new DOMException('The PDF annotation interaction timed out.', 'TimeoutError'),
+          ).catch(() => undefined);
+        }, SELECTION_TRANSACTION_TIMEOUT_MS);
       },
+      controller,
+      clearTimeout: clearTransactionTimeout,
       settled: deferred<void>(),
       removeExternalAbort: () => {
         signal?.removeEventListener('abort', onExternalAbort);
       },
+      restoration: null,
     };
     this.pendingSelectionTransaction = transaction;
-    timeoutId = window.setTimeout(() => {
-      this.abortSelectionTransaction(
-        new DOMException('The PDF annotation interaction timed out.', 'TimeoutError'),
-      );
-    }, SELECTION_TRANSACTION_TIMEOUT_MS);
+    transaction.armTimeout();
     return transaction;
   }
 
@@ -579,28 +633,61 @@ export class PdfAnnotationEditor {
     transaction.settled.resolve(undefined);
   }
 
-  private abortSelectionTransaction(reason?: Error): void {
+  private abortSelectionTransaction(reason?: Error): Promise<void> {
     const transaction = this.pendingSelectionTransaction;
-    if (transaction === null || transaction.controller.signal.aborted) return;
+    if (transaction === null) return Promise.resolve();
+    if (transaction.restoration !== null) return transaction.restoration;
     const failure =
       reason ?? new DOMException('The PDF annotation interaction was cancelled.', 'AbortError');
     transaction.controller.abort(failure);
-    this.cancelPendingModeChange(failure.message);
+    transaction.clearTimeout();
+    transaction.restoration = this.restoreNeutralMode();
+    void transaction.restoration.catch(() => undefined);
+    return transaction.restoration;
+  }
+
+  private async abortAndWaitForTransaction(
+    transaction: PendingSelectionTransaction,
+    reason: Error,
+  ): Promise<void> {
+    let failure: Error | null = null;
     try {
-      if (
-        this.dependencies.viewer.annotationEditorMode !==
-        this.dependencies.annotationEditorType.NONE
-      ) {
-        this.dependencies.viewer.annotationEditorMode = {
-          mode: this.dependencies.annotationEditorType.NONE,
-        };
-      }
+      await this.abortSelectionTransaction(reason);
     } catch (cause) {
-      console.error('[abyss-documents] Failed to restore the PDF annotation editor mode', {
-        cause,
-      });
+      failure = asError(cause);
     }
-    this.setLogicalMode('neutral');
+    await transaction.settled.promise;
+    if (failure !== null) throw failure;
+  }
+
+  private restoreNeutralMode(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let timeoutId: number | null = window.setTimeout(() => {
+        const failure = new DOMException(
+          'Restoring the PDF annotation editor mode timed out.',
+          'TimeoutError',
+        );
+        reject(failure);
+        this.cancelPendingModeChange(failure.message);
+      }, SELECTION_TRANSACTION_TIMEOUT_MS);
+      const settle = (failure?: unknown): void => {
+        if (timeoutId === null) return;
+        window.clearTimeout(timeoutId);
+        timeoutId = null;
+        if (failure === undefined) {
+          this.setLogicalMode('neutral');
+          resolve();
+        } else reject(asError(failure));
+      };
+      this.changeMode(this.dependencies.annotationEditorType.NONE).then(
+        () => {
+          settle();
+        },
+        (cause: unknown) => {
+          settle(cause);
+        },
+      );
+    });
   }
 
   private logicalModeForNative(mode: number): PdfAnnotationLogicalMode {
@@ -613,8 +700,13 @@ export class PdfAnnotationEditor {
   }
 
   private ownCallbacks(): void {
+    const previousEditor = this.storage.onAnnotationEditor;
     const previousSet = this.storage.onSetModified;
     const previousReset = this.storage.onResetModified;
+    const ownedEditor = (type: number | null): void => {
+      previousEditor?.(type);
+      for (const listener of [...this.editorAddedListeners]) listener(type);
+    };
     const ownedSet = (): void => {
       previousSet?.();
       this.emitDirty(true);
@@ -623,7 +715,15 @@ export class PdfAnnotationEditor {
       previousReset?.();
       this.emitDirty(false);
     };
-    this.callbackOwnership = { ownedReset, ownedSet, previousReset, previousSet };
+    this.callbackOwnership = {
+      ownedEditor,
+      ownedReset,
+      ownedSet,
+      previousEditor,
+      previousReset,
+      previousSet,
+    };
+    this.storage.onAnnotationEditor = ownedEditor;
     this.storage.onSetModified = ownedSet;
     this.storage.onResetModified = ownedReset;
   }
@@ -632,6 +732,9 @@ export class PdfAnnotationEditor {
     const ownership = this.callbackOwnership;
     this.callbackOwnership = null;
     if (ownership === null) return;
+    if (this.storage.onAnnotationEditor === ownership.ownedEditor) {
+      this.storage.onAnnotationEditor = ownership.previousEditor;
+    }
     if (this.storage.onSetModified === ownership.ownedSet) {
       this.storage.onSetModified = ownership.previousSet;
     }
@@ -642,6 +745,13 @@ export class PdfAnnotationEditor {
 
   private emitDirty(dirty: boolean): void {
     for (const listener of [...this.dirtyListeners]) listener(dirty);
+  }
+
+  private onEditorAdded(listener: (type: number | null) => void): () => void {
+    this.editorAddedListeners.add(listener);
+    return () => {
+      this.editorAddedListeners.delete(listener);
+    };
   }
 
   private queueToolIntent(

@@ -29,6 +29,8 @@ class FakeEventBus {
 }
 
 interface MutableAnnotationStorage {
+  addEditor: ReturnType<typeof vi.fn<(type: number) => void>>;
+  onAnnotationEditor: ((type: number | null) => void) | null;
   onResetModified: (() => void) | null;
   onSetModified: (() => void) | null;
   resetModified: ReturnType<typeof vi.fn<() => void>>;
@@ -36,10 +38,23 @@ interface MutableAnnotationStorage {
 }
 
 function storage(): MutableAnnotationStorage {
+  let modified = false;
   const value: MutableAnnotationStorage = {
+    addEditor: vi.fn((type: number) => {
+      if (!modified) {
+        modified = true;
+        value.onSetModified?.();
+      }
+      value.onAnnotationEditor?.(type);
+    }),
+    onAnnotationEditor: null,
     onResetModified: null,
     onSetModified: null,
-    resetModified: vi.fn(),
+    resetModified: vi.fn(() => {
+      if (!modified) return;
+      modified = false;
+      value.onResetModified?.();
+    }),
   };
   Object.defineProperty(value, 'serializable', {
     configurable: false,
@@ -93,7 +108,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
   const selectionObserver = {
     invalidate: vi.fn(),
     onSelection: vi.fn(() => () => undefined),
-    validate: vi.fn(() => 'current' as const),
+    validate: vi.fn<(token: string) => 'current' | 'stale'>(() => 'current'),
   };
   const commentBridge = {
     reserveNextDialog: vi.fn<
@@ -147,6 +162,20 @@ function deferred<T>() {
 }
 
 describe('PdfAnnotationEditor lifecycle', () => {
+  it('dismisses a stale token before requiring a live manager', async () => {
+    const fixtureValue = fixture();
+    fixtureValue.selectionObserver.validate.mockReturnValue('stale');
+
+    await expect(
+      fixtureValue.editor.commitSelection('stale', {
+        kind: 'highlight',
+        color: '#ffd400',
+      }),
+    ).resolves.toBe('dismissed');
+
+    expect(fixtureValue.modeRequests).toEqual([]);
+  });
+
   it('sets color before one-shot highlight or comment', async () => {
     for (const kind of ['highlight', 'comment'] as const) {
       const fixtureValue = fixture();
@@ -155,7 +184,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       uiManager.updateParams.mockImplementation(() => calls.push('color'));
       uiManager.highlightSelection.mockImplementation(() => {
         calls.push('highlight');
-        fixtureValue.annotationStorage.onSetModified?.();
+        fixtureValue.annotationStorage.addEditor(9);
       });
       uiManager.commentSelection.mockImplementation(() => calls.push('comment'));
       fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
@@ -212,7 +241,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     });
     expect(settled).toBe(false);
 
-    fixtureValue.annotationStorage.onSetModified?.();
+    fixtureValue.annotationStorage.addEditor(9);
     await vi.waitFor(() => {
       expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
     });
@@ -223,6 +252,28 @@ describe('PdfAnnotationEditor lifecycle', () => {
     });
 
     await expect(committing).resolves.toBe('created');
+  });
+
+  it('resolves a created highlight when annotation storage was already dirty', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    fixtureValue.annotationStorage.addEditor(3);
+    uiManager.highlightSelection.mockImplementation(() => {
+      fixtureValue.annotationStorage.addEditor(9);
+    });
+
+    await expect(
+      fixtureValue.editor.commitSelection('current', {
+        kind: 'highlight',
+        color: '#ffd400',
+      }),
+    ).resolves.toBe('created');
+
+    expect(fixtureValue.annotationStorage.addEditor).toHaveBeenCalledTimes(2);
   });
 
   it('suppresses transient native highlight mode', async () => {
@@ -254,7 +305,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
     });
     expect(modes).toEqual(['neutral', 'one-shot']);
-    fixtureValue.annotationStorage.onSetModified?.();
+    fixtureValue.annotationStorage.addEditor(9);
     await vi.waitFor(() => {
       expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
     });
@@ -344,6 +395,89 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
   });
 
+  it('does not time out while an open comment waits for the user', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixtureValue = fixture();
+      const closed = deferred<'escape'>();
+      fixtureValue.commentBridge.reserveNextDialog.mockReturnValue({
+        opened: Promise.resolve(),
+        closed: closed.promise,
+      });
+      const uiManager = manager();
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      let outcome: unknown = 'pending';
+      const committing = fixtureValue.editor
+        .commitSelection('current', {
+          kind: 'comment',
+          color: '#a28ae5',
+          seed: '',
+        })
+        .then(
+          (value) => {
+            outcome = value;
+          },
+          (cause: unknown) => {
+            outcome = cause;
+          },
+        );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(uiManager.commentSelection).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(2_001);
+
+      expect(outcome).toBe('pending');
+      closed.resolve('escape');
+      await committing;
+      expect(outcome).toBe('created');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restarts the native transition timeout after the user closes a comment', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixtureValue = fixture({ dispatchModeChanges: false });
+      const closed = deferred<'escape'>();
+      fixtureValue.commentBridge.reserveNextDialog.mockReturnValue({
+        opened: Promise.resolve(),
+        closed: closed.promise,
+      });
+      const uiManager = manager();
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      let outcome: unknown = 'pending';
+      void fixtureValue.editor
+        .commitSelection('current', {
+          kind: 'comment',
+          color: '#a28ae5',
+          seed: '',
+        })
+        .catch((cause: unknown) => {
+          outcome = cause;
+        });
+      fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+        source: fixtureValue.viewer,
+        mode: 9,
+      });
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(outcome).toBe('pending');
+
+      closed.resolve('escape');
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('aborts pending transactions on lifecycle changes', async () => {
     for (const lifecycle of ['detach', 'destroy', 'save'] as const) {
       const fixtureValue = fixture();
@@ -380,6 +514,86 @@ describe('PdfAnnotationEditor lifecycle', () => {
       if (saving !== null)
         await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
     }
+  });
+
+  it('waits for source-confirmed NONE before an aborted interaction settles', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const modes: string[] = [];
+    fixtureValue.editor.onMode((mode) => modes.push(mode));
+    let commitOutcome: unknown = 'pending';
+    const committing = fixtureValue.editor
+      .commitSelection('current', {
+        kind: 'highlight',
+        color: '#ffd400',
+      })
+      .catch((cause: unknown) => {
+        commitOutcome = cause;
+      });
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 9,
+    });
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    let aborted = false;
+
+    const aborting = fixtureValue.editor
+      .abortInteraction('Navigation aborted the annotation interaction.')
+      .finally(() => {
+        aborted = true;
+      });
+    await Promise.resolve();
+
+    expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+    expect(aborted).toBe(false);
+    expect(modes).toEqual(['neutral', 'one-shot']);
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', { source: {}, mode: 0 });
+    await Promise.resolve();
+    expect(aborted).toBe(false);
+
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+
+    await aborting;
+    await committing;
+    expect(commitOutcome).toMatchObject({ name: 'AbortError' });
+    expect(modes).toEqual(['neutral', 'one-shot', 'neutral']);
+  });
+
+  it('propagates a neutral mode setter failure from interaction abort', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const committing = fixtureValue.editor
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => cause);
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    const failure = new Error('neutral mode setter failed');
+    Object.defineProperty(fixtureValue.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: () => 9,
+      set: () => {
+        throw failure;
+      },
+    });
+
+    await expect(
+      fixtureValue.editor.abortInteraction('Navigation aborted the annotation interaction.'),
+    ).rejects.toBe(failure);
+    await expect(committing).resolves.toBe(failure);
   });
 
   it('aborts the reserved comment dialog with its transaction', async () => {
@@ -591,23 +805,29 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it('chains and restores prior dirty callbacks across manager rebind and destroy', () => {
     const { annotationStorage, editor, eventBus, viewer } = fixture();
+    const previousEditor = vi.fn();
     const previousSet = vi.fn();
     const previousReset = vi.fn();
+    annotationStorage.onAnnotationEditor = previousEditor;
     annotationStorage.onSetModified = previousSet;
     annotationStorage.onResetModified = previousReset;
     const dirty = vi.fn();
     const unsubscribe = editor.onDirty(dirty);
 
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+    annotationStorage.onAnnotationEditor(9);
     annotationStorage.onSetModified();
     annotationStorage.onResetModified();
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+    annotationStorage.onAnnotationEditor(3);
     annotationStorage.onSetModified();
     editor.destroy();
 
     expect(previousSet).toHaveBeenCalledTimes(2);
     expect(previousReset).toHaveBeenCalledOnce();
+    expect(previousEditor.mock.calls).toEqual([[9], [3]]);
     expect(dirty.mock.calls).toEqual([[true], [false], [true]]);
+    expect(annotationStorage.onAnnotationEditor).toBe(previousEditor);
     expect(annotationStorage.onSetModified).toBe(previousSet);
     expect(annotationStorage.onResetModified).toBe(previousReset);
     expect(eventBus.listeners.get('annotationeditoruimanager')).toHaveLength(0);
@@ -646,6 +866,136 @@ describe('PdfAnnotationEditor lifecycle', () => {
 });
 
 describe('PdfAnnotationEditor save boundary', () => {
+  it('waits for source-confirmed NONE before saving an aborted interaction', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const committing = fixtureValue.editor
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => cause);
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 9,
+    });
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await Promise.resolve();
+
+    expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+    expect(uiManager.endCurrentEditing).not.toHaveBeenCalled();
+    expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+
+    await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
+    await expect(committing).resolves.toMatchObject({ name: 'AbortError' });
+    expect(uiManager.endCurrentEditing).toHaveBeenCalledOnce();
+    expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+  });
+
+  it('propagates neutral mode failure before entering the save boundary', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const committing = fixtureValue.editor
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => cause);
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    const failure = new Error('neutral mode setter failed before save');
+    Object.defineProperty(fixtureValue.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: () => 9,
+      set: () => {
+        throw failure;
+      },
+    });
+
+    await expect(fixtureValue.editor.save(new AbortController().signal)).rejects.toBe(failure);
+    await expect(committing).resolves.toBe(failure);
+    expect(uiManager.endCurrentEditing).not.toHaveBeenCalled();
+    expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
+  });
+
+  it('revalidates the manager after waiting for an interaction abort', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const initialManager = manager();
+    const replacementManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: initialManager,
+    });
+    const committing = fixtureValue.editor
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => cause);
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 9,
+    });
+    await vi.waitFor(() => {
+      expect(initialManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: replacementManager,
+    });
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+
+    await expect(saving).rejects.toMatchObject({ name: 'InvalidStateError' });
+    await committing;
+    expect(initialManager.endCurrentEditing).not.toHaveBeenCalled();
+    expect(replacementManager.endCurrentEditing).not.toHaveBeenCalled();
+    expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
+  });
+
+  it('does not enter the save boundary when destroyed during interaction abort', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const committing = fixtureValue.editor
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+      .catch((cause: unknown) => cause);
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 9,
+    });
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    fixtureValue.editor.destroy();
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+
+    await expect(saving).rejects.toMatchObject({ name: 'InvalidStateError' });
+    await committing;
+    expect(uiManager.endCurrentEditing).not.toHaveBeenCalled();
+    expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
+  });
+
   it.each(['parameter', 'undo', 'redo', 'delete'] as const)(
     'defers %s mutations until the active PDF.js snapshot has settled',
     async (mutation) => {

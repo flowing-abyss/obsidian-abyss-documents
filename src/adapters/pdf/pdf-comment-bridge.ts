@@ -60,6 +60,7 @@ export interface PdfCommentDialogReservation {
 
 interface PendingCommentDialogReservation extends PdfCommentDialogReservation {
   active: boolean;
+  isOpen: boolean;
   settled: boolean;
   readonly seed: '' | '[[' | '#';
   readonly clearOpenTimeout: () => void;
@@ -146,6 +147,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     };
     const reservation: PendingCommentDialogReservation = {
       active: false,
+      isOpen: false,
       settled: false,
       seed,
       clearOpenTimeout,
@@ -178,7 +180,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   // PDF.js 6.2.108 calls this exact five-argument manager seam.
-  // eslint-disable-next-line complexity, max-params -- exact upstream callback and dialog transaction orchestration
+  // eslint-disable-next-line complexity, max-params, sonarjs/cognitive-complexity -- exact upstream callback and dialog transaction orchestration
   async showDialog(
     uiManager: unknown,
     editor: PdfCommentEditor,
@@ -186,46 +188,60 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     posY: number,
     options?: { readonly height?: number | undefined },
   ): Promise<void> {
-    if (this.disposed) throw new DOMException('PDF comment bridge disposed.', 'InvalidStateError');
-    const data = editor.getData();
     const reservation = this.nextDialogReservation;
-    this.nextDialogReservation = null;
-    if (reservation !== null) {
-      reservation.clearOpenTimeout();
-      reservation.active = true;
-      this.activeDialogReservation = reservation;
+    try {
+      if (this.disposed)
+        throw new DOMException('PDF comment bridge disposed.', 'InvalidStateError');
+      const data = editor.getData();
+      this.nextDialogReservation = null;
+      if (reservation !== null) {
+        reservation.clearOpenTimeout();
+        reservation.active = true;
+        this.activeDialogReservation = reservation;
+      }
+      const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
+      const readOnlyReason = annotationReadOnlyReason(editor, manager);
+      this.applyDialogHeight(options?.height);
+      const editable = readOnlyReason === undefined && manager !== null;
+      const comment = reservation?.seed ?? data.contentsObj?.str ?? '';
+      if (reservation !== null) editor.comment = comment;
+      this.popover.open({
+        ...(editable ? this.colorActions(editor, data, manager) : {}),
+        canDeleteAnnotation: editable,
+        comment,
+        onChange: (comment) => {
+          return this.mutate('save-comment', () => {
+            editor.comment = comment;
+          });
+        },
+        onDeleteAnnotation: () => {
+          this.closeReservation(reservation, 'delete-annotation');
+          return this.mutate('delete-annotation', () => {
+            this.deleteAnnotation(manager, editor);
+          });
+        },
+        onDeleteComment: () => {
+          this.closeReservation(reservation, 'delete-comment');
+          return this.mutate('delete-comment', () => {
+            this.deleteComment(manager, editor);
+          });
+        },
+        onClose: (reason) => {
+          this.closeReservation(reservation, reason);
+        },
+        ...(readOnlyReason === undefined ? {} : { readOnlyReason }),
+        x: posX,
+        y: posY,
+      });
+      if (reservation !== null) {
+        reservation.isOpen = true;
+        reservation.resolveOpened();
+      }
+    } catch (cause) {
+      const failure = asError(cause);
+      if (reservation !== null) this.cancelReservation(reservation, failure);
+      console.error('[abyss-documents] Failed to open PDF annotation comment', { cause: failure });
     }
-    const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
-    const readOnlyReason = annotationReadOnlyReason(editor, manager);
-    this.applyDialogHeight(options?.height);
-    const editable = readOnlyReason === undefined && manager !== null;
-    const comment = reservation?.seed ?? data.contentsObj?.str ?? '';
-    if (reservation !== null) editor.comment = comment;
-    this.popover.open({
-      ...(editable ? this.colorActions(editor, data, manager) : {}),
-      canDeleteAnnotation: editable,
-      comment,
-      onChange: (comment) => {
-        return this.mutate('save-comment', () => {
-          editor.comment = comment;
-        });
-      },
-      onDeleteAnnotation: () =>
-        this.mutate('delete-annotation', () => {
-          this.deleteAnnotation(manager, editor);
-        }),
-      onDeleteComment: () =>
-        this.mutate('delete-comment', () => {
-          this.deleteComment(manager, editor);
-        }),
-      onClose: (reason) => {
-        this.closeReservation(reservation, reason);
-      },
-      ...(readOnlyReason === undefined ? {} : { readOnlyReason }),
-      x: posX,
-      y: posY,
-    });
-    reservation?.resolveOpened();
   }
 
   toggleCommentPopup(
@@ -345,7 +361,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     reservation.cleanup();
     if (this.nextDialogReservation === reservation) this.nextDialogReservation = null;
     if (this.activeDialogReservation === reservation) this.activeDialogReservation = null;
-    if (!reservation.active) reservation.rejectOpened(cause);
+    if (!reservation.isOpen) reservation.rejectOpened(cause);
     reservation.rejectClosed(cause);
     if (reservation.active) this.popover.close(false, 'external');
   }
@@ -588,4 +604,14 @@ function abortReason(signal: AbortSignal | undefined): Error {
     return reason as Error;
   }
   return new DOMException('The PDF comment reservation was cancelled.', 'AbortError');
+}
+
+function asError(cause: unknown): Error {
+  if (
+    cause instanceof Error ||
+    (typeof cause === 'object' && cause !== null && 'name' in cause && 'message' in cause)
+  ) {
+    return cause as Error;
+  }
+  return new Error(String(cause));
 }

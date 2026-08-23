@@ -126,6 +126,35 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     }
   });
 
+  it('contains an unawaited dialog seed failure and clears its reservation', async () => {
+    const host = document.body.createDiv();
+    const bridge = new PdfCommentBridge(host);
+    const cause = new Error('seed assignment failed');
+    const native = editor('Existing');
+    Object.defineProperty(native, 'comment', {
+      configurable: true,
+      get: () => 'Existing',
+      set: () => {
+        throw cause;
+      },
+    });
+    const reservation = bridge.reserveNextDialog('#');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const opening = bridge.showDialog(uiManager(native), native, 0, 0);
+    await Promise.resolve();
+
+    await expect(opening).resolves.toBeUndefined();
+    await expect(reservation.opened).rejects.toBe(cause);
+    await expect(reservation.closed).rejects.toBe(cause);
+    expect(error).toHaveBeenCalledWith('[abyss-documents] Failed to open PDF annotation comment', {
+      cause,
+    });
+    error.mockRestore();
+    bridge.dispose();
+    host.remove();
+  });
+
   it('persists comment changes live without Save or Cancel', async () => {
     const host = document.body.createDiv();
     const onNativeMutation = vi.fn();
@@ -237,6 +266,34 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
     bridge.dispose();
     host.remove();
   });
+
+  it.each(['delete-comment', 'delete-annotation'] as const)(
+    'settles %s before synchronous native popup teardown',
+    async (action) => {
+      const host = document.body.createDiv();
+      const bridge = new PdfCommentBridge(host);
+      const native = editor('Existing');
+      const manager = uiManager(native);
+      if (action === 'delete-comment') {
+        manager.deleteComment.mockImplementation(() => {
+          bridge.destroyPopup();
+        });
+      } else {
+        manager.setSelected.mockImplementation(() => {
+          bridge.destroyPopup();
+        });
+      }
+      const reservation = bridge.reserveNextDialog('');
+      await bridge.showDialog(manager, native, 0, 0);
+      await reservation.opened;
+
+      host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)?.click();
+
+      await expect(reservation.closed).resolves.toBe(action);
+      bridge.dispose();
+      host.remove();
+    },
+  );
 
   it.each([
     ['underlineAnnotation', 'Underline annotations'],
@@ -689,9 +746,14 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
 
     expect(host.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Before');
     bridge.dispose();
-    await expect(bridge.showDialog(null, native, 0, 0)).rejects.toMatchObject({
-      name: 'InvalidStateError',
-    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(bridge.showDialog(null, native, 0, 0)).resolves.toBeUndefined();
+    expect(error.mock.calls[0]?.[0]).toBe(
+      '[abyss-documents] Failed to open PDF annotation comment',
+    );
+    const details: unknown = error.mock.calls[0]?.[1];
+    expect(details).toMatchObject({ cause: { name: 'InvalidStateError' } });
+    error.mockRestore();
     host.remove();
   });
 
