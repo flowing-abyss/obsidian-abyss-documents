@@ -28,6 +28,7 @@ import {
   PDFJS_ANNOTATION_EDITOR_TYPE,
   type PdfRuntime,
 } from './pdf-runtime.js';
+import { PdfDomSelectionObserver, type PdfSelectionObserver } from './pdf-selection-observer.js';
 import type { PdfViewportContext, PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
 
@@ -121,6 +122,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private viewer: PdfViewer | null = null;
   private annotationEditorInstance: PdfAnnotationEditor | null = null;
   private commentBridge: PdfCommentBridge | null = null;
+  private selectionObserverInstance: PdfDomSelectionObserver | null = null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
@@ -171,8 +173,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     viewerElement.className = 'pdfViewer';
     root.append(viewerElement);
     host.append(root);
-    this.root = root;
-    this.viewerElement = viewerElement;
+    this.attachRoot(root, viewerElement);
 
     const eventBus = new this.pdfjsViewer.EventBus();
     this.eventBus = eventBus;
@@ -250,6 +251,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   async goTo(location: DocumentLocation): Promise<void> {
     this.requireMounted(this.linkService);
+    this.selectionObserverInstance?.invalidate();
     this.latestLocation = { ...location };
     if (!this.pagesInitialized || this.colorRebindActive) {
       this.pendingLocation = { ...location };
@@ -262,6 +264,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   setScale(scale: ScaleRequest): void {
     const viewer = this.requireMounted(this.viewer);
+    this.selectionObserverInstance?.invalidate();
     this.requestedScale = scale;
     this.explicitScaleRequest = true;
     this.scaleRequestRevision += 1;
@@ -290,6 +293,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   setLayout(layout: ReaderLayout): void {
     const viewer = this.requireMounted(this.viewer);
+    this.selectionObserverInstance?.invalidate();
     this.requestedLayout = { ...layout };
     if (!this.pagesInitialized || this.colorRebindActive) {
       return;
@@ -299,6 +303,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   setReadingColors(appearance: ReadingAppearance): void {
     const root = this.requireMounted(this.root);
+    this.selectionObserverInstance?.invalidate();
     const profile = readingProfile(appearance);
     if (profile.pageColors === null) {
       root.style.removeProperty('--abyss-reader-background');
@@ -404,6 +409,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     return this.annotationEditorInstance;
   }
 
+  get selectionObserver(): PdfSelectionObserver {
+    return this.requireMounted(this.selectionObserverInstance);
+  }
+
   destroy(): Promise<void> {
     this.destroyPromise ??= this.destroyOnce();
     return this.destroyPromise;
@@ -474,6 +483,9 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private destroyEditorBridges(attempt: (operation: () => void) => void): void {
     attempt(() => {
+      this.selectionObserverInstance?.destroy();
+    });
+    attempt(() => {
       this.annotationEditorInstance?.destroy();
     });
     attempt(() => {
@@ -486,6 +498,13 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.viewer = null;
     this.annotationEditorInstance = null;
     this.commentBridge = null;
+    this.selectionObserverInstance = null;
+  }
+
+  private attachRoot(root: HTMLDivElement, viewerElement: HTMLDivElement): void {
+    this.root = root;
+    this.viewerElement = viewerElement;
+    this.selectionObserverInstance = new PdfDomSelectionObserver(root);
   }
 
   private createAnnotationEditor(
@@ -519,9 +538,11 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.onScaleChanging(event);
     });
     this.bind('pagerendered', (event) => {
+      this.selectionObserverInstance?.invalidate();
       this.onPageRendered(event);
     });
     this.bind('textlayerrendered', () => {
+      this.selectionObserverInstance?.invalidate();
       incrementReaderCounter('firstTextLayers');
       markReaderPerformanceOnce('first-text-layer');
       markReaderPerformance('text-layer');
@@ -553,6 +574,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     const pageNumber = positiveInteger(record(event)?.['pageNumber']);
     if (pageNumber === null) return;
     const pageIndex = pageNumber - 1;
+    this.selectionObserverInstance?.invalidate();
     if (this.latestLocation?.pageIndex !== pageIndex) {
       this.latestLocation = { pageIndex };
     }
@@ -566,6 +588,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (data === null) return;
     const eventScale = this.scaleFromEvent(data);
     if (eventScale === null) return;
+    this.selectionObserverInstance?.invalidate();
     this.requestedScale = eventScale;
     this.explicitScaleRequest = true;
     this.scaleRequestRevision += 1;
@@ -632,6 +655,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private startColorRebind(): void {
     const viewer = this.requireMounted(this.viewer);
+    this.selectionObserverInstance?.invalidate();
     const pageColors = this.requestedPageColors;
     this.preservedViewState ??= this.captureViewState(viewer);
     this.colorRebindActive = true;

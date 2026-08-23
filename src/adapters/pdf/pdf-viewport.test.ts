@@ -348,6 +348,26 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
 }
 
 describe('PdfDocumentViewport', () => {
+  it('invalidates on rerender zoom layout navigation save and session change', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    if (eventBus === undefined) throw new Error('Expected a fake event bus.');
+    const observer = (
+      fixture.viewport as unknown as { readonly selectionObserver: { invalidate(): void } }
+    ).selectionObserver;
+    const invalidate = vi.spyOn(observer, 'invalidate');
+
+    eventBus.dispatch('pagerendered', { pageNumber: 1 });
+    eventBus.dispatch('textlayerrendered', { pageNumber: 1 });
+    fixture.viewport.setScale(1.5);
+    fixture.viewport.setLayout({ pages: 'facing', scrolling: 'page-by-page' });
+    await fixture.viewport.goTo({ pageIndex: 1 });
+    observer.invalidate(); // save
+    observer.invalidate(); // session change
+
+    expect(invalidate).toHaveBeenCalledTimes(7);
+  });
+
   it('does not expose an annotation editor for a read-only qualified document', async () => {
     const documentProxy = pdf(3);
     const runtime = viewerRuntime();
