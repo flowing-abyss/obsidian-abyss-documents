@@ -206,6 +206,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
     readonly findDocumentsBeforeViewerOwnership: Array<Array<PDFDocumentProxy | null>> = [];
     readonly pageColorsAtSetDocument: Array<object | null> = [];
     readonly pageViews: FakePageView[] = [];
+    readonly annotationEditorRequests: Array<Record<string, unknown>> = [];
     currentPageNumber = 1;
     currentScale = 1;
     currentScaleValue = 'auto';
@@ -244,6 +245,9 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
 
     set annotationEditorMode(request: number | { readonly mode: number }) {
       const mode = typeof request === 'number' ? request : request.mode;
+      this.annotationEditorRequests.push(
+        typeof request === 'number' ? { mode: request } : { ...request },
+      );
       this.currentAnnotationEditorMode = mode;
       this.options.eventBus.dispatch('annotationeditormodechanged', { source: this, mode });
     }
@@ -350,6 +354,59 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
 }
 
 describe('PdfDocumentViewport', () => {
+  it('delegates one supported annotation click without pointer double firing', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const layer = root.createDiv({ cls: 'annotationLayer' });
+    const annotation = layer.createEl('section', { cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'highlight-1';
+
+    annotation.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
+    annotation.click();
+    await vi.waitFor(() => {
+      expect(viewer.annotationEditorRequests).toContainEqual({
+        editComment: false,
+        editId: 'highlight-1',
+        mode: 9,
+      });
+    });
+    expect(viewer.annotationEditorRequests).toHaveLength(1);
+  });
+
+  it('ignores links and unsupported annotations', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const layer = root.createDiv({ cls: 'annotationLayer' });
+    const highlight = layer.createEl('section', { cls: 'highlightAnnotation' });
+    highlight.dataset['annotationId'] = 'highlight-1';
+    highlight.createEl('a', { text: 'Linked text' }).click();
+    highlight.createEl('button', { text: 'Comment' }).click();
+    for (const className of ['underlineAnnotation', 'textAnnotation', 'stampAnnotation']) {
+      const annotation = layer.createEl('section', { cls: className });
+      annotation.dataset['annotationId'] = className;
+      annotation.click();
+    }
+    await Promise.resolve();
+
+    expect(viewer.annotationEditorRequests).toEqual([]);
+  });
+
   it('dismisses stale tokens without a failure Notice', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
@@ -537,6 +594,20 @@ describe('PdfDocumentViewport', () => {
 
     expect(viewport.annotationEditor).toBeNull();
     expect(viewport.annotationCapabilities.readOnlyReason?.code).toBe('signed-document');
+    const viewer = runtime.state.viewer;
+    const root = host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (viewer === undefined || root === null)
+      throw new Error('Expected mounted read-only viewer.');
+    const annotation = root
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'signed-highlight';
+    annotation.click();
+    await Promise.resolve();
+    expect(viewer.annotationEditorRequests).toEqual([]);
+
+    await viewport.destroy();
+    host.remove();
   });
 
   it('constructs the public PDF.js viewer stack with text, annotations, and bounded canvases', async () => {

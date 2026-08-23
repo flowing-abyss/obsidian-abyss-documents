@@ -668,17 +668,138 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(dirty).toHaveBeenCalledWith(true);
     expect(annotationStorage.resetModified).not.toHaveBeenCalled();
   });
-  it('does not expose target-edit options in the public tool contract', () => {
+  it('does not widen generic setTool edit options', () => {
     expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('editId');
     expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('editComment');
     expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('mustEnterInEditMode');
     expectTypeOf<PdfAnnotationToolOptions>().toHaveProperty('isFromKeyboard');
   });
 
+  it('selects supported annotations from NONE', async () => {
+    const cases = [
+      ['highlight', 9],
+      ['ink', 15],
+      ['freetext', 3],
+    ] as const;
+
+    for (const [kind, mode] of cases) {
+      const { editor, eventBus, modeRequests, viewer } = fixture();
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+
+      await editor.editAnnotation({ editComment: false, id: `${kind}-1`, kind });
+
+      expect(modeRequests).toEqual([{ editComment: false, editId: `${kind}-1`, mode }]);
+    }
+  });
+
+  it('opens comment mode when requested', async () => {
+    const { editor, eventBus, modeRequests, viewer } = fixture();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+
+    await editor.editAnnotation({
+      editComment: true,
+      id: 'highlight-with-comment',
+      kind: 'highlight',
+    });
+
+    expect(modeRequests).toEqual([
+      { editComment: true, editId: 'highlight-with-comment', mode: 9 },
+    ]);
+  });
+
+  it('keeps contextual editing out of the global tool state', async () => {
+    const { editor, eventBus, viewer } = fixture();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+    const modes: string[] = [];
+    editor.onMode((mode) => modes.push(mode));
+
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'highlight-1',
+      kind: 'highlight',
+    });
+
+    expect(modes).toEqual(['neutral']);
+  });
+
+  it('returns neutral after the selected contextual editor tears down', async () => {
+    const { editor, eventBus, modeRequests, viewer } = fixture();
+    const uiManager = manager();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+
+    const editing = editor.editAnnotation({
+      editComment: false,
+      id: 'highlight-1',
+      kind: 'highlight',
+    });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: false },
+    });
+    await editing;
+    expect(modeRequests).toEqual([{ editComment: false, editId: 'highlight-1', mode: 9 }]);
+
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: false },
+    });
+    await vi.waitFor(() => {
+      expect(modeRequests).toEqual([
+        { editComment: false, editId: 'highlight-1', mode: 9 },
+        { mode: 0 },
+      ]);
+    });
+  });
+
+  it('does not re-arm a contextual annotation tool after autosave', async () => {
+    const { editor, eventBus, modeRequests, viewer } = fixture();
+    const uiManager = manager();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'highlight-1',
+      kind: 'highlight',
+    });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+
+    await editor.save(new AbortController().signal);
+
+    expect(viewer.annotationEditorMode).toBe(0);
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: 'highlight-1', mode: 9 },
+      { mode: 0 },
+    ]);
+  });
+
+  it.each(['ink', 'freetext'] as const)(
+    'keeps contextual delegation passive while %s is active',
+    async (tool) => {
+      const { editor, eventBus, modeRequests, viewer } = fixture();
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+      await editor.setTool(tool);
+      modeRequests.splice(0);
+
+      await editor.editAnnotation({
+        editComment: false,
+        id: 'another-highlight',
+        kind: 'highlight',
+      });
+
+      expect(modeRequests).toEqual([]);
+    },
+  );
+
   it.each([
     ['Underline', 'readonly-underline'],
     ['Text Note', 'readonly-text-note'],
-  ])('does not forward an untyped %s target through setTool', async (_type, editId) => {
+  ])('preserves passive Underline and Text Note for %s', async (_type, editId) => {
     const { editor, eventBus, modeRequests, viewer } = fixture();
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
 

@@ -6834,6 +6834,29 @@
   opacity: calc(1 - var(--abyss-reader-image-dim));
 }
 
+/* PDF.js owns the contextual editor DOM; these variables make its controls read as Obsidian UI. */
+/* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
+.abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar {
+  --editor-toolbar-bg-color: var(--background-primary);
+  --editor-toolbar-fg-color: var(--text-normal);
+  --editor-toolbar-border-color: var(--background-modifier-border);
+  --editor-toolbar-hover-border-color: var(--background-modifier-border-hover);
+  --editor-toolbar-hover-bg-color: var(--background-modifier-hover);
+  --editor-toolbar-hover-fg-color: var(--text-normal);
+  --editor-toolbar-focus-outline-color: var(--interactive-accent);
+  --editor-toolbar-shadow: var(--shadow-s);
+  --editor-toolbar-height: 2rem;
+  --editor-toolbar-padding: 0.125rem;
+
+  border-radius: var(--radius-s);
+}
+
+/* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
+.abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar .buttons > :not(.divider) {
+  min-width: 2rem;
+  border-radius: var(--radius-s);
+}
+
 @media (width <= 600px) {
   .abyss-documents .abyss-reader-sidebar {
     position: absolute;
@@ -6877,6 +6900,16 @@
   .abyss-documents .abyss-reader-search-input,
   .abyss-documents [data-action='retry'] {
     min-height: 2.75rem;
+  }
+
+  /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
+  .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar {
+    --editor-toolbar-height: 2.75rem;
+  }
+
+  /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
+  .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar .buttons > :not(.divider) {
+    min-width: 2.75rem;
   }
 }
 

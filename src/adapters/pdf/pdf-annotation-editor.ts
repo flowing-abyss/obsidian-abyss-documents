@@ -8,6 +8,8 @@ const SELECTION_TRANSACTION_TIMEOUT_MS = 2_000;
 export type PdfAnnotationLogicalMode =
   'neutral' | 'one-shot' | 'quick-highlight' | 'ink' | 'freetext' | 'disabled';
 
+export type PdfEditableAnnotationKind = 'highlight' | 'ink' | 'freetext';
+
 export type PdfSelectionAction =
   | { readonly kind: 'highlight'; readonly color: string }
   | { readonly kind: 'comment'; readonly color: string; readonly seed: '' | '[[' | '#' };
@@ -70,7 +72,14 @@ interface PdfAnnotationViewer {
 }
 
 interface PdfAnnotationModeRequest extends PdfAnnotationToolOptions {
+  readonly editComment?: boolean | undefined;
+  readonly editId?: string | null | undefined;
   readonly mode: number;
+}
+
+interface PdfAnnotationModeOptions extends PdfAnnotationToolOptions {
+  readonly editComment?: boolean | undefined;
+  readonly editId?: string | undefined;
 }
 
 interface PdfAnnotationUiManager {
@@ -114,7 +123,7 @@ interface PendingModeChange {
 }
 
 interface QueuedToolIntent {
-  options: PdfAnnotationToolOptions;
+  options: PdfAnnotationModeOptions;
   tool: PdfAnnotationTool;
   readonly waiters: Array<{
     readonly reject: (reason: Error) => void;
@@ -130,7 +139,14 @@ interface QueuedMutation {
 
 interface PreparedSave {
   readonly manager: PdfAnnotationUiManager;
+  readonly restoreNeutral: boolean;
   readonly revision: number;
+}
+
+interface ContextualEditSession {
+  readonly manager: PdfAnnotationUiManager;
+  readonly mode: number;
+  phase: 'awaiting-selection' | 'selected';
 }
 
 interface PendingSelectionTransaction {
@@ -163,18 +179,51 @@ export class PdfAnnotationEditor {
   private lifecycleRevision = 0;
   private saving = false;
   private logicalMode: PdfAnnotationLogicalMode = 'neutral';
+  private contextualEditSession: ContextualEditSession | null = null;
 
   constructor(private readonly dependencies: PdfAnnotationEditorDependencies) {
     this.storage = dependencies.pdf.annotationStorage;
     dependencies.eventBus.on('annotationeditoruimanager', this.onManager);
     dependencies.eventBus.on('annotationeditormodechanged', this.onNativeMode);
+    dependencies.eventBus.on('editingstateschanged', this.onEditingState);
   }
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
     this.requireManager();
-    if (this.saving) return this.queueToolIntent(tool, options);
+    this.contextualEditSession = null;
+    const modeOptions: PdfAnnotationModeOptions =
+      options.isFromKeyboard === undefined ? {} : { isFromKeyboard: options.isFromKeyboard };
+    if (this.saving) return this.queueToolIntent(tool, modeOptions);
     const mode = this.modeFor(tool);
-    await this.changeMode(mode, options);
+    await this.changeMode(mode, modeOptions);
+  }
+
+  async editAnnotation(request: {
+    readonly id: string;
+    readonly kind: PdfEditableAnnotationKind;
+    readonly editComment: boolean;
+  }): Promise<void> {
+    const manager = this.requireManager();
+    if (this.logicalMode !== 'neutral') return;
+    const editId = request.id.trim();
+    if (editId.length === 0) {
+      throw new DOMException('The PDF annotation id is empty.', 'InvalidStateError');
+    }
+    const tool = request.kind === 'freetext' ? 'freetext' : request.kind;
+    const options: PdfAnnotationModeOptions = {
+      editComment: request.editComment,
+      editId,
+    };
+    const mode = this.modeFor(tool);
+    const session: ContextualEditSession = { manager, mode, phase: 'awaiting-selection' };
+    this.contextualEditSession = session;
+    try {
+      if (this.saving) await this.queueToolIntent(tool, options);
+      else await this.changeMode(mode, options);
+    } catch (cause) {
+      if (this.contextualEditSession === session) this.contextualEditSession = null;
+      throw cause;
+    }
   }
 
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void {
@@ -284,11 +333,16 @@ export class PdfAnnotationEditor {
 
   async abortInteraction(message: string): Promise<void> {
     const transaction = this.pendingSelectionTransaction;
-    if (transaction === null) return;
-    await this.abortAndWaitForTransaction(transaction, new DOMException(message, 'AbortError'));
+    if (transaction !== null) {
+      await this.abortAndWaitForTransaction(transaction, new DOMException(message, 'AbortError'));
+      return;
+    }
+    if (this.contextualEditSession === null) return;
+    this.contextualEditSession = null;
+    await this.changeMode(this.dependencies.annotationEditorType.NONE);
   }
 
-  private async changeMode(mode: number, options: PdfAnnotationToolOptions = {}): Promise<void> {
+  private async changeMode(mode: number, options: PdfAnnotationModeOptions = {}): Promise<void> {
     if (this.dependencies.viewer.annotationEditorMode === mode) return;
     this.cancelPendingModeChange('The PDF annotation tool change was superseded.');
     await new Promise<void>((resolve, reject) => {
@@ -303,10 +357,18 @@ export class PdfAnnotationEditor {
       this.pendingModeChange = { listener, reject };
       this.dependencies.eventBus.on('annotationeditormodechanged', listener);
       try {
-        this.dependencies.viewer.annotationEditorMode =
-          options.isFromKeyboard === undefined
-            ? { mode }
-            : { mode, isFromKeyboard: options.isFromKeyboard };
+        this.dependencies.viewer.annotationEditorMode = {
+          mode,
+          ...(options.isFromKeyboard === undefined
+            ? {}
+            : { isFromKeyboard: options.isFromKeyboard }),
+          ...(options.editId === undefined
+            ? {}
+            : {
+                editComment: options.editComment === true,
+                editId: options.editId,
+              }),
+        };
       } catch (cause) {
         this.dependencies.eventBus.off('annotationeditormodechanged', listener);
         this.pendingModeChange = null;
@@ -356,7 +418,7 @@ export class PdfAnnotationEditor {
   async save(signal: AbortSignal): Promise<Uint8Array> {
     const prepared = this.prepareSave(signal);
     const context = prepared instanceof Promise ? await prepared : prepared;
-    const { manager, revision } = context;
+    const { manager, restoreNeutral, revision } = context;
     const finishSerialization = beginReaderTimedOperation('annotation-serialization');
     let outcome: { bytes: Uint8Array | null; failure: Error | null } = {
       bytes: null,
@@ -365,13 +427,14 @@ export class PdfAnnotationEditor {
     let restoredMode: number | null = null;
     try {
       restoredMode = await this.pauseForSave(manager, revision, signal);
+      if (restoreNeutral) restoredMode = this.dependencies.annotationEditorType.NONE;
       outcome = { bytes: await this.captureBytes(manager, revision, signal), failure: null };
     } catch (cause) {
       outcome = { bytes: null, failure: asError(cause) };
     } finally {
       const queuedIntents: QueuedToolIntent[] = [];
       let targetMode = restoredMode;
-      let targetOptions: PdfAnnotationToolOptions = {};
+      let targetOptions: PdfAnnotationModeOptions = {};
       let restoreFailure: Error | null = null;
       do {
         const queued = this.takeQueuedToolIntent();
@@ -407,27 +470,30 @@ export class PdfAnnotationEditor {
   }
 
   private prepareSave(signal: AbortSignal): PreparedSave | Promise<PreparedSave> {
+    const restoreNeutral = this.contextualEditSession !== null;
+    this.contextualEditSession = null;
     const manager = this.requireManager();
     const revision = this.lifecycleRevision;
     const pendingAbort = this.abortInteractionForSave();
     if (pendingAbort === null) {
-      return this.beginPreparedSave(manager, revision, signal);
+      return this.beginPreparedSave(manager, revision, restoreNeutral, signal);
     }
     return pendingAbort.then(() => {
-      return this.beginPreparedSave(manager, revision, signal);
+      return this.beginPreparedSave(manager, revision, restoreNeutral, signal);
     });
   }
 
   private beginPreparedSave(
     manager: PdfAnnotationUiManager,
     revision: number,
+    restoreNeutral: boolean,
     signal: AbortSignal,
   ): PreparedSave {
     if (manager !== this.manager || revision !== this.lifecycleRevision || this.destroyed) {
       throw this.staleError();
     }
     this.beginSave(signal);
-    return { manager, revision };
+    return { manager, restoreNeutral, revision };
   }
 
   private abortInteractionForSave(): Promise<void> | null {
@@ -479,7 +545,7 @@ export class PdfAnnotationEditor {
   private async restoreAfterSave(context: {
     readonly manager: PdfAnnotationUiManager;
     readonly mode: number | null;
-    readonly options?: PdfAnnotationToolOptions | undefined;
+    readonly options?: PdfAnnotationModeOptions | undefined;
     readonly revision: number;
   }): Promise<Error | null> {
     const { manager, mode, options = {}, revision } = context;
@@ -512,6 +578,7 @@ export class PdfAnnotationEditor {
 
   detachFromDocument(): void {
     if (this.destroyed) return;
+    this.contextualEditSession = null;
     const transaction = this.pendingSelectionTransaction;
     void this.abortSelectionTransaction(
       new DOMException('The PDF annotation interaction was detached.', 'AbortError'),
@@ -542,6 +609,7 @@ export class PdfAnnotationEditor {
     this.lifecycleRevision += 1;
     this.dependencies.eventBus.off('annotationeditoruimanager', this.onManager);
     this.dependencies.eventBus.off('annotationeditormodechanged', this.onNativeMode);
+    this.dependencies.eventBus.off('editingstateschanged', this.onEditingState);
     if (transaction === null) {
       this.cancelPendingModeChange('The PDF annotation editor was destroyed.');
     }
@@ -552,6 +620,7 @@ export class PdfAnnotationEditor {
     this.dirtyListeners.clear();
     this.editorAddedListeners.clear();
     this.modeListeners.clear();
+    this.contextualEditSession = null;
   }
 
   private readonly onManager = (event: unknown): void => {
@@ -571,6 +640,7 @@ export class PdfAnnotationEditor {
     }
     this.cancelQueuedToolIntent('The PDF annotation editor was rebound.');
     this.cancelQueuedMutations();
+    this.contextualEditSession = null;
     this.restoreCallbacks();
     this.manager = manager;
     this.ownCallbacks();
@@ -587,7 +657,26 @@ export class PdfAnnotationEditor {
     ) {
       return;
     }
+    if (this.contextualEditSession?.mode === mode) return;
     this.setLogicalMode(this.logicalModeForNative(mode));
+  };
+
+  private readonly onEditingState = (event: unknown): void => {
+    const session = this.contextualEditSession;
+    if (this.destroyed || session === null) return;
+    const data = record(event);
+    if (data?.['source'] !== session.manager) return;
+    const details = record(data['details']);
+    const hasSelectedEditor = details?.['hasSelectedEditor'];
+    if (hasSelectedEditor === true) {
+      session.phase = 'selected';
+      return;
+    }
+    if (hasSelectedEditor !== false || session.phase !== 'selected') return;
+    this.contextualEditSession = null;
+    void this.changeMode(this.dependencies.annotationEditorType.NONE).catch((cause: unknown) => {
+      console.error('[abyss-documents] Failed to close the PDF annotation editor', { cause });
+    });
   };
 
   private setLogicalMode(mode: PdfAnnotationLogicalMode): void {
@@ -762,7 +851,7 @@ export class PdfAnnotationEditor {
 
   private queueToolIntent(
     tool: PdfAnnotationTool,
-    options: PdfAnnotationToolOptions,
+    options: PdfAnnotationModeOptions,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const queued = this.queuedToolIntent;

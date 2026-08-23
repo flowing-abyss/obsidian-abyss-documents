@@ -21,7 +21,11 @@ import {
 } from '../../reader-performance.js';
 import { replacePdfAnnotationImageSources } from './pdf-annotation-assets.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
-import { PdfAnnotationEditor, type PdfAnnotationInteraction } from './pdf-annotation-editor.js';
+import {
+  PdfAnnotationEditor,
+  type PdfAnnotationInteraction,
+  type PdfEditableAnnotationKind,
+} from './pdf-annotation-editor.js';
 import { PdfCommentBridge, type PdfJsCommentManagerRuntime } from './pdf-comment-bridge.js';
 import {
   PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
@@ -99,6 +103,47 @@ function record(event: unknown): Record<string, unknown> | null {
 
 function positiveInteger(value: unknown): number | null {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function isElementTarget(target: EventTarget | null): target is Element {
+  return target !== null && 'closest' in target && typeof target.closest === 'function';
+}
+
+function editableAnnotationKind(annotation: Element): PdfEditableAnnotationKind | null {
+  if (
+    annotation.classList.contains('highlightAnnotation') ||
+    annotation.querySelector('.annotationContent.highlight') !== null
+  )
+    return 'highlight';
+  if (
+    annotation.classList.contains('inkAnnotation') ||
+    annotation.querySelector('.annotationContent.ink') !== null
+  )
+    return 'ink';
+  if (
+    annotation.classList.contains('freeTextAnnotation') ||
+    annotation.querySelector('.annotationContent.freetext') !== null
+  )
+    return 'freetext';
+  return null;
+}
+
+function clickedEditableAnnotation(
+  target: Element,
+  root: Element,
+): { readonly id: string; readonly kind: PdfEditableAnnotationKind } | null {
+  if (
+    target.closest('.annotationEditorLayer') !== null ||
+    target.closest(
+      'a, button, input, textarea, select, [role="button"], .commentButton, .popupTriggerArea',
+    ) !== null
+  )
+    return null;
+  const annotation = target.closest<HTMLElement>('.annotationLayer [data-annotation-id]');
+  if (annotation === null || !root.contains(annotation)) return null;
+  const id = annotation.dataset['annotationId']?.trim();
+  const kind = editableAnnotationKind(annotation);
+  return id === undefined || id.length === 0 || kind === null ? null : { id, kind };
 }
 
 function resolvedPageColors(host: HTMLElement): { background: string; foreground: string } {
@@ -909,14 +954,31 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private readonly onRootClick = (event: MouseEvent): void => {
     const target = event.target;
-    if (!(target instanceof Element)) return;
+    if (!isElementTarget(target)) return;
     const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
-    if (retry === null) return;
-    const page = target.closest<HTMLElement>('[data-page-number]');
-    const pageNumber = positiveInteger(Number(page?.dataset['pageNumber']));
-    if (page === null || pageNumber === null || this.viewer === null) return;
-    this.retryPage(this.viewer, page, pageNumber, retry);
+    if (retry !== null) {
+      const page = target.closest<HTMLElement>('[data-page-number]');
+      const pageNumber = positiveInteger(Number(page?.dataset['pageNumber']));
+      if (page === null || pageNumber === null || this.viewer === null) return;
+      this.retryPage(this.viewer, page, pageNumber, retry);
+      return;
+    }
+    this.editClickedAnnotation(target);
   };
+
+  private editClickedAnnotation(target: Element): void {
+    const editor = this.annotationEditorInstance;
+    const root = this.root;
+    if (editor === null || root === null) return;
+    const request = clickedEditableAnnotation(target, root);
+    if (request === null) return;
+    void editor.editAnnotation({ editComment: false, ...request }).catch((cause: unknown) => {
+      console.error('[abyss-documents] Failed to open the PDF annotation editor', {
+        cause,
+        ...request,
+      });
+    });
+  }
 
   private retryPage(
     viewer: PdfViewer,

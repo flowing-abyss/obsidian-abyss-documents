@@ -46,6 +46,30 @@ function uiManager(selected: PdfCommentEditor | null = null) {
 }
 
 describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
+  it('routes native comment Link Tag color and trash mutations', async () => {
+    const host = document.body.createDiv();
+    const onNativeMutation = vi.fn();
+    const bridge = new PdfCommentBridge(host, { onNativeMutation });
+    const native = editor('Existing');
+    const manager = uiManager(native);
+    await bridge.showDialog(manager, native, 20, 30);
+
+    host.querySelector<HTMLButtonElement>('[data-action="insert-link"]')?.click();
+    host.querySelector<HTMLButtonElement>('[data-action="insert-tag"]')?.click();
+    const color = host.querySelector<HTMLInputElement>('[data-action="annotation-color"]');
+    if (color === null) throw new Error('Expected native annotation color control.');
+    color.value = '#123456';
+    color.dispatchEvent(new Event('input', { bubbles: true }));
+    host.querySelector<HTMLButtonElement>('[data-action="delete-annotation"]')?.click();
+
+    expect(native.comment).toBe('Existing [[Link]] #tag');
+    expect(manager.updateParams).toHaveBeenCalledWith(31, '#123456');
+    expect(manager.delete).toHaveBeenCalledOnce();
+    expect(onNativeMutation).toHaveBeenCalledTimes(4);
+    bridge.dispose();
+    host.remove();
+  });
+
   it('reserves and seeds the next comment dialog', async () => {
     const host = document.body.createDiv();
     const bridge = new PdfCommentBridge(host);
