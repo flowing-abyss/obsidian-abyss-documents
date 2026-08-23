@@ -85,7 +85,20 @@ interface PdfAnnotationModeOptions extends PdfAnnotationToolOptions {
 interface PdfAnnotationUiManager {
   commentSelection(methodOfCreation?: string): void;
   delete(): void;
+  disableUserSelect(value?: boolean): void;
   endCurrentEditing(): void;
+  readonly firstSelectedEditor?:
+    | {
+        readonly mode?: number | undefined;
+        readonly uid?: string | undefined;
+      }
+    | undefined;
+  getLayer(pageIndex: number):
+    | {
+        disableClick(): void;
+        disableTextSelection(): void;
+      }
+    | undefined;
   highlightSelection(methodOfCreation?: string): void;
   redo(): void;
   undo(): void;
@@ -118,6 +131,7 @@ interface CallbackOwnership {
 }
 
 interface PendingModeChange {
+  readonly clearTimeout: () => void;
   readonly reject: (reason: Error) => void;
   readonly listener: (event: unknown) => void;
 }
@@ -144,9 +158,13 @@ interface PreparedSave {
 }
 
 interface ContextualEditSession {
+  closing: Promise<void> | null;
+  guarded: boolean;
+  readonly id: string;
   readonly manager: PdfAnnotationUiManager;
   readonly mode: number;
-  phase: 'awaiting-selection' | 'selected';
+  readonly onEditorsRendered: (event: unknown) => void;
+  phase: 'awaiting-selection' | 'selected' | 'closing';
 }
 
 interface PendingSelectionTransaction {
@@ -190,7 +208,8 @@ export class PdfAnnotationEditor {
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
     this.requireManager();
-    this.contextualEditSession = null;
+    const contextual = this.contextualEditSession;
+    if (contextual !== null) await this.closeContextualEditSession(contextual);
     const modeOptions: PdfAnnotationModeOptions =
       options.isFromKeyboard === undefined ? {} : { isFromKeyboard: options.isFromKeyboard };
     if (this.saving) return this.queueToolIntent(tool, modeOptions);
@@ -204,30 +223,40 @@ export class PdfAnnotationEditor {
     readonly editComment: boolean;
   }): Promise<void> {
     const manager = this.requireManager();
-    if (this.logicalMode !== 'neutral') return;
+    if (this.logicalMode !== 'neutral' || this.contextualEditSession !== null) return;
     const editId = request.id.trim();
     if (editId.length === 0) {
       throw new DOMException('The PDF annotation id is empty.', 'InvalidStateError');
     }
-    const tool = request.kind === 'freetext' ? 'freetext' : request.kind;
     const options: PdfAnnotationModeOptions = {
       editComment: request.editComment,
       editId,
     };
-    const mode = this.modeFor(tool);
-    const session: ContextualEditSession = { manager, mode, phase: 'awaiting-selection' };
+    const mode = this.modeFor(request.kind);
+    const session: ContextualEditSession = {
+      closing: null,
+      guarded: false,
+      id: editId,
+      manager,
+      mode,
+      onEditorsRendered: this.onContextualEditorsRendered,
+      phase: 'awaiting-selection',
+    };
     this.contextualEditSession = session;
     try {
-      if (this.saving) await this.queueToolIntent(tool, options);
-      else await this.changeMode(mode, options);
+      await this.enterContextualEditSession(session, request.kind, options);
     } catch (cause) {
-      if (this.contextualEditSession === session) this.contextualEditSession = null;
+      await this.containFailedContextualEntry(session);
       throw cause;
     }
   }
 
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void {
     return this.dependencies.selectionObserver.onSelection(listener);
+  }
+
+  get hasContextualEdit(): boolean {
+    return this.contextualEditSession !== null;
   }
 
   onMode(listener: (mode: PdfAnnotationLogicalMode) => void): () => void {
@@ -337,24 +366,40 @@ export class PdfAnnotationEditor {
       await this.abortAndWaitForTransaction(transaction, new DOMException(message, 'AbortError'));
       return;
     }
-    if (this.contextualEditSession === null) return;
-    this.contextualEditSession = null;
-    await this.changeMode(this.dependencies.annotationEditorType.NONE);
+    const contextual = this.contextualEditSession;
+    if (contextual === null) return;
+    await this.closeContextualEditSession(contextual);
   }
 
   private async changeMode(mode: number, options: PdfAnnotationModeOptions = {}): Promise<void> {
     if (this.dependencies.viewer.annotationEditorMode === mode) return;
     this.cancelPendingModeChange('The PDF annotation tool change was superseded.');
     await new Promise<void>((resolve, reject) => {
+      let timeoutId: number | null = window.setTimeout(() => {
+        const pending = this.pendingModeChange;
+        if (pending?.listener !== listener) return;
+        this.pendingModeChange = null;
+        this.dependencies.eventBus.off('annotationeditormodechanged', listener);
+        timeoutId = null;
+        reject(
+          new DOMException('Changing the PDF annotation editor mode timed out.', 'TimeoutError'),
+        );
+      }, SELECTION_TRANSACTION_TIMEOUT_MS);
+      const clearTimeout = (): void => {
+        const currentTimeout = timeoutId;
+        timeoutId = null;
+        if (currentTimeout !== null) window.clearTimeout(currentTimeout);
+      };
       const listener = (event: unknown): void => {
         const data = record(event);
         if (data?.['source'] !== this.dependencies.viewer || data['mode'] !== mode) return;
         this.dependencies.eventBus.off('annotationeditormodechanged', listener);
+        clearTimeout();
         const pending = this.pendingModeChange;
         if (pending !== null && pending.listener === listener) this.pendingModeChange = null;
         resolve();
       };
-      this.pendingModeChange = { listener, reject };
+      this.pendingModeChange = { clearTimeout, listener, reject };
       this.dependencies.eventBus.on('annotationeditormodechanged', listener);
       try {
         this.dependencies.viewer.annotationEditorMode = {
@@ -371,6 +416,7 @@ export class PdfAnnotationEditor {
         };
       } catch (cause) {
         this.dependencies.eventBus.off('annotationeditormodechanged', listener);
+        clearTimeout();
         this.pendingModeChange = null;
         reject(cause instanceof Error ? cause : new Error(String(cause)));
       }
@@ -471,7 +517,6 @@ export class PdfAnnotationEditor {
 
   private prepareSave(signal: AbortSignal): PreparedSave | Promise<PreparedSave> {
     const restoreNeutral = this.contextualEditSession !== null;
-    this.contextualEditSession = null;
     const manager = this.requireManager();
     const revision = this.lifecycleRevision;
     const pendingAbort = this.abortInteractionForSave();
@@ -498,11 +543,14 @@ export class PdfAnnotationEditor {
 
   private abortInteractionForSave(): Promise<void> | null {
     const pendingSelection = this.pendingSelectionTransaction;
-    if (pendingSelection === null) return null;
-    return this.abortAndWaitForTransaction(
-      pendingSelection,
-      new DOMException('Saving aborted the PDF annotation interaction.', 'AbortError'),
-    );
+    if (pendingSelection !== null) {
+      return this.abortAndWaitForTransaction(
+        pendingSelection,
+        new DOMException('Saving aborted the PDF annotation interaction.', 'AbortError'),
+      );
+    }
+    const contextual = this.contextualEditSession;
+    return contextual === null ? null : this.closeContextualEditSession(contextual);
   }
 
   private beginSave(signal: AbortSignal): void {
@@ -578,7 +626,7 @@ export class PdfAnnotationEditor {
 
   detachFromDocument(): void {
     if (this.destroyed) return;
-    this.contextualEditSession = null;
+    this.releaseContextualEditSession();
     const transaction = this.pendingSelectionTransaction;
     void this.abortSelectionTransaction(
       new DOMException('The PDF annotation interaction was detached.', 'AbortError'),
@@ -620,7 +668,7 @@ export class PdfAnnotationEditor {
     this.dirtyListeners.clear();
     this.editorAddedListeners.clear();
     this.modeListeners.clear();
-    this.contextualEditSession = null;
+    this.releaseContextualEditSession();
   }
 
   private readonly onManager = (event: unknown): void => {
@@ -640,7 +688,7 @@ export class PdfAnnotationEditor {
     }
     this.cancelQueuedToolIntent('The PDF annotation editor was rebound.');
     this.cancelQueuedMutations();
-    this.contextualEditSession = null;
+    this.releaseContextualEditSession();
     this.restoreCallbacks();
     this.manager = manager;
     this.ownCallbacks();
@@ -669,15 +717,87 @@ export class PdfAnnotationEditor {
     const details = record(data['details']);
     const hasSelectedEditor = details?.['hasSelectedEditor'];
     if (hasSelectedEditor === true) {
-      session.phase = 'selected';
+      if (this.isRequestedEditorSelected(session)) session.phase = 'selected';
       return;
     }
     if (hasSelectedEditor !== false || session.phase !== 'selected') return;
-    this.contextualEditSession = null;
-    void this.changeMode(this.dependencies.annotationEditorType.NONE).catch((cause: unknown) => {
+    void this.closeContextualEditSession(session).catch((cause: unknown) => {
       console.error('[abyss-documents] Failed to close the PDF annotation editor', { cause });
     });
   };
+
+  private isRequestedEditorSelected(session: ContextualEditSession): boolean {
+    const selected = session.manager.firstSelectedEditor;
+    return selected?.uid === session.id && selected.mode === session.mode;
+  }
+
+  private async enterContextualEditSession(
+    session: ContextualEditSession,
+    tool: PdfAnnotationTool,
+    options: PdfAnnotationModeOptions,
+  ): Promise<void> {
+    if (this.saving) await this.queueToolIntent(tool, options);
+    else await this.changeMode(session.mode, options);
+    if (!this.isRequestedEditorSelected(session)) {
+      this.guardContextualEditSession(session);
+      await this.closeContextualEditSession(session);
+      return;
+    }
+    this.guardContextualEditSession(session);
+    session.phase = 'selected';
+  }
+
+  private async containFailedContextualEntry(session: ContextualEditSession): Promise<void> {
+    if (this.contextualEditSession !== session) return;
+    this.guardContextualEditSession(session);
+    try {
+      await this.closeContextualEditSession(session);
+    } catch {
+      // Keep the creator gate installed when PDF.js cannot confirm NONE.
+    }
+  }
+
+  private readonly onContextualEditorsRendered = (event: unknown): void => {
+    const session = this.contextualEditSession;
+    const pageNumber = record(event)?.['pageNumber'];
+    if (session === null || !Number.isInteger(pageNumber)) return;
+    this.gateContextualLayer(session, (pageNumber as number) - 1);
+  };
+
+  private guardContextualEditSession(session: ContextualEditSession): void {
+    if (session.guarded) return;
+    session.guarded = true;
+    session.manager.disableUserSelect(true);
+    for (let pageIndex = 0; pageIndex < this.dependencies.pdf.numPages; pageIndex += 1) {
+      this.gateContextualLayer(session, pageIndex);
+    }
+    this.dependencies.eventBus.on('editorsrendered', session.onEditorsRendered);
+  }
+
+  private gateContextualLayer(session: ContextualEditSession, pageIndex: number): void {
+    const layer = session.manager.getLayer(pageIndex);
+    layer?.disableClick();
+    layer?.disableTextSelection();
+  }
+
+  private closeContextualEditSession(session: ContextualEditSession): Promise<void> {
+    if (session.closing !== null) return session.closing;
+    session.phase = 'closing';
+    session.closing = this.changeMode(this.dependencies.annotationEditorType.NONE).then(() => {
+      this.releaseContextualEditSession(session);
+    });
+    return session.closing;
+  }
+
+  private releaseContextualEditSession(session = this.contextualEditSession): void {
+    if (session === null) return;
+    if (session.guarded) {
+      this.dependencies.eventBus.off('editorsrendered', session.onEditorsRendered);
+      session.manager.disableUserSelect(false);
+      session.guarded = false;
+    }
+    if (this.contextualEditSession === session) this.contextualEditSession = null;
+  }
 
   private setLogicalMode(mode: PdfAnnotationLogicalMode): void {
     if (this.logicalMode === mode) return;
@@ -943,7 +1063,9 @@ export class PdfAnnotationEditor {
     const data = record(value);
     return (
       typeof data?.['commentSelection'] === 'function' &&
+      typeof data['disableUserSelect'] === 'function' &&
       typeof data['endCurrentEditing'] === 'function' &&
+      typeof data['getLayer'] === 'function' &&
       typeof data['delete'] === 'function' &&
       typeof data['highlightSelection'] === 'function' &&
       typeof data['updateParams'] === 'function' &&
@@ -987,6 +1109,7 @@ export class PdfAnnotationEditor {
     if (pending === null) return;
     this.pendingModeChange = null;
     this.dependencies.eventBus.off('annotationeditormodechanged', pending.listener);
+    pending.clearTimeout();
     pending.reject(new DOMException(message, 'AbortError'));
   }
 

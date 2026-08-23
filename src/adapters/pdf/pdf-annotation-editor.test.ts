@@ -65,12 +65,31 @@ function storage(): MutableAnnotationStorage {
   return value;
 }
 
-function manager() {
+function selectedEditor(uid: string, mode: number) {
+  let editorType = 'ink';
+  if (mode === 3) editorType = 'freetext';
+  else if (mode === 9) editorType = 'highlight';
+  return {
+    editorType,
+    mode,
+    uid,
+  };
+}
+
+function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
+  const layers = Array.from({ length: 3 }, () => ({
+    disableClick: vi.fn(),
+    disableTextSelection: vi.fn(),
+  }));
   return {
     commentSelection: vi.fn(),
     delete: vi.fn(),
+    disableUserSelect: vi.fn(),
     endCurrentEditing: vi.fn(),
+    firstSelectedEditor: selected ?? undefined,
+    getLayer: vi.fn((pageIndex: number) => layers[pageIndex]),
     highlightSelection: vi.fn(),
+    layers,
     redo: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
@@ -82,6 +101,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
   const saveDocument = vi.fn(async () => new Uint8Array([37, 80, 68, 70, 45]));
   const pdf = {
     annotationStorage,
+    numPages: 3,
     saveDocument,
   } as unknown as PDFDocumentProxy;
   const eventBus = new FakeEventBus();
@@ -684,7 +704,10 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
     for (const [kind, mode] of cases) {
       const { editor, eventBus, modeRequests, viewer } = fixture();
-      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+      eventBus.dispatch('annotationeditoruimanager', {
+        source: viewer,
+        uiManager: manager(selectedEditor(`${kind}-1`, mode)),
+      });
 
       await editor.editAnnotation({ editComment: false, id: `${kind}-1`, kind });
 
@@ -694,7 +717,10 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it('opens comment mode when requested', async () => {
     const { editor, eventBus, modeRequests, viewer } = fixture();
-    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: manager(selectedEditor('highlight-with-comment', 9)),
+    });
 
     await editor.editAnnotation({
       editComment: true,
@@ -709,7 +735,10 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it('keeps contextual editing out of the global tool state', async () => {
     const { editor, eventBus, viewer } = fixture();
-    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: manager(selectedEditor('highlight-1', 9)),
+    });
     const modes: string[] = [];
     editor.onMode((mode) => modes.push(mode));
 
@@ -722,9 +751,70 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(modes).toEqual(['neutral']);
   });
 
+  it('gates every native creator surface until NONE is source-confirmed', async () => {
+    const { editor, eventBus, viewer } = fixture();
+    const uiManager = manager(selectedEditor('highlight-1', 9));
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'highlight-1',
+      kind: 'highlight',
+    });
+
+    expect(uiManager.disableUserSelect).toHaveBeenCalledWith(true);
+    for (const layer of uiManager.layers) {
+      expect(layer.disableClick).toHaveBeenCalledOnce();
+      expect(layer.disableTextSelection).toHaveBeenCalledOnce();
+    }
+    uiManager.layers[1]?.disableClick.mockClear();
+    uiManager.layers[1]?.disableTextSelection.mockClear();
+    eventBus.dispatch('editorsrendered', { pageNumber: 2, source: {} });
+    expect(uiManager.layers[1]?.disableClick).toHaveBeenCalledOnce();
+    expect(uiManager.layers[1]?.disableTextSelection).toHaveBeenCalledOnce();
+
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: false },
+    });
+    await vi.waitFor(() => {
+      expect(uiManager.disableUserSelect).toHaveBeenLastCalledWith(false);
+    });
+  });
+
+  it('bounds a missing mode confirmation and still requests NONE behind the creator gate', async () => {
+    vi.useFakeTimers();
+    try {
+      const { editor, eventBus, modeRequests, viewer } = fixture({ dispatchModeChanges: false });
+      const uiManager = manager(selectedEditor('highlight-1', 9));
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+      let outcome: unknown = 'pending';
+      void editor
+        .editAnnotation({ editComment: false, id: 'highlight-1', kind: 'highlight' })
+        .catch((cause: unknown) => {
+          outcome = cause;
+        });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(outcome).toMatchObject({ name: 'TimeoutError' });
+      expect(modeRequests).toEqual([
+        { editComment: false, editId: 'highlight-1', mode: 9 },
+        { mode: 0 },
+      ]);
+      expect(viewer.annotationEditorMode).toBe(0);
+      expect(editor.hasContextualEdit).toBe(true);
+      expect(uiManager.disableUserSelect).toHaveBeenCalledWith(true);
+      expect(uiManager.disableUserSelect).not.toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('returns neutral after the selected contextual editor tears down', async () => {
     const { editor, eventBus, modeRequests, viewer } = fixture();
-    const uiManager = manager();
+    const uiManager = manager(selectedEditor('highlight-1', 9));
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
 
     const editing = editor.editAnnotation({
@@ -757,7 +847,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it('does not re-arm a contextual annotation tool after autosave', async () => {
     const { editor, eventBus, modeRequests, viewer } = fixture();
-    const uiManager = manager();
+    const uiManager = manager(selectedEditor('highlight-1', 9));
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
     await editor.editAnnotation({
       editComment: false,
@@ -774,6 +864,41 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(viewer.annotationEditorMode).toBe(0);
     expect(modeRequests).toEqual([
       { editComment: false, editId: 'highlight-1', mode: 9 },
+      { mode: 0 },
+    ]);
+  });
+
+  it('rolls back when PDF.js selects a different editor identity', async () => {
+    const { editor, eventBus, modeRequests, viewer } = fixture();
+    const uiManager = manager(selectedEditor('other-highlight', 9));
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'requested-highlight',
+      kind: 'highlight',
+    });
+
+    expect(viewer.annotationEditorMode).toBe(0);
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: 'requested-highlight', mode: 9 },
+      { mode: 0 },
+    ]);
+  });
+
+  it('rolls back when PDF.js cannot select the requested editor', async () => {
+    const { editor, eventBus, modeRequests, viewer } = fixture();
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
+
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'locked-highlight',
+      kind: 'highlight',
+    });
+
+    expect(viewer.annotationEditorMode).toBe(0);
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: 'locked-highlight', mode: 9 },
       { mode: 0 },
     ]);
   });

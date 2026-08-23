@@ -49,11 +49,19 @@ class FakeEventBus {
   }
 }
 
-function pdf(pageCount = 700): PDFDocumentProxy {
+interface TestPdfAnnotation {
+  readonly annotationType: number;
+  readonly id: string;
+  readonly isEditable: boolean;
+  readonly it?: string | undefined;
+}
+
+function pdf(pageCount = 700, annotations: readonly TestPdfAnnotation[] = []): PDFDocumentProxy {
   return {
     annotationStorage: { onResetModified: null, onSetModified: null },
     numPages: pageCount,
     getPage: vi.fn(async () => ({
+      getAnnotations: vi.fn(async () => annotations),
       getTextContent: vi.fn(async () => ({
         items: [
           {
@@ -74,12 +82,26 @@ function pdf(pageCount = 700): PDFDocumentProxy {
   } as unknown as PDFDocumentProxy;
 }
 
-function annotationManager() {
+function annotationManager(
+  selected: {
+    readonly editorType: string;
+    readonly mode: number;
+    readonly uid: string;
+  } | null = null,
+) {
+  const layers = Array.from({ length: 3 }, () => ({
+    disableClick: vi.fn(),
+    disableTextSelection: vi.fn(),
+  }));
   return {
     commentSelection: vi.fn(),
     delete: vi.fn(),
+    disableUserSelect: vi.fn(),
     endCurrentEditing: vi.fn(),
+    firstSelectedEditor: selected ?? undefined,
+    getLayer: vi.fn((pageIndex: number) => layers[pageIndex]),
     highlightSelection: vi.fn(),
+    layers,
     redo: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
@@ -87,6 +109,7 @@ function annotationManager() {
 }
 
 interface ViewerRuntimeOptions {
+  readonly annotations?: readonly TestPdfAnnotation[];
   readonly findDelay?: number;
   readonly findState?: number;
   readonly layoutScaleChange?: { readonly presetValue?: string; readonly scale: number };
@@ -336,7 +359,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
 }
 
 async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = {}) {
-  const documentProxy = pdf(pageCount);
+  const documentProxy = pdf(pageCount, options.annotations);
   const runtime = viewerRuntime(options);
   const search = new PdfTextSearch(documentProxy);
   const viewport = new PdfDocumentViewport(documentProxy, runtime.module, search, {
@@ -355,17 +378,21 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
 
 describe('PdfDocumentViewport', () => {
   it('delegates one supported annotation click without pointer double firing', async () => {
-    const fixture = await mountedViewport(3);
+    const fixture = await mountedViewport(3, {
+      annotations: [{ annotationType: 9, id: 'highlight-1', isEditable: true }],
+    });
     const eventBus = fixture.runtime.state.eventBus;
     const viewer = fixture.runtime.state.viewer;
     if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
     eventBus.dispatch('annotationeditoruimanager', {
       source: viewer,
-      uiManager: annotationManager(),
+      uiManager: annotationManager({ editorType: 'highlight', mode: 9, uid: 'highlight-1' }),
     });
     const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
     if (root === null) throw new Error('Expected PDF root.');
-    const layer = root.createDiv({ cls: 'annotationLayer' });
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const layer = page.createDiv({ cls: 'annotationLayer' });
     const annotation = layer.createEl('section', { cls: 'highlightAnnotation' });
     annotation.dataset['annotationId'] = 'highlight-1';
 
@@ -381,8 +408,49 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.annotationEditorRequests).toHaveLength(1);
   });
 
+  it('returns to NONE before a dismissing pointer gesture can create another annotation', async () => {
+    const fixture = await mountedViewport(3, {
+      annotations: [{ annotationType: 9, id: 'highlight-1', isEditable: true }],
+    });
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager({ editorType: 'highlight', mode: 9, uid: 'highlight-1' }),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'highlight-1';
+    annotation.click();
+    await vi.waitFor(() => {
+      expect(viewer.annotationEditorRequests).toHaveLength(1);
+    });
+
+    const textLayer = page.createDiv({ cls: 'textLayer' });
+    const nativeCreatorGesture = vi.fn();
+    textLayer.addEventListener('pointerdown', nativeCreatorGesture);
+    const dismiss = new PointerEvent('pointerdown', { bubbles: true, cancelable: true });
+    textLayer.dispatchEvent(dismiss);
+    await vi.waitFor(() => {
+      expect(viewer.annotationEditorRequests[viewer.annotationEditorRequests.length - 1]).toEqual({
+        mode: 0,
+      });
+    });
+
+    expect(dismiss.defaultPrevented).toBe(true);
+    expect(nativeCreatorGesture).not.toHaveBeenCalled();
+  });
+
   it('ignores links and unsupported annotations', async () => {
-    const fixture = await mountedViewport(3);
+    const fixture = await mountedViewport(3, {
+      annotations: [{ annotationType: 9, id: 'highlight-1', isEditable: true }],
+    });
     const eventBus = fixture.runtime.state.eventBus;
     const viewer = fixture.runtime.state.viewer;
     if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
@@ -392,7 +460,9 @@ describe('PdfDocumentViewport', () => {
     });
     const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
     if (root === null) throw new Error('Expected PDF root.');
-    const layer = root.createDiv({ cls: 'annotationLayer' });
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const layer = page.createDiv({ cls: 'annotationLayer' });
     const highlight = layer.createEl('section', { cls: 'highlightAnnotation' });
     highlight.dataset['annotationId'] = 'highlight-1';
     highlight.createEl('a', { text: 'Linked text' }).click();
@@ -405,6 +475,106 @@ describe('PdfDocumentViewport', () => {
     await Promise.resolve();
 
     expect(viewer.annotationEditorRequests).toEqual([]);
+  });
+
+  it('keeps locked class-only annotations passive', async () => {
+    const fixture = await mountedViewport(3, {
+      annotations: [{ annotationType: 9, id: 'locked-highlight', isEditable: false }],
+    });
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'locked-highlight';
+
+    annotation.click();
+    await Promise.resolve();
+
+    expect(viewer.annotationEditorRequests).toEqual([]);
+  });
+
+  it('maps InkHighlight subtype to Highlight editor', async () => {
+    const fixture = await mountedViewport(3, {
+      annotations: [
+        {
+          annotationType: 15,
+          id: 'ink-highlight-1',
+          isEditable: true,
+          it: 'InkHighlight',
+        },
+      ],
+    });
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager({
+        editorType: 'highlight',
+        mode: 9,
+        uid: 'ink-highlight-1',
+      }),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'inkAnnotation' });
+    annotation.dataset['annotationId'] = 'ink-highlight-1';
+
+    annotation.click();
+    await vi.waitFor(() => {
+      expect(viewer.annotationEditorRequests).toContainEqual({
+        editComment: false,
+        editId: 'ink-highlight-1',
+        mode: 9,
+      });
+    });
+  });
+
+  it.each(['Enter', ' '] as const)('opens a focused editable annotation with %s', async (key) => {
+    const fixture = await mountedViewport(3, {
+      annotations: [{ annotationType: 3, id: 'freetext-1', isEditable: true }],
+    });
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager({ editorType: 'freetext', mode: 3, uid: 'freetext-1' }),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'freeTextAnnotation' });
+    annotation.dataset['annotationId'] = 'freetext-1';
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key });
+
+    annotation.dispatchEvent(event);
+    await vi.waitFor(() => {
+      expect(viewer.annotationEditorRequests).toContainEqual({
+        editComment: false,
+        editId: 'freetext-1',
+        mode: 3,
+      });
+    });
+
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it('dismisses stale tokens without a failure Notice', async () => {

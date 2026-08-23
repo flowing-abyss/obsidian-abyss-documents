@@ -589,6 +589,22 @@
   border-radius: var(--radius-s);
 }
 
+@media (forced-colors: active) {
+  /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
+  .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar {
+    --editor-toolbar-bg-color: ButtonFace;
+    --editor-toolbar-fg-color: ButtonText;
+    --editor-toolbar-border-color: ButtonText;
+    --editor-toolbar-hover-border-color: Highlight;
+    --editor-toolbar-hover-bg-color: Highlight;
+    --editor-toolbar-hover-fg-color: HighlightText;
+    --editor-toolbar-focus-outline-color: Highlight;
+    --editor-toolbar-shadow: none;
+
+    forced-color-adjust: auto;
+  }
+}
+
 @media (width <= 600px) {
   .abyss-documents .abyss-reader-sidebar {
     position: absolute;

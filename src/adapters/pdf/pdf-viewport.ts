@@ -97,6 +97,20 @@ interface FindRequest {
   readonly signal: AbortSignal;
 }
 
+interface PdfEditableAnnotationData {
+  readonly annotationType?: unknown;
+  readonly id?: unknown;
+  readonly isEditable?: unknown;
+  readonly it?: unknown;
+}
+
+interface ClickedAnnotationCandidate {
+  readonly annotation: HTMLElement;
+  readonly id: string;
+  readonly inlineKind: PdfEditableAnnotationKind | null;
+  readonly pageNumber: number;
+}
+
 function record(event: unknown): Record<string, unknown> | null {
   return typeof event === 'object' && event !== null ? (event as Record<string, unknown>) : null;
 }
@@ -109,29 +123,29 @@ function isElementTarget(target: EventTarget | null): target is Element {
   return target !== null && 'closest' in target && typeof target.closest === 'function';
 }
 
-function editableAnnotationKind(annotation: Element): PdfEditableAnnotationKind | null {
-  if (
-    annotation.classList.contains('highlightAnnotation') ||
-    annotation.querySelector('.annotationContent.highlight') !== null
-  )
-    return 'highlight';
-  if (
-    annotation.classList.contains('inkAnnotation') ||
-    annotation.querySelector('.annotationContent.ink') !== null
-  )
-    return 'ink';
-  if (
-    annotation.classList.contains('freeTextAnnotation') ||
-    annotation.querySelector('.annotationContent.freetext') !== null
-  )
-    return 'freetext';
+function inlineEditableAnnotationKind(annotation: Element): PdfEditableAnnotationKind | null {
+  if (annotation.querySelector('.annotationContent.highlight') !== null) return 'highlight';
+  if (annotation.querySelector('.annotationContent.ink') !== null) return 'ink';
+  if (annotation.querySelector('.annotationContent.freetext') !== null) return 'freetext';
   return null;
 }
 
-function clickedEditableAnnotation(
+function importedEditableAnnotationKind(
+  annotation: PdfEditableAnnotationData,
+): PdfEditableAnnotationKind | null {
+  if (annotation.isEditable !== true) return null;
+  if (annotation.annotationType === 3) return 'freetext';
+  if (annotation.annotationType === 9) return 'highlight';
+  if (annotation.annotationType === 15) {
+    return annotation.it === 'InkHighlight' ? 'highlight' : 'ink';
+  }
+  return null;
+}
+
+function clickedAnnotationCandidate(
   target: Element,
   root: Element,
-): { readonly id: string; readonly kind: PdfEditableAnnotationKind } | null {
+): ClickedAnnotationCandidate | null {
   if (
     target.closest('.annotationEditorLayer') !== null ||
     target.closest(
@@ -142,8 +156,17 @@ function clickedEditableAnnotation(
   const annotation = target.closest<HTMLElement>('.annotationLayer [data-annotation-id]');
   if (annotation === null || !root.contains(annotation)) return null;
   const id = annotation.dataset['annotationId']?.trim();
-  const kind = editableAnnotationKind(annotation);
-  return id === undefined || id.length === 0 || kind === null ? null : { id, kind };
+  const pageNumber = positiveInteger(
+    Number(annotation.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber']),
+  );
+  return id === undefined || id.length === 0 || pageNumber === null
+    ? null
+    : {
+        annotation,
+        id,
+        inlineKind: inlineEditableAnnotationKind(annotation),
+        pageNumber,
+      };
 }
 
 function resolvedPageColors(host: HTMLElement): { background: string; foreground: string } {
@@ -192,6 +215,11 @@ export class PdfDocumentViewport implements DocumentViewport {
   private explicitScaleRequest = false;
   private applyingScale: ScaleRequest | null = null;
   private applyingLayout = false;
+  private annotationEditRevision = 0;
+  private readonly pageAnnotations = new Map<
+    number,
+    Promise<readonly PdfEditableAnnotationData[]>
+  >();
 
   constructor(
     private readonly pdf: PDFDocumentProxy,
@@ -242,7 +270,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.viewer = viewer;
     this.annotationEditorInstance = this.createAnnotationEditor(eventBus, viewer);
     this.bindEvents();
-    root.addEventListener('click', this.onRootClick);
+    this.registerRootListeners(root);
     if (typeof ResizeObserver === 'function') {
       this.resizeObserver = new ResizeObserver(this.onResize);
       this.resizeObserver.observe(root);
@@ -486,10 +514,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.destroyEditorBridges(attempt);
     const eventBus = this.eventBus;
     this.clearPendingPagesInit();
-    this.colorRebindActive = false;
-    this.requestedPageColors = null;
-    this.preservedViewState = null;
-    this.clearPendingInteractions();
+    this.resetDestroyedInteractionState();
     attempt(() => {
       this.disconnectResizeObserver();
     });
@@ -506,7 +531,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.listeners.clear();
 
     attempt(() => {
-      this.root?.removeEventListener('click', this.onRootClick);
+      if (this.root !== null) this.unregisterRootListeners(this.root);
     });
     attempt(() => {
       this.viewer?.cleanup();
@@ -545,6 +570,15 @@ export class PdfDocumentViewport implements DocumentViewport {
     });
   }
 
+  private resetDestroyedInteractionState(): void {
+    this.colorRebindActive = false;
+    this.requestedPageColors = null;
+    this.preservedViewState = null;
+    this.clearPendingInteractions();
+    this.annotationEditRevision += 1;
+    this.pageAnnotations.clear();
+  }
+
   private clearOwnedViewerReferences(): void {
     this.findController = null;
     this.viewer = null;
@@ -557,6 +591,18 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.root = root;
     this.viewerElement = viewerElement;
     this.selectionObserverInstance = new PdfDomSelectionObserver(root);
+  }
+
+  private registerRootListeners(root: HTMLElement): void {
+    root.addEventListener('click', this.onRootClick);
+    root.addEventListener('keydown', this.onRootKeyDown);
+    root.addEventListener('pointerdown', this.onRootPointerDown, true);
+  }
+
+  private unregisterRootListeners(root: HTMLElement): void {
+    root.removeEventListener('click', this.onRootClick);
+    root.removeEventListener('keydown', this.onRootKeyDown);
+    root.removeEventListener('pointerdown', this.onRootPointerDown, true);
   }
 
   private createAnnotationEditor(
@@ -966,18 +1012,74 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.editClickedAnnotation(target);
   };
 
-  private editClickedAnnotation(target: Element): void {
+  private readonly onRootPointerDown = (event: PointerEvent): void => {
+    const editor = this.annotationEditorInstance;
+    const target = event.target;
+    if (editor?.hasContextualEdit !== true || !isElementTarget(target)) return;
+    if (
+      target.closest(
+        '.annotationEditorLayer .selectedEditor, .editToolbar, .abyss-annotation-popover',
+      ) !== null
+    )
+      return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void editor
+      .abortInteraction('A pointer gesture outside the selected annotation closed its editor.')
+      .catch((cause: unknown) => {
+        console.error('[abyss-documents] Failed to close the PDF annotation editor', { cause });
+      });
+  };
+
+  private readonly onRootKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const target = event.target;
+    if (!isElementTarget(target) || !this.editClickedAnnotation(target)) return;
+    event.preventDefault();
+  };
+
+  private editClickedAnnotation(target: Element): boolean {
     const editor = this.annotationEditorInstance;
     const root = this.root;
-    if (editor === null || root === null) return;
-    const request = clickedEditableAnnotation(target, root);
-    if (request === null) return;
-    void editor.editAnnotation({ editComment: false, ...request }).catch((cause: unknown) => {
-      console.error('[abyss-documents] Failed to open the PDF annotation editor', {
-        cause,
-        ...request,
+    if (editor === null || root === null) return false;
+    const candidate = clickedAnnotationCandidate(target, root);
+    if (candidate === null) return false;
+    const revision = ++this.annotationEditRevision;
+    void this.resolveEditableAnnotation(candidate)
+      .then((kind) => {
+        if (
+          kind === null ||
+          revision !== this.annotationEditRevision ||
+          this.destroyPromise !== null ||
+          this.root !== root ||
+          !root.contains(candidate.annotation)
+        )
+          return;
+        return editor.editAnnotation({ editComment: false, id: candidate.id, kind });
+      })
+      .catch((cause: unknown) => {
+        console.error('[abyss-documents] Failed to open the PDF annotation editor', {
+          cause,
+          id: candidate.id,
+          pageNumber: candidate.pageNumber,
+        });
       });
-    });
+    return true;
+  }
+
+  private async resolveEditableAnnotation(
+    candidate: ClickedAnnotationCandidate,
+  ): Promise<PdfEditableAnnotationKind | null> {
+    if (candidate.inlineKind !== null) return candidate.inlineKind;
+    let annotations = this.pageAnnotations.get(candidate.pageNumber);
+    if (annotations === undefined) {
+      annotations = this.pdf.getPage(candidate.pageNumber).then(async (page) => {
+        return (await page.getAnnotations({ intent: 'display' })) as PdfEditableAnnotationData[];
+      });
+      this.pageAnnotations.set(candidate.pageNumber, annotations);
+    }
+    const annotation = (await annotations).find((item) => item.id === candidate.id);
+    return annotation === undefined ? null : importedEditableAnnotationKind(annotation);
   }
 
   private retryPage(
