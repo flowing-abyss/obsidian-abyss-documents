@@ -88,17 +88,23 @@ function annotationManager(
     readonly mode: number;
     readonly uid: string;
   } | null = null,
+  nativeEditors: ReadonlyArray<
+    readonly [string, { readonly editorType: string; readonly mode: number; readonly uid: string }]
+  > = [],
 ) {
   const layers = Array.from({ length: 3 }, () => ({
     disableClick: vi.fn(),
     disableTextSelection: vi.fn(),
   }));
+  const editors = new Map(nativeEditors);
   return {
     commentSelection: vi.fn(),
     delete: vi.fn(),
     disableUserSelect: vi.fn(),
     endCurrentEditing: vi.fn(),
+    editors,
     firstSelectedEditor: selected ?? undefined,
+    getEditor: vi.fn((id: string) => editors.get(id)),
     getLayer: vi.fn((pageIndex: number) => layers[pageIndex]),
     highlightSelection: vi.fn(),
     layers,
@@ -446,6 +452,110 @@ describe('PdfDocumentViewport', () => {
     expect(dismiss.defaultPrevented).toBe(true);
     expect(nativeCreatorGesture).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['highlight', 'highlightEditor', 9],
+    ['ink', 'inkEditor', 15],
+    ['freetext', 'freeTextEditor', 3],
+  ] as const)(
+    'switches from annotation A to native %s editor B with one pointer gesture',
+    async (editorType, className, mode) => {
+      const fixture = await mountedViewport(3, {
+        annotations: [{ annotationType: 9, id: 'annotation-a', isEditable: true }],
+      });
+      const eventBus = fixture.runtime.state.eventBus;
+      const viewer = fixture.runtime.state.viewer;
+      if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+      const selectedA = { editorType: 'highlight', mode: 9, uid: 'annotation-a' };
+      const selectedB = { editorType, mode, uid: `annotation-b-${editorType}` };
+      const uiManager = annotationManager(selectedA, [['internal-b', selectedB]]);
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+      const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+      if (root === null) throw new Error('Expected PDF root.');
+      const page = root.createDiv();
+      page.dataset['pageNumber'] = '1';
+      const annotationA = page
+        .createDiv({ cls: 'annotationLayer' })
+        .createEl('section', { cls: 'highlightAnnotation' });
+      annotationA.dataset['annotationId'] = 'annotation-a';
+      annotationA.click();
+      await vi.waitFor(() => {
+        expect(viewer.annotationEditorRequests).toHaveLength(1);
+      });
+
+      uiManager.firstSelectedEditor = selectedB;
+      const editorB = page
+        .createDiv({ cls: 'annotationEditorLayer' })
+        .createDiv({ cls: className });
+      editorB.id = 'internal-b';
+      const nativeCreatorGesture = vi.fn();
+      editorB.addEventListener('pointerdown', nativeCreatorGesture);
+      const switchGesture = new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      editorB.dispatchEvent(switchGesture);
+      editorB.click();
+      await vi.waitFor(() => {
+        expect(viewer.annotationEditorRequests).toEqual([
+          { editComment: false, editId: 'annotation-a', mode: 9 },
+          { mode: 0 },
+          { editComment: false, editId: `annotation-b-${editorType}`, mode },
+        ]);
+      });
+
+      expect(switchGesture.defaultPrevented).toBe(true);
+      expect(nativeCreatorGesture).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['locked', 'highlightAnnotation', { annotationType: 9, isEditable: false }],
+    ['unsupported', 'underlineAnnotation', { annotationType: 10, isEditable: true }],
+  ] as const)(
+    'closes annotation A but keeps a %s annotation B passive',
+    async (_case, className, annotationB) => {
+      const fixture = await mountedViewport(3, {
+        annotations: [
+          { annotationType: 9, id: 'annotation-a', isEditable: true },
+          { ...annotationB, id: 'annotation-b' },
+        ],
+      });
+      const eventBus = fixture.runtime.state.eventBus;
+      const viewer = fixture.runtime.state.viewer;
+      if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+      const uiManager = annotationManager({
+        editorType: 'highlight',
+        mode: 9,
+        uid: 'annotation-a',
+      });
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+      const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+      if (root === null) throw new Error('Expected PDF root.');
+      const page = root.createDiv();
+      page.dataset['pageNumber'] = '1';
+      const layer = page.createDiv({ cls: 'annotationLayer' });
+      const annotationA = layer.createEl('section', { cls: 'highlightAnnotation' });
+      annotationA.dataset['annotationId'] = 'annotation-a';
+      const annotationBElement = layer.createEl('section', { cls: className });
+      annotationBElement.dataset['annotationId'] = 'annotation-b';
+      annotationA.click();
+      await vi.waitFor(() => {
+        expect(viewer.annotationEditorRequests).toHaveLength(1);
+      });
+
+      annotationBElement.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, cancelable: true }),
+      );
+      annotationBElement.click();
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+      expect(viewer.annotationEditorRequests).toEqual([
+        { editComment: false, editId: 'annotation-a', mode: 9 },
+        { mode: 0 },
+      ]);
+    },
+  );
 
   it('ignores links and unsupported annotations', async () => {
     const fixture = await mountedViewport(3, {

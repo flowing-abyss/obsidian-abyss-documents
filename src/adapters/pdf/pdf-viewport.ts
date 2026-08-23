@@ -40,6 +40,7 @@ const TEXT_LAYER_MODE_ENABLE = 1;
 const ANNOTATION_MODE_ENABLE_FORMS = 2;
 const MAX_CANVAS_PIXELS = 16_777_216;
 const FIND_SELECTION_TIMEOUT_MS = 2_000;
+const CONTEXTUAL_SWITCH_CLICK_TIMEOUT_MS = 750;
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 25;
 const SCALE_DELTA = 1.1;
@@ -169,6 +170,35 @@ function clickedAnnotationCandidate(
       };
 }
 
+function clickedNativeEditorCandidate(
+  target: Element,
+  root: Element,
+  editor: PdfAnnotationEditor,
+): ClickedAnnotationCandidate | null {
+  if (
+    target.closest(
+      'a, button, input, textarea, select, [role="button"], .editToolbar, .commentButton, .popupTriggerArea',
+    ) !== null
+  )
+    return null;
+  const native = target.closest<HTMLElement>(
+    '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
+  );
+  if (native === null || !root.contains(native)) return null;
+  const request = editor.resolveNativeEditor(native.id);
+  const pageNumber = positiveInteger(
+    Number(native.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber']),
+  );
+  return request === null || pageNumber === null
+    ? null
+    : {
+        annotation: native,
+        id: request.id,
+        inlineKind: request.kind,
+        pageNumber,
+      };
+}
+
 function resolvedPageColors(host: HTMLElement): { background: string; foreground: string } {
   const style = getComputedStyle(host);
   const background = style.getPropertyValue('--background-primary').trim();
@@ -216,6 +246,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   private applyingScale: ScaleRequest | null = null;
   private applyingLayout = false;
   private annotationEditRevision = 0;
+  private contextualSwitchClickTarget: HTMLElement | null = null;
+  private contextualSwitchClickTimer: number | null = null;
   private readonly pageAnnotations = new Map<
     number,
     Promise<readonly PdfEditableAnnotationData[]>
@@ -584,6 +616,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.clearPendingInteractions();
     this.annotationEditRevision += 1;
     this.pageAnnotations.clear();
+    this.clearContextualSwitchClick();
   }
 
   private clearOwnedViewerReferences(): void {
@@ -1016,9 +1049,15 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private readonly onRootClick = (event: MouseEvent): void => {
-    this.invalidateAnnotationEditCandidate();
     const target = event.target;
     if (!isElementTarget(target)) return;
+    if (this.consumeContextualSwitchClick(target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    this.clearContextualSwitchClick();
+    this.invalidateAnnotationEditCandidate();
     const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
     if (retry !== null) {
       const page = target.closest<HTMLElement>('[data-page-number]');
@@ -1031,18 +1070,30 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private readonly onRootPointerDown = (event: PointerEvent): void => {
-    this.invalidateAnnotationEditCandidate();
+    this.clearContextualSwitchClick();
+    const revision = this.invalidateAnnotationEditCandidate();
     const editor = this.annotationEditorInstance;
     const target = event.target;
     if (editor?.hasContextualEdit !== true || !isElementTarget(target)) return;
     if (
       target.closest(
-        '.annotationEditorLayer .selectedEditor, .editToolbar, .abyss-annotation-popover',
+        '.annotationEditorLayer .selectedEditor, .editToolbar, .abyss-annotation-popover, .commentButton, .popupTriggerArea',
       ) !== null
     )
       return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    const root = this.root;
+    const candidate =
+      root === null
+        ? null
+        : (clickedNativeEditorCandidate(target, root, editor) ??
+          clickedAnnotationCandidate(target, root));
+    if (candidate !== null && root !== null) {
+      this.armContextualSwitchClick(candidate.annotation);
+      this.switchContextualAnnotation(candidate, editor, root, revision);
+      return;
+    }
     void editor
       .abortInteraction('A pointer gesture outside the selected annotation closed its editor.')
       .catch((cause: unknown) => {
@@ -1050,7 +1101,29 @@ export class PdfDocumentViewport implements DocumentViewport {
       });
   };
 
+  private switchContextualAnnotation(
+    candidate: ClickedAnnotationCandidate,
+    editor: PdfAnnotationEditor,
+    root: HTMLDivElement,
+    revision: number,
+  ): void {
+    void (async () => {
+      await editor.abortInteraction('Selecting another PDF annotation closed its prior editor.');
+      const kind = await this.resolveEditableAnnotation(candidate);
+      if (!this.isAnnotationEditCandidateCurrent(candidate, root, revision) || kind === null)
+        return;
+      await editor.editAnnotation({ editComment: false, id: candidate.id, kind });
+    })().catch((cause: unknown) => {
+      console.error('[abyss-documents] Failed to switch the selected PDF annotation', {
+        cause,
+        id: candidate.id,
+        pageNumber: candidate.pageNumber,
+      });
+    });
+  }
+
   private readonly onRootKeyDown = (event: KeyboardEvent): void => {
+    this.clearContextualSwitchClick();
     this.invalidateAnnotationEditCandidate();
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const target = event.target;
@@ -1059,6 +1132,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private readonly onRootReadingGesture = (): void => {
+    this.clearContextualSwitchClick();
     this.invalidateAnnotationEditCandidate();
   };
 
@@ -1071,13 +1145,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     const revision = this.invalidateAnnotationEditCandidate();
     void this.resolveEditableAnnotation(candidate)
       .then((kind) => {
-        if (
-          kind === null ||
-          revision !== this.annotationEditRevision ||
-          this.destroyPromise !== null ||
-          this.root !== root ||
-          !root.contains(candidate.annotation)
-        )
+        if (kind === null || !this.isAnnotationEditCandidateCurrent(candidate, root, revision))
           return;
         return editor.editAnnotation({ editComment: false, id: candidate.id, kind });
       })
@@ -1109,6 +1177,42 @@ export class PdfDocumentViewport implements DocumentViewport {
   private invalidateAnnotationEditCandidate(): number {
     this.annotationEditRevision += 1;
     return this.annotationEditRevision;
+  }
+
+  private isAnnotationEditCandidateCurrent(
+    candidate: ClickedAnnotationCandidate,
+    root: HTMLDivElement,
+    revision: number,
+  ): boolean {
+    return (
+      revision === this.annotationEditRevision &&
+      this.destroyPromise === null &&
+      this.root === root &&
+      root.contains(candidate.annotation)
+    );
+  }
+
+  private armContextualSwitchClick(target: HTMLElement): void {
+    this.clearContextualSwitchClick();
+    this.contextualSwitchClickTarget = target;
+    this.contextualSwitchClickTimer = window.setTimeout(() => {
+      this.clearContextualSwitchClick();
+    }, CONTEXTUAL_SWITCH_CLICK_TIMEOUT_MS);
+  }
+
+  private consumeContextualSwitchClick(target: Element): boolean {
+    const pending = this.contextualSwitchClickTarget;
+    if (pending?.contains(target) !== true) return false;
+    this.clearContextualSwitchClick();
+    return true;
+  }
+
+  private clearContextualSwitchClick(): void {
+    if (this.contextualSwitchClickTimer !== null) {
+      window.clearTimeout(this.contextualSwitchClickTimer);
+      this.contextualSwitchClickTimer = null;
+    }
+    this.contextualSwitchClickTarget = null;
   }
 
   private retryPage(

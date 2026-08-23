@@ -93,6 +93,12 @@ interface PdfAnnotationUiManager {
         readonly uid?: string | undefined;
       }
     | undefined;
+  getEditor(id: string):
+    | {
+        readonly mode?: number | undefined;
+        readonly uid?: string | undefined;
+      }
+    | undefined;
   getLayer(pageIndex: number):
     | {
         disableClick(): void;
@@ -257,6 +263,18 @@ export class PdfAnnotationEditor {
 
   get hasContextualEdit(): boolean {
     return this.contextualEditSession !== null;
+  }
+
+  resolveNativeEditor(
+    internalId: string,
+  ): { readonly id: string; readonly kind: PdfEditableAnnotationKind } | null {
+    const manager = this.manager;
+    if (this.destroyed || manager === null) return null;
+    const native = manager.getEditor(internalId.trim());
+    const id = native?.uid?.trim();
+    if (id === undefined || id.length === 0) return null;
+    const kind = this.editableKindForMode(native?.mode);
+    return kind === null ? null : { id, kind };
   }
 
   onMode(listener: (mode: PdfAnnotationLogicalMode) => void): () => void {
@@ -1065,17 +1083,20 @@ export class PdfAnnotationEditor {
 
   private isUiManager(value: unknown): value is PdfAnnotationUiManager {
     const data = record(value);
-    return (
-      typeof data?.['commentSelection'] === 'function' &&
-      typeof data['disableUserSelect'] === 'function' &&
-      typeof data['endCurrentEditing'] === 'function' &&
-      typeof data['getLayer'] === 'function' &&
-      typeof data['delete'] === 'function' &&
-      typeof data['highlightSelection'] === 'function' &&
-      typeof data['updateParams'] === 'function' &&
-      typeof data['undo'] === 'function' &&
-      typeof data['redo'] === 'function'
-    );
+    if (data === null) return false;
+    const methods = [
+      'commentSelection',
+      'delete',
+      'disableUserSelect',
+      'endCurrentEditing',
+      'getEditor',
+      'getLayer',
+      'highlightSelection',
+      'redo',
+      'undo',
+      'updateParams',
+    ] as const;
+    return methods.every((method) => typeof data[method] === 'function');
   }
 
   private modeFor(tool: PdfAnnotationTool): number {
@@ -1090,6 +1111,14 @@ export class PdfAnnotationEditor {
       case 'freetext':
         return types.FREETEXT;
     }
+  }
+
+  private editableKindForMode(mode: number | undefined): PdfEditableAnnotationKind | null {
+    const types = this.dependencies.annotationEditorType;
+    if (mode === types.HIGHLIGHT) return 'highlight';
+    if (mode === types.INK) return 'ink';
+    if (mode === types.FREETEXT) return 'freetext';
+    return null;
   }
 
   private parameterFor(parameter: PdfAnnotationParameter): number {

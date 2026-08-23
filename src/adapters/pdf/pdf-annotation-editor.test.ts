@@ -87,6 +87,7 @@ function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
     disableUserSelect: vi.fn(),
     endCurrentEditing: vi.fn(),
     firstSelectedEditor: selected ?? undefined,
+    getEditor: vi.fn(),
     getLayer: vi.fn((pageIndex: number) => layers[pageIndex]),
     highlightSelection: vi.fn(),
     layers,
