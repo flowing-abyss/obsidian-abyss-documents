@@ -6434,11 +6434,9 @@
 
   position: fixed;
   z-index: var(--layer-popover);
+  box-sizing: border-box;
   display: flex;
-  max-width: calc(
-    100dvw - var(--abyss-selection-safe-area-left) - var(--abyss-selection-safe-area-right) -
-      var(--size-4-4)
-  );
+  max-width: 100%;
   align-items: center;
   gap: var(--size-2-1);
   padding: var(--size-2-1);
@@ -6457,6 +6455,29 @@
   min-width: var(--input-height);
   min-height: var(--input-height);
   padding: 0;
+}
+
+.abyss-documents .abyss-selection-annotation-swatch-strip,
+.abyss-documents .abyss-selection-annotation-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-1);
+}
+
+.abyss-documents .abyss-selection-annotation-swatch-strip {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
+.abyss-documents .abyss-selection-annotation-swatch-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.abyss-documents .abyss-selection-annotation-actions {
+  flex: 0 0 auto;
 }
 
 .abyss-documents .abyss-selection-annotation-swatch {

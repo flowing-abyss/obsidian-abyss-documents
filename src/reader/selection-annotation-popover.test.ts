@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
+import { DEFAULT_SETTINGS } from '../settings.js';
 import { SelectionAnnotationPopover } from './selection-annotation-popover.js';
 
 const palette = [
@@ -152,7 +153,7 @@ describe('SelectionAnnotationPopover', () => {
       Array.from(popover.element.querySelectorAll<HTMLButtonElement>('[data-selection-color]')).map(
         (button) => button.getAttribute('aria-label'),
       ),
-    ).toEqual(['Highlight: Key idea', 'Highlight: Custom color']);
+    ).toEqual(['Highlight: Key idea', 'Highlight: Custom color — Blue']);
     popover.destroy();
     host.remove();
   });
@@ -175,7 +176,8 @@ describe('SelectionAnnotationPopover', () => {
 
     expect(buttons.map((button) => button.tabIndex)).toEqual([-1, 0, -1, -1, -1]);
     expect(host.doc.activeElement).toBe(buttons[1]);
-    buttons[1]?.dispatchEvent(
+    invoker.focus();
+    invoker.dispatchEvent(
       new OwnerKeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
     );
     expect(popover.element.hidden).toBe(true);
@@ -195,7 +197,7 @@ describe('SelectionAnnotationPopover', () => {
     runFrame();
 
     expect(host.doc.activeElement).toBe(invoker);
-    popover.element.dispatchEvent(
+    invoker.dispatchEvent(
       new (host.win as Window & { KeyboardEvent: typeof KeyboardEvent }).KeyboardEvent('keydown', {
         bubbles: true,
         cancelable: true,
@@ -204,6 +206,101 @@ describe('SelectionAnnotationPopover', () => {
     );
     expect(host.doc.activeElement).toBe(invoker);
     expect(host.querySelector('textarea')).toBeNull();
+    popover.destroy();
+    host.remove();
+  });
+
+  it('keeps the original return focus across replacement opens and falls back when it is removed', () => {
+    const { host, intents, popover } = createPopover();
+    const invoker = host.createEl('button');
+    invoker.focus();
+    const runFrame = runNextFrame(host);
+    const open = () => {
+      popover.open({ onIntent: (intent) => intents.push(intent), palette, selection: selection() });
+      runFrame();
+    };
+
+    open();
+    popover.element.querySelector<HTMLButtonElement>('button')?.focus();
+    open();
+    invoker.dispatchEvent(
+      new (host.win as Window & { KeyboardEvent: typeof KeyboardEvent }).KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'Escape',
+      }),
+    );
+    expect(host.doc.activeElement).toBe(invoker);
+
+    invoker.focus();
+    open();
+    invoker.remove();
+    host.doc.body.dispatchEvent(
+      new (host.win as Window & { KeyboardEvent: typeof KeyboardEvent }).KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'Escape',
+      }),
+    );
+    expect(host.doc.activeElement).toBe(host);
+    popover.destroy();
+    host.remove();
+  });
+
+  it('contains the default palette in a narrow visual viewport with a scrollable swatch strip', () => {
+    const { host, intents, popover } = createPopover();
+    const runFrame = runNextFrame(host);
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      value: () => new DOMRect(0, 0, 176, 52),
+    });
+    Object.defineProperty(host.win, 'visualViewport', {
+      configurable: true,
+      value: { height: 120, offsetLeft: 40, offsetTop: 20, width: 180 },
+    });
+
+    popover.open({
+      onIntent: (intent) => intents.push(intent),
+      palette: DEFAULT_SETTINGS.annotations.palette,
+      selection: selection({ bottom: 100, left: 100, right: 120, top: 80, width: 20 }),
+    });
+    runFrame();
+
+    expect(popover.element.style.maxWidth).toBe('180px');
+    expect(popover.element.style.left).toBe('40px');
+    expect(popover.element.querySelector('[data-region="selection-swatch-strip"]')).not.toBeNull();
+    expect(
+      popover.element
+        .querySelector('[data-region="selection-swatch-strip"]')
+        ?.getAttribute('data-overflow'),
+    ).toBe('scroll');
+    expect(popover.element.querySelector('[data-region="selection-actions"]')).not.toBeNull();
+    expect(popover.element.querySelectorAll('button')).toHaveLength(11);
+    Reflect.deleteProperty(host.win, 'visualViewport');
+    popover.destroy();
+    host.remove();
+  });
+
+  it('gives every default blank-meaning swatch a unique semantic name', () => {
+    const { host, intents, popover } = createPopover();
+    const runFrame = runNextFrame(host);
+    popover.open({
+      onIntent: (intent) => intents.push(intent),
+      palette: DEFAULT_SETTINGS.annotations.palette,
+      selection: selection(),
+    });
+    runFrame();
+
+    const labels = Array.from(
+      popover.element.querySelectorAll<HTMLButtonElement>('[data-selection-color]'),
+      (button) => button.getAttribute('aria-label'),
+    );
+    expect(new Set(labels).size).toBe(DEFAULT_SETTINGS.annotations.palette.length);
+    expect(
+      labels.every((label) =>
+        label === null ? false : label.startsWith('Highlight: Custom color — '),
+      ),
+    ).toBe(true);
+    expect(labels.some((label) => (label === null ? false : label.includes('#')))).toBe(false);
     popover.destroy();
     host.remove();
   });
@@ -219,6 +316,12 @@ describe('SelectionAnnotationPopover', () => {
         (button) => button.dataset['touchTarget'],
       ),
     ).toEqual(['44', '44', '44', '44', '44']);
+    expect(
+      Array.from(popover.element.querySelectorAll('button')).every((button) =>
+        button.classList.contains('abyss-selection-annotation-popover-button'),
+      ),
+    ).toBe(true);
+    expect(popover.element.querySelector('[data-region="selection-swatch-strip"]')).not.toBeNull();
     popover.destroy();
     host.remove();
   });

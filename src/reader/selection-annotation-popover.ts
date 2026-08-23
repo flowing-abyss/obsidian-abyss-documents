@@ -30,6 +30,7 @@ export class SelectionAnnotationPopover {
   readonly element: HTMLDivElement;
 
   private readonly cleanups: Array<() => void> = [];
+  private readonly activeCleanups: Array<() => void> = [];
   private active: SelectionAnnotationPopoverRequest | null = null;
   private frame: number | null = null;
   private previousFocus: HTMLElement | null = null;
@@ -57,34 +58,39 @@ export class SelectionAnnotationPopover {
       const button = target.closest<HTMLButtonElement>('button[data-selection-intent]');
       if (button !== null) this.emitAction(button);
     });
-    this.listen(this.host.ownerDocument, 'pointerdown', (event) => {
-      const target = event.target;
-      if (target instanceof ownerWindow(this.host).Element && !this.element.contains(target))
-        this.dismiss(true);
-    });
   }
 
   open(request: SelectionAnnotationPopoverRequest): void {
     if (this.destroyed)
       throw new DOMException('Selection annotation popover destroyed.', 'InvalidStateError');
-    this.close(false);
+    this.close(false, true);
     this.capturePreviousFocus();
     this.active = request;
     this.render(request.palette);
+    this.listenActive(this.host.ownerDocument, 'keydown', (event) => {
+      this.handleKeydown(event);
+    });
+    this.listenActive(this.host.ownerDocument, 'pointerdown', (event) => {
+      const target = event.target;
+      if (target instanceof ownerWindow(this.host).Element && !this.element.contains(target))
+        this.dismiss(true);
+    });
     this.frame = ownerWindow(this.host).requestAnimationFrame(() => {
       this.frame = null;
       if (this.active !== request) return;
+      this.applyViewportSize();
       this.element.hidden = false;
       this.place(request.selection);
     });
   }
 
-  close(restoreFocus = false): void {
+  close(restoreFocus = false, preservePreviousFocus = false): void {
+    this.clearActiveListeners();
     this.cancelFrame();
     this.element.hidden = true;
     this.active = null;
-    if (restoreFocus) this.previousFocus?.focus();
-    this.previousFocus = null;
+    if (restoreFocus) this.restoreFocus();
+    if (!preservePreviousFocus) this.previousFocus = null;
   }
 
   destroy(): void {
@@ -97,19 +103,32 @@ export class SelectionAnnotationPopover {
 
   private render(palette: readonly AnnotationPaletteEntry[]): void {
     this.element.replaceChildren();
+    const owner = ownerWindow(this.host);
+    const swatches = owner.createDiv();
+    swatches.className = 'abyss-selection-annotation-swatch-strip';
+    swatches.dataset['overflow'] = 'scroll';
+    swatches.dataset['region'] = 'selection-swatch-strip';
+    swatches.setAttribute('aria-label', 'Highlight colors');
+    swatches.setAttribute('role', 'group');
     for (const entry of palette) {
       const label = semanticLabel(entry);
       const button = this.button('highlight', `Highlight: ${label}`, 'highlighter');
       button.classList.add('abyss-selection-annotation-swatch');
       button.dataset['selectionColor'] = entry.color;
       button.style.backgroundColor = entry.color;
-      this.element.append(button);
+      swatches.append(button);
     }
-    this.element.append(
+    const actions = owner.createDiv();
+    actions.className = 'abyss-selection-annotation-actions';
+    actions.dataset['region'] = 'selection-actions';
+    actions.setAttribute('aria-label', 'Selection actions');
+    actions.setAttribute('role', 'group');
+    actions.append(
       this.button('comment', 'Add a comment', 'message-square-plus'),
       this.button('link', 'Add link', 'link-2'),
       this.button('tag', 'Add tag', 'tag'),
     );
+    this.element.append(swatches, actions);
     this.setRovingFocus(0, false);
   }
 
@@ -182,6 +201,7 @@ export class SelectionAnnotationPopover {
   }
 
   private capturePreviousFocus(): void {
+    if (this.previousFocus !== null) return;
     const owner = ownerWindow(this.host);
     const active = this.host.ownerDocument.activeElement;
     if (active instanceof owner.HTMLElement && !this.element.contains(active))
@@ -203,6 +223,26 @@ export class SelectionAnnotationPopover {
     this.element.style.top = `${clamp(desiredTop, viewport.top, viewport.bottom - bounds.height)}px`;
   }
 
+  private applyViewportSize(): void {
+    const viewport = viewportBounds(ownerWindow(this.host), this.element);
+    this.element.style.maxWidth = `${Math.max(0, viewport.right - viewport.left)}px`;
+    this.element.style.maxHeight = `${Math.max(0, viewport.bottom - viewport.top)}px`;
+  }
+
+  private restoreFocus(): void {
+    const previousFocus = this.previousFocus;
+    if (previousFocus?.isConnected === true) {
+      previousFocus.focus();
+      return;
+    }
+    if (this.host.isConnected) {
+      this.host.tabIndex = -1;
+      this.host.focus();
+      return;
+    }
+    this.host.ownerDocument.body.focus();
+  }
+
   private cancelFrame(): void {
     if (this.frame === null) return;
     ownerWindow(this.host).cancelAnimationFrame(this.frame);
@@ -214,22 +254,34 @@ export class SelectionAnnotationPopover {
     type: K,
     listener: (event: HTMLElementEventMap[K]) => void,
   ): void;
-  private listen<K extends keyof DocumentEventMap>(
-    target: Document,
-    type: K,
-    listener: (event: DocumentEventMap[K]) => void,
-  ): void;
-  private listen(target: HTMLElement | Document, type: string, listener: EventListener): void {
+  private listen(target: HTMLElement, type: string, listener: EventListener): void {
     target.addEventListener(type, listener);
     this.cleanups.push(() => {
       target.removeEventListener(type, listener);
     });
   }
+
+  private listenActive<K extends keyof DocumentEventMap>(
+    target: Document,
+    type: K,
+    listener: (event: DocumentEventMap[K]) => void,
+  ): void {
+    target.addEventListener(type, listener);
+    this.activeCleanups.push(() => {
+      target.removeEventListener(type, listener);
+    });
+  }
+
+  private clearActiveListeners(): void {
+    for (const cleanup of this.activeCleanups.splice(0)) cleanup();
+  }
 }
 
 function semanticLabel(entry: AnnotationPaletteEntry): string {
   const meaning = entry.meaning.trim();
-  return meaning.length > 0 ? meaning : 'Custom color';
+  if (meaning.length > 0) return meaning;
+  const name = entry.name.trim();
+  return name.length > 0 ? `Custom color — ${name}` : 'Custom color';
 }
 
 function viewportBounds(owner: Window, element: HTMLElement): VisualViewportBounds {
