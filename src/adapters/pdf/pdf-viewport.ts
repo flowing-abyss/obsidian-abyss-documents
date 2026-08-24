@@ -41,6 +41,7 @@ const ANNOTATION_MODE_ENABLE_FORMS = 2;
 const MAX_CANVAS_PIXELS = 16_777_216;
 const FIND_SELECTION_TIMEOUT_MS = 2_000;
 const CONTEXTUAL_SWITCH_CLICK_TIMEOUT_MS = 750;
+const CONTEXTUAL_SWITCH_CLICK_COORDINATE_TOLERANCE = 4;
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 25;
 const SCALE_DELTA = 1.1;
@@ -112,6 +113,23 @@ interface ClickedAnnotationCandidate {
   readonly pageNumber: number;
 }
 
+interface ContextualSwitchCandidate {
+  readonly expectedMode: number | null;
+  readonly id: string;
+  readonly kind: PdfEditableAnnotationKind | null;
+  readonly pageNumber: number;
+  readonly source: 'imported' | 'native';
+}
+
+interface ContextualSwitchGesture {
+  readonly button: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly revision: number;
+}
+
 function record(event: unknown): Record<string, unknown> | null {
   return typeof event === 'object' && event !== null ? (event as Record<string, unknown>) : null;
 }
@@ -174,7 +192,7 @@ function clickedNativeEditorCandidate(
   target: Element,
   root: Element,
   editor: PdfAnnotationEditor,
-): ClickedAnnotationCandidate | null {
+): ContextualSwitchCandidate | null {
   if (
     target.closest(
       'a, button, input, textarea, select, [role="button"], .editToolbar, .commentButton, .popupTriggerArea',
@@ -192,11 +210,59 @@ function clickedNativeEditorCandidate(
   return request === null || pageNumber === null
     ? null
     : {
-        annotation: native,
+        expectedMode: request.mode,
         id: request.id,
-        inlineKind: request.kind,
+        kind: request.kind,
         pageNumber,
+        source: 'native',
       };
+}
+
+function clickedContextualSwitchCandidate(
+  target: Element,
+  root: Element,
+  editor: PdfAnnotationEditor,
+): ContextualSwitchCandidate | null {
+  const native = clickedNativeEditorCandidate(target, root, editor);
+  if (native !== null) return native;
+  const imported = clickedAnnotationCandidate(target, root);
+  return imported === null
+    ? null
+    : {
+        expectedMode: null,
+        id: imported.id,
+        kind: null,
+        pageNumber: imported.pageNumber,
+        source: 'imported',
+      };
+}
+
+function modeForEditableAnnotationKind(kind: PdfEditableAnnotationKind): number {
+  switch (kind) {
+    case 'highlight':
+      return PDFJS_ANNOTATION_EDITOR_TYPE.HIGHLIGHT;
+    case 'ink':
+      return PDFJS_ANNOTATION_EDITOR_TYPE.INK;
+    case 'freetext':
+      return PDFJS_ANNOTATION_EDITOR_TYPE.FREETEXT;
+  }
+}
+
+function isContextualSwitchClick(event: MouseEvent, pending: ContextualSwitchGesture): boolean {
+  if (event.button !== pending.button) return false;
+  if (
+    Math.abs(event.clientX - pending.clientX) > CONTEXTUAL_SWITCH_CLICK_COORDINATE_TOLERANCE ||
+    Math.abs(event.clientY - pending.clientY) > CONTEXTUAL_SWITCH_CLICK_COORDINATE_TOLERANCE
+  )
+    return false;
+  if (!event.instanceOf(PointerEvent)) return true;
+  if (event.pointerId <= 0 || pending.pointerId <= 0) return true;
+  if (event.pointerId !== pending.pointerId) return false;
+  return (
+    event.pointerType.length === 0 ||
+    pending.pointerType.length === 0 ||
+    event.pointerType === pending.pointerType
+  );
 }
 
 function resolvedPageColors(host: HTMLElement): { background: string; foreground: string } {
@@ -246,7 +312,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private applyingScale: ScaleRequest | null = null;
   private applyingLayout = false;
   private annotationEditRevision = 0;
-  private contextualSwitchClickTarget: HTMLElement | null = null;
+  private contextualSwitchGesture: ContextualSwitchGesture | null = null;
   private contextualSwitchClickTimer: number | null = null;
   private readonly pageAnnotations = new Map<
     number,
@@ -634,7 +700,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private registerRootListeners(root: HTMLElement): void {
-    root.addEventListener('click', this.onRootClick);
+    root.addEventListener('click', this.onRootClick, true);
     root.addEventListener('keydown', this.onRootKeyDown);
     root.addEventListener('pointerdown', this.onRootPointerDown, true);
     root.addEventListener('scroll', this.onRootReadingGesture);
@@ -642,7 +708,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private unregisterRootListeners(root: HTMLElement): void {
-    root.removeEventListener('click', this.onRootClick);
+    root.removeEventListener('click', this.onRootClick, true);
     root.removeEventListener('keydown', this.onRootKeyDown);
     root.removeEventListener('pointerdown', this.onRootPointerDown, true);
     root.removeEventListener('scroll', this.onRootReadingGesture);
@@ -1051,7 +1117,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly onRootClick = (event: MouseEvent): void => {
     const target = event.target;
     if (!isElementTarget(target)) return;
-    if (this.consumeContextualSwitchClick(target)) {
+    if (this.consumeContextualSwitchClick(event)) {
       event.preventDefault();
       event.stopImmediatePropagation();
       return;
@@ -1072,6 +1138,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly onRootPointerDown = (event: PointerEvent): void => {
     this.clearContextualSwitchClick();
     const revision = this.invalidateAnnotationEditCandidate();
+    if (event.button !== 0) return;
     const editor = this.annotationEditorInstance;
     const target = event.target;
     if (editor?.hasContextualEdit !== true || !isElementTarget(target)) return;
@@ -1084,13 +1151,9 @@ export class PdfDocumentViewport implements DocumentViewport {
     event.preventDefault();
     event.stopImmediatePropagation();
     const root = this.root;
-    const candidate =
-      root === null
-        ? null
-        : (clickedNativeEditorCandidate(target, root, editor) ??
-          clickedAnnotationCandidate(target, root));
+    const candidate = root === null ? null : clickedContextualSwitchCandidate(target, root, editor);
     if (candidate !== null && root !== null) {
-      this.armContextualSwitchClick(candidate.annotation);
+      this.armContextualSwitchClick(event, revision);
       this.switchContextualAnnotation(candidate, editor, root, revision);
       return;
     }
@@ -1102,15 +1165,31 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private switchContextualAnnotation(
-    candidate: ClickedAnnotationCandidate,
+    candidate: ContextualSwitchCandidate,
     editor: PdfAnnotationEditor,
     root: HTMLDivElement,
     revision: number,
   ): void {
     void (async () => {
       await editor.abortInteraction('Selecting another PDF annotation closed its prior editor.');
-      const kind = await this.resolveEditableAnnotation(candidate);
-      if (!this.isAnnotationEditCandidateCurrent(candidate, root, revision) || kind === null)
+      if (!this.isContextualSwitchCurrent(editor, root, candidate.pageNumber, revision)) return;
+      let kind = candidate.kind;
+      if (candidate.source === 'imported') {
+        const annotation = this.findImportedAnnotation(root, candidate.id, candidate.pageNumber);
+        if (annotation === null) return;
+        kind = await this.resolveEditableAnnotation({
+          annotation,
+          id: candidate.id,
+          inlineKind: null,
+          pageNumber: candidate.pageNumber,
+        });
+      } else if (kind === null || candidate.expectedMode !== modeForEditableAnnotationKind(kind)) {
+        return;
+      }
+      if (
+        kind === null ||
+        !this.isContextualSwitchCurrent(editor, root, candidate.pageNumber, revision)
+      )
         return;
       await editor.editAnnotation({ editComment: false, id: candidate.id, kind });
     })().catch((cause: unknown) => {
@@ -1192,19 +1271,60 @@ export class PdfDocumentViewport implements DocumentViewport {
     );
   }
 
-  private armContextualSwitchClick(target: HTMLElement): void {
+  private isContextualSwitchCurrent(
+    editor: PdfAnnotationEditor,
+    root: HTMLDivElement,
+    pageNumber: number,
+    revision: number,
+  ): boolean {
+    return (
+      revision === this.annotationEditRevision &&
+      pageNumber <= this.pageCount &&
+      this.destroyPromise === null &&
+      this.root === root &&
+      this.annotationEditorInstance === editor
+    );
+  }
+
+  private findImportedAnnotation(
+    root: HTMLDivElement,
+    id: string,
+    pageNumber: number,
+  ): HTMLElement | null {
+    const annotations = Array.from(
+      root.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]'),
+    );
+    for (const annotation of annotations) {
+      if (annotation.dataset['annotationId'] !== id) continue;
+      const containingPage = positiveInteger(
+        Number(annotation.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber']),
+      );
+      if (containingPage === pageNumber) return annotation;
+    }
+    return null;
+  }
+
+  private armContextualSwitchClick(event: PointerEvent, revision: number): void {
     this.clearContextualSwitchClick();
-    this.contextualSwitchClickTarget = target;
+    this.contextualSwitchGesture = {
+      button: event.button,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      revision,
+    };
     this.contextualSwitchClickTimer = window.setTimeout(() => {
       this.clearContextualSwitchClick();
     }, CONTEXTUAL_SWITCH_CLICK_TIMEOUT_MS);
   }
 
-  private consumeContextualSwitchClick(target: Element): boolean {
-    const pending = this.contextualSwitchClickTarget;
-    if (pending?.contains(target) !== true) return false;
+  private consumeContextualSwitchClick(event: MouseEvent): boolean {
+    const pending = this.contextualSwitchGesture;
+    if (pending === null) return false;
     this.clearContextualSwitchClick();
-    return true;
+    if (pending.revision !== this.annotationEditRevision) return false;
+    return isContextualSwitchClick(event, pending);
   }
 
   private clearContextualSwitchClick(): void {
@@ -1212,7 +1332,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       window.clearTimeout(this.contextualSwitchClickTimer);
       this.contextualSwitchClickTimer = null;
     }
-    this.contextualSwitchClickTarget = null;
+    this.contextualSwitchGesture = null;
   }
 
   private retryPage(

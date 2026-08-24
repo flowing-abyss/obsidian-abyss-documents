@@ -265,16 +265,19 @@ export class PdfAnnotationEditor {
     return this.contextualEditSession !== null;
   }
 
-  resolveNativeEditor(
-    internalId: string,
-  ): { readonly id: string; readonly kind: PdfEditableAnnotationKind } | null {
+  resolveNativeEditor(internalId: string): {
+    readonly id: string;
+    readonly kind: PdfEditableAnnotationKind;
+    readonly mode: number;
+  } | null {
     const manager = this.manager;
     if (this.destroyed || manager === null) return null;
     const native = manager.getEditor(internalId.trim());
     const id = native?.uid?.trim();
-    if (id === undefined || id.length === 0) return null;
-    const kind = this.editableKindForMode(native?.mode);
-    return kind === null ? null : { id, kind };
+    const mode = native?.mode;
+    if (id === undefined || id.length === 0 || typeof mode !== 'number') return null;
+    const kind = this.editableKindForMode(mode);
+    return kind === null ? null : { id, kind, mode };
   }
 
   onMode(listener: (mode: PdfAnnotationLogicalMode) => void): () => void {
