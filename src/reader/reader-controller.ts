@@ -1535,12 +1535,7 @@ export class ReaderController {
             },
           };
     const callbacks: ReaderSidebarCallbacks = {
-      annotationColorMeanings: Object.fromEntries(
-        (this.profileState.annotations?.palette ?? []).map((entry) => [
-          entry.color.toLocaleLowerCase(),
-          entry.meaning.trim().length > 0 ? entry.meaning.trim() : entry.name,
-        ]),
-      ),
+      ...annotationColorLabels(this.profileState.annotations?.palette ?? []),
       onClose: () => undefined,
       onAnnotationNavigate: (location) => {
         this.navigateToLocation(location);
@@ -2198,6 +2193,22 @@ function annotationColorParameter(
   if (tool === 'highlight') return 'highlight-color';
   if (tool === 'ink') return 'ink-color';
   return 'freetext-color';
+}
+
+function annotationColorLabels(
+  palette: PluginSettings['annotations']['palette'],
+): Pick<ReaderSidebarCallbacks, 'annotationColorMeanings' | 'annotationColorNames'> {
+  return {
+    annotationColorMeanings: Object.fromEntries(
+      palette.map((entry) => [
+        entry.color.toLocaleLowerCase(),
+        entry.meaning.trim().length > 0 ? entry.meaning.trim() : entry.name,
+      ]),
+    ),
+    annotationColorNames: Object.fromEntries(
+      palette.map((entry) => [entry.color.toLocaleLowerCase(), entry.name]),
+    ),
+  };
 }
 
 function isAnnotationToolbarIntent(intent: ReaderShellIntent): intent is AnnotationToolbarIntent {

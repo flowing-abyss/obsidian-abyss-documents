@@ -17,6 +17,11 @@ interface AnnotationPanelUnavailableOptions {
   readonly onRetry?: () => void;
 }
 
+interface AnnotationFocusTarget {
+  readonly action: string | null;
+  readonly rowId: string;
+}
+
 export interface AnnotationPanelFilter {
   readonly query: string;
   readonly colors: ReadonlySet<string>;
@@ -31,6 +36,7 @@ export interface AnnotationColorFacet {
 
 export interface AnnotationsPanelOptions {
   readonly colorMeanings?: Readonly<Record<string, string>>;
+  readonly colorNames?: Readonly<Record<string, string>>;
   readonly onCopy?: (annotation: DocumentAnnotation) => void;
   readonly onInsert?: (annotation: DocumentAnnotation) => void;
   readonly onNavigate: (location: DocumentLocation) => void;
@@ -70,7 +76,10 @@ export class AnnotationsPanel {
   private nextRowId = 0;
   private measurementFrame: number | null = null;
   private estimateCalibrated = false;
-  private focusedRowId: string | null = null;
+  private focusedTarget: AnnotationFocusTarget | null = null;
+  private openActionsRowId: string | null = null;
+  private suppressedActionsRowId: string | null = null;
+  private touchNavigationGuardRowId: string | null = null;
   private destroyed = false;
   private readonly onScroll = (): void => {
     if (this.destroyed || !this.updateWindowFromScroll()) return;
@@ -91,10 +100,19 @@ export class AnnotationsPanel {
   private readonly onDocumentFocusIn = (event: FocusEvent): void => {
     const target = event.target;
     if (!(target instanceof ownerWindow(this.root).Element)) return;
-    this.closeContextActionsExcept(target.closest('.abyss-annotation-card-row'));
-    this.focusedRowId = this.root.contains(target)
-      ? target.getAttribute('data-annotation-row-id')
-      : null;
+    const row = target.closest<HTMLElement>('.abyss-annotation-card-row');
+    this.closeContextActionsExcept(row);
+    if (!this.root.contains(target) || row === null) {
+      this.focusedTarget = null;
+      return;
+    }
+    const rowId = row.dataset['annotationRowId'];
+    const action = target.closest<HTMLElement>('[data-action]')?.dataset['action'] ?? null;
+    if (action !== null && rowId !== undefined && this.suppressedActionsRowId === rowId) {
+      this.suppressedActionsRowId = null;
+      row.removeAttribute('data-actions-suppressed');
+    }
+    this.focusedTarget = rowId === undefined ? null : { action, rowId };
   };
   private readonly onDocumentPointerDown = (event: PointerEvent): void => {
     const target = event.target;
@@ -197,6 +215,7 @@ export class AnnotationsPanel {
 
   setAnnotations(annotations: readonly DocumentAnnotation[]): void {
     this.clearResolutionFeedback();
+    this.resetContextualActions();
     this.annotations = [...annotations];
     this.rowIds = new WeakMap();
     this.nextRowId = 0;
@@ -336,10 +355,7 @@ export class AnnotationsPanel {
       chip.style.setProperty('--abyss-annotation-color', facet.color);
       const pressed = selected.has(normalize(facet.color));
       chip.setAttribute('aria-pressed', String(pressed));
-      chip.setAttribute(
-        'aria-label',
-        `${facet.meaning}, ${facet.count} ${facet.count === 1 ? 'annotation' : 'annotations'}`,
-      );
+      chip.setAttribute('aria-label', this.colorFacetAccessibleLabel(facet));
       const swatch = ownerWindow(this.root).createSpan();
       swatch.className = 'abyss-annotation-color-chip-swatch';
       swatch.setAttribute('aria-hidden', 'true');
@@ -411,7 +427,7 @@ export class AnnotationsPanel {
   }
 
   private render(): void {
-    const focusedRowId = this.activeRowId();
+    const focusedTarget = this.activeFocusTarget();
     this.list.replaceChildren();
     const visible = this.filtered.slice(this.windowStart, this.windowStart + MAX_CARDS);
     if (visible.length > 0) this.list.append(this.spacer(this.offsetAt(this.windowStart), 'top'));
@@ -421,7 +437,7 @@ export class AnnotationsPanel {
     const remainingHeight = this.offsetAt(this.filtered.length) - this.offsetAt(end);
     if (visible.length > 0) this.list.append(this.spacer(remainingHeight, 'bottom'));
     this.renderState();
-    this.restoreFocusedRow(focusedRowId);
+    this.restoreFocusedTarget(focusedTarget);
     maximizeReaderCounter(
       'maxAnnotationCards',
       this.list.querySelectorAll('.abyss-annotation-card').length,
@@ -466,7 +482,14 @@ export class AnnotationsPanel {
         this.cardTags(annotation),
       ].filter((element): element is HTMLElement => element !== null),
     );
-    button.addEventListener('click', () => {
+    button.addEventListener('click', (event) => {
+      const rowId = this.rowId(annotation);
+      if (this.touchNavigationGuardRowId === rowId) {
+        this.touchNavigationGuardRowId = null;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       this.clearResolutionFeedback();
       this.options.onNavigate(location(annotation));
     });
@@ -530,7 +553,7 @@ export class AnnotationsPanel {
     linkRow.dataset['annotationLinks'] = '';
     for (const link of links) {
       const item = owner.createSpan();
-      item.className = 'internal-link abyss-annotation-card-link';
+      item.className = 'abyss-annotation-card-link';
       item.dataset['annotationLink'] = link;
       item.textContent = link;
       linkRow.append(item);
@@ -559,7 +582,10 @@ export class AnnotationsPanel {
     const row = ownerWindow(this.root).createEl('article');
     row.className = 'abyss-annotation-card-row';
     row.dataset['annotationCardId'] = annotationId(annotation);
-    row.dataset['annotationRowId'] = this.rowId(annotation);
+    const rowId = this.rowId(annotation);
+    row.dataset['annotationRowId'] = rowId;
+    if (this.openActionsRowId === rowId) row.dataset['actionsOpen'] = '';
+    if (this.suppressedActionsRowId === rowId) row.dataset['actionsSuppressed'] = '';
     row.setAttribute('role', 'listitem');
     row.setAttribute('aria-posinset', String(index + 1));
     row.setAttribute('aria-setsize', String(this.filtered.length));
@@ -567,14 +593,29 @@ export class AnnotationsPanel {
     row.addEventListener('contextmenu', (event) => {
       if (row.querySelector('.abyss-annotation-card-actions') === null) return;
       event.preventDefault();
+      this.openActionsRowId = rowId;
+      this.suppressedActionsRowId = null;
       row.dataset['actionsOpen'] = '';
-      row.querySelector<HTMLButtonElement>('.abyss-annotation-card-action')?.focus();
+      row.removeAttribute('data-actions-suppressed');
     });
     row.addEventListener('pointerup', (event) => {
-      if (event.pointerType === 'touch') row.dataset['actionsOpen'] = '';
+      if (event.pointerType !== 'touch' || this.openActionsRowId === rowId) return;
+      this.openActionsRowId = rowId;
+      this.suppressedActionsRowId = null;
+      this.touchNavigationGuardRowId = rowId;
+      row.dataset['actionsOpen'] = '';
+      row.removeAttribute('data-actions-suppressed');
     });
     row.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') delete row.dataset['actionsOpen'];
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.openActionsRowId = null;
+      this.touchNavigationGuardRowId = null;
+      this.suppressedActionsRowId = rowId;
+      row.removeAttribute('data-actions-open');
+      row.dataset['actionsSuppressed'] = '';
+      row.querySelector<HTMLElement>('.abyss-annotation-card')?.focus();
     });
     row.addEventListener('dragstart', (event) => {
       if (event.dataTransfer === null || !isTransferableAnnotation(annotation)) return;
@@ -715,7 +756,7 @@ export class AnnotationsPanel {
 
   private measureRenderedRows(): void {
     if (this.destroyed) return;
-    const activeRowId = this.activeRowId();
+    const activeTarget = this.activeFocusTarget();
     const virtualScrollTop = this.virtualScrollTop();
     const anchorIndex = this.indexAtOffset(virtualScrollTop);
     const anchorDelta = virtualScrollTop - this.offsetAt(anchorIndex);
@@ -733,7 +774,7 @@ export class AnnotationsPanel {
     if (!changed) return;
     this.rebuildOffsets();
     this.scrollHost.scrollTop = this.scrollTopForIndex(anchorIndex) + anchorDelta;
-    this.windowStart = this.windowStartForAnchor(anchorIndex, activeRowId);
+    this.windowStart = this.windowStartForAnchor(anchorIndex, activeTarget?.rowId);
     this.render();
   }
 
@@ -755,7 +796,7 @@ export class AnnotationsPanel {
   }
 
   private invalidateMeasurements(preserveAnchor: boolean): void {
-    const focusedRowId = this.activeRowId();
+    const focusedTarget = this.activeFocusTarget();
     const virtualScrollTop = this.virtualScrollTop();
     const anchorIndex = this.indexAtOffset(virtualScrollTop);
     const anchor = preserveAnchor ? this.filtered[anchorIndex] : undefined;
@@ -768,23 +809,42 @@ export class AnnotationsPanel {
       this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
     }
     this.render();
-    this.restoreFocusedRow(focusedRowId);
+    this.restoreFocusedTarget(focusedTarget);
   }
 
-  private restoreFocusedRow(rowId: string | undefined): void {
-    if (rowId === undefined) return;
-    const target = Array.from(
-      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card[data-annotation-row-id]'),
-    ).find((candidate) => candidate.dataset['annotationRowId'] === rowId);
-    if (target === undefined) return;
+  private restoreFocusedTarget(focus: AnnotationFocusTarget | null): void {
+    if (focus === null) return;
+    const row = Array.from(
+      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row[data-annotation-row-id]'),
+    ).find((candidate) => candidate.dataset['annotationRowId'] === focus.rowId);
+    if (row === undefined) return;
+    const actionName = focus.action;
+    const action =
+      actionName === null
+        ? null
+        : Array.from(row.querySelectorAll<HTMLElement>('[data-action]')).find(
+            (candidate) => candidate.dataset['action'] === actionName,
+          );
+    const target = action ?? row.querySelector<HTMLElement>('.abyss-annotation-card');
+    if (target === null) return;
     const scrollTop = this.scrollHost.scrollTop;
     target.focus();
     this.scrollHost.scrollTop = scrollTop;
   }
 
-  private activeRowId(): string | undefined {
+  private activeFocusTarget(): AnnotationFocusTarget | null {
     const activeElement = ownerWindow(this.root).document.activeElement;
-    return activeElement?.getAttribute('data-annotation-row-id') ?? this.focusedRowId ?? undefined;
+    if (activeElement instanceof ownerWindow(this.root).Element) {
+      const row = activeElement.closest<HTMLElement>('.abyss-annotation-card-row');
+      const rowId = row?.dataset['annotationRowId'];
+      if (rowId !== undefined) {
+        return {
+          action: activeElement.closest<HTMLElement>('[data-action]')?.dataset['action'] ?? null,
+          rowId,
+        };
+      }
+    }
+    return this.focusedTarget;
   }
 
   private virtualScrollTop(): number {
@@ -852,10 +912,54 @@ export class AnnotationsPanel {
   }
 
   private closeContextActionsExcept(exception: Element | null): void {
-    const rows = Array.from(this.root.querySelectorAll<HTMLElement>('[data-actions-open]'));
-    for (const row of rows) {
-      if (row !== exception) row.removeAttribute('data-actions-open');
+    const exceptionRowId =
+      exception instanceof ownerWindow(this.root).HTMLElement
+        ? (exception.dataset['annotationRowId'] ?? null)
+        : null;
+    if (
+      exceptionRowId === null ||
+      (this.openActionsRowId !== null && this.openActionsRowId !== exceptionRowId)
+    ) {
+      this.openActionsRowId = null;
+      this.suppressedActionsRowId = null;
+      this.touchNavigationGuardRowId = null;
     }
+    const rows = Array.from(
+      this.root.querySelectorAll<HTMLElement>('[data-actions-open], [data-actions-suppressed]'),
+    );
+    for (const row of rows) {
+      if (row === exception) continue;
+      row.removeAttribute('data-actions-open');
+      row.removeAttribute('data-actions-suppressed');
+    }
+  }
+
+  private resetContextualActions(): void {
+    this.focusedTarget = null;
+    this.openActionsRowId = null;
+    this.suppressedActionsRowId = null;
+    this.touchNavigationGuardRowId = null;
+  }
+
+  private colorFacetAccessibleLabel(facet: AnnotationColorFacet): string {
+    const peers = this.displayColors.filter(
+      (candidate) => normalize(candidate.meaning) === normalize(facet.meaning),
+    );
+    const count = `${facet.count} ${facet.count === 1 ? 'annotation' : 'annotations'}`;
+    if (peers.length === 1) return `${facet.meaning}, ${count}`;
+    const configuredName = colorSetting(facet.color, this.options.colorNames);
+    const configuredNameIsUnique =
+      configuredName !== null &&
+      peers.filter(
+        (candidate) =>
+          normalize(colorSetting(candidate.color, this.options.colorNames) ?? '') ===
+          normalize(configuredName),
+      ).length === 1;
+    const qualifier =
+      configuredNameIsUnique && normalize(configuredName) !== normalize(facet.meaning)
+        ? configuredName
+        : `Color ${String(peers.indexOf(facet) + 1)} of ${String(peers.length)}`;
+    return `${facet.meaning} — ${qualifier}, ${count}`;
   }
 }
 
@@ -966,7 +1070,18 @@ function colorMeaning(
   color: string,
   meanings: Readonly<Record<string, string>> | undefined,
 ): string {
-  return nonEmpty(meanings?.[color]) ?? 'Custom color';
+  return colorSetting(color, meanings) ?? 'Custom color';
+}
+
+function colorSetting(
+  color: string,
+  settings: Readonly<Record<string, string>> | undefined,
+): string | null {
+  if (settings === undefined) return null;
+  const match = Object.entries(settings).find(
+    ([candidate]) => normalize(candidate) === normalize(color),
+  );
+  return nonEmpty(match?.[1]);
 }
 
 function nonEmpty(value: string | null | undefined): string | null {

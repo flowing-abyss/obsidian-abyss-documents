@@ -33,7 +33,11 @@ describe('ReaderSidebar', () => {
     expect(sidebar.annotationsPanel.root.hidden).toBe(false);
   });
   it('passes configured color meanings into annotation cards', () => {
-    const handlers = { ...callbacks(), annotationColorMeanings: { '#ffd400': 'Important' } };
+    const handlers = {
+      ...callbacks(),
+      annotationColorMeanings: { '#ffd400': 'Important' },
+      annotationColorNames: { '#ffd400': 'Yellow' },
+    };
     const sidebar = new ReaderSidebar(createDiv(), handlers);
     const annotation = {
       ...({} as DocumentAnnotation),
@@ -56,6 +60,11 @@ describe('ReaderSidebar', () => {
     };
     sidebar.annotationsPanel.setAnnotations([annotation]);
     expect(sidebar.annotationsPanel.root.textContent).toContain('Important');
+    expect(
+      sidebar.annotationsPanel.root
+        .querySelector('[data-annotation-color]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Important, 1 annotation');
   });
   it('forwards optional drag, copy, and insert callbacks into annotation cards', () => {
     const onAnnotationCopy = vi.fn();

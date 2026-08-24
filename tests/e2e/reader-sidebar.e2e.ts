@@ -294,6 +294,7 @@ describe('PDF reader sidebar', () => {
         comment: card.querySelector('[data-annotation-comment]')?.textContent ?? '',
         link: card.querySelector('[data-annotation-link]')?.textContent ?? '',
         meaning: card.querySelector('[data-annotation-meaning]')?.textContent ?? '',
+        paddingInlineEnd: Number.parseFloat(getComputedStyle(card).paddingInlineEnd),
         page: card.querySelector('[data-annotation-page]')?.textContent ?? '',
         panelRight: panel.getBoundingClientRect().right,
         quoteCount: card.querySelectorAll('[data-annotation-quote]').length,
@@ -319,13 +320,19 @@ describe('PDF reader sidebar', () => {
     });
     expect(initial.comment).toContain('Annotation 00000');
     expect(initial.cardRight).toBeLessThanOrEqual(initial.panelRight + 1);
+    expect(initial.paddingInlineEnd).toBeLessThan(30);
 
-    await browser.execute(() => {
-      document
-        .querySelector<HTMLElement>('.abyss-annotation-card-row')
-        ?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    const contextResult = await browser.execute(() => {
+      const row = document.querySelector<HTMLElement>('.abyss-annotation-card-row');
+      if (row === null) throw new Error('Annotation row is missing.');
+      const before = document.activeElement;
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      return {
+        actionFocused: document.activeElement?.hasAttribute('data-action') === true,
+        focusPreserved: document.activeElement === before,
+      };
     });
-    await expect($('[data-action="copy-annotation-link"]')).toBeFocused();
+    expect(contextResult).toEqual({ actionFocused: false, focusPreserved: true });
     expect(
       await browser.execute(() => {
         const actions = document.querySelector('.abyss-annotation-card-actions');
@@ -334,6 +341,23 @@ describe('PDF reader sidebar', () => {
       }),
     ).toBe('1');
 
+    await browser.execute(() => {
+      const insert = document.querySelector<HTMLElement>('[data-action="insert-annotation"]');
+      if (insert === null) throw new Error('Insert action is missing.');
+      insert.focus();
+      window.dispatchEvent(new Event('resize'));
+    });
+    await expect($('[data-action="insert-annotation"]')).toBeFocused();
+    await browser.keys(Key.Escape);
+    await expect($('.abyss-annotation-card')).toBeFocused();
+    expect(
+      await browser.execute(() => {
+        const actions = document.querySelector('.abyss-annotation-card-actions');
+        if (actions === null) throw new Error('Annotation actions are missing after Escape.');
+        return getComputedStyle(actions).opacity;
+      }),
+    ).toBe('0');
+
     await $('[data-annotation-color]').click();
     await browser.waitUntil(
       async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '5000',
@@ -341,5 +365,40 @@ describe('PDF reader sidebar', () => {
     );
     await expect($$('[data-annotation-color]')).toBeElementsArrayOfSize(2);
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 48 });
+
+    await $('[data-annotation-search]').setValue('Annotation 07501');
+    await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
+    await expect($('[data-annotation-page]')).toHaveText('Page 76');
+    await expect($('[data-control="page-field"]')).toHaveValue('1');
+    const firstTouch = await browser.execute(() => {
+      const card = document.querySelector<HTMLButtonElement>('.abyss-annotation-card');
+      if (card === null) throw new Error('Touch annotation card is missing.');
+      card.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'touch' }),
+      );
+      const clickAccepted = card.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+      return {
+        actionsOpen: card.closest('.abyss-annotation-card-row')?.hasAttribute('data-actions-open'),
+        clickAccepted,
+      };
+    });
+    expect(firstTouch).toEqual({ actionsOpen: true, clickAccepted: false });
+    await expect($('[data-control="page-field"]')).toHaveValue('1');
+    await browser.execute(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    await expect($('.abyss-annotation-card-row')).toHaveAttribute('data-actions-open');
+
+    await browser.execute(() => {
+      const card = document.querySelector<HTMLButtonElement>('.abyss-annotation-card');
+      if (card === null) throw new Error('Second touch annotation card is missing.');
+      card.click();
+    });
+    await browser.waitUntil(
+      async () => Number(await $('[data-control="page-field"]').getValue()) > 1,
+      { timeout: 5_000, timeoutMsg: 'Second explicit card intent did not navigate.' },
+    );
   });
 });

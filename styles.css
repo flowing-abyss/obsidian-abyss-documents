@@ -6944,7 +6944,7 @@
   height: auto;
   flex-direction: column;
   gap: var(--size-2-2);
-  padding: var(--size-4-2) calc(var(--size-4-3) + 86px) var(--size-4-2) var(--size-4-3);
+  padding: var(--size-4-2) var(--size-4-3);
   border: var(--border-width) solid transparent;
   border-radius: var(--radius-s);
   background: transparent;
@@ -6977,6 +6977,13 @@
 .abyss-documents .abyss-annotation-card-row[data-actions-open] .abyss-annotation-card-actions {
   opacity: 1;
   pointer-events: auto;
+}
+
+.abyss-documents
+  .abyss-annotation-card-row[data-actions-suppressed]
+  .abyss-annotation-card-actions {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .abyss-documents .abyss-annotation-card-action {
@@ -7017,6 +7024,12 @@
 .abyss-documents .abyss-annotation-card:focus-visible,
 .abyss-documents .abyss-annotation-card[aria-current='location'] {
   background: var(--background-modifier-hover);
+}
+
+.abyss-documents .abyss-annotation-card-row:hover .abyss-annotation-card,
+.abyss-documents .abyss-annotation-card-row:focus-within .abyss-annotation-card,
+.abyss-documents .abyss-annotation-card-row[data-actions-open] .abyss-annotation-card {
+  padding-inline-end: calc(var(--size-4-3) + 86px);
 }
 
 .abyss-documents .abyss-annotation-card-header {
@@ -7097,7 +7110,10 @@
 }
 
 .abyss-documents .abyss-annotation-card-link {
-  color: var(--link-color);
+  padding: 1px var(--size-2-1);
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
 }
 
 .abyss-documents .abyss-annotation-card-tag {
@@ -7272,7 +7288,9 @@
 }
 
 @media (pointer: coarse) {
-  .abyss-documents .abyss-annotation-card {
+  .abyss-documents .abyss-annotation-card-row:hover .abyss-annotation-card,
+  .abyss-documents .abyss-annotation-card-row:focus-within .abyss-annotation-card,
+  .abyss-documents .abyss-annotation-card-row[data-actions-open] .abyss-annotation-card {
     padding-inline-end: calc(var(--size-4-3) + 104px);
   }
 

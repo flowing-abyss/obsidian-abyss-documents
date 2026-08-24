@@ -1,7 +1,7 @@
 import { Platform, setIcon } from 'obsidian';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation, SearchHit } from '../document-core/document.js';
-import { AnnotationsPanel } from './annotations-panel.js';
+import { AnnotationsPanel, type AnnotationsPanelOptions } from './annotations-panel.js';
 import { OutlinePanel } from './outline-panel.js';
 import { ownerWindow } from './owner-dom.js';
 import {
@@ -22,6 +22,7 @@ const SIDEBAR_INSTANCE_COUNTS = new WeakMap<Document, number>();
 
 export interface ReaderSidebarCallbacks {
   readonly annotationColorMeanings?: Readonly<Record<string, string>>;
+  readonly annotationColorNames?: Readonly<Record<string, string>>;
   readonly onClose: () => void;
   readonly onAnnotationNavigate?: (location: DocumentLocation) => void;
   readonly onAnnotationCopy?: (annotation: DocumentAnnotation) => void;
@@ -73,22 +74,7 @@ export class ReaderSidebar {
     host.append(this.root);
 
     this.outlinePanel = new OutlinePanel(this.panelHost, callbacks.onOutlineNavigate);
-    this.annotationsPanel = new AnnotationsPanel(this.panelHost, {
-      ...(callbacks.annotationColorMeanings === undefined
-        ? {}
-        : { colorMeanings: callbacks.annotationColorMeanings }),
-      onNavigate: callbacks.onAnnotationNavigate ?? (() => undefined),
-      ...(callbacks.onAnnotationCopy === undefined ? {} : { onCopy: callbacks.onAnnotationCopy }),
-      ...(callbacks.onAnnotationInsert === undefined
-        ? {}
-        : { onInsert: callbacks.onAnnotationInsert }),
-      ...(callbacks.onAnnotationTransfer === undefined
-        ? {}
-        : { onTransfer: callbacks.onAnnotationTransfer }),
-      ...(callbacks.onAnnotationTransferFailure === undefined
-        ? {}
-        : { onTransferFailure: callbacks.onAnnotationTransferFailure }),
-    });
+    this.annotationsPanel = new AnnotationsPanel(this.panelHost, annotationPanelOptions(callbacks));
     const searchCallbacks: SearchPanelCallbacks = {
       onClose: () => {
         this.close();
@@ -219,6 +205,25 @@ export class ReaderSidebar {
   private panelId(tab: ReaderSidebarTab): string {
     return `${this.idPrefix}-panel-${tab}`;
   }
+}
+
+function annotationPanelOptions(callbacks: ReaderSidebarCallbacks): AnnotationsPanelOptions {
+  const options: AnnotationsPanelOptions = {
+    onNavigate: callbacks.onAnnotationNavigate ?? (() => undefined),
+  };
+  if (callbacks.annotationColorMeanings !== undefined)
+    Object.assign(options, { colorMeanings: callbacks.annotationColorMeanings });
+  if (callbacks.annotationColorNames !== undefined)
+    Object.assign(options, { colorNames: callbacks.annotationColorNames });
+  if (callbacks.onAnnotationCopy !== undefined)
+    Object.assign(options, { onCopy: callbacks.onAnnotationCopy });
+  if (callbacks.onAnnotationInsert !== undefined)
+    Object.assign(options, { onInsert: callbacks.onAnnotationInsert });
+  if (callbacks.onAnnotationTransfer !== undefined)
+    Object.assign(options, { onTransfer: callbacks.onAnnotationTransfer });
+  if (callbacks.onAnnotationTransferFailure !== undefined)
+    Object.assign(options, { onTransferFailure: callbacks.onAnnotationTransferFailure });
+  return options;
 }
 
 function nextSidebarIdPrefix(doc: Document): string {

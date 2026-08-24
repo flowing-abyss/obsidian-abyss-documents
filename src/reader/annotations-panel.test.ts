@@ -451,6 +451,56 @@ describe('AnnotationsPanel', () => {
     ]);
   });
 
+  it('disambiguates duplicate semantic facet names without exposing hex', () => {
+    const root = createDiv();
+    const options = {
+      colorMeanings: { '#0000ff': 'Review', '#00ff00': 'Review' },
+      colorNames: { '#0000ff': 'Blue', '#00ff00': 'Green' },
+      onNavigate: vi.fn(),
+    };
+    const panel = new AnnotationsPanel(root, options);
+    panel.setAnnotations([
+      annotation(0, { color: '#0000ff' }),
+      annotation(1, { color: '#00ff00' }),
+      annotation(2, { color: '#123456' }),
+      annotation(3, { color: '#654321' }),
+    ]);
+
+    const chips = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'));
+    expect(chips.map((chip) => chip.textContent)).toEqual([
+      'Review1',
+      'Review1',
+      'Custom color1',
+      'Custom color1',
+    ]);
+    const names = chips.map((chip) => chip.getAttribute('aria-label'));
+    expect(new Set(names).size).toBe(4);
+    expect(names).toEqual([
+      'Review — Blue, 1 annotation',
+      'Review — Green, 1 annotation',
+      'Custom color — Color 1 of 2, 1 annotation',
+      'Custom color — Color 2 of 2, 1 annotation',
+    ]);
+    expect(names.join(' ')).not.toMatch(/#[\da-f]{6}/iu);
+
+    const repeatedRoot = createDiv();
+    const repeatedPanel = new AnnotationsPanel(repeatedRoot, {
+      colorMeanings: { '#0000ff': 'Later', '#00ff00': 'Later' },
+      colorNames: { '#0000ff': 'Marker', '#00ff00': 'Marker' },
+      onNavigate: vi.fn(),
+    });
+    repeatedPanel.setAnnotations([
+      annotation(0, { color: '#0000ff' }),
+      annotation(1, { color: '#00ff00' }),
+    ]);
+    expect(
+      Array.from(
+        repeatedRoot.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'),
+        (chip) => chip.getAttribute('aria-label'),
+      ),
+    ).toEqual(['Later — Color 1 of 2, 1 annotation', 'Later — Color 2 of 2, 1 annotation']);
+  });
+
   it('filters without scanning rendered DOM', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, {
@@ -515,6 +565,7 @@ describe('AnnotationsPanel', () => {
         (tag) => tag.textContent,
       ),
     ).toEqual(['#Evidence', '#Review']);
+    expect(card?.querySelector('.internal-link')).toBeNull();
     const empty = root.querySelector<HTMLElement>('[data-annotation-id="annotation-1"]');
     expect(empty?.querySelector('[data-annotation-quote]')).toBeNull();
     expect(empty?.querySelector('[data-annotation-comment]')).toBeNull();
@@ -533,13 +584,17 @@ describe('AnnotationsPanel', () => {
     panel.setAnnotations([annotation(0)]);
     const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
     const actions = root.querySelector<HTMLElement>('.abyss-annotation-card-actions');
+    const origin = ownerWindow(root).createEl('button');
+    root.doc.body.append(origin);
+    origin.focus();
     expect(actions?.dataset['contextual']).toBe('');
     expect(row?.hasAttribute('data-actions-open')).toBe(false);
 
     row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
 
     expect(row?.hasAttribute('data-actions-open')).toBe(true);
-    expect(root.doc.activeElement?.getAttribute('data-action')).toBe('copy-annotation-link');
+    expect(root.doc.activeElement).toBe(origin);
+    origin.remove();
     root.remove();
   });
 
@@ -588,6 +643,87 @@ describe('AnnotationsPanel', () => {
     panel.destroy();
     outside.remove();
     root.remove();
+  });
+
+  it('preserves contextual action focus through virtual rerenders and restores the card on Escape', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    const insert = root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
+    insert?.focus();
+    expect(root.doc.activeElement).toBe(insert);
+
+    panel.setCurrentPage(0);
+
+    const restored = root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
+    expect(root.doc.activeElement).toBe(restored);
+    restored?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+    expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-0');
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
+        ?.hasAttribute('data-actions-open'),
+    ).toBe(false);
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
+        ?.hasAttribute('data-actions-suppressed'),
+    ).toBe(true);
+    panel.setCurrentPage(0);
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
+        ?.hasAttribute('data-actions-suppressed'),
+    ).toBe(true);
+    const outside = ownerWindow(root).createEl('button');
+    root.doc.body.append(outside);
+    outside.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    expect(root.querySelector('[data-actions-suppressed]')).toBeNull();
+    outside.remove();
+    root.remove();
+  });
+
+  it('uses the first touch only to reveal persistent actions and suppress navigation', () => {
+    const root = createDiv();
+    const onNavigate = vi.fn();
+    const panel = new AnnotationsPanel(root, {
+      onNavigate,
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations([annotation(0), annotation(1)]);
+    const firstCard = root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-0"]');
+    firstCard?.dispatchEvent(
+      Object.assign(new Event('pointerup', { bubbles: true, cancelable: true }), {
+        pointerType: 'touch',
+      }),
+    );
+    const generatedClick = new MouseEvent('click', { bubbles: true, cancelable: true });
+    firstCard?.dispatchEvent(generatedClick);
+
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(generatedClick.defaultPrevented).toBe(true);
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
+        ?.hasAttribute('data-actions-open'),
+    ).toBe(true);
+    panel.setCurrentPage(1);
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
+        ?.hasAttribute('data-actions-open'),
+    ).toBe(true);
+
+    root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-0"]')?.click();
+    expect(onNavigate).toHaveBeenCalledOnce();
+    panel.setAnnotations([annotation(0), annotation(1)]);
+    expect(root.querySelector('[data-actions-open]')).toBeNull();
   });
 
   it('keeps unique tag facets bounded and finds a late tag on demand', () => {
