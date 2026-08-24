@@ -10,6 +10,7 @@ const MAX_TAG_FACETS = 48;
 const ESTIMATED_CARD_HEIGHT = 112;
 const SCROLL_OVERSCAN = 10;
 const HEIGHT_EPSILON = 0.5;
+let nextDocumentTagsBodyId = 0;
 
 type AnnotationPanelState = 'loading' | 'empty' | 'content' | 'filtered-empty' | 'unavailable';
 
@@ -94,7 +95,7 @@ export class AnnotationsPanel {
   private measurementFrame: number | null = null;
   private estimateCalibrated = false;
   private focusedTarget: AnnotationFocusTarget | null = null;
-  private focusedVisualAnchor: AnnotationVisualAnchor | null = null;
+  private lastFocusedVisualAnchor: AnnotationVisualAnchor | null = null;
   private openActionsRowId: string | null = null;
   private suppressedActionsRowId: string | null = null;
   private touchNavigationGuardRowId: string | null = null;
@@ -125,9 +126,13 @@ export class AnnotationsPanel {
     if (!(target instanceof ownerWindow(this.root).Element)) return;
     const row = target.closest<HTMLElement>('.abyss-annotation-card-row');
     this.closeContextActionsExcept(row);
-    if (!this.root.contains(target) || row === null) {
+    if (!this.root.contains(target)) {
       this.focusedTarget = null;
-      this.focusedVisualAnchor = null;
+      this.lastFocusedVisualAnchor = null;
+      return;
+    }
+    if (row === null) {
+      this.focusedTarget = null;
       return;
     }
     const rowId = row.dataset['annotationRowId'];
@@ -137,7 +142,7 @@ export class AnnotationsPanel {
       row.removeAttribute('data-actions-suppressed');
     }
     this.focusedTarget = rowId === undefined ? null : { action, rowId };
-    this.focusedVisualAnchor = this.visualAnchorFor(row, rowId);
+    this.lastFocusedVisualAnchor = this.visualAnchorFor(row, rowId);
   };
   private readonly onDocumentPointerDown = (event: PointerEvent): void => {
     const target = event.target;
@@ -882,12 +887,12 @@ export class AnnotationsPanel {
   }
 
   private restoreFocusedVisualAnchor(): void {
-    const anchor = this.focusedVisualAnchor;
+    const anchor = this.lastFocusedVisualAnchor;
     if (anchor === null) return;
-    const active = ownerWindow(this.root).document.activeElement;
-    if (!(active instanceof ownerWindow(this.root).Element)) return;
-    const row = active.closest<HTMLElement>('.abyss-annotation-card-row');
-    if (row?.dataset['annotationRowId'] !== anchor.rowId) return;
+    const row = Array.from(
+      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row[data-annotation-row-id]'),
+    ).find((candidate) => candidate.dataset['annotationRowId'] === anchor.rowId);
+    if (row === undefined) return;
     const card = row.querySelector<HTMLElement>('.abyss-annotation-card');
     if (card === null) return;
     const delta = card.getBoundingClientRect().top - anchor.top;
@@ -1015,6 +1020,7 @@ export class AnnotationsPanel {
 
   private resetContextualActions(): void {
     this.focusedTarget = null;
+    this.lastFocusedVisualAnchor = null;
     this.openActionsRowId = null;
     this.suppressedActionsRowId = null;
     this.touchNavigationGuardRowId = null;
@@ -1095,13 +1101,16 @@ function createTagFacetControls(owner: ReaderOwnerWindow): TagFacetControls {
   tags.className = 'abyss-annotation-tags';
   tags.dataset['section'] = 'tags';
   tags.dataset['expanded'] = 'false';
-  const { count, toggle } = createTagToggle(owner);
   const { body, rows, search } = createTagBody(owner);
+  const { count, toggle } = createTagToggle(owner, body.id);
   tags.append(toggle, body);
   return { body, count, rows, search, tags, toggle };
 }
 
-function createTagToggle(owner: ReaderOwnerWindow): {
+function createTagToggle(
+  owner: ReaderOwnerWindow,
+  bodyId: string,
+): {
   readonly count: HTMLElement;
   readonly toggle: HTMLButtonElement;
 } {
@@ -1109,6 +1118,7 @@ function createTagToggle(owner: ReaderOwnerWindow): {
   summary.type = 'button';
   summary.className = 'abyss-annotation-tags-summary';
   summary.dataset['action'] = 'toggle-document-tags';
+  summary.setAttribute('aria-controls', bodyId);
   summary.setAttribute('aria-expanded', 'false');
   const label = owner.createSpan();
   label.dataset['annotationTagsLabel'] = '';
@@ -1129,6 +1139,8 @@ function createTagBody(owner: ReaderOwnerWindow): {
 } {
   const body = owner.createDiv();
   body.className = 'abyss-annotation-tags-body';
+  nextDocumentTagsBodyId += 1;
+  body.id = `abyss-document-tags-${String(nextDocumentTagsBodyId)}`;
   body.hidden = true;
   const search = owner.createEl('input');
   search.type = 'search';

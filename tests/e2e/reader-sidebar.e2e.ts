@@ -107,6 +107,62 @@ async function waitForAnnotationWindowToSettle(): Promise<void> {
   );
 }
 
+async function documentTagsAnchorGeometry(annotationId: string): Promise<{
+  readonly activeAction: string | null;
+  readonly bodyDisplay: string;
+  readonly bodyId: string;
+  readonly bottomGap: number;
+  readonly cardTop: number;
+  readonly collapsed: boolean;
+  readonly controlledId: string | null;
+  readonly firstPosition: string | null;
+  readonly footerHeight: number;
+  readonly footerIsLast: boolean;
+  readonly scrollTop: number;
+  readonly summaryHeight: number;
+}> {
+  return browser.execute((anchorId) => {
+    const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+    const footer = panel?.querySelector<HTMLElement>('[data-section="tags"]') ?? null;
+    const body = footer?.querySelector<HTMLElement>('.abyss-annotation-tags-body') ?? null;
+    const toggle =
+      footer?.querySelector<HTMLButtonElement>('[data-action="toggle-document-tags"]') ?? null;
+    const scrollHost = panel?.querySelector<HTMLElement>('[data-annotation-scroll-host]') ?? null;
+    const card = Array.from(
+      panel?.querySelectorAll<HTMLElement>('.abyss-annotation-card') ?? [],
+    ).find((candidate) => candidate.dataset['annotationId'] === anchorId);
+    if (
+      panel === null ||
+      footer === null ||
+      body === null ||
+      toggle === null ||
+      scrollHost === null ||
+      card === undefined
+    )
+      throw new Error('Document tags anchor geometry is incomplete.');
+    const panelRect = panel.getBoundingClientRect();
+    const footerRect = footer.getBoundingClientRect();
+    return {
+      activeAction:
+        document.activeElement instanceof HTMLElement
+          ? (document.activeElement.dataset['action'] ?? null)
+          : null,
+      bodyDisplay: getComputedStyle(body).display,
+      bodyId: body.id,
+      bottomGap: Math.abs(panelRect.bottom - footerRect.bottom),
+      cardTop: card.getBoundingClientRect().top,
+      collapsed: toggle.getAttribute('aria-expanded') === 'false',
+      controlledId: toggle.getAttribute('aria-controls'),
+      firstPosition:
+        card.closest('.abyss-annotation-card-row')?.getAttribute('aria-posinset') ?? null,
+      footerHeight: footerRect.height,
+      footerIsLast: panel.lastElementChild === footer,
+      scrollTop: scrollHost.scrollTop,
+      summaryHeight: toggle.getBoundingClientRect().height,
+    };
+  }, annotationId);
+}
+
 async function movePointerTo(x: number, y: number): Promise<void> {
   await browser.performActions([
     {
@@ -379,65 +435,45 @@ describe('PDF reader sidebar', () => {
       card.focus({ preventScroll: true });
     });
     await waitForAnnotationWindowToSettle();
-    const before = await browser.execute(() => {
-      const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
-      const footer = panel?.querySelector<HTMLElement>('[data-section="tags"]') ?? null;
-      const scrollHost = panel?.querySelector<HTMLElement>('[data-annotation-scroll-host]') ?? null;
-      const card =
-        document.activeElement instanceof HTMLElement &&
-        document.activeElement.matches('.abyss-annotation-card')
-          ? document.activeElement
-          : null;
-      if (panel === null || footer === null || scrollHost === null || card === null)
-        throw new Error('Document tags geometry is incomplete.');
-      const panelRect = panel.getBoundingClientRect();
-      const footerRect = footer.getBoundingClientRect();
-      return {
-        activeId: card.dataset['annotationId'],
-        bottomGap: Math.abs(panelRect.bottom - footerRect.bottom),
-        cardTop: card.getBoundingClientRect().top,
-        collapsed:
-          footer
-            .querySelector('[data-action="toggle-document-tags"]')
-            ?.getAttribute('aria-expanded') === 'false',
-        firstPosition: card.closest('.abyss-annotation-card-row')?.getAttribute('aria-posinset'),
-        footerIsLast: panel.lastElementChild === footer,
-        scrollTop: scrollHost.scrollTop,
-      };
-    });
+    const activeId = await browser.execute(() =>
+      document.activeElement instanceof HTMLElement
+        ? (document.activeElement.dataset['annotationId'] ?? '')
+        : '',
+    );
+    expect(activeId).not.toBe('');
+    const before = await documentTagsAnchorGeometry(activeId);
     expect(before).toMatchObject({ collapsed: true, footerIsLast: true });
     expect(before.bottomGap).toBeLessThanOrEqual(2);
+    expect(before.bodyDisplay).toBe('none');
+    expect(before.bodyId).not.toBe('');
+    expect(before.controlledId).toBe(before.bodyId);
+    expect(Math.abs(before.footerHeight - before.summaryHeight)).toBeLessThanOrEqual(2);
 
-    await browser.execute(() => {
-      const toggle = document.querySelector<HTMLButtonElement>(
-        '[data-action="toggle-document-tags"]',
-      );
-      if (toggle === null) throw new Error('Document tags toggle is missing.');
-      toggle.click();
-    });
+    const toggle = $('[data-action="toggle-document-tags"]');
+    await toggle.click();
     await expect($('[data-annotation-tag-search]')).toBeDisplayed();
     await waitForAnnotationWindowToSettle();
+    const pointerExpandedAnchor = await documentTagsAnchorGeometry(activeId);
+    expect(pointerExpandedAnchor.activeAction).toBe('toggle-document-tags');
+    expect(pointerExpandedAnchor.collapsed).toBe(false);
+    expect(pointerExpandedAnchor.firstPosition).toBe(before.firstPosition);
+    expect(Math.abs(pointerExpandedAnchor.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+
     const expanded = await browser.execute(() => {
       const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
       const footer = panel?.querySelector<HTMLElement>('[data-section="tags"]') ?? null;
       const tagScroll =
         footer?.querySelector<HTMLElement>('[data-annotation-tag-scroll-host]') ?? null;
-      const scrollHost = panel?.querySelector<HTMLElement>('[data-annotation-scroll-host]') ?? null;
       const chips = Array.from(
         footer?.querySelectorAll<HTMLElement>('[data-annotation-tag]') ?? [],
       );
-      if (panel === null || footer === null || tagScroll === null || scrollHost === null)
+      if (panel === null || footer === null || tagScroll === null)
         throw new Error('Expanded Document tags geometry is incomplete.');
       const panelRect = panel.getBoundingClientRect();
       const footerRect = footer.getBoundingClientRect();
       const summary = footer.querySelector<HTMLElement>('.abyss-annotation-tags-summary');
       return {
-        activeId: document.activeElement?.getAttribute('data-annotation-id'),
         bottomGap: Math.abs(panelRect.bottom - footerRect.bottom),
-        cardTop:
-          document.activeElement instanceof HTMLElement
-            ? document.activeElement.getBoundingClientRect().top
-            : Number.NaN,
         chipRoles: chips.map((chip) => ({
           pressed: chip.getAttribute('aria-pressed'),
           tag: chip.tagName,
@@ -445,12 +481,9 @@ describe('PDF reader sidebar', () => {
         footerHeight: footerRect.height,
         maxHeight: panelRect.height * 0.4,
         summaryHeight: summary?.getBoundingClientRect().height ?? Number.NaN,
-        scrollTop: scrollHost.scrollTop,
         tagOverflowY: getComputedStyle(tagScroll).overflowY,
       };
     });
-    expect(expanded.activeId).toBe(before.activeId);
-    expect(Math.abs(expanded.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
     expect(expanded.bottomGap).toBeLessThanOrEqual(2);
     expect(expanded.footerHeight).toBeGreaterThan(expanded.summaryHeight + 32);
     expect(expanded.footerHeight).toBeLessThanOrEqual(expanded.maxHeight + 1);
@@ -460,7 +493,38 @@ describe('PDF reader sidebar', () => {
       expanded.chipRoles.every(({ pressed, tag }) => pressed === 'false' && tag === 'BUTTON'),
     ).toBe(true);
 
-    const annotationScrollTop = expanded.scrollTop;
+    await toggle.click();
+    await expect($('[data-annotation-tag-search]')).not.toBeDisplayed();
+    await waitForAnnotationWindowToSettle();
+    const pointerCollapsed = await documentTagsAnchorGeometry(activeId);
+    expect(pointerCollapsed.activeAction).toBe('toggle-document-tags');
+    expect(pointerCollapsed.collapsed).toBe(true);
+    expect(pointerCollapsed.firstPosition).toBe(before.firstPosition);
+    expect(Math.abs(pointerCollapsed.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+
+    await browser.keys(Key.Enter);
+    await expect($('[data-annotation-tag-search]')).toBeDisplayed();
+    await waitForAnnotationWindowToSettle();
+    const enterExpanded = await documentTagsAnchorGeometry(activeId);
+    expect(enterExpanded.activeAction).toBe('toggle-document-tags');
+    expect(enterExpanded.collapsed).toBe(false);
+    expect(enterExpanded.firstPosition).toBe(before.firstPosition);
+    expect(Math.abs(enterExpanded.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+
+    await browser.keys(' ');
+    await expect($('[data-annotation-tag-search]')).not.toBeDisplayed();
+    await waitForAnnotationWindowToSettle();
+    const spaceCollapsed = await documentTagsAnchorGeometry(activeId);
+    expect(spaceCollapsed.activeAction).toBe('toggle-document-tags');
+    expect(spaceCollapsed.collapsed).toBe(true);
+    expect(spaceCollapsed.firstPosition).toBe(before.firstPosition);
+    expect(Math.abs(spaceCollapsed.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+
+    await browser.keys(Key.Enter);
+    await expect($('[data-annotation-tag-search]')).toBeDisplayed();
+    await waitForAnnotationWindowToSettle();
+
+    const annotationScrollTop = (await documentTagsAnchorGeometry(activeId)).scrollTop;
     await browser.execute(() => {
       const tagScroll = document.querySelector<HTMLElement>('[data-annotation-tag-scroll-host]');
       if (tagScroll === null) throw new Error('Document tag scroll host is missing.');

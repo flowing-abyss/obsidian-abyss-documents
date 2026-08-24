@@ -6898,6 +6898,10 @@
   padding: 0 var(--size-4-2) var(--size-4-2);
 }
 
+.abyss-documents .abyss-annotation-tags-body[hidden] {
+  display: none;
+}
+
 .abyss-documents .abyss-annotation-tags-body > [data-annotation-tag-search] {
   width: 100%;
   min-width: 0;

@@ -108,10 +108,13 @@ describe('AnnotationsPanel', () => {
     panel.setAnnotations([annotation(0), annotation(1)]);
 
     const footer = documentTagsFooter(root);
+    const toggle = footer.querySelector<HTMLButtonElement>('[data-action="toggle-document-tags"]');
+    const body = footer.querySelector<HTMLElement>('.abyss-annotation-tags-body');
     expect(panel.root.lastElementChild).toBe(footer);
-    expect(
-      footer.querySelector('[data-action="toggle-document-tags"]')?.getAttribute('aria-expanded'),
-    ).toBe('false');
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle?.getAttribute('aria-controls')).toBe(body?.id);
+    expect(body?.id).not.toBe('');
+    expect(body?.hidden).toBe(true);
     expect(footer.querySelector('[data-annotation-tags-label]')?.textContent).toBe('Document tags');
     expect(footer.querySelector('[data-annotation-tags-count]')?.textContent).toBe('2');
   });
@@ -194,7 +197,7 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
-  it('keeps the focused virtual anchor at the same visual position when the footer grows upward', () => {
+  it('keeps the last focused virtual anchor while disclosure focus drives expansion', () => {
     let expanded = false;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
       this: HTMLElement,
@@ -211,13 +214,30 @@ describe('AnnotationsPanel', () => {
     scrollHost.scrollTop = 100;
     const card = root.querySelector<HTMLElement>('.abyss-annotation-card');
     card?.focus();
-    documentTagsFooter(root);
+    const toggle = documentTagsFooter(root).querySelector<HTMLButtonElement>(
+      '[data-action="toggle-document-tags"]',
+    );
+    toggle?.focus();
+    expect(root.doc.activeElement).toBe(toggle);
 
     expanded = true;
-    toggleDocumentTags(root);
+    toggle?.click();
 
     expect(scrollHost.scrollTop).toBe(136);
-    expect(root.doc.activeElement).toBe(card);
+    expect(root.doc.activeElement).toBe(toggle);
+
+    expanded = false;
+    toggle?.click();
+
+    expect(scrollHost.scrollTop).toBe(100);
+    expect(root.doc.activeElement).toBe(toggle);
+
+    panel.setAnnotations([annotation(0)]);
+    expanded = true;
+    toggle?.click();
+
+    expect(scrollHost.scrollTop).toBe(0);
+    expect(root.doc.activeElement).toBe(toggle);
     root.remove();
   });
 
