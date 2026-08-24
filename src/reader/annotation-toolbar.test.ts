@@ -86,6 +86,27 @@ describe('AnnotationToolbar', () => {
     host.remove();
   });
 
+  it('opens the Quick Highlight palette from a touch pointer without a duplicate click menu', () => {
+    const addItem = vi.spyOn(Menu.prototype, 'addItem');
+    const host = document.body.createDiv();
+    const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
+    const trigger = host.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]');
+    if (trigger === null) throw new Error('Expected Quick Highlight menu.');
+    const OwnerPointerEvent = (trigger.win as Window & { PointerEvent: typeof PointerEvent })
+      .PointerEvent;
+    const OwnerMouseEvent = (trigger.win as Window & { MouseEvent: typeof MouseEvent }).MouseEvent;
+
+    trigger.dispatchEvent(
+      new OwnerPointerEvent('pointerup', { bubbles: true, pointerType: 'touch' }),
+    );
+    expect(addItem).toHaveBeenCalledTimes(palette.length);
+    trigger.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
+    expect(addItem).toHaveBeenCalledTimes(palette.length);
+
+    toolbar.destroy();
+    host.remove();
+  });
+
   it('keeps tools visible but disabled with a stable qualified read-only reason', () => {
     const host = document.body.createDiv();
     const toolbar = new AnnotationToolbar(

@@ -72,12 +72,15 @@ const LAYOUT_CHOICES: readonly LayoutChoice[] = [
   },
 ];
 
+const COMPACT_TOOLBAR_WIDTH = 760;
+
 export class ReaderToolbar {
   readonly annotationHost: HTMLElement;
   readonly root: HTMLElement;
   readonly sidebarButton: HTMLButtonElement;
 
   private readonly cleanups: Array<() => void> = [];
+  private readonly focusFrames = new Set<number>();
   private readonly menus = new Set<Menu>();
   private readonly nextButton: HTMLButtonElement;
   private readonly pageInput: HTMLInputElement;
@@ -161,14 +164,7 @@ export class ReaderToolbar {
     const overflow = this.iconButton('overflow', 'More options', 'ellipsis');
     overflow.setAttribute('aria-haspopup', 'menu');
     overflow.setAttribute('aria-expanded', 'false');
-    this.listen(overflow, 'click', () => {
-      this.showMenuAtButton(overflow, (menu) => {
-        this.addOverflowChoices(menu);
-      });
-    });
-    this.listen(overflow, 'keydown', (event) => {
-      if (event.key !== 'ArrowDown') return;
-      event.preventDefault();
+    this.bindMenuTrigger(overflow, () => {
       this.showMenuAtButton(overflow, (menu) => {
         this.addOverflowChoices(menu);
       });
@@ -208,6 +204,8 @@ export class ReaderToolbar {
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     for (const menu of [...this.menus]) menu.close();
     this.menus.clear();
+    for (const frame of this.focusFrames) this.root.win.cancelAnimationFrame(frame);
+    this.focusFrames.clear();
   }
 
   private createFitControl(): void {
@@ -238,14 +236,7 @@ export class ReaderToolbar {
     fitMenu.addClass('abyss-reader-split-menu');
     fitMenu.setAttribute('aria-haspopup', 'menu');
     fitMenu.setAttribute('aria-expanded', 'false');
-    this.listen(fitMenu, 'click', () => {
-      this.showMenuAtButton(fitMenu, (menu) => {
-        this.addFitChoices(menu);
-      });
-    });
-    this.listen(fitMenu, 'keydown', (event) => {
-      if (event.key !== 'ArrowDown') return;
-      event.preventDefault();
+    this.bindMenuTrigger(fitMenu, () => {
       this.showMenuAtButton(fitMenu, (menu) => {
         this.addFitChoices(menu);
       });
@@ -332,6 +323,39 @@ export class ReaderToolbar {
   }
 
   private addOverflowChoices(menu: Menu): void {
+    if (this.isCompact()) {
+      menu.addItem((item) => item.setTitle('Zoom & fit').setIsLabel(true));
+      menu.addItem((item) =>
+        item.setTitle(`Current zoom: ${scaleLabel(this.currentScale).long}`).setIsLabel(true),
+      );
+      menu.addItem((item) => {
+        item
+          .setTitle('Zoom out')
+          .setIcon('minus')
+          .onClick(() => {
+            this.onIntent({ type: 'zoom-step', direction: -1 });
+          });
+      });
+      menu.addItem((item) => {
+        item
+          .setTitle('Reset zoom')
+          .setIcon('rotate-ccw')
+          .setChecked(this.currentScale === 1)
+          .onClick(() => {
+            this.onIntent({ type: 'set-scale', scale: 1 });
+          });
+      });
+      menu.addItem((item) => {
+        item
+          .setTitle('Zoom in')
+          .setIcon('plus')
+          .onClick(() => {
+            this.onIntent({ type: 'zoom-step', direction: 1 });
+          });
+      });
+      this.addFitChoices(menu);
+      menu.addSeparator();
+    }
     menu.addItem((item) => item.setTitle('Layout').setIsLabel(true));
     for (const choice of LAYOUT_CHOICES) {
       menu.addItem((item) => {
@@ -393,11 +417,42 @@ export class ReaderToolbar {
     menu.onHide(() => {
       this.menus.delete(menu);
       trigger.setAttribute('aria-expanded', 'false');
-      const active = this.root.doc.activeElement;
-      if (active === this.root.doc.body || active === this.root.doc.documentElement)
-        trigger.focus();
+      this.restoreMenuTriggerFocus(trigger);
     });
     return menu;
+  }
+
+  private restoreMenuTriggerFocus(trigger: HTMLButtonElement): void {
+    const frame = this.root.win.requestAnimationFrame(() => {
+      this.focusFrames.delete(frame);
+      if (!this.destroyed && this.menus.size === 0 && trigger.isConnected) trigger.focus();
+    });
+    this.focusFrames.add(frame);
+  }
+
+  private bindMenuTrigger(trigger: HTMLButtonElement, show: () => void): void {
+    let lastTouchPointerUp = Number.NEGATIVE_INFINITY;
+    this.listen(trigger, 'pointerup', (event) => {
+      if (event.pointerType !== 'touch') return;
+      event.preventDefault();
+      lastTouchPointerUp = event.timeStamp;
+      show();
+    });
+    this.listen(trigger, 'click', (event) => {
+      const elapsed = event.timeStamp - lastTouchPointerUp;
+      if (event.detail > 0 && elapsed >= 0 && elapsed < 750) return;
+      show();
+    });
+    this.listen(trigger, 'keydown', (event) => {
+      if (event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      show();
+    });
+  }
+
+  private isCompact(): boolean {
+    const width = this.root.getBoundingClientRect().width;
+    return width > 0 && width <= COMPACT_TOOLBAR_WIDTH;
   }
 }
 

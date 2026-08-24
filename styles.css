@@ -6277,6 +6277,8 @@
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
+  container-name: abyss-reader;
+  container-type: inline-size;
 }
 
 .abyss-documents [data-region='toolbar'] {
@@ -6303,13 +6305,7 @@
   padding: var(--size-2-1) var(--size-4-1);
   border-bottom: var(--border-width) solid var(--background-modifier-border);
   background: var(--background-primary);
-  overflow-x: auto;
-  overscroll-behavior-inline: contain;
-  scrollbar-width: none;
-}
-
-.abyss-documents .abyss-reader-toolbar::-webkit-scrollbar {
-  display: none;
+  overflow-x: hidden;
 }
 
 .abyss-documents .abyss-reader-toolbar-navigation {
@@ -6951,26 +6947,33 @@
     padding-inline-start: env(safe-area-inset-left);
     box-shadow: var(--shadow-l);
   }
+}
 
-  .abyss-documents .abyss-reader-toolbar {
-    padding-inline: var(--size-4-1);
-  }
-
+@container abyss-reader (inline-size <= 760px) {
   .abyss-documents .abyss-reader-toolbar-spacer {
     display: none;
   }
 
   .abyss-documents .abyss-reader-fit-control,
-  .abyss-documents .abyss-reader-toolbar-zoom-level,
+  .abyss-documents .abyss-reader-toolbar-zoom-level {
+    display: none;
+  }
+}
+
+@container abyss-reader (inline-size <= 600px) {
+  .abyss-documents .abyss-reader-toolbar {
+    padding-inline: var(--size-4-1);
+  }
+
+  .abyss-documents .abyss-reader-toolbar-zoom,
   .abyss-documents [data-control='previous-page'],
   .abyss-documents [data-control='next-page'] {
     display: none;
   }
 }
 
-@media (width <= 600px), (pointer: coarse) {
+@media (pointer: coarse) {
   .abyss-documents .abyss-reader-toolbar-button,
-  .abyss-documents .abyss-reader-toolbar-zoom-button,
   .abyss-documents .abyss-annotation-tool,
   .abyss-documents .abyss-annotation-color,
   .abyss-documents .abyss-annotation-popover-button,
@@ -6978,6 +6981,12 @@
   .abyss-documents .abyss-selection-annotation-popover-button,
   .abyss-documents .abyss-reader-sidebar-close,
   .abyss-documents .abyss-reader-search-button {
+    width: 2.75rem;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .abyss-documents .abyss-reader-split-control .abyss-reader-split-menu {
     width: 2.75rem;
     min-width: 2.75rem;
     min-height: 2.75rem;
@@ -6998,12 +7007,6 @@
   /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
   .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar .buttons > :not(.divider) {
     min-width: 2.75rem;
-  }
-}
-
-@media (width <= 600px) and (pointer: coarse) {
-  .abyss-documents .abyss-reader-toolbar-zoom {
-    display: none;
   }
 }
 

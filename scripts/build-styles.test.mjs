@@ -13,9 +13,11 @@ function mobileDeclarations(mobile, selector) {
 }
 
 function topLevelDeclarations(root, selector) {
-  const rule = root.nodes.find((node) => node.type === 'rule' && node.selectors.includes(selector));
   const values = new Map();
-  rule?.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
+  for (const node of root.nodes) {
+    if (node.type !== 'rule' || !node.selectors.includes(selector)) continue;
+    node.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
+  }
   return Object.fromEntries(values);
 }
 
@@ -193,13 +195,15 @@ describe('PDF.js style build', () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
     const narrow = root.nodes.find(
       (node) =>
-        node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
+        node.type === 'atrule' &&
+        node.name === 'container' &&
+        node.params === 'abyss-reader (inline-size <= 600px)',
     );
-    const narrowCoarse = root.nodes.find(
+    const priority = root.nodes.find(
       (node) =>
         node.type === 'atrule' &&
-        node.name === 'media' &&
-        node.params === '(width <= 600px) and (pointer: coarse)',
+        node.name === 'container' &&
+        node.params === 'abyss-reader (inline-size <= 760px)',
     );
     const coarsePointer = root.nodes.find(
       (node) =>
@@ -208,18 +212,23 @@ describe('PDF.js style build', () => {
 
     expect(topLevelDeclarations(root, '.abyss-documents .abyss-reader-toolbar')).toMatchObject({
       'flex-wrap': 'nowrap',
+      'overflow-x': 'hidden',
     });
-    expect(mobileDeclarations(narrow, '.abyss-documents .abyss-reader-fit-control')).toMatchObject({
-      display: 'none',
+    expect(topLevelDeclarations(root, '.abyss-documents')).toMatchObject({
+      'container-name': 'abyss-reader',
+      'container-type': 'inline-size',
     });
     expect(
-      mobileDeclarations(narrow, '.abyss-documents .abyss-reader-toolbar-zoom-level'),
+      mobileDeclarations(priority, '.abyss-documents .abyss-reader-fit-control'),
+    ).toMatchObject({ display: 'none' });
+    expect(
+      mobileDeclarations(priority, '.abyss-documents .abyss-reader-toolbar-zoom-level'),
     ).toMatchObject({
       display: 'none',
     });
-    expect(
-      mobileDeclarations(narrowCoarse, '.abyss-documents .abyss-reader-toolbar-zoom'),
-    ).toMatchObject({ display: 'none' });
+    expect(mobileDeclarations(narrow, '.abyss-documents .abyss-reader-toolbar-zoom')).toMatchObject(
+      { display: 'none' },
+    );
     expect(
       mobileDeclarations(narrow, ".abyss-documents [data-control='previous-page']"),
     ).toMatchObject({ display: 'none' });
@@ -230,6 +239,15 @@ describe('PDF.js style build', () => {
       'min-width': '2.75rem',
       'min-height': '2.75rem',
     });
+    expect(
+      mobileDeclarations(
+        coarsePointer,
+        '.abyss-documents .abyss-reader-split-control .abyss-reader-split-menu',
+      ),
+    ).toMatchObject({ width: '2.75rem', 'min-width': '2.75rem', 'min-height': '2.75rem' });
+    expect(
+      mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
+    ).toEqual({});
   });
 
   it('keeps the sidebar as a left mobile overlay and gives direct zoom controls 44px targets', async () => {

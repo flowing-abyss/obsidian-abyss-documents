@@ -67,6 +67,20 @@ function fixture() {
   return { host, intents, onIntent, toolbar };
 }
 
+function setToolbarWidth(host: HTMLElement, width: number): void {
+  vi.spyOn(host, 'getBoundingClientRect').mockReturnValue({
+    bottom: 44,
+    height: 44,
+    left: 0,
+    right: width,
+    top: 0,
+    width,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
+}
+
 describe('ReaderToolbar', () => {
   it('clamps an entered page and navigates on Enter', () => {
     const { host, onIntent, toolbar } = fixture();
@@ -281,6 +295,72 @@ describe('ReaderToolbar', () => {
     expect(setUseNativeMenu).toHaveBeenCalledTimes(1);
     expect(setUseNativeMenu).toHaveBeenNthCalledWith(1, false);
     expect(intents).toEqual([{ type: 'set-profile', profile: 'dark' }]);
+  });
+
+  it('retains zoom and every Fit action in More when the reader leaf is narrow', () => {
+    const entries = captureMenuItems();
+    const { host, intents, toolbar } = fixture();
+    setToolbarWidth(host, 420);
+    toolbar.setScale(1.25);
+    const overflow = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
+    if (overflow === null) throw new Error('Expected More options.');
+
+    overflow.click();
+
+    expect(entries.map(({ title }) => title)).toEqual(
+      expect.arrayContaining([
+        'Zoom & fit',
+        'Current zoom: 125%',
+        'Zoom out',
+        'Reset zoom',
+        'Zoom in',
+        'Fit width',
+        'Fit page',
+        'Fit height',
+      ]),
+    );
+    entries.find(({ title }) => title === 'Zoom out')?.click();
+    entries.find(({ title }) => title === 'Reset zoom')?.click();
+    entries.find(({ title }) => title === 'Zoom in')?.click();
+    entries.find(({ title }) => title === 'Fit height')?.click();
+    expect(intents).toEqual([
+      { type: 'zoom-step', direction: -1 },
+      { type: 'set-scale', scale: 1 },
+      { type: 'zoom-step', direction: 1 },
+      { type: 'set-scale', scale: 'page-height' },
+    ]);
+  });
+
+  it('does not duplicate zoom and Fit actions in More for a wide reader leaf', () => {
+    const entries = captureMenuItems();
+    const { host } = fixture();
+    setToolbarWidth(host, 900);
+
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+
+    expect(entries.map(({ title }) => title)).not.toContain('Zoom & fit');
+    expect(entries.map(({ title }) => title)).not.toContain('Fit height');
+  });
+
+  it('opens More from touch pointer and ArrowDown without duplicate menus', () => {
+    const entries = captureMenuItems();
+    const { host } = fixture();
+    const overflow = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
+    if (overflow === null) throw new Error('Expected More options.');
+    const OwnerPointerEvent = (overflow.win as Window & { PointerEvent: typeof PointerEvent })
+      .PointerEvent;
+    const OwnerKeyboardEvent = (overflow.win as Window & { KeyboardEvent: typeof KeyboardEvent })
+      .KeyboardEvent;
+    const OwnerMouseEvent = (overflow.win as Window & { MouseEvent: typeof MouseEvent }).MouseEvent;
+
+    overflow.dispatchEvent(
+      new OwnerPointerEvent('pointerup', { bubbles: true, pointerType: 'touch' }),
+    );
+    expect(entries.filter(({ title }) => title === 'Layout')).toHaveLength(1);
+    overflow.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
+    expect(entries.filter(({ title }) => title === 'Layout')).toHaveLength(1);
+    overflow.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
+    expect(entries.filter(({ title }) => title === 'Layout')).toHaveLength(2);
   });
 
   it('omits OCR when no provider is qualified', () => {

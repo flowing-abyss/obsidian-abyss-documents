@@ -26,6 +26,7 @@ export class AnnotationToolbar {
   readonly root: HTMLElement;
 
   private readonly cleanups: Array<() => void> = [];
+  private readonly focusFrames = new Set<number>();
   private readonly menus = new Set<Menu>();
   private readonly palette: readonly AnnotationPaletteEntry[];
   private readonly quickButton: HTMLButtonElement;
@@ -82,12 +83,7 @@ export class AnnotationToolbar {
     quickMenu.disabled = readOnlyReason !== null;
     quickMenu.setAttribute('aria-haspopup', 'menu');
     quickMenu.setAttribute('aria-expanded', 'false');
-    this.listen(quickMenu, 'click', () => {
-      this.showPaletteMenu(quickMenu);
-    });
-    this.listen(quickMenu, 'keydown', (event) => {
-      if (event.key !== 'ArrowDown') return;
-      event.preventDefault();
+    this.bindMenuTrigger(quickMenu, () => {
       this.showPaletteMenu(quickMenu);
     });
     return quickButton;
@@ -134,6 +130,8 @@ export class AnnotationToolbar {
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     for (const menu of [...this.menus]) menu.close();
     this.menus.clear();
+    for (const frame of this.focusFrames) this.root.win.cancelAnimationFrame(frame);
+    this.focusFrames.clear();
     this.root.remove();
   }
 
@@ -174,12 +172,18 @@ export class AnnotationToolbar {
     menu.onHide(() => {
       this.menus.delete(menu);
       trigger.setAttribute('aria-expanded', 'false');
-      const active = this.root.doc.activeElement;
-      if (active === this.root.doc.body || active === this.root.doc.documentElement)
-        trigger.focus();
+      this.restoreMenuTriggerFocus(trigger);
     });
     const bounds = trigger.getBoundingClientRect();
     menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, this.root.doc);
+  }
+
+  private restoreMenuTriggerFocus(trigger: HTMLButtonElement): void {
+    const frame = this.root.win.requestAnimationFrame(() => {
+      this.focusFrames.delete(frame);
+      if (!this.destroyed && this.menus.size === 0 && trigger.isConnected) trigger.focus();
+    });
+    this.focusFrames.add(frame);
   }
 
   private paletteMenuTitle(entry: AnnotationPaletteEntry): DocumentFragment {
@@ -215,6 +219,26 @@ export class AnnotationToolbar {
     target.addEventListener(type, listener);
     this.cleanups.push(() => {
       target.removeEventListener(type, listener);
+    });
+  }
+
+  private bindMenuTrigger(trigger: HTMLButtonElement, show: () => void): void {
+    let lastTouchPointerUp = Number.NEGATIVE_INFINITY;
+    this.listen(trigger, 'pointerup', (event) => {
+      if (event.pointerType !== 'touch') return;
+      event.preventDefault();
+      lastTouchPointerUp = event.timeStamp;
+      show();
+    });
+    this.listen(trigger, 'click', (event) => {
+      const elapsed = event.timeStamp - lastTouchPointerUp;
+      if (event.detail > 0 && elapsed >= 0 && elapsed < 750) return;
+      show();
+    });
+    this.listen(trigger, 'keydown', (event) => {
+      if (event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      show();
     });
   }
 }
