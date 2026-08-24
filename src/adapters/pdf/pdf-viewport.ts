@@ -42,6 +42,7 @@ const MAX_CANVAS_PIXELS = 16_777_216;
 const FIND_SELECTION_TIMEOUT_MS = 2_000;
 const CONTEXTUAL_SWITCH_CLICK_TIMEOUT_MS = 750;
 const CONTEXTUAL_SWITCH_CLICK_COORDINATE_TOLERANCE = 4;
+const CONTEXTUAL_SWITCH_DRAG_THRESHOLD_PX = 8;
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 25;
 const SCALE_DELTA = 1.1;
@@ -121,13 +122,19 @@ interface ContextualSwitchCandidate {
   readonly source: 'imported' | 'native';
 }
 
-interface ContextualSwitchGesture {
+interface ContextualSwitchClick {
   readonly button: number;
   readonly clientX: number;
   readonly clientY: number;
   readonly pointerId: number;
   readonly pointerType: string;
   readonly revision: number;
+}
+
+interface PendingContextualSwitchGesture extends ContextualSwitchClick {
+  readonly candidate: ContextualSwitchCandidate;
+  readonly editor: PdfAnnotationEditor;
+  readonly root: HTMLDivElement;
 }
 
 function record(event: unknown): Record<string, unknown> | null {
@@ -248,7 +255,30 @@ function modeForEditableAnnotationKind(kind: PdfEditableAnnotationKind): number 
   }
 }
 
-function isContextualSwitchClick(event: MouseEvent, pending: ContextualSwitchGesture): boolean {
+function isSamePointer(
+  event: PointerEvent,
+  pending: Pick<ContextualSwitchClick, 'pointerId' | 'pointerType'>,
+): boolean {
+  if (event.pointerId > 0 && pending.pointerId > 0 && event.pointerId !== pending.pointerId)
+    return false;
+  return (
+    event.pointerType.length === 0 ||
+    pending.pointerType.length === 0 ||
+    event.pointerType === pending.pointerType
+  );
+}
+
+function exceedsContextualSwitchDragThreshold(
+  event: PointerEvent,
+  pending: Pick<ContextualSwitchClick, 'clientX' | 'clientY'>,
+): boolean {
+  return (
+    Math.hypot(event.clientX - pending.clientX, event.clientY - pending.clientY) >
+    CONTEXTUAL_SWITCH_DRAG_THRESHOLD_PX
+  );
+}
+
+function isContextualSwitchClick(event: MouseEvent, pending: ContextualSwitchClick): boolean {
   if (event.button !== pending.button) return false;
   if (
     Math.abs(event.clientX - pending.clientX) > CONTEXTUAL_SWITCH_CLICK_COORDINATE_TOLERANCE ||
@@ -256,13 +286,7 @@ function isContextualSwitchClick(event: MouseEvent, pending: ContextualSwitchGes
   )
     return false;
   if (!event.instanceOf(PointerEvent)) return true;
-  if (event.pointerId <= 0 || pending.pointerId <= 0) return true;
-  if (event.pointerId !== pending.pointerId) return false;
-  return (
-    event.pointerType.length === 0 ||
-    pending.pointerType.length === 0 ||
-    event.pointerType === pending.pointerType
-  );
+  return isSamePointer(event, pending);
 }
 
 function resolvedPageColors(host: HTMLElement): { background: string; foreground: string } {
@@ -312,7 +336,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   private applyingScale: ScaleRequest | null = null;
   private applyingLayout = false;
   private annotationEditRevision = 0;
-  private contextualSwitchGesture: ContextualSwitchGesture | null = null;
+  private pendingContextualSwitchGesture: PendingContextualSwitchGesture | null = null;
+  private contextualSwitchClick: ContextualSwitchClick | null = null;
   private contextualSwitchClickTimer: number | null = null;
   private readonly pageAnnotations = new Map<
     number,
@@ -682,6 +707,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.clearPendingInteractions();
     this.annotationEditRevision += 1;
     this.pageAnnotations.clear();
+    this.clearPendingContextualSwitchGesture();
     this.clearContextualSwitchClick();
   }
 
@@ -702,7 +728,10 @@ export class PdfDocumentViewport implements DocumentViewport {
   private registerRootListeners(root: HTMLElement): void {
     root.addEventListener('click', this.onRootClick, true);
     root.addEventListener('keydown', this.onRootKeyDown);
+    root.addEventListener('pointercancel', this.onRootPointerCancel, true);
     root.addEventListener('pointerdown', this.onRootPointerDown, true);
+    root.addEventListener('pointermove', this.onRootPointerMove, true);
+    root.addEventListener('pointerup', this.onRootPointerUp, true);
     root.addEventListener('scroll', this.onRootReadingGesture);
     root.addEventListener('wheel', this.onRootReadingGesture, { passive: true });
   }
@@ -710,7 +739,10 @@ export class PdfDocumentViewport implements DocumentViewport {
   private unregisterRootListeners(root: HTMLElement): void {
     root.removeEventListener('click', this.onRootClick, true);
     root.removeEventListener('keydown', this.onRootKeyDown);
+    root.removeEventListener('pointercancel', this.onRootPointerCancel, true);
     root.removeEventListener('pointerdown', this.onRootPointerDown, true);
+    root.removeEventListener('pointermove', this.onRootPointerMove, true);
+    root.removeEventListener('pointerup', this.onRootPointerUp, true);
     root.removeEventListener('scroll', this.onRootReadingGesture);
     root.removeEventListener('wheel', this.onRootReadingGesture);
   }
@@ -1136,7 +1168,6 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private readonly onRootPointerDown = (event: PointerEvent): void => {
-    this.clearContextualSwitchClick();
     const revision = this.invalidateAnnotationEditCandidate();
     if (event.button !== 0) return;
     const editor = this.annotationEditorInstance;
@@ -1153,8 +1184,17 @@ export class PdfDocumentViewport implements DocumentViewport {
     const root = this.root;
     const candidate = root === null ? null : clickedContextualSwitchCandidate(target, root, editor);
     if (candidate !== null && root !== null) {
-      this.armContextualSwitchClick(event, revision);
-      this.switchContextualAnnotation(candidate, editor, root, revision);
+      this.pendingContextualSwitchGesture = {
+        button: event.button,
+        candidate,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        editor,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        revision,
+        root,
+      };
       return;
     }
     void editor
@@ -1162,6 +1202,50 @@ export class PdfDocumentViewport implements DocumentViewport {
       .catch((cause: unknown) => {
         console.error('[abyss-documents] Failed to close the PDF annotation editor', { cause });
       });
+  };
+
+  private readonly onRootPointerMove = (event: PointerEvent): void => {
+    const pending = this.pendingContextualSwitchGesture;
+    if (
+      pending === null ||
+      !isSamePointer(event, pending) ||
+      !exceedsContextualSwitchDragThreshold(event, pending)
+    )
+      return;
+    this.clearPendingContextualSwitchGesture();
+  };
+
+  private readonly onRootPointerCancel = (event: PointerEvent): void => {
+    const pending = this.pendingContextualSwitchGesture;
+    if (pending !== null && isSamePointer(event, pending)) {
+      this.clearPendingContextualSwitchGesture();
+    }
+  };
+
+  private readonly onRootPointerUp = (event: PointerEvent): void => {
+    const pending = this.pendingContextualSwitchGesture;
+    if (pending === null || !isSamePointer(event, pending)) return;
+    this.clearPendingContextualSwitchGesture();
+    if (
+      event.button !== pending.button ||
+      exceedsContextualSwitchDragThreshold(event, pending) ||
+      !this.isContextualSwitchCurrent(
+        pending.editor,
+        pending.root,
+        pending.candidate.pageNumber,
+        pending.revision,
+      )
+    )
+      return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    this.armContextualSwitchClick(event, pending.revision);
+    this.switchContextualAnnotation(
+      pending.candidate,
+      pending.editor,
+      pending.root,
+      pending.revision,
+    );
   };
 
   private switchContextualAnnotation(
@@ -1254,6 +1338,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private invalidateAnnotationEditCandidate(): number {
+    this.clearPendingContextualSwitchGesture();
+    this.clearContextualSwitchClick();
     this.annotationEditRevision += 1;
     return this.annotationEditRevision;
   }
@@ -1306,7 +1392,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private armContextualSwitchClick(event: PointerEvent, revision: number): void {
     this.clearContextualSwitchClick();
-    this.contextualSwitchGesture = {
+    this.contextualSwitchClick = {
       button: event.button,
       clientX: event.clientX,
       clientY: event.clientY,
@@ -1320,11 +1406,15 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private consumeContextualSwitchClick(event: MouseEvent): boolean {
-    const pending = this.contextualSwitchGesture;
+    const pending = this.contextualSwitchClick;
     if (pending === null) return false;
     this.clearContextualSwitchClick();
     if (pending.revision !== this.annotationEditRevision) return false;
     return isContextualSwitchClick(event, pending);
+  }
+
+  private clearPendingContextualSwitchGesture(): void {
+    this.pendingContextualSwitchGesture = null;
   }
 
   private clearContextualSwitchClick(): void {
@@ -1332,7 +1422,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       window.clearTimeout(this.contextualSwitchClickTimer);
       this.contextualSwitchClickTimer = null;
     }
-    this.contextualSwitchGesture = null;
+    this.contextualSwitchClick = null;
   }
 
   private retryPage(
