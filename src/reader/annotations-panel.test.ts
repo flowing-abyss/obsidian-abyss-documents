@@ -609,11 +609,12 @@ describe('AnnotationsPanel', () => {
     });
     panel.setAnnotations([annotation(0)]);
     const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
+    const card = root.querySelector<HTMLElement>('.abyss-annotation-card');
     const copy = root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]');
     copy?.focus();
     expect(root.doc.activeElement).toBe(copy);
 
-    row?.dispatchEvent(
+    card?.dispatchEvent(
       Object.assign(new Event('pointerup', { bubbles: true }), { pointerType: 'touch' }),
     );
     expect(row?.hasAttribute('data-actions-open')).toBe(true);
@@ -688,6 +689,39 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
+  it('does not rehydrate contextual state after focus moves to a different virtual row', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    const firstInsert = root.querySelector<HTMLButtonElement>(
+      '[data-annotation-card-id="annotation-0"] [data-action="insert-annotation"]',
+    );
+    firstInsert?.focus();
+    firstInsert?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
+        ?.hasAttribute('data-actions-suppressed'),
+    ).toBe(true);
+
+    panel.setCurrentPage(50);
+    root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-50"]')?.focus();
+    panel.setCurrentPage(0);
+
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
+        ?.hasAttribute('data-actions-suppressed'),
+    ).toBe(false);
+    expect(root.querySelector('[data-actions-open]')).toBeNull();
+    root.remove();
+  });
+
   it('uses the first touch only to reveal persistent actions and suppress navigation', () => {
     const root = createDiv();
     const onNavigate = vi.fn();
@@ -724,6 +758,32 @@ describe('AnnotationsPanel', () => {
     expect(onNavigate).toHaveBeenCalledOnce();
     panel.setAnnotations([annotation(0), annotation(1)]);
     expect(root.querySelector('[data-actions-open]')).toBeNull();
+  });
+
+  it('does not arm card navigation suppression when touch originates on an action', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onCopy = vi.fn();
+    const onNavigate = vi.fn();
+    const panel = new AnnotationsPanel(root, {
+      onCopy,
+      onInsert: vi.fn(),
+      onNavigate,
+    });
+    panel.setAnnotations([annotation(0)]);
+    const copy = root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]');
+    copy?.focus();
+    copy?.dispatchEvent(
+      Object.assign(new Event('pointerup', { bubbles: true, cancelable: true }), {
+        pointerType: 'touch',
+      }),
+    );
+    copy?.click();
+    root.querySelector<HTMLButtonElement>('.abyss-annotation-card')?.click();
+
+    expect(onCopy).toHaveBeenCalledOnce();
+    expect(onNavigate).toHaveBeenCalledOnce();
+    root.remove();
   });
 
   it('keeps unique tag facets bounded and finds a late tag on demand', () => {

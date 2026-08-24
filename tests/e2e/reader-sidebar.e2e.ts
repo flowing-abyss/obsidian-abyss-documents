@@ -31,6 +31,67 @@ async function openAnnotations(path: string): Promise<void> {
   await expect($('[data-tab="annotations"][aria-selected="true"]')).toExist();
 }
 
+async function annotationCardGeometry(): Promise<{
+  readonly cardHeight: number;
+  readonly cardWidth: number;
+  readonly commentHeight: number;
+  readonly commentWidth: number;
+  readonly firstPosition: string | null;
+  readonly headerHeight: number;
+  readonly rowHeight: number;
+  readonly rowWidth: number;
+  readonly scrollTop: number;
+}> {
+  return browser.execute(() => {
+    const card = document.querySelector<HTMLElement>('.abyss-annotation-card');
+    const comment = card?.querySelector<HTMLElement>('[data-annotation-comment]') ?? null;
+    const header = card?.querySelector<HTMLElement>('.abyss-annotation-card-header') ?? null;
+    const row = card?.closest<HTMLElement>('.abyss-annotation-card-row') ?? null;
+    const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+    if (card === null || comment === null || header === null || row === null || scrollHost === null)
+      throw new Error('Annotation geometry target is incomplete.');
+    const rounded = (value: number): number => Number(value.toFixed(3));
+    const cardRect = card.getBoundingClientRect();
+    const commentRect = comment.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    return {
+      cardHeight: rounded(cardRect.height),
+      cardWidth: rounded(cardRect.width),
+      commentHeight: rounded(commentRect.height),
+      commentWidth: rounded(commentRect.width),
+      firstPosition: row.getAttribute('aria-posinset'),
+      headerHeight: rounded(header.getBoundingClientRect().height),
+      rowHeight: rounded(rowRect.height),
+      rowWidth: rounded(rowRect.width),
+      scrollTop: rounded(scrollHost.scrollTop),
+    };
+  });
+}
+
+async function setCoarseAnnotationGeometry(enabled: boolean): Promise<void> {
+  await browser.execute((coarse) => {
+    const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+    if (panel === null) throw new Error('Annotation panel is missing for coarse geometry.');
+    panel.setCssProps({
+      '--abyss-annotation-action-height': coarse ? '44px' : '',
+      '--abyss-annotation-action-width': coarse ? '104px' : '',
+    });
+    window.dispatchEvent(new Event('resize'));
+  }, enabled);
+}
+
+async function movePointerTo(x: number, y: number): Promise<void> {
+  await browser.performActions([
+    {
+      type: 'pointer',
+      id: 'annotation-geometry-pointer',
+      parameters: { pointerType: 'mouse' },
+      actions: [{ type: 'pointerMove', duration: 0, origin: 'viewport', x, y }],
+    },
+  ]);
+  await browser.releaseActions();
+}
+
 describe('PDF reader sidebar', () => {
   beforeEach(closeReaderLeaves);
   afterEach(closeReaderLeaves);
@@ -321,6 +382,19 @@ describe('PDF reader sidebar', () => {
     expect(initial.comment).toContain('Annotation 00000');
     expect(initial.cardRight).toBeLessThanOrEqual(initial.panelRight + 1);
     expect(initial.paddingInlineEnd).toBeLessThan(30);
+    const restingGeometry = await annotationCardGeometry();
+
+    const cardCenter = await browser.execute(() => {
+      const card = document.querySelector<HTMLElement>('.abyss-annotation-card');
+      if (card === null) throw new Error('Annotation card is missing for pointer geometry.');
+      const rect = card.getBoundingClientRect();
+      return {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+      };
+    });
+    await movePointerTo(cardCenter.x, cardCenter.y);
+    expect(await annotationCardGeometry()).toEqual(restingGeometry);
 
     const contextResult = await browser.execute(() => {
       const row = document.querySelector<HTMLElement>('.abyss-annotation-card-row');
@@ -333,6 +407,7 @@ describe('PDF reader sidebar', () => {
       };
     });
     expect(contextResult).toEqual({ actionFocused: false, focusPreserved: true });
+    expect(await annotationCardGeometry()).toEqual(restingGeometry);
     expect(
       await browser.execute(() => {
         const actions = document.querySelector('.abyss-annotation-card-actions');
@@ -348,6 +423,7 @@ describe('PDF reader sidebar', () => {
       window.dispatchEvent(new Event('resize'));
     });
     await expect($('[data-action="insert-annotation"]')).toBeFocused();
+    expect(await annotationCardGeometry()).toEqual(restingGeometry);
     await browser.keys(Key.Escape);
     await expect($('.abyss-annotation-card')).toBeFocused();
     expect(
@@ -357,6 +433,34 @@ describe('PDF reader sidebar', () => {
         return getComputedStyle(actions).opacity;
       }),
     ).toBe('0');
+    expect(await annotationCardGeometry()).toEqual(restingGeometry);
+    await movePointerTo(1, 1);
+    await browser.execute(() => {
+      document.querySelector<HTMLElement>('[data-annotation-search]')?.focus();
+    });
+    await setCoarseAnnotationGeometry(true);
+    const coarseRestingGeometry = await annotationCardGeometry();
+    expect(coarseRestingGeometry.headerHeight).toBe(44);
+    await browser.execute(() => {
+      const row = document.querySelector<HTMLElement>('.abyss-annotation-card-row');
+      row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    expect(await annotationCardGeometry()).toEqual(coarseRestingGeometry);
+    await browser.execute(() => {
+      document.querySelector<HTMLElement>('[data-action="insert-annotation"]')?.focus();
+    });
+    const coarseFocusedGeometry = await annotationCardGeometry();
+    expect(coarseFocusedGeometry).toEqual({
+      ...coarseRestingGeometry,
+      scrollTop: coarseFocusedGeometry.scrollTop,
+    });
+    await browser.keys(Key.Escape);
+    const coarseEscapedGeometry = await annotationCardGeometry();
+    expect(coarseEscapedGeometry).toEqual({
+      ...coarseRestingGeometry,
+      scrollTop: coarseEscapedGeometry.scrollTop,
+    });
+    await setCoarseAnnotationGeometry(false);
 
     await $('[data-annotation-color]').click();
     await browser.waitUntil(
@@ -369,6 +473,26 @@ describe('PDF reader sidebar', () => {
     await $('[data-annotation-search]').setValue('Annotation 07501');
     await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
     await expect($('[data-annotation-page]')).toHaveText('Page 76');
+    await expect($('[data-control="page-field"]')).toHaveValue('1');
+    const actionTouch = await browser.execute(() => {
+      const card = document.querySelector<HTMLButtonElement>('.abyss-annotation-card');
+      const insert = document.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
+      if (card === null || insert === null) throw new Error('Hybrid action target is missing.');
+      insert.focus({ preventScroll: true });
+      insert.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'touch' }),
+      );
+      insert.click();
+      card.click();
+      return card.closest('.abyss-annotation-card-row')?.hasAttribute('data-actions-open');
+    });
+    expect(actionTouch).toBe(false);
+    await browser.waitUntil(
+      async () => Number(await $('[data-control="page-field"]').getValue()) > 1,
+      { timeout: 5_000, timeoutMsg: 'Touching an action swallowed the next card activation.' },
+    );
+    await $('[data-control="page-field"]').setValue('1');
+    await browser.keys(Key.Enter);
     await expect($('[data-control="page-field"]')).toHaveValue('1');
     const firstTouch = await browser.execute(() => {
       const card = document.querySelector<HTMLButtonElement>('.abyss-annotation-card');

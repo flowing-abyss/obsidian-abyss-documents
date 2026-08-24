@@ -599,7 +599,17 @@ export class AnnotationsPanel {
       row.removeAttribute('data-actions-suppressed');
     });
     row.addEventListener('pointerup', (event) => {
-      if (event.pointerType !== 'touch' || this.openActionsRowId === rowId) return;
+      const target = event.target;
+      const card =
+        target instanceof ownerWindow(this.root).Element
+          ? target.closest('.abyss-annotation-card')
+          : null;
+      if (
+        event.pointerType !== 'touch' ||
+        card?.closest('.abyss-annotation-card-row') !== row ||
+        this.openActionsRowId === rowId
+      )
+        return;
       this.openActionsRowId = rowId;
       this.suppressedActionsRowId = null;
       this.touchNavigationGuardRowId = rowId;
@@ -615,7 +625,7 @@ export class AnnotationsPanel {
       this.suppressedActionsRowId = rowId;
       row.removeAttribute('data-actions-open');
       row.dataset['actionsSuppressed'] = '';
-      row.querySelector<HTMLElement>('.abyss-annotation-card')?.focus();
+      row.querySelector<HTMLElement>('.abyss-annotation-card')?.focus({ preventScroll: true });
     });
     row.addEventListener('dragstart', (event) => {
       if (event.dataTransfer === null || !isTransferableAnnotation(annotation)) return;
@@ -916,10 +926,14 @@ export class AnnotationsPanel {
       exception instanceof ownerWindow(this.root).HTMLElement
         ? (exception.dataset['annotationRowId'] ?? null)
         : null;
-    if (
-      exceptionRowId === null ||
-      (this.openActionsRowId !== null && this.openActionsRowId !== exceptionRowId)
-    ) {
+    const contextualRowIds = [
+      this.openActionsRowId,
+      this.suppressedActionsRowId,
+      this.touchNavigationGuardRowId,
+    ].filter((rowId): rowId is string => rowId !== null);
+    const crossesContextBoundary =
+      exceptionRowId === null || contextualRowIds.some((rowId) => rowId !== exceptionRowId);
+    if (crossesContextBoundary) {
       this.openActionsRowId = null;
       this.suppressedActionsRowId = null;
       this.touchNavigationGuardRowId = null;
@@ -928,7 +942,7 @@ export class AnnotationsPanel {
       this.root.querySelectorAll<HTMLElement>('[data-actions-open], [data-actions-suppressed]'),
     );
     for (const row of rows) {
-      if (row === exception) continue;
+      if (!crossesContextBoundary && row === exception) continue;
       row.removeAttribute('data-actions-open');
       row.removeAttribute('data-actions-suppressed');
     }

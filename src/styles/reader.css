@@ -401,6 +401,9 @@
 }
 
 .abyss-documents .abyss-reader-annotations {
+  --abyss-annotation-action-height: 28px;
+  --abyss-annotation-action-width: 86px;
+
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -695,7 +698,7 @@
 .abyss-documents .abyss-annotation-card-actions {
   position: absolute;
   z-index: 1;
-  inset-block-start: var(--size-2-2);
+  inset-block-start: calc(var(--size-4-2) + var(--border-width));
   inset-inline-end: var(--size-2-2);
   display: flex;
   gap: var(--size-2-1);
@@ -720,8 +723,8 @@
 
 .abyss-documents .abyss-annotation-card-action {
   width: auto;
-  min-width: 36px;
-  min-height: 28px;
+  min-width: max(36px, var(--abyss-annotation-action-height));
+  min-height: var(--abyss-annotation-action-height);
   padding: 2px var(--size-2-2);
   border-radius: var(--radius-s);
   background: var(--background-primary);
@@ -758,17 +761,13 @@
   background: var(--background-modifier-hover);
 }
 
-.abyss-documents .abyss-annotation-card-row:hover .abyss-annotation-card,
-.abyss-documents .abyss-annotation-card-row:focus-within .abyss-annotation-card,
-.abyss-documents .abyss-annotation-card-row[data-actions-open] .abyss-annotation-card {
-  padding-inline-end: calc(var(--size-4-3) + 86px);
-}
-
 .abyss-documents .abyss-annotation-card-header {
   display: flex;
   min-width: 0;
+  min-height: var(--abyss-annotation-action-height);
   align-items: center;
   gap: var(--size-2-2);
+  padding-inline-end: var(--abyss-annotation-action-width);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   font-variant-numeric: tabular-nums;
@@ -1020,15 +1019,9 @@
 }
 
 @media (pointer: coarse) {
-  .abyss-documents .abyss-annotation-card-row:hover .abyss-annotation-card,
-  .abyss-documents .abyss-annotation-card-row:focus-within .abyss-annotation-card,
-  .abyss-documents .abyss-annotation-card-row[data-actions-open] .abyss-annotation-card {
-    padding-inline-end: calc(var(--size-4-3) + 104px);
-  }
-
-  .abyss-documents .abyss-annotation-card-action {
-    min-width: 44px;
-    min-height: 44px;
+  .abyss-documents .abyss-reader-annotations {
+    --abyss-annotation-action-height: 44px;
+    --abyss-annotation-action-width: 104px;
   }
 
   .abyss-documents .abyss-reader-outline-row-shell {
