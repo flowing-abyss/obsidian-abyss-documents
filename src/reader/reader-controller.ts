@@ -688,8 +688,8 @@ export class ReaderController {
     );
     this.annotationsLoadedFor = null;
     this.annotationsLoadingFor = null;
-    this.currentAnnotations = [];
-    if (this.hasAnnotationIntent(session)) shell.sidebar?.annotationsPanel.setLoading();
+    if (this.hasAnnotationIntent(session) && this.currentAnnotations.length === 0)
+      shell.sidebar?.annotationsPanel.setLoading();
     this.startVerifiedAnnotationInvalidation(marker);
   }
 
@@ -844,9 +844,11 @@ export class ReaderController {
     cause: unknown,
   ): void {
     if (isAbortFailure(cause)) return;
-    marker.shell.sidebar?.annotationsPanel.setError(
-      'Could not refresh saved annotations. Reopen the PDF to retry.',
-    );
+    marker.shell.sidebar?.annotationsPanel.setUnavailable({
+      onRetry: () => {
+        this.loadAnnotations(marker.session, marker.shell);
+      },
+    });
     console.error('[abyss-documents] Failed to refresh verified PDF annotations', {
       path: marker.session.descriptor.path,
       revision: marker.revision,
@@ -1230,9 +1232,11 @@ export class ReaderController {
         if (isAbortFailure(cause)) return;
         if (Object.is(this.session, session) && Object.is(this.shell, shell)) {
           this.annotationsLoadingFor = null;
-          shell.sidebar?.annotationsPanel.setError(
-            'Could not prepare annotations for export. Try again.',
-          );
+          shell.sidebar?.annotationsPanel.setUnavailable({
+            onRetry: () => {
+              this.loadAnnotations(session, shell);
+            },
+          });
         }
         this.reportAnnotationExportPreparationFailure(file, cause);
       },
@@ -1567,7 +1571,10 @@ export class ReaderController {
   }
 
   private loadAnnotations(session: DocumentSession, shell: ReaderShell): void {
-    if (!hasAnnotationListing(session)) return;
+    if (!hasAnnotationListing(session)) {
+      shell.sidebar?.annotationsPanel.setUnavailable();
+      return;
+    }
     this.annotationIntentFor = session;
     if (this.requestPendingVerifiedAnnotations(session, shell)) return;
     if (this.hydrateLoadedAnnotations(session, shell)) return;
@@ -1595,9 +1602,11 @@ export class ReaderController {
         )
           return;
         this.annotationsLoadingFor = null;
-        shell.sidebar?.annotationsPanel.setError(
-          'Could not index annotations. Reopen the PDF to retry.',
-        );
+        shell.sidebar?.annotationsPanel.setUnavailable({
+          onRetry: () => {
+            this.loadAnnotations(session, shell);
+          },
+        });
         console.error('[abyss-documents] Failed to extract PDF annotations', {
           path: session.descriptor.path,
           page: annotationFailurePage(cause) ?? this.currentPageIndex + 1,

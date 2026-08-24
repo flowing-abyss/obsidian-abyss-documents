@@ -20,6 +20,17 @@ async function openOutline(): Promise<void> {
   await expect($$('[data-outline-row]')).toBeElementsArrayOfSize({ gte: 6 });
 }
 
+async function openAnnotations(path: string): Promise<void> {
+  await browser.executeObsidian(async ({ app }, documentPath) => {
+    await app.workspace.openLinkText(documentPath, '', false);
+  }, path);
+  await $('[data-abyss-document]').waitForDisplayed({ timeout: 15_000 });
+  await $('[data-page-number="1"] canvas').waitForExist({ timeout: 15_000 });
+  await $('[data-control="sidebar"]').click();
+  await $('[data-tab="annotations"]').click();
+  await expect($('[data-tab="annotations"][aria-selected="true"]')).toExist();
+}
+
 describe('PDF reader sidebar', () => {
   beforeEach(closeReaderLeaves);
   afterEach(closeReaderLeaves);
@@ -136,5 +147,51 @@ describe('PDF reader sidebar', () => {
     expect(Math.max(...geometry.iconHeights)).toBeLessThanOrEqual(16);
     expect(Math.min(...geometry.iconWidths)).toBeGreaterThanOrEqual(14);
     expect(Math.max(...geometry.iconWidths)).toBeLessThanOrEqual(16);
+  });
+
+  it('shows one clean empty annotation state without inactive controls', async () => {
+    await openAnnotations('Documents/outline-20-pages.pdf');
+
+    const status = $('[data-annotations-status]');
+    await expect(status).toHaveText('No annotations');
+    await expect($('[data-annotation-search]')).not.toBeDisplayed();
+    await expect($('[data-section="tags"]')).not.toBeDisplayed();
+    await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(0);
+  });
+
+  it('keeps annotation controls above an independent virtual scroll host', async () => {
+    await openAnnotations('Documents/annotations-10000.pdf');
+    await browser.waitUntil(
+      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
+      { timeout: 15_000, timeoutMsg: 'Annotation panel did not load ten thousand items.' },
+    );
+
+    const geometry = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+      if (panel === null) throw new Error('Annotation panel is missing.');
+      const controls = panel.querySelector<HTMLElement>('.abyss-annotation-controls');
+      const scrollHost = panel.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+      const tags = panel.querySelector<HTMLElement>('[data-section="tags"]');
+      if (controls === null || scrollHost === null || tags === null)
+        throw new Error('Annotation panel structure is incomplete.');
+      return {
+        controlsAboveList:
+          controls.getBoundingClientRect().bottom <= scrollHost.getBoundingClientRect().top + 1,
+        panelOverflowY: getComputedStyle(panel).overflowY,
+        scrollHostOverflowY: getComputedStyle(scrollHost).overflowY,
+        tagsInsideScrollHost: scrollHost.contains(tags),
+      };
+    });
+    expect(geometry).toEqual({
+      controlsAboveList: true,
+      panelOverflowY: 'hidden',
+      scrollHostOverflowY: 'auto',
+      tagsInsideScrollHost: false,
+    });
+    await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 48 });
+
+    await $('[data-annotation-search]').setValue('not present in any annotation');
+    await expect($('[data-annotations-status]')).toHaveText('No matching annotations');
+    await expect($$('[data-annotation-search]')).toBeElementsArrayOfSize(1);
   });
 });

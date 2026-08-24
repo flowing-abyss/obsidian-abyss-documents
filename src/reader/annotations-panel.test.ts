@@ -45,7 +45,118 @@ function annotation(
   };
 }
 
+function annotationScrollHost(root: HTMLElement): HTMLElement {
+  const scrollHost = root.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+  if (scrollHost === null) throw new Error('Expected annotation scroll host.');
+  return scrollHost;
+}
+
 describe('AnnotationsPanel', () => {
+  it('renders exactly No annotations when empty', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+
+    panel.setAnnotations([]);
+
+    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe('No annotations');
+    expect(root.querySelector<HTMLInputElement>('[data-annotation-search]')?.hidden).toBe(true);
+    expect(root.querySelector<HTMLDetailsElement>('[data-section="tags"]')?.hidden).toBe(true);
+    expect(root.querySelector('.abyss-annotation-card')).toBeNull();
+  });
+
+  it('renders No matching annotations only for filtered content', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0)]);
+
+    panel.setFilter({ query: 'absent', colors: new Set(), tags: new Set() });
+
+    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
+      'No matching annotations',
+    );
+    expect(root.querySelector<HTMLInputElement>('[data-annotation-search]')?.hidden).toBe(false);
+    panel.setFilter({ query: '', colors: new Set(), tags: new Set() });
+    expect(root.querySelector<HTMLElement>('[data-annotations-status]')?.hidden).toBe(true);
+  });
+
+  it('hides controls and tags when empty', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+
+    panel.setAnnotations([]);
+
+    expect(root.querySelector<HTMLElement>('.abyss-annotation-controls')?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>('.abyss-annotation-tags')?.hidden).toBe(true);
+  });
+
+  it('keeps stale data after extraction failure', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0)]);
+
+    panel.setUnavailable();
+
+    expect(panel.visibleIds()).toEqual(['annotation-0']);
+    expect(root.querySelector<HTMLElement>('[data-annotations-status]')?.hidden).toBe(true);
+    expect(root.querySelector('[data-annotation-id="annotation-0"]')).not.toBeNull();
+    expect(root.textContent).not.toContain('unavailable');
+  });
+
+  it('renders actionable unavailable without technical jargon', () => {
+    const root = createDiv();
+    const retry = vi.fn();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+
+    panel.setUnavailable({ onRetry: retry });
+
+    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
+      'Annotations unavailableTry again',
+    );
+    expect(root.textContent).not.toMatch(/index|cache|reopen/i);
+    root.querySelector<HTMLButtonElement>('[data-action="retry-annotations"]')?.click();
+    expect(retry).toHaveBeenCalledOnce();
+
+    panel.setUnavailable();
+    expect(root.querySelector('[data-action="retry-annotations"]')).toBeNull();
+    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
+      'Annotations unavailable',
+    );
+  });
+
+  it('uses an independent list scrollHost', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    const scrollHost = annotationScrollHost(root);
+
+    scrollHost.scrollTop = 50 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+
+    expect(panel.visibleIds()).toContain('annotation-50');
+    expect(panel.root.scrollTop).toBe(0);
+    expect(scrollHost.contains(root.querySelector('.abyss-annotations-list'))).toBe(true);
+    expect(scrollHost.contains(root.querySelector('[data-section="tags"]'))).toBe(false);
+  });
+
+  it('keeps ten thousand items at forty eight cards or fewer with stable anchors', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
+    const scrollHost = annotationScrollHost(root);
+
+    scrollHost.scrollTop = 7_500 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    const anchored = panel.visibleIds()[10];
+    root.querySelector<HTMLElement>(`[data-annotation-id="${anchored}"]`)?.focus();
+    ownerWindow(root).dispatchEvent(new Event('resize'));
+
+    expect(panel.visibleIds()).toContain(anchored);
+    expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe(anchored);
+    expect(root.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
+    root.remove();
+  });
+
   it('maps mixed-height rows through measured prefix offsets without losing scroll anchoring', () => {
     const host = createDiv();
     host.doc.body.append(host);
@@ -76,8 +187,9 @@ describe('AnnotationsPanel', () => {
     const remainder = target % 3;
     const exactOffset =
       cycles * 416 + heights.slice(0, remainder).reduce((sum, value) => sum + value, 0);
-    panel.root.scrollTop = exactOffset;
-    panel.root.dispatchEvent(new Event('scroll'));
+    const scrollHost = annotationScrollHost(host);
+    scrollHost.scrollTop = exactOffset;
+    scrollHost.dispatchEvent(new Event('scroll'));
     const firstMiddle = Number(panel.visibleIds()[0]?.slice('annotation-'.length));
     expect(Math.abs(firstMiddle - target)).toBeLessThanOrEqual(50);
     expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
@@ -85,8 +197,8 @@ describe('AnnotationsPanel', () => {
     const anchoredId = panel.visibleIds()[10];
     frames.shift()?.(1);
     expect(panel.visibleIds()).toContain(anchoredId);
-    panel.root.scrollTop = 0;
-    panel.root.dispatchEvent(new Event('scroll'));
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatchEvent(new Event('scroll'));
     const bottomAfter = Number.parseFloat(
       host.querySelector<HTMLElement>('[data-virtual-spacer="bottom"]')?.style.height ?? '0',
     );
@@ -109,8 +221,8 @@ describe('AnnotationsPanel', () => {
     owner.dispatchEvent(new Event('resize'));
     expect(owner.document.activeElement).toBe(outside);
 
-    panel.root.scrollTop = Number.MAX_SAFE_INTEGER;
-    panel.root.dispatchEvent(new Event('scroll'));
+    scrollHost.scrollTop = Number.MAX_SAFE_INTEGER;
+    scrollHost.dispatchEvent(new Event('scroll'));
     expect(panel.visibleIds()).toContain('annotation-9999');
     host.remove();
   });
@@ -127,8 +239,9 @@ describe('AnnotationsPanel', () => {
     const panel = new AnnotationsPanel(host, { onNavigate: vi.fn() });
     panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
     frames.shift()?.(0);
-    panel.root.scrollTop = 50 * 112;
-    panel.root.dispatchEvent(new Event('scroll'));
+    const scrollHost = annotationScrollHost(host);
+    scrollHost.scrollTop = 50 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
     expect(panel.visibleIds()).toContain('annotation-50');
 
     panel.destroy();
@@ -172,23 +285,24 @@ describe('AnnotationsPanel', () => {
     const firstIds = panel.visibleIds();
     expect(firstIds[0]).toBe('annotation-0');
 
-    panel.root.scrollTop = 5000 * 112;
-    panel.root.dispatchEvent(new Event('scroll'));
+    const scrollHost = annotationScrollHost(host);
+    scrollHost.scrollTop = 5000 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
     const middleIds = panel.visibleIds();
     expect(middleIds[0]).not.toBe('annotation-0');
     expect(middleIds.some((id) => id === 'annotation-5000')).toBe(true);
     expect(host.querySelectorAll('.abyss-annotation-card')).toHaveLength(middleIds.length);
     expect(middleIds.length).toBeLessThanOrEqual(48);
 
-    panel.root.scrollTop = Number.MAX_SAFE_INTEGER;
-    panel.root.dispatchEvent(new Event('scroll'));
+    scrollHost.scrollTop = Number.MAX_SAFE_INTEGER;
+    scrollHost.dispatchEvent(new Event('scroll'));
     expect(panel.visibleIds()).toContain('annotation-9999');
     expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
 
     ownerWindow(panel.root).dispatchEvent(new Event('resize'));
     expect(panel.visibleIds()).toContain('annotation-9999');
     panel.setFilter({ query: 'concept 42', colors: new Set(), tags: new Set() });
-    expect(panel.root.scrollTop).toBe(0);
+    expect(scrollHost.scrollTop).toBe(0);
     expect(panel.visibleIds()[0]).toBe('annotation-42');
     panel.setFilter({ query: '', colors: new Set(), tags: new Set() });
     panel.setCurrentPage(7500);
@@ -198,8 +312,8 @@ describe('AnnotationsPanel', () => {
     const beforeDestroy = panel.visibleIds();
     panel.destroy();
     panel.destroy();
-    panel.root.scrollTop = 0;
-    panel.root.dispatchEvent(new Event('scroll'));
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatchEvent(new Event('scroll'));
     expect(panel.visibleIds()).toEqual(beforeDestroy);
     host.remove();
   });
@@ -326,8 +440,8 @@ describe('AnnotationsPanel', () => {
   it('shows one background failure state without throwing', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
-    panel.setError('Could not index annotations. Reopen the PDF to retry.');
-    expect(root.querySelector('[role="alert"]')?.textContent).toContain('Could not index');
+    panel.setUnavailable();
+    expect(root.querySelector('[role="alert"]')?.textContent).toBe('Annotations unavailable');
   });
 
   it('sets drag payloads and exposes keyboard/mobile Copy and Insert actions', () => {
@@ -482,7 +596,7 @@ describe('AnnotationsPanel', () => {
     expect(onNavigate).toHaveBeenNthCalledWith(4, { pageIndex: 3, x: 10, y: 11 });
 
     panel.setFilter({ query: 'missing', colors: new Set(), tags: new Set() });
-    expect(root.textContent).toContain('No annotations match');
+    expect(root.textContent).toContain('No matching annotations');
     panel.setFilter({ query: '', colors: new Set(), tags: new Set() });
     const firstColor = root.querySelector<HTMLInputElement>('[data-annotation-color]');
     if (firstColor === null) throw new Error('Expected color facet.');

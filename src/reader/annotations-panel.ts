@@ -11,6 +11,12 @@ const ESTIMATED_CARD_HEIGHT = 112;
 const SCROLL_OVERSCAN = 10;
 const HEIGHT_EPSILON = 0.5;
 
+type AnnotationPanelState = 'loading' | 'empty' | 'content' | 'filtered-empty' | 'unavailable';
+
+interface AnnotationPanelUnavailableOptions {
+  readonly onRetry?: () => void;
+}
+
 export interface AnnotationPanelFilter {
   readonly query: string;
   readonly colors: ReadonlySet<string>;
@@ -29,7 +35,9 @@ export interface AnnotationsPanelOptions {
 export class AnnotationsPanel {
   readonly root: HTMLElement;
 
+  private readonly controls: HTMLElement;
   private readonly list: HTMLElement;
+  private readonly scrollHost: HTMLElement;
   private readonly status: HTMLElement;
   private readonly query: HTMLInputElement;
   private readonly colors: HTMLElement;
@@ -44,6 +52,8 @@ export class AnnotationsPanel {
   private filtered: readonly DocumentAnnotation[] = [];
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
   private currentPage = 0;
+  private state: AnnotationPanelState = 'loading';
+  private unavailableOptions: AnnotationPanelUnavailableOptions = {};
   private selectedAnnotationId: string | null = null;
   private windowStart = 0;
   private estimatedCardHeight = ESTIMATED_CARD_HEIGHT;
@@ -86,11 +96,9 @@ export class AnnotationsPanel {
     const owner = ownerWindow(host);
     this.root = owner.createEl('section');
     this.configureRoot();
-    this.status = owner.createDiv();
-    this.status.className = 'abyss-annotations-status';
-    this.status.setAttribute('aria-live', 'polite');
-    const controls = owner.createDiv();
-    controls.className = 'abyss-annotation-controls';
+    this.status = createStatus(owner);
+    this.controls = owner.createDiv();
+    this.controls.className = 'abyss-annotation-controls';
     this.query = owner.createEl('input');
     this.query.type = 'search';
     this.query.placeholder = 'Filter annotations';
@@ -100,7 +108,7 @@ export class AnnotationsPanel {
     this.colors = colorControls.colors;
     this.colorSearch = colorControls.search;
     this.colorRows = colorControls.rows;
-    controls.append(this.query, this.colors);
+    this.controls.append(this.query, this.colors);
     const tagControls = createTagFacetControls(owner);
     this.tags = tagControls.tags;
     this.tagSearch = tagControls.search;
@@ -108,15 +116,19 @@ export class AnnotationsPanel {
     this.list = owner.createDiv();
     this.list.className = 'abyss-annotations-list';
     this.list.setAttribute('role', 'list');
-    this.root.append(controls, this.status, this.tags, this.list);
-    host.append(this.root);
+    this.scrollHost = owner.createDiv();
+    this.scrollHost.className = 'abyss-annotations-scroll-host';
+    this.scrollHost.dataset['annotationScrollHost'] = '';
+    this.scrollHost.append(this.status, this.list);
+    this.mount(host);
     this.bindEvents();
+    this.renderState();
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.root.removeEventListener('scroll', this.onScroll);
+    this.scrollHost.removeEventListener('scroll', this.onScroll);
     ownerWindow(this.root).removeEventListener('resize', this.onResize);
     ownerWindow(this.root).document.removeEventListener('focusin', this.onDocumentFocusIn);
     this.tags.removeEventListener('toggle', this.onTagsToggle);
@@ -134,8 +146,13 @@ export class AnnotationsPanel {
     this.root.setAttribute('aria-label', 'Annotations');
   }
 
+  private mount(host: HTMLElement): void {
+    this.root.append(this.controls, this.scrollHost, this.tags);
+    host.append(this.root);
+  }
+
   private bindEvents(): void {
-    this.root.addEventListener('scroll', this.onScroll);
+    this.scrollHost.addEventListener('scroll', this.onScroll);
     ownerWindow(this.root).addEventListener('resize', this.onResize);
     ownerWindow(this.root).document.addEventListener('focusin', this.onDocumentFocusIn);
     this.tags.addEventListener('toggle', this.onTagsToggle);
@@ -149,13 +166,15 @@ export class AnnotationsPanel {
   }
 
   setLoading(): void {
-    this.status.removeAttribute('role');
-    this.status.textContent = 'Loading annotations…';
+    this.state = 'loading';
+    this.unavailableOptions = {};
+    this.renderState();
   }
 
-  setError(message: string): void {
-    this.status.setAttribute('role', 'alert');
-    this.status.textContent = message;
+  setUnavailable(options: AnnotationPanelUnavailableOptions = {}): void {
+    this.unavailableOptions = options;
+    this.state = this.annotations.length === 0 ? 'unavailable' : this.dataState();
+    this.renderState();
   }
 
   setAnnotations(annotations: readonly DocumentAnnotation[]): void {
@@ -164,8 +183,7 @@ export class AnnotationsPanel {
     this.nextRowId = 0;
     this.clearMeasurements();
     this.resetVirtualScroll();
-    this.status.removeAttribute('role');
-    this.status.textContent = `${annotations.length} ${annotations.length === 1 ? 'annotation' : 'annotations'}`;
+    this.unavailableOptions = {};
     this.renderFacets();
     this.applyFilter();
   }
@@ -191,7 +209,7 @@ export class AnnotationsPanel {
       selected >= 0 &&
       (selected < this.windowStart || selected >= this.windowStart + MAX_CARDS)
     ) {
-      this.root.scrollTop = this.scrollTopForIndex(selected);
+      this.scrollHost.scrollTop = this.scrollTopForIndex(selected);
       this.windowStart = clampWindowStart(selected - SCROLL_OVERSCAN, this.filtered.length);
     }
     this.render();
@@ -201,7 +219,7 @@ export class AnnotationsPanel {
     const index = this.filtered.findIndex((annotation) => annotationId(annotation) === id);
     if (index < 0) return false;
     this.selectedAnnotationId = id;
-    this.root.scrollTop = this.scrollTopForIndex(index);
+    this.scrollHost.scrollTop = this.scrollTopForIndex(index);
     this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
     this.render();
     this.list.querySelector<HTMLElement>(`[data-annotation-id="${CSS.escape(id)}"]`)?.focus();
@@ -209,6 +227,7 @@ export class AnnotationsPanel {
   }
 
   setResolutionError(kind: 'ambiguous' | 'unresolved', path: string): void {
+    this.status.hidden = false;
     this.status.setAttribute('role', 'alert');
     this.status.textContent =
       kind === 'ambiguous'
@@ -241,6 +260,7 @@ export class AnnotationsPanel {
     });
     this.rebuildOffsets();
     this.windowStart = clampWindowStart(this.windowStart, this.filtered.length);
+    this.state = this.dataState();
     this.render();
     recordReaderPerformanceSample(
       query.length === 0 ? 'annotationFilterMs' : 'annotationSearchMs',
@@ -358,12 +378,7 @@ export class AnnotationsPanel {
     const end = this.windowStart + visible.length;
     const remainingHeight = this.offsetAt(this.filtered.length) - this.offsetAt(end);
     if (visible.length > 0) this.list.append(this.spacer(remainingHeight, 'bottom'));
-    if (this.filtered.length === 0) {
-      const empty = ownerWindow(this.root).createEl('p');
-      empty.className = 'abyss-reader-sidebar-empty';
-      empty.textContent = 'No annotations match the current filters.';
-      this.list.append(empty);
-    }
+    this.renderState();
     this.restoreFocusedRow(focusedRowId);
     maximizeReaderCounter(
       'maxAnnotationCards',
@@ -486,7 +501,7 @@ export class AnnotationsPanel {
     if (target === null) return;
     event.preventDefault();
     if (target < this.windowStart || target >= this.windowStart + MAX_CARDS) {
-      this.root.scrollTop = this.scrollTopForIndex(target);
+      this.scrollHost.scrollTop = this.scrollTopForIndex(target);
       this.windowStart = clampWindowStart(target - SCROLL_OVERSCAN, this.filtered.length);
     }
     this.render();
@@ -499,7 +514,7 @@ export class AnnotationsPanel {
 
   private resetVirtualScroll(): void {
     this.windowStart = 0;
-    this.root.scrollTop = 0;
+    this.scrollHost.scrollTop = 0;
   }
 
   private updateWindowFromScroll(): boolean {
@@ -585,7 +600,7 @@ export class AnnotationsPanel {
     }
     if (!changed) return;
     this.rebuildOffsets();
-    this.root.scrollTop = this.scrollTopForIndex(anchorIndex) + anchorDelta;
+    this.scrollHost.scrollTop = this.scrollTopForIndex(anchorIndex) + anchorDelta;
     this.windowStart = this.windowStartForAnchor(anchorIndex, activeRowId);
     this.render();
   }
@@ -617,7 +632,7 @@ export class AnnotationsPanel {
     this.rebuildOffsets();
     if (anchor !== undefined) {
       const index = this.filtered.indexOf(anchor);
-      this.root.scrollTop = this.scrollTopForIndex(Math.max(0, index)) + delta;
+      this.scrollHost.scrollTop = this.scrollTopForIndex(Math.max(0, index)) + delta;
       this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
     }
     this.render();
@@ -630,9 +645,9 @@ export class AnnotationsPanel {
       this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card[data-annotation-row-id]'),
     ).find((candidate) => candidate.dataset['annotationRowId'] === rowId);
     if (target === undefined) return;
-    const scrollTop = this.root.scrollTop;
+    const scrollTop = this.scrollHost.scrollTop;
     target.focus();
-    this.root.scrollTop = scrollTop;
+    this.scrollHost.scrollTop = scrollTop;
   }
 
   private activeRowId(): string | undefined {
@@ -641,7 +656,7 @@ export class AnnotationsPanel {
   }
 
   private virtualScrollTop(): number {
-    return Math.max(0, this.root.scrollTop - this.list.offsetTop);
+    return Math.max(0, this.scrollHost.scrollTop - this.list.offsetTop);
   }
 
   private scrollTopForIndex(index: number): number {
@@ -657,6 +672,45 @@ export class AnnotationsPanel {
     if (focusedIndex < start) start = focusedIndex;
     if (focusedIndex >= start + MAX_CARDS) start = focusedIndex - MAX_CARDS + 1;
     return clampWindowStart(start, this.filtered.length);
+  }
+
+  private dataState(): Extract<AnnotationPanelState, 'empty' | 'content' | 'filtered-empty'> {
+    if (this.annotations.length === 0) return 'empty';
+    return this.filtered.length === 0 ? 'filtered-empty' : 'content';
+  }
+
+  private renderState(): void {
+    this.root.dataset['annotationState'] = this.state;
+    const hasControls = this.state === 'content' || this.state === 'filtered-empty';
+    this.controls.hidden = !hasControls;
+    this.query.hidden = !hasControls;
+    this.tags.hidden = !hasControls;
+    this.list.hidden = this.state !== 'content';
+    this.status.hidden = this.state === 'content';
+    this.status.removeAttribute('role');
+    this.status.replaceChildren();
+    if (this.state === 'content') return;
+    this.status.setAttribute('role', this.state === 'unavailable' ? 'alert' : 'status');
+    const copy: Readonly<Record<Exclude<AnnotationPanelState, 'content'>, string>> = {
+      loading: 'Loading annotations…',
+      empty: 'No annotations',
+      'filtered-empty': 'No matching annotations',
+      unavailable: 'Annotations unavailable',
+    };
+    this.status.append(copy[this.state]);
+    if (this.state !== 'unavailable' || this.unavailableOptions.onRetry === undefined) return;
+    const retry = ownerWindow(this.root).createEl('button');
+    retry.type = 'button';
+    retry.className = 'mod-cta abyss-annotations-retry';
+    retry.dataset['action'] = 'retry-annotations';
+    retry.textContent = 'Try again';
+    retry.addEventListener('click', () => {
+      const onRetry = this.unavailableOptions.onRetry;
+      if (onRetry === undefined) return;
+      this.setLoading();
+      onRetry();
+    });
+    this.status.append(retry);
   }
 }
 
@@ -678,6 +732,14 @@ function createColorFacetControls(owner: ReaderOwnerWindow): {
   rows.className = 'abyss-annotation-color-rows';
   colors.append(search, rows);
   return { colors, rows, search };
+}
+
+function createStatus(owner: ReaderOwnerWindow): HTMLElement {
+  const status = owner.createDiv();
+  status.className = 'abyss-annotations-status';
+  status.setAttribute('aria-live', 'polite');
+  status.dataset['annotationsStatus'] = '';
+  return status;
 }
 
 function createTagFacetControls(owner: ReaderOwnerWindow): {

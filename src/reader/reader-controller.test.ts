@@ -350,6 +350,29 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('renders unavailable without retry when annotation listing is unsupported', async () => {
+    const [pdf] = files('Books/No-annotation-listing.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    expect(
+      shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')?.textContent,
+    ).toBe('Annotations unavailable');
+    expect(
+      shell.created.sidebar?.annotationsPanel.root.querySelector(
+        '[data-action="retry-annotations"]',
+      ),
+    ).toBeNull();
+  });
+
   it('integrates selection-first actions and Quick Highlight without intercepting native drawing tools', async () => {
     const [pdf] = files('Books/Selection-first.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -1237,7 +1260,7 @@ describe('ReaderController', () => {
     });
     expect(cacheRead).toHaveBeenCalledWith(pdf.path, pdf.path, 1);
     expect(cacheWrite).toHaveBeenCalledWith(expect.objectContaining({ annotations: [] }), 1);
-    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain('0 annotations');
+    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain('No annotations');
   });
   it('mounts a session viewport into the shell document region', async () => {
     beginPluginActivation();
@@ -2874,13 +2897,13 @@ describe('ReaderController', () => {
     expect(reopened.close).toHaveBeenCalledOnce();
   });
 
-  it('reports a current persisted annotation refresh failure without retrying forever', async () => {
+  it('keeps stale data after extraction failure and retries only on request', async () => {
     const [pdf] = files('Books/Refresh-failure.pdf');
     if (pdf === undefined) throw new Error('Expected PDF.');
     const active = session(pdf.path);
     Object.assign(active.value, {
       listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
-        sink([]);
+        sink([annotationRecord('stale-id', 0, { kind: 'point', point: { x: 1, y: 2 } })]);
       },
     });
     const retry = session(pdf.path);
@@ -2932,20 +2955,22 @@ describe('ReaderController', () => {
     await controller.open(pdf, createDiv());
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
     await vi.waitFor(() => {
-      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['stale-id']);
     });
     if (broadcast === undefined) throw new Error('Expected save listener.');
 
     await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
     await vi.waitFor(() => {
-      expect(
-        shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')?.textContent,
-      ).toContain('Could not refresh saved annotations');
+      expect(log).toHaveBeenCalledWith(
+        '[abyss-documents] Failed to refresh verified PDF annotations',
+        expect.objectContaining({ path: pdf.path, revision: 1 }),
+      );
     });
     expect(adapter.open).toHaveBeenCalledOnce();
-    expect(log).toHaveBeenCalledWith(
-      '[abyss-documents] Failed to refresh verified PDF annotations',
-      expect.objectContaining({ path: pdf.path, revision: 1 }),
+    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['stale-id']);
+    expect(shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')).toBeNull();
+    expect(shell.created.sidebar?.annotationsPanel.root.textContent).not.toMatch(
+      /index|cache|reopen/i,
     );
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
     await vi.waitFor(() => {
