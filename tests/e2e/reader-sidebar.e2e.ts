@@ -100,6 +100,12 @@ describe('PDF reader sidebar', () => {
       const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="outline"]');
       const tree = document.querySelector<HTMLElement>('[role="tree"]');
       const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-outline-row]'));
+      const chevrons = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-outline-chevron].is-interactive'),
+      );
+      const icons = chevrons.flatMap((chevron) =>
+        Array.from(chevron.querySelectorAll<SVGElement>('.svg-icon')),
+      );
       if (panel === null || tree === null || rows.length === 0)
         throw new Error('Outline geometry is unavailable.');
       const panelRect = panel.getBoundingClientRect();
@@ -107,6 +113,10 @@ describe('PDF reader sidebar', () => {
         hasChevron: rows[0]?.querySelector('[data-outline-chevron] svg') !== null,
         maxRowRight: Math.max(...rows.map((row) => row.getBoundingClientRect().right)),
         minRowLeft: Math.min(...rows.map((row) => row.getBoundingClientRect().left)),
+        chevronHeights: chevrons.map((chevron) => chevron.getBoundingClientRect().height),
+        chevronWidths: chevrons.map((chevron) => chevron.getBoundingClientRect().width),
+        iconHeights: icons.map((icon) => icon.getBoundingClientRect().height),
+        iconWidths: icons.map((icon) => icon.getBoundingClientRect().width),
         panelLeft: panelRect.left,
         panelRight: panelRect.right,
         rowHeights: rows.map((row) => row.getBoundingClientRect().height),
@@ -120,5 +130,11 @@ describe('PDF reader sidebar', () => {
     expect(geometry.scrollOverflow).toBeLessThanOrEqual(1);
     expect(Math.min(...geometry.rowHeights)).toBeGreaterThanOrEqual(28);
     expect(Math.max(...geometry.rowHeights)).toBeLessThanOrEqual(32);
+    expect(Math.min(...geometry.chevronHeights)).toBeGreaterThanOrEqual(32);
+    expect(Math.min(...geometry.chevronWidths)).toBeGreaterThanOrEqual(32);
+    expect(Math.min(...geometry.iconHeights)).toBeGreaterThanOrEqual(14);
+    expect(Math.max(...geometry.iconHeights)).toBeLessThanOrEqual(16);
+    expect(Math.min(...geometry.iconWidths)).toBeGreaterThanOrEqual(14);
+    expect(Math.max(...geometry.iconWidths)).toBeLessThanOrEqual(16);
   });
 });

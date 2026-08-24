@@ -6706,10 +6706,10 @@
 
 .abyss-documents .abyss-reader-outline-chevron {
   display: inline-flex;
-  width: 24px;
-  min-width: 24px;
-  height: 30px;
-  min-height: 30px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
   align-items: center;
   justify-content: center;
   padding: 0;

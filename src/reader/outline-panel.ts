@@ -10,6 +10,17 @@ interface OutlineRow {
   readonly parentIndex: number | null;
 }
 
+interface FoldedSource {
+  readonly ends: readonly number[];
+  readonly starts: readonly number[];
+  readonly text: string;
+}
+
+interface SourceRange {
+  end: number;
+  readonly start: number;
+}
+
 export class OutlinePanel {
   readonly root: HTMLElement;
 
@@ -41,7 +52,7 @@ export class OutlinePanel {
     this.searchInput.placeholder = 'Find a heading…';
     this.searchInput.setAttribute('aria-label', 'Find a heading');
     this.searchInput.addEventListener('input', () => {
-      this.query = this.searchInput.value.trim().toLocaleLowerCase();
+      this.query = this.foldText(this.searchInput.value.trim());
       this.renderTree();
     });
     controls.append(this.searchInput);
@@ -105,7 +116,7 @@ export class OutlinePanel {
     if (this.query === '') return items;
     return items.flatMap((item) => {
       const children = this.filteredItems(item.children);
-      if (children.length === 0 && !item.label.toLocaleLowerCase().includes(this.query)) return [];
+      if (children.length === 0 && !this.foldText(item.label).includes(this.query)) return [];
       return [{ ...item, children }];
     });
   }
@@ -165,25 +176,69 @@ export class OutlinePanel {
     const label = owner.createSpan();
     label.className = 'abyss-reader-outline-label';
     label.dataset['outlineLabel'] = '';
-    const normalized = text.toLocaleLowerCase();
-    if (this.query === '' || !normalized.includes(this.query)) {
+    const ranges = this.matchRanges(text);
+    if (ranges.length === 0) {
       label.textContent = text;
       return label;
     }
 
     let cursor = 0;
-    for (let match = normalized.indexOf(this.query); match >= 0;) {
-      label.append(owner.document.createTextNode(text.slice(cursor, match)));
+    for (const range of ranges) {
+      label.append(owner.document.createTextNode(text.slice(cursor, range.start)));
       const highlighted = owner.createSpan();
       highlighted.className = 'abyss-reader-outline-match';
       highlighted.dataset['outlineMatch'] = '';
-      highlighted.textContent = text.slice(match, match + this.query.length);
+      highlighted.textContent = text.slice(range.start, range.end);
       label.append(highlighted);
-      cursor = match + this.query.length;
-      match = normalized.indexOf(this.query, cursor);
+      cursor = range.end;
     }
     label.append(owner.document.createTextNode(text.slice(cursor)));
     return label;
+  }
+
+  private matchRanges(text: string): readonly SourceRange[] {
+    if (this.query === '') return [];
+    const folded = this.foldSource(text);
+    const ranges: SourceRange[] = [];
+    for (let match = folded.text.indexOf(this.query); match >= 0;) {
+      const start = folded.starts[match];
+      const end = folded.ends[match + this.query.length - 1];
+      if (start !== undefined && end !== undefined) {
+        const previous = ranges[ranges.length - 1];
+        if (previous !== undefined && start < previous.end)
+          previous.end = Math.max(previous.end, end);
+        else ranges.push({ end, start });
+      }
+      match = folded.text.indexOf(this.query, match + this.query.length);
+    }
+    return ranges;
+  }
+
+  private foldSource(text: string): FoldedSource {
+    const starts: number[] = [];
+    const ends: number[] = [];
+    let foldedText = '';
+    let sourceOffset = 0;
+    for (const symbol of text) {
+      const foldedSymbol = this.foldSymbol(symbol);
+      foldedText += foldedSymbol;
+      for (let index = 0; index < foldedSymbol.length; index += 1) {
+        starts.push(sourceOffset);
+        ends.push(sourceOffset + symbol.length);
+      }
+      sourceOffset += symbol.length;
+    }
+    return { ends, starts, text: foldedText };
+  }
+
+  private foldText(text: string): string {
+    let folded = '';
+    for (const symbol of text) folded += this.foldSymbol(symbol);
+    return folded;
+  }
+
+  private foldSymbol(symbol: string): string {
+    return symbol.toLocaleUpperCase().toLocaleLowerCase();
   }
 
   private createGroup(listItem: HTMLLIElement, hasChildren: boolean): HTMLUListElement | null {

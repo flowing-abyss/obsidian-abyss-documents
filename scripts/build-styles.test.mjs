@@ -202,6 +202,21 @@ describe('PDF.js style build', () => {
     });
   });
 
+  it('keeps desktop outline chevrons easy to hit without enlarging their icons', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    expect(
+      topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-chevron'),
+    ).toMatchObject({
+      width: '32px',
+      'min-width': '32px',
+      height: '32px',
+      'min-height': '32px',
+    });
+    expect(
+      topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-chevron .svg-icon'),
+    ).toMatchObject({ width: 'var(--icon-xs)', height: 'var(--icon-xs)' });
+  });
+
   it('keeps a narrow reader leaf on one row and keeps coarse pointers 44px above 600px', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
     const narrow = root.nodes.find(

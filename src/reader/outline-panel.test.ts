@@ -129,6 +129,44 @@ describe('OutlinePanel', () => {
     ).toBe('Инструмент');
   });
 
+  it('maps case-folded matches back to their original Unicode offsets', () => {
+    const panel = new OutlinePanel(createDiv(), vi.fn());
+    const label = 'İX and İx';
+    panel.render([{ id: 'unicode', label, target: { pageIndex: 0 }, children: [] }]);
+
+    search(panel, 'x');
+    const row = panel.root.querySelector<HTMLElement>('[data-outline-id="unicode"]');
+    const renderedLabel = row?.querySelector<HTMLElement>('[data-outline-label]');
+    expect(
+      Array.from(renderedLabel?.querySelectorAll('[data-outline-match]') ?? []).map(
+        (match) => match.textContent,
+      ),
+    ).toEqual(['X', 'x']);
+    expect(renderedLabel?.textContent).toBe(label);
+    expect(row?.getAttribute('aria-label')).toBe(label);
+
+    search(panel, 'i');
+    expect(
+      Array.from(
+        panel.root.querySelectorAll<HTMLElement>(
+          '[data-outline-id="unicode"] [data-outline-match]',
+        ),
+      ).map((match) => match.textContent),
+    ).toEqual(['İ', 'İ']);
+
+    panel.render([{ id: 'adjacent', label: 'XX', target: { pageIndex: 0 }, children: [] }]);
+    search(panel, 'x');
+    expect(
+      Array.from(panel.root.querySelectorAll<HTMLElement>('[data-outline-match]')).map(
+        (match) => match.textContent,
+      ),
+    ).toEqual(['X', 'X']);
+
+    panel.render([{ id: 'casefold', label: 'Straße', target: { pageIndex: 0 }, children: [] }]);
+    search(panel, 'STRASSE');
+    expect(panel.root.querySelector('[data-outline-match]')?.textContent).toBe('Straße');
+  });
+
   it('restores expansion after clearing search', () => {
     const panel = new OutlinePanel(createDiv(), vi.fn());
     panel.render(searchableOutline);
