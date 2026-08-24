@@ -1,4 +1,4 @@
-import { setIcon } from 'obsidian';
+import { setTooltip } from 'obsidian';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation } from '../document-core/document.js';
 import { maximizeReaderCounter, recordReaderPerformanceSample } from '../reader-performance.js';
@@ -21,6 +21,12 @@ export interface AnnotationPanelFilter {
   readonly query: string;
   readonly colors: ReadonlySet<string>;
   readonly tags: ReadonlySet<string>;
+}
+
+export interface AnnotationColorFacet {
+  readonly color: string;
+  readonly meaning: string;
+  readonly count: number;
 }
 
 export interface AnnotationsPanelOptions {
@@ -48,7 +54,7 @@ export class AnnotationsPanel {
   private readonly tagSearch: HTMLInputElement;
   private readonly tagRows: HTMLElement;
   private displayTags: ReadonlyArray<readonly [string, string]> = [];
-  private displayColors: readonly string[] = [];
+  private displayColors: readonly AnnotationColorFacet[] = [];
   private annotations: readonly DocumentAnnotation[] = [];
   private filtered: readonly DocumentAnnotation[] = [];
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
@@ -85,9 +91,18 @@ export class AnnotationsPanel {
   private readonly onDocumentFocusIn = (event: FocusEvent): void => {
     const target = event.target;
     if (!(target instanceof ownerWindow(this.root).Element)) return;
+    this.closeContextActionsExcept(target.closest('.abyss-annotation-card-row'));
     this.focusedRowId = this.root.contains(target)
       ? target.getAttribute('data-annotation-row-id')
       : null;
+  };
+  private readonly onDocumentPointerDown = (event: PointerEvent): void => {
+    const target = event.target;
+    const row =
+      target instanceof ownerWindow(this.root).Element
+        ? target.closest('.abyss-annotation-card-row')
+        : null;
+    this.closeContextActionsExcept(row);
   };
 
   constructor(
@@ -130,6 +145,7 @@ export class AnnotationsPanel {
     this.scrollHost.removeEventListener('scroll', this.onScroll);
     ownerWindow(this.root).removeEventListener('resize', this.onResize);
     ownerWindow(this.root).document.removeEventListener('focusin', this.onDocumentFocusIn);
+    ownerWindow(this.root).document.removeEventListener('pointerdown', this.onDocumentPointerDown);
     this.tags.removeEventListener('toggle', this.onTagsToggle);
     this.tagSearch.removeEventListener('input', this.onTagSearchInput);
     this.colorSearch.removeEventListener('input', this.onColorSearchInput);
@@ -154,6 +170,7 @@ export class AnnotationsPanel {
     this.scrollHost.addEventListener('scroll', this.onScroll);
     ownerWindow(this.root).addEventListener('resize', this.onResize);
     ownerWindow(this.root).document.addEventListener('focusin', this.onDocumentFocusIn);
+    ownerWindow(this.root).document.addEventListener('pointerdown', this.onDocumentPointerDown);
     this.tags.addEventListener('toggle', this.onTagsToggle);
     this.tagSearch.addEventListener('input', this.onTagSearchInput);
     this.colorSearch.addEventListener('input', this.onColorSearchInput);
@@ -272,13 +289,16 @@ export class AnnotationsPanel {
   }
 
   private renderFacets(): void {
-    this.displayColors = Array.from(
-      new Set(
-        this.annotations.flatMap((annotation) =>
-          annotation.color === null ? [] : [annotation.color],
-        ),
-      ),
-    ).sort((left, right) => left.localeCompare(right));
+    const colorCounts = new Map<string, number>();
+    for (const annotation of this.annotations) {
+      if (annotation.color === null) continue;
+      colorCounts.set(annotation.color, (colorCounts.get(annotation.color) ?? 0) + 1);
+    }
+    this.displayColors = Array.from(colorCounts, ([color, count]) => ({
+      color,
+      count,
+      meaning: colorMeaning(color, this.options.colorMeanings),
+    })).sort((left, right) => left.color.localeCompare(right.color));
     this.renderColorFacets();
 
     const displayTags = new Map<string, string>();
@@ -298,32 +318,51 @@ export class AnnotationsPanel {
     const query = normalize(this.colorSearch.value.trim());
     const selected = new Set(Array.from(this.filter.colors, normalize));
     const matching = this.displayColors.filter(
-      (color) => query.length === 0 || normalize(color).includes(query),
+      (facet) =>
+        query.length === 0 ||
+        normalize(facet.color).includes(query) ||
+        normalize(facet.meaning).includes(query),
     );
     const visible = [
-      ...this.displayColors.filter((color) => selected.has(normalize(color))),
-      ...matching.filter((color) => !selected.has(normalize(color))),
+      ...this.displayColors.filter((facet) => selected.has(normalize(facet.color))),
+      ...matching.filter((facet) => !selected.has(normalize(facet.color))),
     ].slice(0, MAX_COLOR_FACETS);
-    for (const color of visible) {
-      const label = ownerWindow(this.root).createEl('label');
-      label.dataset['annotationColorRow'] = '';
-      const input = ownerWindow(this.root).createEl('input');
-      input.type = 'checkbox';
-      input.dataset['annotationColor'] = color;
-      input.checked = selected.has(normalize(color));
-      input.addEventListener('change', () => {
-        const selected = new Set(this.filter.colors);
-        const previous = Array.from(selected).find(
-          (candidate) => normalize(candidate) === normalize(color),
+    for (const facet of visible) {
+      const chip = ownerWindow(this.root).createEl('button');
+      chip.type = 'button';
+      chip.className = 'abyss-annotation-color-chip';
+      chip.dataset['annotationColorRow'] = '';
+      chip.dataset['annotationColor'] = facet.color;
+      chip.style.setProperty('--abyss-annotation-color', facet.color);
+      const pressed = selected.has(normalize(facet.color));
+      chip.setAttribute('aria-pressed', String(pressed));
+      chip.setAttribute(
+        'aria-label',
+        `${facet.meaning}, ${facet.count} ${facet.count === 1 ? 'annotation' : 'annotations'}`,
+      );
+      const swatch = ownerWindow(this.root).createSpan();
+      swatch.className = 'abyss-annotation-color-chip-swatch';
+      swatch.setAttribute('aria-hidden', 'true');
+      const meaning = ownerWindow(this.root).createSpan();
+      meaning.className = 'abyss-annotation-color-chip-meaning';
+      meaning.textContent = facet.meaning;
+      const count = ownerWindow(this.root).createSpan();
+      count.className = 'abyss-annotation-color-chip-count';
+      count.textContent = String(facet.count);
+      chip.append(swatch, meaning, count);
+      chip.addEventListener('click', () => {
+        const next = new Set(this.filter.colors);
+        const previous = Array.from(next).find(
+          (candidate) => normalize(candidate) === normalize(facet.color),
         );
-        if (input.checked) selected.add(color);
-        else if (previous !== undefined) selected.delete(previous);
-        this.filter = { ...this.filter, colors: selected };
+        if (previous === undefined) next.add(facet.color);
+        else next.delete(previous);
+        chip.setAttribute('aria-pressed', String(previous === undefined));
+        this.filter = { ...this.filter, colors: next };
         this.resetVirtualScroll();
         this.applyFilter(true);
       });
-      label.append(input, this.options.colorMeanings?.[color] ?? color);
-      this.colorRows.append(label);
+      this.colorRows.append(chip);
     }
     this.recordPanelDomMaximum();
   }
@@ -410,6 +449,7 @@ export class AnnotationsPanel {
     const button = owner.createEl('button');
     button.type = 'button';
     button.className = 'abyss-annotation-card';
+    button.style.setProperty('--abyss-annotation-color', annotation.color ?? 'transparent');
     button.dataset['annotationId'] = annotationId(annotation);
     button.dataset['annotationRowId'] = this.rowId(annotation);
     button.tabIndex = index === this.windowStart ? 0 : -1;
@@ -417,17 +457,15 @@ export class AnnotationsPanel {
       button.setAttribute('aria-current', 'location');
     if (annotationId(annotation) === this.selectedAnnotationId)
       button.setAttribute('aria-current', 'true');
-    const header = owner.createDiv();
-    header.className = 'abyss-annotation-card-header';
-    const meaning =
-      annotation.color === null ? undefined : this.options.colorMeanings?.[annotation.color];
-    header.textContent = annotationHeader(annotation, meaning);
-    const text = owner.createDiv();
-    text.className = 'abyss-annotation-card-text';
-    text.textContent =
-      annotation.selectedText ??
-      (annotation.comment.length > 0 ? annotation.comment : 'Annotation');
-    button.append(header, text);
+    button.append(
+      this.cardHeader(annotation),
+      ...[
+        this.cardQuote(annotation),
+        this.cardComment(annotation),
+        this.cardLinks(annotation),
+        this.cardTags(annotation),
+      ].filter((element): element is HTMLElement => element !== null),
+    );
     button.addEventListener('click', () => {
       this.clearResolutionFeedback();
       this.options.onNavigate(location(annotation));
@@ -441,6 +479,82 @@ export class AnnotationsPanel {
     return row;
   }
 
+  private cardHeader(annotation: DocumentAnnotation): HTMLElement {
+    const owner = ownerWindow(this.root);
+    const header = owner.createDiv();
+    header.className = 'abyss-annotation-card-header';
+    const page = owner.createSpan();
+    page.dataset['annotationPage'] = '';
+    page.textContent = `Page ${annotationPage(annotation) + 1}`;
+    const meaning = owner.createSpan();
+    meaning.className = 'abyss-annotation-card-meaning';
+    meaning.dataset['annotationMeaning'] = '';
+    meaning.style.setProperty('--abyss-annotation-color', annotation.color ?? 'transparent');
+    meaning.textContent = annotationMeaning(annotation, this.options.colorMeanings);
+    header.append(page, meaning);
+    if (annotation.identity.kind !== 'stable') {
+      const pending = owner.createSpan();
+      pending.className = 'abyss-annotation-card-pending';
+      pending.textContent = 'Pending save';
+      header.append(pending);
+    }
+    return header;
+  }
+
+  private cardQuote(annotation: DocumentAnnotation): HTMLElement | null {
+    const quote = nonEmpty(annotation.selectedText);
+    if (quote === null) return null;
+    const text = ownerWindow(this.root).createDiv();
+    text.className = 'abyss-annotation-card-text abyss-annotation-card-quote';
+    text.dataset['annotationQuote'] = '';
+    text.textContent = quote;
+    return text;
+  }
+
+  private cardComment(annotation: DocumentAnnotation): HTMLElement | null {
+    const comment = nonEmpty(annotation.comment);
+    if (comment === null) return null;
+    const note = ownerWindow(this.root).createDiv();
+    note.className = 'abyss-annotation-card-text abyss-annotation-card-comment';
+    note.dataset['annotationComment'] = '';
+    note.textContent = comment;
+    return note;
+  }
+
+  private cardLinks(annotation: DocumentAnnotation): HTMLElement | null {
+    const links = annotation.links.map(nonEmpty).filter((value): value is string => value !== null);
+    if (links.length === 0) return null;
+    const owner = ownerWindow(this.root);
+    const linkRow = owner.createDiv();
+    linkRow.className = 'abyss-annotation-card-links';
+    linkRow.dataset['annotationLinks'] = '';
+    for (const link of links) {
+      const item = owner.createSpan();
+      item.className = 'internal-link abyss-annotation-card-link';
+      item.dataset['annotationLink'] = link;
+      item.textContent = link;
+      linkRow.append(item);
+    }
+    return linkRow;
+  }
+
+  private cardTags(annotation: DocumentAnnotation): HTMLElement | null {
+    const tags = annotation.tags.map(nonEmpty).filter((value): value is string => value !== null);
+    if (tags.length === 0) return null;
+    const owner = ownerWindow(this.root);
+    const tagRow = owner.createDiv();
+    tagRow.className = 'abyss-annotation-card-tags';
+    tagRow.dataset['annotationCardTags'] = '';
+    for (const tag of tags) {
+      const item = owner.createSpan();
+      item.className = 'abyss-annotation-card-tag';
+      item.dataset['annotationCardTag'] = normalize(tag);
+      item.textContent = `#${tag}`;
+      tagRow.append(item);
+    }
+    return tagRow;
+  }
+
   private cardRow(annotation: DocumentAnnotation, index: number): HTMLElement {
     const row = ownerWindow(this.root).createEl('article');
     row.className = 'abyss-annotation-card-row';
@@ -450,6 +564,18 @@ export class AnnotationsPanel {
     row.setAttribute('aria-posinset', String(index + 1));
     row.setAttribute('aria-setsize', String(this.filtered.length));
     row.draggable = isTransferableAnnotation(annotation);
+    row.addEventListener('contextmenu', (event) => {
+      if (row.querySelector('.abyss-annotation-card-actions') === null) return;
+      event.preventDefault();
+      row.dataset['actionsOpen'] = '';
+      row.querySelector<HTMLButtonElement>('.abyss-annotation-card-action')?.focus();
+    });
+    row.addEventListener('pointerup', (event) => {
+      if (event.pointerType === 'touch') row.dataset['actionsOpen'] = '';
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') delete row.dataset['actionsOpen'];
+    });
     row.addEventListener('dragstart', (event) => {
       if (event.dataTransfer === null || !isTransferableAnnotation(annotation)) return;
       try {
@@ -467,6 +593,8 @@ export class AnnotationsPanel {
     if (this.options.onCopy === undefined && this.options.onInsert === undefined) return null;
     const actions = ownerWindow(this.root).createDiv();
     actions.className = 'abyss-annotation-card-actions';
+    actions.dataset['contextual'] = '';
+    actions.setAttribute('aria-label', 'Annotation actions');
     if (this.options.onCopy !== undefined) {
       actions.append(
         this.actionButton('copy-annotation-link', 'Copy annotation link', () => {
@@ -490,8 +618,8 @@ export class AnnotationsPanel {
     button.className = 'clickable-icon abyss-annotation-card-action';
     button.dataset['action'] = action;
     button.setAttribute('aria-label', label);
-    button.title = label;
-    setIcon(button, action === 'copy-annotation-link' ? 'copy' : 'file-input');
+    setTooltip(button, label);
+    button.textContent = action === 'copy-annotation-link' ? 'Copy' : 'Insert';
     button.addEventListener('click', callback);
     return button;
   }
@@ -722,6 +850,13 @@ export class AnnotationsPanel {
     this.contextStatus.removeAttribute('role');
     this.contextStatus.replaceChildren();
   }
+
+  private closeContextActionsExcept(exception: Element | null): void {
+    const rows = Array.from(this.root.querySelectorAll<HTMLElement>('[data-actions-open]'));
+    for (const row of rows) {
+      if (row !== exception) row.removeAttribute('data-actions-open');
+    }
+  }
 }
 
 function createColorFacetControls(owner: ReaderOwnerWindow): {
@@ -820,10 +955,24 @@ function annotationPage(annotation: DocumentAnnotation): number {
   return annotation.anchor.kind === 'fixed-page' ? annotation.anchor.pageIndex : 0;
 }
 
-function annotationHeader(annotation: DocumentAnnotation, meaning: string | undefined): string {
-  const label =
-    annotation.identity.kind === 'stable' ? (meaning ?? annotation.type) : 'Pending save';
-  return `Page ${annotationPage(annotation) + 1} · ${label}`;
+function annotationMeaning(
+  annotation: DocumentAnnotation,
+  meanings: Readonly<Record<string, string>> | undefined,
+): string {
+  return annotation.color === null ? annotation.type : colorMeaning(annotation.color, meanings);
+}
+
+function colorMeaning(
+  color: string,
+  meanings: Readonly<Record<string, string>> | undefined,
+): string {
+  return nonEmpty(meanings?.[color]) ?? 'Custom color';
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 function location(annotation: DocumentAnnotation): DocumentLocation {

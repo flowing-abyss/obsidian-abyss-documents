@@ -6381,7 +6381,9 @@
 }
 
 .abyss-documents .abyss-annotation-color-rows {
-  flex-wrap: wrap;
+  overflow: auto hidden;
+  padding-block: var(--size-2-1);
+  scrollbar-width: thin;
 }
 
 .abyss-documents [data-annotation-color-search] {
@@ -6833,6 +6835,66 @@
   min-width: 0;
 }
 
+.abyss-documents .abyss-annotation-colors {
+  min-width: 0;
+  margin-block-start: var(--size-2-1);
+}
+
+.abyss-documents .abyss-annotation-color-chip {
+  --abyss-annotation-color: var(--text-faint);
+
+  display: inline-flex;
+  width: auto;
+  min-width: max-content;
+  min-height: 28px;
+  align-items: center;
+  gap: var(--size-2-1);
+  padding: 2px var(--size-2-2);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-l);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  line-height: var(--line-height-tight);
+  white-space: nowrap;
+}
+
+.abyss-documents .abyss-annotation-color-chip:hover,
+.abyss-documents .abyss-annotation-color-chip[aria-pressed='true'] {
+  border-color: color-mix(
+    in srgb,
+    var(--abyss-annotation-color) 58%,
+    var(--background-modifier-border)
+  );
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.abyss-documents .abyss-annotation-color-chip:focus-visible {
+  outline: var(--border-width) solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+.abyss-documents .abyss-annotation-color-chip-swatch {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border: var(--border-width) solid color-mix(in srgb, var(--abyss-annotation-color) 72%, black);
+  border-radius: 50%;
+  background: var(--abyss-annotation-color);
+}
+
+.abyss-documents .abyss-annotation-color-chip-count {
+  min-width: 1.35em;
+  padding-inline: 0.35em;
+  border-radius: var(--radius-l);
+  background: var(--background-modifier-hover);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
 .abyss-documents .abyss-annotations-scroll-host {
   min-height: 0;
   flex: 1 1 auto;
@@ -6881,32 +6943,49 @@
   width: 100%;
   height: auto;
   flex-direction: column;
-  gap: var(--size-2-1);
-  padding: var(--size-4-2);
-  border: var(--border-width) solid var(--background-modifier-border);
+  gap: var(--size-2-2);
+  padding: var(--size-4-2) calc(var(--size-4-3) + 86px) var(--size-4-2) var(--size-4-3);
+  border: var(--border-width) solid transparent;
   border-radius: var(--radius-s);
   background: transparent;
+  box-shadow: inset 2px 0 0 var(--abyss-annotation-color, transparent);
   color: var(--text-normal);
   text-align: start;
   white-space: normal;
 }
 
 .abyss-documents .abyss-annotation-card-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--size-2-1);
-  align-items: start;
+  position: relative;
+  display: block;
   margin-block-end: var(--size-2-1);
 }
 
 .abyss-documents .abyss-annotation-card-actions {
+  position: absolute;
+  z-index: 1;
+  inset-block-start: var(--size-2-2);
+  inset-inline-end: var(--size-2-2);
   display: flex;
   gap: var(--size-2-1);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 80ms ease-out;
+}
+
+.abyss-documents .abyss-annotation-card-row:hover .abyss-annotation-card-actions,
+.abyss-documents .abyss-annotation-card-row:focus-within .abyss-annotation-card-actions,
+.abyss-documents .abyss-annotation-card-row[data-actions-open] .abyss-annotation-card-actions {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .abyss-documents .abyss-annotation-card-action {
-  min-width: 44px;
-  min-height: 44px;
+  width: auto;
+  min-width: 36px;
+  min-height: 28px;
+  padding: 2px var(--size-2-2);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
   font-size: var(--font-ui-smaller);
 }
 
@@ -6941,8 +7020,39 @@
 }
 
 .abyss-documents .abyss-annotation-card-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--size-2-2);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+
+.abyss-documents .abyss-annotation-card-meaning {
+  --abyss-annotation-color: transparent;
+
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--size-2-1);
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.abyss-documents .abyss-annotation-card-meaning::before {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--abyss-annotation-color);
+  content: '';
+}
+
+.abyss-documents .abyss-annotation-card-pending {
+  color: var(--text-faint);
 }
 
 .abyss-documents .abyss-annotation-card-text {
@@ -6950,6 +7060,48 @@
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;
+}
+
+.abyss-documents .abyss-annotation-card-quote {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: var(--line-height-normal);
+}
+
+.abyss-documents .abyss-annotation-card-comment {
+  display: -webkit-box;
+  overflow: hidden;
+  padding-inline-start: var(--size-2-2);
+  border-inline-start: 2px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.abyss-documents .abyss-annotation-card-links,
+.abyss-documents .abyss-annotation-card-tags {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--size-2-1);
+}
+
+.abyss-documents .abyss-annotation-card-link,
+.abyss-documents .abyss-annotation-card-tag {
+  overflow: hidden;
+  font-size: var(--font-ui-smaller);
+  line-height: var(--line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.abyss-documents .abyss-annotation-card-link {
+  color: var(--link-color);
+}
+
+.abyss-documents .abyss-annotation-card-tag {
+  color: var(--text-accent);
 }
 
 .abyss-documents .abyss-reader-search-result {
@@ -7120,6 +7272,15 @@
 }
 
 @media (pointer: coarse) {
+  .abyss-documents .abyss-annotation-card {
+    padding-inline-end: calc(var(--size-4-3) + 104px);
+  }
+
+  .abyss-documents .abyss-annotation-card-action {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   .abyss-documents .abyss-reader-outline-row-shell {
     min-height: 2.75rem;
   }

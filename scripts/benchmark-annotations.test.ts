@@ -127,13 +127,17 @@ describe('annotation qualification budgets', () => {
     expect(source).toContain('__abyssAnnotationBenchmarkPreviousRoot');
   });
 
-  it('targets annotation-panel filter inputs instead of the toolbar color buttons', () => {
+  it('targets semantic annotation-panel chips instead of toolbar color buttons', () => {
     const source = readFileSync(
       path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
       'utf8',
     );
-    expect(source).toContain('[data-sidebar-panel="annotations"] input[data-annotation-color]');
-    expect(source).not.toContain('.abyss-annotation-colors [data-annotation-color]');
+    expect(source).toContain(
+      '[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color]',
+    );
+    expect(source).toContain('color instanceof HTMLButtonElement');
+    expect(source).toContain("getAttribute('aria-setsize')==='10001'");
+    expect(source).not.toContain("includes('10001 annotations')");
   });
 
   it('waits for selectable text in the exact reader root after sidebar relayout', () => {

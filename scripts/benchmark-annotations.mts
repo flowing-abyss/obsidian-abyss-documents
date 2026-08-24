@@ -421,7 +421,7 @@ async function qualifyRecoverableAnnotationPressure(input: {
   await waitFor(
     input.executable,
     input.vaultName,
-    `document.querySelector('[data-sidebar-panel="annotations"]')?.textContent?.includes('10001 annotations')===true`,
+    `document.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10001'`,
     'Recovered annotation did not reindex from verified PDF bytes.',
     30_000,
   );
@@ -535,7 +535,7 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
       await waitFor(
         executable,
         vaultName,
-        `document.querySelector('[data-sidebar-panel="annotations"]')?.textContent?.includes('10000 annotations')===true`,
+        `document.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10000'`,
         'Ten-thousand-annotation extraction did not complete.',
         30_000,
       );
@@ -551,7 +551,7 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
       await evaluate(
         executable,
         vaultName,
-        `(()=>{const input=document.querySelector('[data-annotation-search]');if(!(input instanceof HTMLInputElement))throw new Error('Annotation search input unavailable.');input.value='Annotation 07500';input.dispatchEvent(new Event('input',{bubbles:true}));input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));const color=document.querySelector('[data-sidebar-panel="annotations"] input[data-annotation-color]');if(!(color instanceof HTMLInputElement))throw new Error('Annotation color facet unavailable.');color.click();const details=document.querySelector('.abyss-reader-annotations details');if(!(details instanceof HTMLDetailsElement))throw new Error('Annotation tag facets unavailable.');details.open=true;details.dispatchEvent(new Event('toggle'));const tag=document.querySelector('[data-annotation-tag="topic-0"]');if(!(tag instanceof HTMLInputElement))throw new Error('Annotation tag facet unavailable.');tag.click();document.querySelector('[data-control="sidebar"]')?.click();return true})()`,
+        `(()=>{const input=document.querySelector('[data-annotation-search]');if(!(input instanceof HTMLInputElement))throw new Error('Annotation search input unavailable.');input.value='Annotation 07500';input.dispatchEvent(new Event('input',{bubbles:true}));input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));const color=document.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color]');if(!(color instanceof HTMLButtonElement))throw new Error('Annotation color facet unavailable.');color.click();const details=document.querySelector('.abyss-reader-annotations details');if(!(details instanceof HTMLDetailsElement))throw new Error('Annotation tag facets unavailable.');details.open=true;details.dispatchEvent(new Event('toggle'));const tag=document.querySelector('[data-annotation-tag="topic-0"]');if(!(tag instanceof HTMLInputElement))throw new Error('Annotation tag facet unavailable.');tag.click();document.querySelector('[data-control="sidebar"]')?.click();return true})()`,
       );
       await sampleHeap();
       await evaluate(

@@ -257,4 +257,89 @@ describe('PDF reader sidebar', () => {
     await expect($('[data-annotations-status]')).toHaveText('No matching annotations');
     await expect($$('[data-annotation-search]')).toBeElementsArrayOfSize(1);
   });
+
+  it('renders semantic facets and structured contextual cards at narrow widths', async () => {
+    await openAnnotations('Documents/annotations-10000.pdf');
+    await browser.waitUntil(
+      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
+      { timeout: 15_000, timeoutMsg: 'Annotation panel did not load semantic facets.' },
+    );
+    await browser.execute(() => {
+      const sidebar = document.querySelector<HTMLElement>('.abyss-reader-sidebar');
+      if (sidebar === null) throw new Error('Reader sidebar is missing.');
+      const narrowWidth = '260px';
+      sidebar.style.width = narrowWidth;
+      sidebar.style.maxWidth = narrowWidth;
+    });
+
+    const initial = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+      if (panel === null) throw new Error('Annotation panel is missing.');
+      const card = panel.querySelector<HTMLElement>('.abyss-annotation-card');
+      const row = panel.querySelector<HTMLElement>('.abyss-annotation-card-row');
+      const actions = row?.querySelector<HTMLElement>('.abyss-annotation-card-actions') ?? null;
+      const chips = Array.from(
+        panel.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'),
+      );
+      if (card === null || row === null || actions === null || chips.length !== 2)
+        throw new Error('Semantic annotation UI is incomplete.');
+      return {
+        actionOpacity: getComputedStyle(actions).opacity,
+        cardRight: card.getBoundingClientRect().right,
+        chipLabels: chips.map((chip) => chip.textContent),
+        chipRoles: chips.map((chip) => ({
+          pressed: chip.getAttribute('aria-pressed'),
+          tag: chip.tagName,
+        })),
+        comment: card.querySelector('[data-annotation-comment]')?.textContent ?? '',
+        link: card.querySelector('[data-annotation-link]')?.textContent ?? '',
+        meaning: card.querySelector('[data-annotation-meaning]')?.textContent ?? '',
+        page: card.querySelector('[data-annotation-page]')?.textContent ?? '',
+        panelRight: panel.getBoundingClientRect().right,
+        quoteCount: card.querySelectorAll('[data-annotation-quote]').length,
+        rawColorInCopy: /#[\da-f]{6}/iu.test(
+          panel.querySelector('.abyss-annotation-colors')?.textContent ?? '',
+        ),
+        tag: card.querySelector('[data-annotation-card-tag]')?.textContent ?? '',
+      };
+    });
+    expect(initial).toMatchObject({
+      actionOpacity: '0',
+      chipLabels: ['Blue5000', 'Yellow5000'],
+      chipRoles: [
+        { pressed: 'false', tag: 'BUTTON' },
+        { pressed: 'false', tag: 'BUTTON' },
+      ],
+      link: 'Topic 0',
+      meaning: 'Yellow',
+      page: 'Page 1',
+      quoteCount: 0,
+      rawColorInCopy: false,
+      tag: '#topic-0',
+    });
+    expect(initial.comment).toContain('Annotation 00000');
+    expect(initial.cardRight).toBeLessThanOrEqual(initial.panelRight + 1);
+
+    await browser.execute(() => {
+      document
+        .querySelector<HTMLElement>('.abyss-annotation-card-row')
+        ?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    });
+    await expect($('[data-action="copy-annotation-link"]')).toBeFocused();
+    expect(
+      await browser.execute(() => {
+        const actions = document.querySelector('.abyss-annotation-card-actions');
+        if (actions === null) throw new Error('Annotation actions are missing.');
+        return getComputedStyle(actions).opacity;
+      }),
+    ).toBe('1');
+
+    await $('[data-annotation-color]').click();
+    await browser.waitUntil(
+      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '5000',
+      { timeout: 5_000, timeoutMsg: 'Semantic color facet did not filter the data model.' },
+    );
+    await expect($$('[data-annotation-color]')).toBeElementsArrayOfSize(2);
+    await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 48 });
+  });
 });

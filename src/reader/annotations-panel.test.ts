@@ -382,11 +382,10 @@ describe('AnnotationsPanel', () => {
     input.value = '';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     const color = Array.from(
-      root.querySelectorAll<HTMLInputElement>('[data-annotation-color]'),
+      root.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'),
     ).find((candidate) => candidate.dataset['annotationColor'] === '#ffd400');
     if (color === undefined) throw new Error('Expected Important color filter.');
-    color.checked = true;
-    color.dispatchEvent(new Event('change', { bubbles: true }));
+    color.click();
     expect(panel.visibleIds()).toEqual(['annotation-0']);
     const tagSection = root.querySelector<HTMLDetailsElement>('[data-section="tags"]');
     expect(tagSection?.open).toBe(false);
@@ -402,6 +401,193 @@ describe('AnnotationsPanel', () => {
     tag.checked = false;
     tag.dispatchEvent(new Event('change', { bubbles: true }));
     expect(panel.visibleIds()).toEqual(['annotation-0']);
+  });
+
+  it('counts semantic color facets', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      colorMeanings: { '#ffd400': 'Important', '#00ff00': 'Question' },
+      onNavigate: vi.fn(),
+    });
+    panel.setAnnotations([
+      annotation(0),
+      annotation(1),
+      annotation(2, { color: '#00ff00' }),
+      annotation(3, { color: '#ff00ff' }),
+    ]);
+
+    const chips = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'));
+    expect(
+      Object.fromEntries(chips.map((chip) => [chip.dataset['annotationColor'], chip.textContent])),
+    ).toEqual({ '#00ff00': 'Question1', '#ffd400': 'Important2', '#ff00ff': 'Custom color1' });
+    expect(chips.map((chip) => chip.getAttribute('aria-pressed'))).toEqual([
+      'false',
+      'false',
+      'false',
+    ]);
+  });
+
+  it('labels unknown colors as Custom color', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      colorMeanings: { '#ffd400': '  ', '#00ff00': 'Review', '#0000ff': 'Review' },
+      onNavigate: vi.fn(),
+    });
+    panel.setAnnotations([
+      annotation(0),
+      annotation(1, { color: '#00ff00' }),
+      annotation(2, { color: '#0000ff' }),
+    ]);
+
+    const chips = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'));
+    expect(chips.map((chip) => chip.textContent)).toEqual(['Review1', 'Review1', 'Custom color1']);
+    expect(root.querySelector('.abyss-annotation-colors')?.textContent).not.toMatch(
+      /#[\da-f]{6}/iu,
+    );
+    expect(chips.map((chip) => chip.dataset['annotationColor'])).toEqual([
+      '#0000ff',
+      '#00ff00',
+      '#ffd400',
+    ]);
+  });
+
+  it('filters without scanning rendered DOM', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      colorMeanings: { '#ffd400': 'Important', '#00ff00': 'Question' },
+      onNavigate: vi.fn(),
+    });
+    panel.setAnnotations([
+      annotation(0),
+      annotation(1, { color: '#00ff00' }),
+      annotation(2, { color: '#00ff00' }),
+    ]);
+    root
+      .querySelector<HTMLElement>('[data-annotation-id="annotation-0"]')
+      ?.replaceChildren('Question');
+    const question = root.querySelector<HTMLButtonElement>('[data-annotation-color="#00ff00"]');
+    if (question === null) throw new Error('Expected Question color facet.');
+
+    question.click();
+
+    expect(panel.visibleIds()).toEqual(['annotation-1', 'annotation-2']);
+    expect(
+      root
+        .querySelector<HTMLButtonElement>('[data-annotation-color="#00ff00"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+  });
+
+  it('renders structured quote comment links and tags', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      colorMeanings: { '#ffd400': 'Important' },
+      onNavigate: vi.fn(),
+    });
+    panel.setAnnotations([
+      annotation(0, {
+        selectedText: 'A precise passage from the document.',
+        comment: 'Compare this with the governing rule.',
+        links: ['Governing rule', 'Case notes'],
+        tags: ['Evidence', 'Review'],
+      }),
+      annotation(1, { selectedText: ' ', comment: '', links: [], tags: [] }),
+    ]);
+
+    const card = root.querySelector<HTMLElement>('[data-annotation-id="annotation-0"]');
+    expect(card?.querySelector('[data-annotation-page]')?.textContent).toBe('Page 1');
+    expect(card?.querySelector('[data-annotation-meaning]')?.textContent).toBe('Important');
+    expect(card?.querySelector('[data-annotation-quote]')?.textContent).toBe(
+      'A precise passage from the document.',
+    );
+    expect(card?.querySelector('[data-annotation-comment]')?.textContent).toBe(
+      'Compare this with the governing rule.',
+    );
+    expect(
+      Array.from(
+        card?.querySelectorAll('[data-annotation-link]') ?? [],
+        (link) => link.textContent,
+      ),
+    ).toEqual(['Governing rule', 'Case notes']);
+    expect(
+      Array.from(
+        card?.querySelectorAll('[data-annotation-card-tag]') ?? [],
+        (tag) => tag.textContent,
+      ),
+    ).toEqual(['#Evidence', '#Review']);
+    const empty = root.querySelector<HTMLElement>('[data-annotation-id="annotation-1"]');
+    expect(empty?.querySelector('[data-annotation-quote]')).toBeNull();
+    expect(empty?.querySelector('[data-annotation-comment]')).toBeNull();
+    expect(empty?.querySelector('[data-annotation-links]')).toBeNull();
+    expect(empty?.querySelector('[data-annotation-card-tags]')).toBeNull();
+  });
+
+  it('keeps Copy and Insert contextual', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations([annotation(0)]);
+    const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
+    const actions = root.querySelector<HTMLElement>('.abyss-annotation-card-actions');
+    expect(actions?.dataset['contextual']).toBe('');
+    expect(row?.hasAttribute('data-actions-open')).toBe(false);
+
+    row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+    expect(row?.hasAttribute('data-actions-open')).toBe(true);
+    expect(root.doc.activeElement?.getAttribute('data-action')).toBe('copy-annotation-link');
+    root.remove();
+  });
+
+  it('keeps actions reachable without hover', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onCopy = vi.fn();
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onCopy,
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations([annotation(0)]);
+    const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
+    const copy = root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]');
+    copy?.focus();
+    expect(root.doc.activeElement).toBe(copy);
+
+    row?.dispatchEvent(
+      Object.assign(new Event('pointerup', { bubbles: true }), { pointerType: 'touch' }),
+    );
+    expect(row?.hasAttribute('data-actions-open')).toBe(true);
+    copy?.click();
+    expect(onCopy).toHaveBeenCalledOnce();
+    root.remove();
+  });
+
+  it('closes contextual actions when interaction moves away', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations([annotation(0)]);
+    const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
+    row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    expect(row?.hasAttribute('data-actions-open')).toBe(true);
+    const outside = ownerWindow(root).createEl('button');
+    root.doc.body.append(outside);
+
+    outside.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+
+    expect(row?.hasAttribute('data-actions-open')).toBe(false);
+    panel.destroy();
+    outside.remove();
+    root.remove();
   });
 
   it('keeps unique tag facets bounded and finds a late tag on demand', () => {
@@ -450,10 +636,9 @@ describe('AnnotationsPanel', () => {
     if (search === null) throw new Error('Expected color search for a high-cardinality facet.');
     search.value = '#00270f';
     search.dispatchEvent(new Event('input', { bubbles: true }));
-    const lateColor = root.querySelector<HTMLInputElement>('[data-annotation-color="#00270f"]');
+    const lateColor = root.querySelector<HTMLButtonElement>('[data-annotation-color="#00270f"]');
     if (lateColor === null) throw new Error('Expected the searched late color.');
-    lateColor.checked = true;
-    lateColor.dispatchEvent(new Event('change', { bubbles: true }));
+    lateColor.click();
 
     expect(panel.visibleIds()).toEqual(['annotation-9999']);
     expect(root.querySelectorAll('[data-annotation-color-row]').length).toBeLessThanOrEqual(16);
@@ -643,12 +828,10 @@ describe('AnnotationsPanel', () => {
     panel.setFilter({ query: 'missing', colors: new Set(), tags: new Set() });
     expect(root.textContent).toContain('No matching annotations');
     panel.setFilter({ query: '', colors: new Set(), tags: new Set() });
-    const firstColor = root.querySelector<HTMLInputElement>('[data-annotation-color]');
+    const firstColor = root.querySelector<HTMLButtonElement>('[data-annotation-color]');
     if (firstColor === null) throw new Error('Expected color facet.');
-    firstColor.checked = true;
-    firstColor.dispatchEvent(new Event('change', { bubbles: true }));
-    firstColor.checked = false;
-    firstColor.dispatchEvent(new Event('change', { bubbles: true }));
+    firstColor.click();
+    root.querySelector<HTMLButtonElement>('[data-annotation-color]')?.click();
   });
 
   it('moves the virtual window with End, Down, Home and current-page synchronization', () => {
