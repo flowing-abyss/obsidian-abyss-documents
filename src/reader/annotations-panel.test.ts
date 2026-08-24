@@ -123,6 +123,51 @@ describe('AnnotationsPanel', () => {
     );
   });
 
+  it('keeps resolution feedback through scroll resize filter and page renders until navigation', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    panel.setResolutionError('unresolved', 'Books/Source.pdf');
+    const scrollHost = annotationScrollHost(root);
+
+    scrollHost.scrollTop = 50 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    ownerWindow(root).dispatchEvent(new Event('resize'));
+    panel.setFilter({ query: 'concept', colors: new Set(), tags: new Set() });
+    panel.setCurrentPage(60);
+
+    expect(root.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(root.querySelector('[role="alert"]')?.textContent).toBe(
+      'The linked annotation in Books/Source.pdf could not be found.',
+    );
+    expect(scrollHost.contains(root.querySelector('[role="alert"]'))).toBe(false);
+    expect(panel.root.dataset['annotationState']).toBe('content');
+    panel.selectAnnotation('annotation-60');
+    expect(root.querySelector('[role="alert"]:not([hidden])')).toBeNull();
+    root.remove();
+  });
+
+  it('clears resolution feedback on loading recovery and unavailable boundaries', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0)]);
+    panel.setResolutionError('ambiguous', 'Books/Source.pdf');
+
+    panel.setLoading();
+    expect(root.querySelector('[role="alert"]:not([hidden])')).toBeNull();
+    panel.setAnnotations([annotation(1)]);
+    panel.setResolutionError('unresolved', 'Books/Source.pdf');
+    panel.setUnavailable();
+    expect(root.querySelector('[role="alert"]:not([hidden])')).toBeNull();
+    expect(root.querySelector('[data-annotation-id="annotation-1"]')).not.toBeNull();
+
+    panel.setResolutionError('unresolved', 'Books/Source.pdf');
+    panel.setAnnotations([]);
+    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe('No annotations');
+    expect(root.querySelector('[role="alert"]:not([hidden])')).toBeNull();
+  });
+
   it('uses an independent list scrollHost', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });

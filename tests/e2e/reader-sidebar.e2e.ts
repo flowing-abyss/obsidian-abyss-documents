@@ -174,21 +174,84 @@ describe('PDF reader sidebar', () => {
       const tags = panel.querySelector<HTMLElement>('[data-section="tags"]');
       if (controls === null || scrollHost === null || tags === null)
         throw new Error('Annotation panel structure is incomplete.');
+      const rows = Array.from(
+        scrollHost.querySelectorAll<HTMLElement>('.abyss-annotation-card-row'),
+      );
       return {
+        clientHeight: scrollHost.clientHeight,
         controlsAboveList:
           controls.getBoundingClientRect().bottom <= scrollHost.getBoundingClientRect().top + 1,
+        controlsBottom: controls.getBoundingClientRect().bottom,
+        controlsTop: controls.getBoundingClientRect().top,
+        firstPosition: Number(rows[0]?.getAttribute('aria-posinset')),
+        firstRowId: rows[0]?.dataset['annotationCardId'] ?? '',
+        lastPosition: Number(rows[rows.length - 1]?.getAttribute('aria-posinset')),
         panelOverflowY: getComputedStyle(panel).overflowY,
+        scrollHeight: scrollHost.scrollHeight,
         scrollHostOverflowY: getComputedStyle(scrollHost).overflowY,
+        tagsBottom: tags.getBoundingClientRect().bottom,
         tagsInsideScrollHost: scrollHost.contains(tags),
+        tagsTop: tags.getBoundingClientRect().top,
       };
     });
-    expect(geometry).toEqual({
+    expect(geometry).toMatchObject({
       controlsAboveList: true,
       panelOverflowY: 'hidden',
       scrollHostOverflowY: 'auto',
       tagsInsideScrollHost: false,
     });
+    expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+    expect(geometry.firstPosition).toBe(1);
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 48 });
+
+    const targetScrollTop = Math.min(
+      geometry.scrollHeight - geometry.clientHeight,
+      Math.max(geometry.clientHeight * 20, 10_000),
+    );
+    await browser.execute((scrollTop) => {
+      const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+      if (scrollHost === null) throw new Error('Annotation scroll host is missing.');
+      scrollHost.scrollTop = scrollTop;
+      scrollHost.dispatchEvent(new Event('scroll'));
+    }, targetScrollTop);
+    await browser.waitUntil(
+      async () =>
+        Number(await $('.abyss-annotation-card-row').getAttribute('aria-posinset')) >
+        geometry.firstPosition,
+      { timeout: 5_000, timeoutMsg: 'Annotation virtual window did not move after scrolling.' },
+    );
+    const scrolled = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+      if (panel === null) throw new Error('Scrolled annotation panel is missing.');
+      const controls = panel.querySelector<HTMLElement>('.abyss-annotation-controls');
+      const scrollHost = panel.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+      const tags = panel.querySelector<HTMLElement>('[data-section="tags"]');
+      const rows = Array.from(
+        scrollHost?.querySelectorAll<HTMLElement>('.abyss-annotation-card-row') ?? [],
+      );
+      if (controls === null || scrollHost === null || tags === null || rows.length === 0)
+        throw new Error('Scrolled annotation panel structure is incomplete.');
+      return {
+        cardCount: rows.length,
+        controlsBottom: controls.getBoundingClientRect().bottom,
+        controlsTop: controls.getBoundingClientRect().top,
+        firstPosition: Number(rows[0]?.getAttribute('aria-posinset')),
+        firstRowId: rows[0]?.dataset['annotationCardId'] ?? '',
+        lastPosition: Number(rows[rows.length - 1]?.getAttribute('aria-posinset')),
+        scrollTop: scrollHost.scrollTop,
+        tagsBottom: tags.getBoundingClientRect().bottom,
+        tagsTop: tags.getBoundingClientRect().top,
+      };
+    });
+    expect(scrolled.scrollTop).toBeGreaterThan(0);
+    expect(scrolled.firstPosition).toBeGreaterThan(geometry.firstPosition);
+    expect(scrolled.lastPosition).toBeGreaterThan(geometry.lastPosition);
+    expect(scrolled.firstRowId).not.toBe(geometry.firstRowId);
+    expect(scrolled.cardCount).toBeLessThanOrEqual(48);
+    expect(Math.abs(scrolled.controlsTop - geometry.controlsTop)).toBeLessThanOrEqual(1);
+    expect(Math.abs(scrolled.controlsBottom - geometry.controlsBottom)).toBeLessThanOrEqual(1);
+    expect(Math.abs(scrolled.tagsTop - geometry.tagsTop)).toBeLessThanOrEqual(1);
+    expect(Math.abs(scrolled.tagsBottom - geometry.tagsBottom)).toBeLessThanOrEqual(1);
 
     await $('[data-annotation-search]').setValue('not present in any annotation');
     await expect($('[data-annotations-status]')).toHaveText('No matching annotations');

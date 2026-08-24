@@ -36,6 +36,7 @@ export class AnnotationsPanel {
   readonly root: HTMLElement;
 
   private readonly controls: HTMLElement;
+  private readonly contextStatus: HTMLElement;
   private readonly list: HTMLElement;
   private readonly scrollHost: HTMLElement;
   private readonly status: HTMLElement;
@@ -97,6 +98,7 @@ export class AnnotationsPanel {
     this.root = owner.createEl('section');
     this.configureRoot();
     this.status = createStatus(owner);
+    this.contextStatus = createContextStatus(owner);
     this.controls = owner.createDiv();
     this.controls.className = 'abyss-annotation-controls';
     this.query = owner.createEl('input');
@@ -116,10 +118,7 @@ export class AnnotationsPanel {
     this.list = owner.createDiv();
     this.list.className = 'abyss-annotations-list';
     this.list.setAttribute('role', 'list');
-    this.scrollHost = owner.createDiv();
-    this.scrollHost.className = 'abyss-annotations-scroll-host';
-    this.scrollHost.dataset['annotationScrollHost'] = '';
-    this.scrollHost.append(this.status, this.list);
+    this.scrollHost = createScrollHost(owner, this.status, this.list);
     this.mount(host);
     this.bindEvents();
     this.renderState();
@@ -147,7 +146,7 @@ export class AnnotationsPanel {
   }
 
   private mount(host: HTMLElement): void {
-    this.root.append(this.controls, this.scrollHost, this.tags);
+    this.root.append(this.controls, this.contextStatus, this.scrollHost, this.tags);
     host.append(this.root);
   }
 
@@ -166,18 +165,21 @@ export class AnnotationsPanel {
   }
 
   setLoading(): void {
+    this.clearResolutionFeedback();
     this.state = 'loading';
     this.unavailableOptions = {};
     this.renderState();
   }
 
   setUnavailable(options: AnnotationPanelUnavailableOptions = {}): void {
+    this.clearResolutionFeedback();
     this.unavailableOptions = options;
     this.state = this.annotations.length === 0 ? 'unavailable' : this.dataState();
     this.renderState();
   }
 
   setAnnotations(annotations: readonly DocumentAnnotation[]): void {
+    this.clearResolutionFeedback();
     this.annotations = [...annotations];
     this.rowIds = new WeakMap();
     this.nextRowId = 0;
@@ -218,6 +220,7 @@ export class AnnotationsPanel {
   selectAnnotation(id: string): boolean {
     const index = this.filtered.findIndex((annotation) => annotationId(annotation) === id);
     if (index < 0) return false;
+    this.clearResolutionFeedback();
     this.selectedAnnotationId = id;
     this.scrollHost.scrollTop = this.scrollTopForIndex(index);
     this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
@@ -227,9 +230,9 @@ export class AnnotationsPanel {
   }
 
   setResolutionError(kind: 'ambiguous' | 'unresolved', path: string): void {
-    this.status.hidden = false;
-    this.status.setAttribute('role', 'alert');
-    this.status.textContent =
+    this.contextStatus.hidden = false;
+    this.contextStatus.setAttribute('role', 'alert');
+    this.contextStatus.textContent =
       kind === 'ambiguous'
         ? `The link in ${path} matches more than one annotation.`
         : `The linked annotation in ${path} could not be found.`;
@@ -426,6 +429,7 @@ export class AnnotationsPanel {
       (annotation.comment.length > 0 ? annotation.comment : 'Annotation');
     button.append(header, text);
     button.addEventListener('click', () => {
+      this.clearResolutionFeedback();
       this.options.onNavigate(location(annotation));
     });
     button.addEventListener('keydown', (event) => {
@@ -712,6 +716,12 @@ export class AnnotationsPanel {
     });
     this.status.append(retry);
   }
+
+  private clearResolutionFeedback(): void {
+    this.contextStatus.hidden = true;
+    this.contextStatus.removeAttribute('role');
+    this.contextStatus.replaceChildren();
+  }
 }
 
 function createColorFacetControls(owner: ReaderOwnerWindow): {
@@ -740,6 +750,26 @@ function createStatus(owner: ReaderOwnerWindow): HTMLElement {
   status.setAttribute('aria-live', 'polite');
   status.dataset['annotationsStatus'] = '';
   return status;
+}
+
+function createContextStatus(owner: ReaderOwnerWindow): HTMLElement {
+  const status = owner.createDiv();
+  status.className = 'abyss-annotations-context-status';
+  status.dataset['annotationsContextStatus'] = '';
+  status.hidden = true;
+  return status;
+}
+
+function createScrollHost(
+  owner: ReaderOwnerWindow,
+  status: HTMLElement,
+  list: HTMLElement,
+): HTMLElement {
+  const scrollHost = owner.createDiv();
+  scrollHost.className = 'abyss-annotations-scroll-host';
+  scrollHost.dataset['annotationScrollHost'] = '';
+  scrollHost.append(status, list);
+  return scrollHost;
 }
 
 function createTagFacetControls(owner: ReaderOwnerWindow): {
