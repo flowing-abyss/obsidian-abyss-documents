@@ -198,12 +198,61 @@ describe('AnnotationsPanel', () => {
   });
 
   it('keeps the last focused virtual anchor while disclosure focus drives expansion', () => {
-    let expanded = false;
+    let scrollHost: HTMLElement | null = null;
+    let footer: HTMLElement | null = null;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList.contains('abyss-annotation-card')) {
+        const expansionOffset = footer?.dataset['expanded'] === 'true' ? 36 : 0;
+        return DOMRect.fromRect({
+          height: 40,
+          y: 200 + expansionOffset - (scrollHost?.scrollTop ?? 0),
+        });
+      }
+      return DOMRect.fromRect();
+    });
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    scrollHost = annotationScrollHost(root);
+    scrollHost.scrollTop = 100;
+    const card = root.querySelector<HTMLElement>('.abyss-annotation-card');
+    card?.focus();
+    footer = documentTagsFooter(root);
+    const toggle = footer.querySelector<HTMLButtonElement>('[data-action="toggle-document-tags"]');
+    scrollHost.scrollTop = 116;
+    toggle?.focus();
+    expect(root.doc.activeElement).toBe(toggle);
+
+    toggle?.click();
+
+    expect(scrollHost.scrollTop).toBe(152);
+    expect(card?.getBoundingClientRect().top).toBe(84);
+    expect(root.doc.activeElement).toBe(toggle);
+
+    toggle?.click();
+
+    expect(scrollHost.scrollTop).toBe(116);
+    expect(card?.getBoundingClientRect().top).toBe(84);
+    expect(root.doc.activeElement).toBe(toggle);
+
+    panel.setAnnotations([annotation(0)]);
+    toggle?.click();
+
+    expect(scrollHost.scrollTop).toBe(0);
+    expect(root.doc.activeElement).toBe(toggle);
+    root.remove();
+  });
+
+  it('drops a retained visual anchor after scrolling its row out of the virtual window', () => {
+    let moved = false;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
       this: HTMLElement,
     ) {
       if (this.classList.contains('abyss-annotation-card'))
-        return DOMRect.fromRect({ height: 40, y: expanded ? 136 : 100 });
+        return DOMRect.fromRect({ height: 40, y: moved ? 200 : 100 });
       return DOMRect.fromRect();
     });
     const root = createDiv();
@@ -211,29 +260,19 @@ describe('AnnotationsPanel', () => {
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
     panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
     const scrollHost = annotationScrollHost(root);
-    scrollHost.scrollTop = 100;
-    const card = root.querySelector<HTMLElement>('.abyss-annotation-card');
-    card?.focus();
+    root.querySelector<HTMLElement>('.abyss-annotation-card')?.focus();
+
+    scrollHost.scrollTop = 80 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
     const toggle = documentTagsFooter(root).querySelector<HTMLButtonElement>(
       '[data-action="toggle-document-tags"]',
     );
     toggle?.focus();
-    expect(root.doc.activeElement).toBe(toggle);
-
-    expanded = true;
     toggle?.click();
 
-    expect(scrollHost.scrollTop).toBe(136);
-    expect(root.doc.activeElement).toBe(toggle);
-
-    expanded = false;
-    toggle?.click();
-
-    expect(scrollHost.scrollTop).toBe(100);
-    expect(root.doc.activeElement).toBe(toggle);
-
-    panel.setAnnotations([annotation(0)]);
-    expanded = true;
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    moved = true;
     toggle?.click();
 
     expect(scrollHost.scrollTop).toBe(0);

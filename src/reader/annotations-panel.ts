@@ -109,6 +109,7 @@ export class AnnotationsPanel {
   };
   private readonly onTagsToggle = (): void => {
     if (this.destroyed) return;
+    this.rebaseLastFocusedVisualAnchor();
     const expanded = this.tagToggle.getAttribute('aria-expanded') !== 'true';
     this.tagToggle.setAttribute('aria-expanded', String(expanded));
     this.tags.dataset['expanded'] = String(expanded);
@@ -889,9 +890,7 @@ export class AnnotationsPanel {
   private restoreFocusedVisualAnchor(): void {
     const anchor = this.lastFocusedVisualAnchor;
     if (anchor === null) return;
-    const row = Array.from(
-      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row[data-annotation-row-id]'),
-    ).find((candidate) => candidate.dataset['annotationRowId'] === anchor.rowId);
+    const row = this.renderedRow(anchor.rowId);
     if (row === undefined) return;
     const card = row.querySelector<HTMLElement>('.abyss-annotation-card');
     if (card === null) return;
@@ -899,6 +898,20 @@ export class AnnotationsPanel {
     if (!Number.isFinite(delta) || Math.abs(delta) <= HEIGHT_EPSILON) return;
     this.scrollHost.scrollTop += delta;
     anchor.top = card.getBoundingClientRect().top;
+  }
+
+  private rebaseLastFocusedVisualAnchor(): void {
+    const anchor = this.lastFocusedVisualAnchor;
+    if (anchor === null) return;
+    const row = this.renderedRow(anchor.rowId);
+    this.lastFocusedVisualAnchor =
+      row === undefined ? null : this.visualAnchorFor(row, anchor.rowId);
+  }
+
+  private renderedRow(rowId: string): HTMLElement | undefined {
+    return Array.from(
+      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row[data-annotation-row-id]'),
+    ).find((candidate) => candidate.dataset['annotationRowId'] === rowId);
   }
 
   private visualAnchorFor(

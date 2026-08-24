@@ -163,6 +163,16 @@ async function documentTagsAnchorGeometry(annotationId: string): Promise<{
   }, annotationId);
 }
 
+async function scrollAnnotationListBy(pixels: number): Promise<void> {
+  await browser.execute((delta) => {
+    const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+    if (scrollHost === null) throw new Error('Annotation scroll host is missing.');
+    scrollHost.scrollTop += delta;
+    scrollHost.dispatchEvent(new Event('scroll'));
+  }, pixels);
+  await waitForAnnotationWindowToSettle();
+}
+
 async function movePointerTo(x: number, y: number): Promise<void> {
   await browser.performActions([
     {
@@ -450,14 +460,19 @@ describe('PDF reader sidebar', () => {
     expect(Math.abs(before.footerHeight - before.summaryHeight)).toBeLessThanOrEqual(2);
 
     const toggle = $('[data-action="toggle-document-tags"]');
+    await scrollAnnotationListBy(18);
+    const pointerExpandStart = await documentTagsAnchorGeometry(activeId);
+    expect(pointerExpandStart.scrollTop).toBeGreaterThan(before.scrollTop);
     await toggle.click();
     await expect($('[data-annotation-tag-search]')).toBeDisplayed();
     await waitForAnnotationWindowToSettle();
     const pointerExpandedAnchor = await documentTagsAnchorGeometry(activeId);
     expect(pointerExpandedAnchor.activeAction).toBe('toggle-document-tags');
     expect(pointerExpandedAnchor.collapsed).toBe(false);
-    expect(pointerExpandedAnchor.firstPosition).toBe(before.firstPosition);
-    expect(Math.abs(pointerExpandedAnchor.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+    expect(pointerExpandedAnchor.firstPosition).toBe(pointerExpandStart.firstPosition);
+    expect(
+      Math.abs(pointerExpandedAnchor.cardTop - pointerExpandStart.cardTop),
+    ).toBeLessThanOrEqual(1);
 
     const expanded = await browser.execute(() => {
       const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
@@ -493,32 +508,43 @@ describe('PDF reader sidebar', () => {
       expanded.chipRoles.every(({ pressed, tag }) => pressed === 'false' && tag === 'BUTTON'),
     ).toBe(true);
 
+    await scrollAnnotationListBy(18);
+    const pointerCollapseStart = await documentTagsAnchorGeometry(activeId);
+    expect(pointerCollapseStart.scrollTop).toBeGreaterThan(pointerExpandedAnchor.scrollTop);
     await toggle.click();
     await expect($('[data-annotation-tag-search]')).not.toBeDisplayed();
     await waitForAnnotationWindowToSettle();
     const pointerCollapsed = await documentTagsAnchorGeometry(activeId);
     expect(pointerCollapsed.activeAction).toBe('toggle-document-tags');
     expect(pointerCollapsed.collapsed).toBe(true);
-    expect(pointerCollapsed.firstPosition).toBe(before.firstPosition);
-    expect(Math.abs(pointerCollapsed.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+    expect(pointerCollapsed.firstPosition).toBe(pointerCollapseStart.firstPosition);
+    expect(Math.abs(pointerCollapsed.cardTop - pointerCollapseStart.cardTop)).toBeLessThanOrEqual(
+      1,
+    );
 
+    await scrollAnnotationListBy(18);
+    const enterExpandStart = await documentTagsAnchorGeometry(activeId);
+    expect(enterExpandStart.scrollTop).toBeGreaterThan(pointerCollapsed.scrollTop);
     await browser.keys(Key.Enter);
     await expect($('[data-annotation-tag-search]')).toBeDisplayed();
     await waitForAnnotationWindowToSettle();
     const enterExpanded = await documentTagsAnchorGeometry(activeId);
     expect(enterExpanded.activeAction).toBe('toggle-document-tags');
     expect(enterExpanded.collapsed).toBe(false);
-    expect(enterExpanded.firstPosition).toBe(before.firstPosition);
-    expect(Math.abs(enterExpanded.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+    expect(enterExpanded.firstPosition).toBe(enterExpandStart.firstPosition);
+    expect(Math.abs(enterExpanded.cardTop - enterExpandStart.cardTop)).toBeLessThanOrEqual(1);
 
+    await scrollAnnotationListBy(18);
+    const spaceCollapseStart = await documentTagsAnchorGeometry(activeId);
+    expect(spaceCollapseStart.scrollTop).toBeGreaterThan(enterExpanded.scrollTop);
     await browser.keys(' ');
     await expect($('[data-annotation-tag-search]')).not.toBeDisplayed();
     await waitForAnnotationWindowToSettle();
     const spaceCollapsed = await documentTagsAnchorGeometry(activeId);
     expect(spaceCollapsed.activeAction).toBe('toggle-document-tags');
     expect(spaceCollapsed.collapsed).toBe(true);
-    expect(spaceCollapsed.firstPosition).toBe(before.firstPosition);
-    expect(Math.abs(spaceCollapsed.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+    expect(spaceCollapsed.firstPosition).toBe(spaceCollapseStart.firstPosition);
+    expect(Math.abs(spaceCollapsed.cardTop - spaceCollapseStart.cardTop)).toBeLessThanOrEqual(1);
 
     await browser.keys(Key.Enter);
     await expect($('[data-annotation-tag-search]')).toBeDisplayed();
