@@ -573,7 +573,7 @@ describe('PDF reader foundation', () => {
     await colorFacets[0]?.click();
     await browser.waitUntil(async () => (await filteredSize()) === 5_000);
 
-    await $('.abyss-reader-annotations details > summary').click();
+    await $('[data-action="toggle-document-tags"]').click();
     const topic = $('[data-annotation-tag="topic-0"]');
     await expect(topic).toExist();
     await topic.click();

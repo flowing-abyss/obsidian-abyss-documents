@@ -80,6 +80,33 @@ async function setCoarseAnnotationGeometry(enabled: boolean): Promise<void> {
   }, enabled);
 }
 
+async function waitForAnnotationWindowToSettle(): Promise<void> {
+  let previous = '';
+  let stableSamples = 0;
+  await browser.waitUntil(
+    async () => {
+      const sample = await browser.execute(() => {
+        const row = document.querySelector<HTMLElement>('.abyss-annotation-card-row');
+        const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+        if (row === null || scrollHost === null) return '';
+        return [
+          row.getAttribute('aria-posinset'),
+          row.getBoundingClientRect().top.toFixed(2),
+          scrollHost.scrollTop.toFixed(2),
+        ].join(':');
+      });
+      stableSamples = sample === previous && sample !== '' ? stableSamples + 1 : 0;
+      previous = sample;
+      return stableSamples >= 2;
+    },
+    {
+      interval: 100,
+      timeout: 5_000,
+      timeoutMsg: 'Annotation virtual window did not settle.',
+    },
+  );
+}
+
 async function movePointerTo(x: number, y: number): Promise<void> {
   await browser.performActions([
     {
@@ -317,6 +344,140 @@ describe('PDF reader sidebar', () => {
     await $('[data-annotation-search]').setValue('not present in any annotation');
     await expect($('[data-annotations-status]')).toHaveText('No matching annotations');
     await expect($$('[data-annotation-search]')).toBeElementsArrayOfSize(1);
+  });
+
+  it('pins an independently scrolling Document tags footer without losing the list anchor', async () => {
+    await openAnnotations('Documents/annotations-10000.pdf');
+    await browser.waitUntil(
+      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
+      { timeout: 15_000, timeoutMsg: 'Annotation panel did not load Document tags.' },
+    );
+    await browser.execute(() => {
+      const sidebar = document.querySelector<HTMLElement>('.abyss-reader-sidebar');
+      const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+      if (sidebar === null || scrollHost === null) throw new Error('Sidebar geometry is missing.');
+      sidebar.setCssProps({ '--abyss-reader-sidebar-width': '260px' });
+      scrollHost.scrollTop = Math.min(scrollHost.scrollHeight - scrollHost.clientHeight, 10_000);
+      scrollHost.dispatchEvent(new Event('scroll'));
+    });
+    await browser.waitUntil(
+      async () => Number(await $('.abyss-annotation-card-row').getAttribute('aria-posinset')) > 1,
+      { timeout: 5_000, timeoutMsg: 'Annotation list did not establish a virtual anchor.' },
+    );
+    await waitForAnnotationWindowToSettle();
+    await browser.execute(() => {
+      const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+      if (scrollHost === null) throw new Error('Annotation scroll host is missing.');
+      const viewport = scrollHost.getBoundingClientRect();
+      const card = Array.from(
+        document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+      ).find((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return rect.top >= viewport.top && rect.bottom <= viewport.bottom;
+      });
+      if (card === undefined) throw new Error('No visible annotation card is available to anchor.');
+      card.focus({ preventScroll: true });
+    });
+    await waitForAnnotationWindowToSettle();
+    const before = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+      const footer = panel?.querySelector<HTMLElement>('[data-section="tags"]') ?? null;
+      const scrollHost = panel?.querySelector<HTMLElement>('[data-annotation-scroll-host]') ?? null;
+      const card =
+        document.activeElement instanceof HTMLElement &&
+        document.activeElement.matches('.abyss-annotation-card')
+          ? document.activeElement
+          : null;
+      if (panel === null || footer === null || scrollHost === null || card === null)
+        throw new Error('Document tags geometry is incomplete.');
+      const panelRect = panel.getBoundingClientRect();
+      const footerRect = footer.getBoundingClientRect();
+      return {
+        activeId: card.dataset['annotationId'],
+        bottomGap: Math.abs(panelRect.bottom - footerRect.bottom),
+        cardTop: card.getBoundingClientRect().top,
+        collapsed:
+          footer
+            .querySelector('[data-action="toggle-document-tags"]')
+            ?.getAttribute('aria-expanded') === 'false',
+        firstPosition: card.closest('.abyss-annotation-card-row')?.getAttribute('aria-posinset'),
+        footerIsLast: panel.lastElementChild === footer,
+        scrollTop: scrollHost.scrollTop,
+      };
+    });
+    expect(before).toMatchObject({ collapsed: true, footerIsLast: true });
+    expect(before.bottomGap).toBeLessThanOrEqual(2);
+
+    await browser.execute(() => {
+      const toggle = document.querySelector<HTMLButtonElement>(
+        '[data-action="toggle-document-tags"]',
+      );
+      if (toggle === null) throw new Error('Document tags toggle is missing.');
+      toggle.click();
+    });
+    await expect($('[data-annotation-tag-search]')).toBeDisplayed();
+    await waitForAnnotationWindowToSettle();
+    const expanded = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+      const footer = panel?.querySelector<HTMLElement>('[data-section="tags"]') ?? null;
+      const tagScroll =
+        footer?.querySelector<HTMLElement>('[data-annotation-tag-scroll-host]') ?? null;
+      const scrollHost = panel?.querySelector<HTMLElement>('[data-annotation-scroll-host]') ?? null;
+      const chips = Array.from(
+        footer?.querySelectorAll<HTMLElement>('[data-annotation-tag]') ?? [],
+      );
+      if (panel === null || footer === null || tagScroll === null || scrollHost === null)
+        throw new Error('Expanded Document tags geometry is incomplete.');
+      const panelRect = panel.getBoundingClientRect();
+      const footerRect = footer.getBoundingClientRect();
+      const summary = footer.querySelector<HTMLElement>('.abyss-annotation-tags-summary');
+      return {
+        activeId: document.activeElement?.getAttribute('data-annotation-id'),
+        bottomGap: Math.abs(panelRect.bottom - footerRect.bottom),
+        cardTop:
+          document.activeElement instanceof HTMLElement
+            ? document.activeElement.getBoundingClientRect().top
+            : Number.NaN,
+        chipRoles: chips.map((chip) => ({
+          pressed: chip.getAttribute('aria-pressed'),
+          tag: chip.tagName,
+        })),
+        footerHeight: footerRect.height,
+        maxHeight: panelRect.height * 0.4,
+        summaryHeight: summary?.getBoundingClientRect().height ?? Number.NaN,
+        scrollTop: scrollHost.scrollTop,
+        tagOverflowY: getComputedStyle(tagScroll).overflowY,
+      };
+    });
+    expect(expanded.activeId).toBe(before.activeId);
+    expect(Math.abs(expanded.cardTop - before.cardTop)).toBeLessThanOrEqual(1);
+    expect(expanded.bottomGap).toBeLessThanOrEqual(2);
+    expect(expanded.footerHeight).toBeGreaterThan(expanded.summaryHeight + 32);
+    expect(expanded.footerHeight).toBeLessThanOrEqual(expanded.maxHeight + 1);
+    expect(expanded.tagOverflowY).toBe('auto');
+    expect(expanded.chipRoles.length).toBeGreaterThan(0);
+    expect(
+      expanded.chipRoles.every(({ pressed, tag }) => pressed === 'false' && tag === 'BUTTON'),
+    ).toBe(true);
+
+    const annotationScrollTop = expanded.scrollTop;
+    await browser.execute(() => {
+      const tagScroll = document.querySelector<HTMLElement>('[data-annotation-tag-scroll-host]');
+      if (tagScroll === null) throw new Error('Document tag scroll host is missing.');
+      tagScroll.scrollTop = tagScroll.scrollHeight;
+    });
+    const independentScroll = await browser.execute(() => ({
+      annotations: document.querySelector<HTMLElement>('[data-annotation-scroll-host]')?.scrollTop,
+      tags: document.querySelector<HTMLElement>('[data-annotation-tag-scroll-host]')?.scrollTop,
+    }));
+    expect(independentScroll.annotations).toBe(annotationScrollTop);
+    expect(independentScroll.tags).toBeGreaterThan(0);
+
+    await $('[data-annotation-tag-search]').setValue('topic-24');
+    await expect($$('[data-annotation-tag-row]')).toBeElementsArrayOfSize(1);
+    await expect($('[data-annotation-tag="topic-24"]')).toHaveText('#topic-24');
+    await $('[data-annotation-tag="topic-24"]').click();
+    await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '400');
   });
 
   it('renders semantic facets and structured contextual cards at narrow widths', async () => {

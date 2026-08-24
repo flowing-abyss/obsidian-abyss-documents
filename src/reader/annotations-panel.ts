@@ -22,6 +22,20 @@ interface AnnotationFocusTarget {
   readonly rowId: string;
 }
 
+interface AnnotationVisualAnchor {
+  readonly rowId: string;
+  top: number;
+}
+
+interface TagFacetControls {
+  readonly body: HTMLElement;
+  readonly count: HTMLElement;
+  readonly rows: HTMLElement;
+  readonly search: HTMLInputElement;
+  readonly tags: HTMLElement;
+  readonly toggle: HTMLButtonElement;
+}
+
 export interface AnnotationPanelFilter {
   readonly query: string;
   readonly colors: ReadonlySet<string>;
@@ -56,9 +70,12 @@ export class AnnotationsPanel {
   private readonly colors: HTMLElement;
   private readonly colorSearch: HTMLInputElement;
   private readonly colorRows: HTMLElement;
-  private readonly tags: HTMLDetailsElement;
+  private readonly tags: HTMLElement;
+  private readonly tagCount: HTMLElement;
+  private readonly tagBody: HTMLElement;
   private readonly tagSearch: HTMLInputElement;
   private readonly tagRows: HTMLElement;
+  private readonly tagToggle: HTMLButtonElement;
   private displayTags: ReadonlyArray<readonly [string, string]> = [];
   private displayColors: readonly AnnotationColorFacet[] = [];
   private annotations: readonly DocumentAnnotation[] = [];
@@ -77,6 +94,7 @@ export class AnnotationsPanel {
   private measurementFrame: number | null = null;
   private estimateCalibrated = false;
   private focusedTarget: AnnotationFocusTarget | null = null;
+  private focusedVisualAnchor: AnnotationVisualAnchor | null = null;
   private openActionsRowId: string | null = null;
   private suppressedActionsRowId: string | null = null;
   private touchNavigationGuardRowId: string | null = null;
@@ -89,7 +107,12 @@ export class AnnotationsPanel {
     if (!this.destroyed) this.invalidateMeasurements(true);
   };
   private readonly onTagsToggle = (): void => {
-    if (!this.destroyed) this.renderTagFacets();
+    if (this.destroyed) return;
+    const expanded = this.tagToggle.getAttribute('aria-expanded') !== 'true';
+    this.tagToggle.setAttribute('aria-expanded', String(expanded));
+    this.tags.dataset['expanded'] = String(expanded);
+    this.renderTagFacets();
+    this.restoreFocusedVisualAnchor();
   };
   private readonly onTagSearchInput = (): void => {
     if (!this.destroyed) this.renderTagRows();
@@ -104,6 +127,7 @@ export class AnnotationsPanel {
     this.closeContextActionsExcept(row);
     if (!this.root.contains(target) || row === null) {
       this.focusedTarget = null;
+      this.focusedVisualAnchor = null;
       return;
     }
     const rowId = row.dataset['annotationRowId'];
@@ -113,6 +137,7 @@ export class AnnotationsPanel {
       row.removeAttribute('data-actions-suppressed');
     }
     this.focusedTarget = rowId === undefined ? null : { action, rowId };
+    this.focusedVisualAnchor = this.visualAnchorFor(row, rowId);
   };
   private readonly onDocumentPointerDown = (event: PointerEvent): void => {
     const target = event.target;
@@ -144,10 +169,14 @@ export class AnnotationsPanel {
     this.colorSearch = colorControls.search;
     this.colorRows = colorControls.rows;
     this.controls.append(this.query, this.colors);
-    const tagControls = createTagFacetControls(owner);
-    this.tags = tagControls.tags;
-    this.tagSearch = tagControls.search;
-    this.tagRows = tagControls.rows;
+    ({
+      body: this.tagBody,
+      count: this.tagCount,
+      rows: this.tagRows,
+      search: this.tagSearch,
+      tags: this.tags,
+      toggle: this.tagToggle,
+    } = createTagFacetControls(owner));
     this.list = owner.createDiv();
     this.list.className = 'abyss-annotations-list';
     this.list.setAttribute('role', 'list');
@@ -164,7 +193,7 @@ export class AnnotationsPanel {
     ownerWindow(this.root).removeEventListener('resize', this.onResize);
     ownerWindow(this.root).document.removeEventListener('focusin', this.onDocumentFocusIn);
     ownerWindow(this.root).document.removeEventListener('pointerdown', this.onDocumentPointerDown);
-    this.tags.removeEventListener('toggle', this.onTagsToggle);
+    this.tagToggle.removeEventListener('click', this.onTagsToggle);
     this.tagSearch.removeEventListener('input', this.onTagSearchInput);
     this.colorSearch.removeEventListener('input', this.onColorSearchInput);
     if (this.measurementFrame !== null) {
@@ -189,7 +218,7 @@ export class AnnotationsPanel {
     ownerWindow(this.root).addEventListener('resize', this.onResize);
     ownerWindow(this.root).document.addEventListener('focusin', this.onDocumentFocusIn);
     ownerWindow(this.root).document.addEventListener('pointerdown', this.onDocumentPointerDown);
-    this.tags.addEventListener('toggle', this.onTagsToggle);
+    this.tagToggle.addEventListener('click', this.onTagsToggle);
     this.tagSearch.addEventListener('input', this.onTagSearchInput);
     this.colorSearch.addEventListener('input', this.onColorSearchInput);
     this.query.addEventListener('input', () => {
@@ -321,9 +350,14 @@ export class AnnotationsPanel {
     this.renderColorFacets();
 
     const displayTags = new Map<string, string>();
-    for (const annotation of this.annotations)
-      for (const tag of annotation.tags) displayTags.set(normalize(tag), tag);
+    for (const annotation of this.annotations) {
+      for (const tag of annotation.tags) {
+        const display = nonEmpty(tag);
+        if (display !== null) displayTags.set(normalize(display), display);
+      }
+    }
     this.displayTags = Array.from(displayTags.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+    this.tagCount.textContent = String(this.displayTags.length);
     this.renderTagFacets();
   }
 
@@ -384,8 +418,10 @@ export class AnnotationsPanel {
   }
 
   private renderTagFacets(): void {
-    this.tagSearch.hidden = !this.tags.open || this.displayTags.length <= MAX_TAG_FACETS;
-    if (!this.tags.open) {
+    const expanded = this.tagToggle.getAttribute('aria-expanded') === 'true';
+    this.tagBody.hidden = !expanded;
+    this.tagSearch.hidden = !expanded;
+    if (!expanded) {
       this.tagRows.replaceChildren();
       return;
     }
@@ -405,23 +441,26 @@ export class AnnotationsPanel {
       ...matching.filter(([key]) => !selected.has(key)),
     ].slice(0, MAX_TAG_FACETS);
     for (const [key, display] of visible) {
-      const label = ownerWindow(this.root).createEl('label');
-      label.dataset['annotationTagRow'] = '';
-      const input = ownerWindow(this.root).createEl('input');
-      input.type = 'checkbox';
-      input.dataset['annotationTag'] = key;
-      input.checked = selected.has(key);
-      input.addEventListener('change', () => {
-        const selected = new Set(this.filter.tags);
-        const previous = Array.from(selected).find((tag) => normalize(tag) === key);
-        if (input.checked) selected.add(display);
-        else if (previous !== undefined) selected.delete(previous);
-        this.filter = { ...this.filter, tags: selected };
+      const chip = ownerWindow(this.root).createEl('button');
+      chip.type = 'button';
+      chip.className = 'abyss-annotation-tag-chip';
+      chip.dataset['annotationTagRow'] = '';
+      chip.dataset['annotationTag'] = key;
+      const pressed = selected.has(key);
+      chip.setAttribute('aria-pressed', String(pressed));
+      chip.setAttribute('aria-label', `${display} tag`);
+      chip.textContent = `#${display}`;
+      chip.addEventListener('click', () => {
+        const next = new Set(this.filter.tags);
+        const previous = Array.from(next).find((tag) => normalize(tag) === key);
+        if (previous === undefined) next.add(display);
+        else next.delete(previous);
+        chip.setAttribute('aria-pressed', String(previous === undefined));
+        this.filter = { ...this.filter, tags: next };
         this.resetVirtualScroll();
         this.applyFilter(true);
       });
-      label.append(input, `#${display}`);
-      this.tagRows.append(label);
+      this.tagRows.append(chip);
     }
     this.recordPanelDomMaximum();
   }
@@ -842,6 +881,32 @@ export class AnnotationsPanel {
     this.scrollHost.scrollTop = scrollTop;
   }
 
+  private restoreFocusedVisualAnchor(): void {
+    const anchor = this.focusedVisualAnchor;
+    if (anchor === null) return;
+    const active = ownerWindow(this.root).document.activeElement;
+    if (!(active instanceof ownerWindow(this.root).Element)) return;
+    const row = active.closest<HTMLElement>('.abyss-annotation-card-row');
+    if (row?.dataset['annotationRowId'] !== anchor.rowId) return;
+    const card = row.querySelector<HTMLElement>('.abyss-annotation-card');
+    if (card === null) return;
+    const delta = card.getBoundingClientRect().top - anchor.top;
+    if (!Number.isFinite(delta) || Math.abs(delta) <= HEIGHT_EPSILON) return;
+    this.scrollHost.scrollTop += delta;
+    anchor.top = card.getBoundingClientRect().top;
+  }
+
+  private visualAnchorFor(
+    row: HTMLElement,
+    rowId: string | undefined,
+  ): AnnotationVisualAnchor | null {
+    if (rowId === undefined) return null;
+    const card = row.querySelector<HTMLElement>('.abyss-annotation-card');
+    if (card === null) return null;
+    const top = card.getBoundingClientRect().top;
+    return Number.isFinite(top) ? { rowId, top } : null;
+  }
+
   private activeFocusTarget(): AnnotationFocusTarget | null {
     const activeElement = ownerWindow(this.root).document.activeElement;
     if (activeElement instanceof ownerWindow(this.root).Element) {
@@ -886,7 +951,7 @@ export class AnnotationsPanel {
     const hasControls = this.state === 'content' || this.state === 'filtered-empty';
     this.controls.hidden = !hasControls;
     this.query.hidden = !hasControls;
-    this.tags.hidden = !hasControls;
+    this.tags.hidden = !hasControls || this.displayTags.length === 0;
     this.list.hidden = this.state !== 'content';
     this.status.hidden = this.state === 'content';
     this.status.removeAttribute('role');
@@ -1025,26 +1090,60 @@ function createScrollHost(
   return scrollHost;
 }
 
-function createTagFacetControls(owner: ReaderOwnerWindow): {
-  readonly rows: HTMLElement;
-  readonly search: HTMLInputElement;
-  readonly tags: HTMLDetailsElement;
-} {
-  const tags = owner.createEl('details');
+function createTagFacetControls(owner: ReaderOwnerWindow): TagFacetControls {
+  const tags = owner.createEl('section');
   tags.className = 'abyss-annotation-tags';
   tags.dataset['section'] = 'tags';
-  const summary = owner.createEl('summary');
-  summary.textContent = 'Tags';
+  tags.dataset['expanded'] = 'false';
+  const { count, toggle } = createTagToggle(owner);
+  const { body, rows, search } = createTagBody(owner);
+  tags.append(toggle, body);
+  return { body, count, rows, search, tags, toggle };
+}
+
+function createTagToggle(owner: ReaderOwnerWindow): {
+  readonly count: HTMLElement;
+  readonly toggle: HTMLButtonElement;
+} {
+  const summary = owner.createEl('button');
+  summary.type = 'button';
+  summary.className = 'abyss-annotation-tags-summary';
+  summary.dataset['action'] = 'toggle-document-tags';
+  summary.setAttribute('aria-expanded', 'false');
+  const label = owner.createSpan();
+  label.dataset['annotationTagsLabel'] = '';
+  label.textContent = 'Document tags';
+  const count = owner.createSpan();
+  count.className = 'abyss-annotation-tags-count';
+  count.dataset['annotationTagsCount'] = '';
+  count.setAttribute('aria-label', 'Unique tags');
+  count.textContent = '0';
+  summary.append(label, count);
+  return { count, toggle: summary };
+}
+
+function createTagBody(owner: ReaderOwnerWindow): {
+  readonly body: HTMLElement;
+  readonly rows: HTMLElement;
+  readonly search: HTMLInputElement;
+} {
+  const body = owner.createDiv();
+  body.className = 'abyss-annotation-tags-body';
+  body.hidden = true;
   const search = owner.createEl('input');
   search.type = 'search';
   search.placeholder = 'Filter tags';
-  search.setAttribute('aria-label', 'Filter annotation tags');
+  search.setAttribute('aria-label', 'Filter document tags');
   search.dataset['annotationTagSearch'] = '';
   search.hidden = true;
+  const scrollHost = owner.createDiv();
+  scrollHost.className = 'abyss-annotation-tag-scroll-host';
+  scrollHost.dataset['annotationTagScrollHost'] = '';
   const rows = owner.createDiv();
   rows.className = 'abyss-annotation-tag-rows';
-  tags.append(summary, search, rows);
-  return { rows, search, tags };
+  scrollHost.append(rows);
+  body.append(search, scrollHost);
+  return { body, rows, search };
 }
 
 function measuredCardHeight(card: HTMLElement): number {

@@ -6814,10 +6814,139 @@
 }
 
 .abyss-documents .abyss-annotations-status,
-.abyss-documents .abyss-annotations-context-status,
-.abyss-documents .abyss-annotation-tags {
+.abyss-documents .abyss-annotations-context-status {
   padding: var(--size-4-2);
   color: var(--text-muted);
+}
+
+.abyss-documents .abyss-annotation-tags {
+  box-sizing: border-box;
+  max-height: 40%;
+  min-height: 0;
+  flex: 0 0 auto;
+  border-top: var(--border-width) solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+}
+
+.abyss-documents .abyss-annotation-tags[data-expanded='true'] {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.abyss-documents .abyss-annotation-tags-summary {
+  display: flex;
+  min-height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--size-2-2);
+  padding: var(--size-2-1) var(--size-4-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+}
+
+.abyss-documents .abyss-annotation-tags-summary::before {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid currentcolor;
+  border-bottom: 1.5px solid currentcolor;
+  content: '';
+  transform: rotate(-45deg);
+  transition: transform 100ms ease-out;
+}
+
+.abyss-documents
+  .abyss-annotation-tags[data-expanded='true']
+  > .abyss-annotation-tags-summary::before {
+  transform: rotate(45deg);
+}
+
+.abyss-documents .abyss-annotation-tags-summary:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.abyss-documents .abyss-annotation-tags-summary:focus-visible {
+  outline: var(--border-width) solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+.abyss-documents .abyss-annotation-tags-count {
+  min-width: 1.5em;
+  margin-inline-start: auto;
+  padding-inline: 0.4em;
+  border-radius: var(--radius-l);
+  background: var(--background-modifier-hover);
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-normal);
+  text-align: center;
+}
+
+.abyss-documents .abyss-annotation-tags-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--size-2-2);
+  padding: 0 var(--size-4-2) var(--size-4-2);
+}
+
+.abyss-documents .abyss-annotation-tags-body > [data-annotation-tag-search] {
+  width: 100%;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.abyss-documents .abyss-annotation-tag-scroll-host {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+}
+
+.abyss-documents .abyss-annotation-tag-rows {
+  display: flex;
+  align-content: flex-start;
+  gap: var(--size-2-1);
+  flex-wrap: wrap;
+}
+
+.abyss-documents .abyss-annotation-tag-chip {
+  display: inline-flex;
+  box-sizing: border-box;
+  width: auto;
+  max-width: 100%;
+  min-height: 28px;
+  align-items: center;
+  overflow: hidden;
+  padding: 2px var(--size-2-2);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-l);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: var(--line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.abyss-documents .abyss-annotation-tag-chip:hover,
+.abyss-documents .abyss-annotation-tag-chip[aria-pressed='true'] {
+  border-color: var(--background-modifier-border-hover);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.abyss-documents .abyss-annotation-tag-chip:focus-visible {
+  outline: var(--border-width) solid var(--interactive-accent);
+  outline-offset: 1px;
 }
 
 .abyss-documents .abyss-annotations-context-status {
@@ -6900,7 +7029,7 @@
 
 .abyss-documents .abyss-annotations-scroll-host {
   min-height: 0;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   overflow: hidden auto;
 }
 
@@ -7316,6 +7445,11 @@
     min-height: 2.75rem;
   }
 
+  .abyss-documents .abyss-annotation-tag-chip {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
   .abyss-documents .abyss-reader-split-control .abyss-reader-split-menu {
     width: 2.75rem;
     min-width: 2.75rem;
@@ -7324,6 +7458,7 @@
 
   .abyss-documents .abyss-reader-toolbar-page-field,
   .abyss-documents .abyss-reader-sidebar-tab,
+  .abyss-documents .abyss-annotation-tags-summary,
   .abyss-documents .abyss-reader-outline-search,
   .abyss-documents .abyss-reader-search-input,
   .abyss-documents [data-action='retry'] {

@@ -51,6 +51,18 @@ function annotationScrollHost(root: HTMLElement): HTMLElement {
   return scrollHost;
 }
 
+function documentTagsFooter(root: HTMLElement): HTMLElement {
+  const footer = root.querySelector<HTMLElement>('[data-section="tags"]');
+  if (footer === null) throw new Error('Expected Document tags footer.');
+  return footer;
+}
+
+function toggleDocumentTags(root: HTMLElement): void {
+  const toggle = root.querySelector<HTMLButtonElement>('[data-action="toggle-document-tags"]');
+  if (toggle === null) throw new Error('Expected Document tags toggle.');
+  toggle.click();
+}
+
 describe('AnnotationsPanel', () => {
   it('renders exactly No annotations when empty', () => {
     const root = createDiv();
@@ -60,7 +72,7 @@ describe('AnnotationsPanel', () => {
 
     expect(root.querySelector('[data-annotations-status]')?.textContent).toBe('No annotations');
     expect(root.querySelector<HTMLInputElement>('[data-annotation-search]')?.hidden).toBe(true);
-    expect(root.querySelector<HTMLDetailsElement>('[data-section="tags"]')?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>('[data-section="tags"]')?.hidden).toBe(true);
     expect(root.querySelector('.abyss-annotation-card')).toBeNull();
   });
 
@@ -87,6 +99,126 @@ describe('AnnotationsPanel', () => {
 
     expect(root.querySelector<HTMLElement>('.abyss-annotation-controls')?.hidden).toBe(true);
     expect(root.querySelector<HTMLElement>('.abyss-annotation-tags')?.hidden).toBe(true);
+  });
+
+  it('places Document tags last and collapsed', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+
+    panel.setAnnotations([annotation(0), annotation(1)]);
+
+    const footer = documentTagsFooter(root);
+    expect(panel.root.lastElementChild).toBe(footer);
+    expect(
+      footer.querySelector('[data-action="toggle-document-tags"]')?.getAttribute('aria-expanded'),
+    ).toBe('false');
+    expect(footer.querySelector('[data-annotation-tags-label]')?.textContent).toBe('Document tags');
+    expect(footer.querySelector('[data-annotation-tags-count]')?.textContent).toBe('2');
+  });
+
+  it('hides tags for empty documents', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+
+    panel.setAnnotations([]);
+    expect(root.querySelector<HTMLElement>('[data-section="tags"]')?.hidden).toBe(true);
+
+    panel.setAnnotations([annotation(0, { tags: [] })]);
+    expect(root.querySelector<HTMLElement>('[data-section="tags"]')?.hidden).toBe(true);
+
+    panel.setAnnotations([annotation(0, { tags: ['', '   '] })]);
+    expect(root.querySelector<HTMLElement>('[data-section="tags"]')?.hidden).toBe(true);
+  });
+
+  it('filters tags in their own region', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([
+      annotation(0, { tags: ['Theory'] }),
+      annotation(1, { tags: ['Other'] }),
+      annotation(2, { tags: ['theory'] }),
+    ]);
+    const footer = documentTagsFooter(root);
+    toggleDocumentTags(root);
+    const search = footer.querySelector<HTMLInputElement>('[data-annotation-tag-search]');
+    if (search === null) throw new Error('Expected Document tags search.');
+    expect(search.hidden).toBe(false);
+    search.value = 'oth';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const chips = Array.from(
+      footer.querySelectorAll<HTMLButtonElement>('[data-annotation-tag-row]'),
+    );
+    expect(chips.map((chip) => chip.textContent)).toEqual(['#Other']);
+    expect(
+      footer.querySelector('[data-annotation-tag-scroll-host]')?.contains(chips[0] ?? null),
+    ).toBe(true);
+    chips[0]?.click();
+    expect(panel.visibleIds()).toEqual(['annotation-1']);
+  });
+
+  it('renders semantic chips instead of browser checkboxes', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0), annotation(1)]);
+    const footer = documentTagsFooter(root);
+    toggleDocumentTags(root);
+
+    expect(footer.querySelector('input[type="checkbox"]')).toBeNull();
+    const chips = Array.from(footer.querySelectorAll<HTMLElement>('[data-annotation-tag]'));
+    expect(chips.map((chip) => chip.tagName)).toEqual(['BUTTON', 'BUTTON']);
+    expect(chips.map((chip) => chip.getAttribute('aria-pressed'))).toEqual(['false', 'false']);
+  });
+
+  it('preserves annotation scroll and focus across tag expansion', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    const scrollHost = annotationScrollHost(root);
+    scrollHost.scrollTop = 50 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    const anchored = panel.visibleIds()[10];
+    const card = root.querySelector<HTMLElement>(`[data-annotation-id="${anchored}"]`);
+    card?.focus();
+    const scrollTop = scrollHost.scrollTop;
+    const visibleIds = panel.visibleIds();
+    const footer = documentTagsFooter(root);
+    toggleDocumentTags(root);
+
+    expect(scrollHost.scrollTop).toBe(scrollTop);
+    expect(panel.visibleIds()).toEqual(visibleIds);
+    expect(root.doc.activeElement).toBe(card);
+    expect(footer.querySelector('[data-annotation-tag-scroll-host]')).not.toBeNull();
+    expect(scrollHost.contains(footer)).toBe(false);
+    root.remove();
+  });
+
+  it('keeps the focused virtual anchor at the same visual position when the footer grows upward', () => {
+    let expanded = false;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList.contains('abyss-annotation-card'))
+        return DOMRect.fromRect({ height: 40, y: expanded ? 136 : 100 });
+      return DOMRect.fromRect();
+    });
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
+    const scrollHost = annotationScrollHost(root);
+    scrollHost.scrollTop = 100;
+    const card = root.querySelector<HTMLElement>('.abyss-annotation-card');
+    card?.focus();
+    documentTagsFooter(root);
+
+    expanded = true;
+    toggleDocumentTags(root);
+
+    expect(scrollHost.scrollTop).toBe(136);
+    expect(root.doc.activeElement).toBe(card);
+    root.remove();
   });
 
   it('keeps stale data after extraction failure', () => {
@@ -387,19 +519,21 @@ describe('AnnotationsPanel', () => {
     if (color === undefined) throw new Error('Expected Important color filter.');
     color.click();
     expect(panel.visibleIds()).toEqual(['annotation-0']);
-    const tagSection = root.querySelector<HTMLDetailsElement>('[data-section="tags"]');
-    expect(tagSection?.open).toBe(false);
+    const tagSection = documentTagsFooter(root);
+    expect(
+      tagSection
+        .querySelector('[data-action="toggle-document-tags"]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
     expect(root.querySelector('[data-annotation-tag-row]')).toBeNull();
-    if (tagSection === null) throw new Error('Expected Tags section.');
-    tagSection.open = true;
-    tagSection.dispatchEvent(new Event('toggle'));
-    const tag = root.querySelector<HTMLInputElement>('[data-annotation-tag="theory"]');
+    toggleDocumentTags(root);
+    const tag = root.querySelector<HTMLButtonElement>('[data-annotation-tag="theory"]');
     if (tag === null) throw new Error('Expected Theory tag filter.');
-    tag.checked = true;
-    tag.dispatchEvent(new Event('change', { bubbles: true }));
+    tag.click();
+    expect(tag.getAttribute('aria-pressed')).toBe('true');
     expect(panel.visibleIds()).toEqual(['annotation-0']);
-    tag.checked = false;
-    tag.dispatchEvent(new Event('change', { bubbles: true }));
+    tag.click();
+    expect(tag.getAttribute('aria-pressed')).toBe('false');
     expect(panel.visibleIds()).toEqual(['annotation-0']);
   });
 
@@ -796,21 +930,18 @@ describe('AnnotationsPanel', () => {
         annotation(index, { tags: [`Unique-${String(index).padStart(5, '0')}`] }),
       ),
     );
-    const tagSection = root.querySelector<HTMLDetailsElement>('[data-section="tags"]');
-    if (tagSection === null) throw new Error('Expected Tags section.');
+    documentTagsFooter(root);
     expect(root.querySelectorAll('[data-annotation-tag-row]')).toHaveLength(0);
 
-    tagSection.open = true;
-    tagSection.dispatchEvent(new Event('toggle'));
+    toggleDocumentTags(root);
     expect(root.querySelectorAll('[data-annotation-tag-row]').length).toBeLessThanOrEqual(48);
     const search = root.querySelector<HTMLInputElement>('[data-annotation-tag-search]');
     if (search === null) throw new Error('Expected tag search for a high-cardinality facet.');
     search.value = 'unique-09999';
     search.dispatchEvent(new Event('input', { bubbles: true }));
-    const lateTag = root.querySelector<HTMLInputElement>('[data-annotation-tag="unique-09999"]');
+    const lateTag = root.querySelector<HTMLButtonElement>('[data-annotation-tag="unique-09999"]');
     if (lateTag === null) throw new Error('Expected the searched late tag.');
-    lateTag.checked = true;
-    lateTag.dispatchEvent(new Event('change', { bubbles: true }));
+    lateTag.click();
 
     expect(panel.visibleIds()).toEqual(['annotation-9999']);
     expect(root.querySelectorAll('[data-annotation-tag-row]').length).toBeLessThanOrEqual(48);
@@ -850,8 +981,10 @@ describe('AnnotationsPanel', () => {
       onNavigate,
     });
     panel.setAnnotations([annotation(0), annotation(1)]);
-    const tags = root.querySelector<HTMLDetailsElement>('[data-section="tags"]');
-    expect(tags?.open).toBe(false);
+    const tags = documentTagsFooter(root);
+    expect(
+      tags.querySelector('[data-action="toggle-document-tags"]')?.getAttribute('aria-expanded'),
+    ).toBe('false');
     expect(root.textContent).toContain('Important');
     panel.setCurrentPage(1);
     const current = root.querySelector<HTMLElement>('[aria-current="location"]');
