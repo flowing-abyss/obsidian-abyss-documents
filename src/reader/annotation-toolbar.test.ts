@@ -7,6 +7,25 @@ const palette = [
   { color: '#ff6666', meaning: '', name: 'Red' },
 ] as const;
 
+function captureMenuHide(): { hide: () => void } {
+  const onHide = vi.spyOn(Menu.prototype, 'onHide');
+  return {
+    hide: () => {
+      const callback = onHide.mock.lastCall?.[0];
+      if (callback === undefined) throw new Error('Expected an open menu.');
+      callback();
+    },
+  };
+}
+
+async function nextAnimationFrame(owner: Window): Promise<void> {
+  await new Promise<void>((resolve) => {
+    owner.requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+}
+
 describe('AnnotationToolbar', () => {
   it('shows semantic Quick Highlight color and pressed state', () => {
     const host = document.body.createDiv();
@@ -124,6 +143,45 @@ describe('AnnotationToolbar', () => {
       host.querySelector('[data-region="annotation-toolbar"]')?.getAttribute('aria-description'),
     ).toContain('Signed PDF');
     expect(host.querySelector('[data-region="annotation-read-only-reason"]')).toBeNull();
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('restores Quick menu focus conditionally and ignores a disconnected trigger', async () => {
+    const menu = captureMenuHide();
+    const host = document.body.createDiv();
+    const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
+    const trigger = host.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]');
+    if (trigger === null) throw new Error('Expected Quick Highlight menu.');
+    const outside = document.body.createEl('button', { text: 'Outside control', type: 'button' });
+
+    trigger.click();
+    outside.focus();
+    menu.hide();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).toBe(outside);
+
+    trigger.click();
+    outside.focus();
+    trigger.click();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).toBe(outside);
+    menu.hide();
+    await nextAnimationFrame(host.win);
+
+    trigger.click();
+    outside.remove();
+    trigger.blur();
+    menu.hide();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).toBe(trigger);
+
+    trigger.click();
+    trigger.remove();
+    menu.hide();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).not.toBe(trigger);
+
     toolbar.destroy();
     host.remove();
   });

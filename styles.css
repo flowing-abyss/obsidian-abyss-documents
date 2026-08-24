@@ -6955,7 +6955,7 @@
   }
 
   .abyss-documents .abyss-reader-fit-control,
-  .abyss-documents .abyss-reader-toolbar-zoom-level {
+  .abyss-documents .abyss-reader-toolbar-zoom {
     display: none;
   }
 }
@@ -6965,7 +6965,6 @@
     padding-inline: var(--size-4-1);
   }
 
-  .abyss-documents .abyss-reader-toolbar-zoom,
   .abyss-documents [data-control='previous-page'],
   .abyss-documents [data-control='next-page'] {
     display: none;

@@ -2,6 +2,7 @@ import { Menu, type IconName } from 'obsidian';
 import type { PdfAnnotationTool } from '../adapters/pdf/pdf-annotation-editor.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { createIconButton, updateIconButtonLabel } from './icon-button.js';
+import { shouldRestoreMenuTriggerFocus } from './menu-focus.js';
 import { ownerWindow } from './owner-dom.js';
 
 export type AnnotationToolbarIntent =
@@ -181,7 +182,14 @@ export class AnnotationToolbar {
   private restoreMenuTriggerFocus(trigger: HTMLButtonElement): void {
     const frame = this.root.win.requestAnimationFrame(() => {
       this.focusFrames.delete(frame);
-      if (!this.destroyed && this.menus.size === 0 && trigger.isConnected) trigger.focus();
+      if (
+        !this.destroyed &&
+        this.menus.size === 0 &&
+        trigger.isConnected &&
+        shouldRestoreMenuTriggerFocus(trigger)
+      ) {
+        trigger.focus();
+      }
     });
     this.focusFrames.add(frame);
   }

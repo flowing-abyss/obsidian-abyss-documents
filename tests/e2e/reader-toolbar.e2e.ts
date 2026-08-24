@@ -40,6 +40,44 @@ describe('reader compact toolbar', () => {
 
     const sidebar = $('[data-control="sidebar"]');
     await expect(sidebar).toHaveAttribute('aria-label', 'Toggle sidebar');
+    await $('[data-control="page-field"]').click();
+    await sidebar.moveTo();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await browser.execute(() => {
+        window.focus();
+        const button = document.querySelector<HTMLElement>('[data-control="sidebar"]');
+        const bounds = button?.getBoundingClientRect();
+        button?.dispatchEvent(
+          new PointerEvent('pointerover', {
+            bubbles: true,
+            clientX: bounds?.left ?? 0,
+            clientY: bounds?.top ?? 0,
+            isPrimary: true,
+            pointerType: 'mouse',
+          }),
+        );
+      });
+      await browser.pause(350);
+    }
+    const tooltipState = await browser.execute(() => {
+      const button = document.querySelector<HTMLElement>('[data-control="sidebar"]');
+      const bounds = button?.getBoundingClientRect();
+      return {
+        active: (document.activeElement as HTMLElement | null)?.outerHTML.slice(0, 200),
+        attributes: Array.from(button?.attributes ?? []).map(({ name, value }) => [name, value]),
+        elementAtButton:
+          bounds === undefined
+            ? null
+            : document
+                .elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)
+                ?.outerHTML.slice(0, 200),
+        hasFocus: document.hasFocus(),
+        tooltips: Array.from(document.querySelectorAll<HTMLElement>('.tooltip')).map(
+          ({ outerHTML }) => outerHTML.slice(0, 300),
+        ),
+      };
+    });
+    expect(tooltipState.tooltips.join('\n')).toContain('Toggle sidebar');
 
     const geometry = await browser.execute(() => {
       const toolbar = document.querySelector<HTMLElement>('.abyss-reader-toolbar');
@@ -79,14 +117,14 @@ describe('reader compact toolbar', () => {
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await expect($('.menu')).toHaveText(expect.stringContaining('Fit height'));
     await expect(fitMenu).toHaveAttribute('aria-expanded', 'true');
-    await $('.pdfViewerContainer').click({ x: 2, y: 2 });
+    await $('[data-control="page-field"]').click();
     await expect($('.menu')).not.toBeDisplayed();
     await expect(fitMenu).toHaveAttribute('aria-expanded', 'false');
     expect(
       await browser.execute(
         () => (document.activeElement as HTMLElement | null)?.dataset['control'] ?? '',
       ),
-    ).toBe('fit-menu');
+    ).toBe('page-field');
 
     const fit = $('[data-control="fit"]');
     await fit.click({ button: 'right' });
@@ -111,7 +149,18 @@ describe('reader compact toolbar', () => {
     await quickMenu.click();
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await expect($('.menu')).toHaveText(expect.stringContaining('Yellow'));
-    await $('.pdfViewerContainer').click({ x: 2, y: 2 });
+    await $('[data-control="page-field"]').click();
+    await expect($('.menu')).not.toBeDisplayed();
+    await expect(quickMenu).toHaveAttribute('aria-expanded', 'false');
+    expect(
+      await browser.execute(
+        () => (document.activeElement as HTMLElement | null)?.dataset['control'] ?? '',
+      ),
+    ).toBe('page-field');
+
+    await quickMenu.click();
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+    await browser.keys(['Escape']);
     await expect($('.menu')).not.toBeDisplayed();
     await expect(quickMenu).toHaveAttribute('aria-expanded', 'false');
     expect(
@@ -148,24 +197,24 @@ describe('reader compact toolbar', () => {
 
     await more.click();
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
-    await $('.pdfViewerContainer').click({ x: 2, y: 2 });
+    await $('[data-control="page-field"]').click();
     await expect($('.menu')).not.toBeDisplayed();
     await expect(more).toHaveAttribute('aria-expanded', 'false');
     expect(
       await browser.execute(
         () => (document.activeElement as HTMLElement | null)?.dataset['control'] ?? '',
       ),
-    ).toBe('overflow');
+    ).toBe('page-field');
   });
 
-  it('adapts a narrow reader leaf inside a wide viewport without losing Fit or zoom', async () => {
+  it('adapts a 680px reader leaf inside a wide viewport without losing Fit or zoom', async () => {
     const responsive = await browser.execute(() => {
       const reader = document.querySelector<HTMLElement>('.abyss-documents');
       if (reader === null) throw new Error('Reader root is missing.');
       // Emulate a narrow split leaf without changing the wide app viewport.
       Reflect.set(reader.style, 'alignSelf', 'flex-start');
-      Reflect.set(reader.style, 'width', '390px');
-      Reflect.set(reader.style, 'maxWidth', '390px');
+      Reflect.set(reader.style, 'width', '680px');
+      Reflect.set(reader.style, 'maxWidth', '680px');
       return { viewport: window.innerWidth };
     });
     expect(responsive.viewport).toBeGreaterThan(760);
@@ -177,7 +226,7 @@ describe('reader compact toolbar', () => {
           const zoom = document.querySelector<HTMLElement>('.abyss-reader-toolbar-zoom');
           return (
             toolbar !== null &&
-            toolbar.getBoundingClientRect().width <= 390 &&
+            toolbar.getBoundingClientRect().width <= 680 &&
             getComputedStyle(fit as HTMLElement).display === 'none' &&
             getComputedStyle(zoom as HTMLElement).display === 'none'
           );
@@ -207,8 +256,8 @@ describe('reader compact toolbar', () => {
     await $('[data-control="overflow"]').click();
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     const menuText = await $('.menu').getText();
-    expect(menuText).toContain('Zoom & fit');
-    expect(menuText).toContain('Current zoom: Fit width');
+    expect(menuText).toContain('Zoom · Fit width');
+    expect(menuText).toContain('Fit');
     expect(menuText).toContain('Zoom out');
     expect(menuText).toContain('Reset zoom');
     expect(menuText).toContain('Zoom in');

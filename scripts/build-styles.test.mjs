@@ -222,13 +222,8 @@ describe('PDF.js style build', () => {
       mobileDeclarations(priority, '.abyss-documents .abyss-reader-fit-control'),
     ).toMatchObject({ display: 'none' });
     expect(
-      mobileDeclarations(priority, '.abyss-documents .abyss-reader-toolbar-zoom-level'),
-    ).toMatchObject({
-      display: 'none',
-    });
-    expect(mobileDeclarations(narrow, '.abyss-documents .abyss-reader-toolbar-zoom')).toMatchObject(
-      { display: 'none' },
-    );
+      mobileDeclarations(priority, '.abyss-documents .abyss-reader-toolbar-zoom'),
+    ).toMatchObject({ display: 'none' });
     expect(
       mobileDeclarations(narrow, ".abyss-documents [data-control='previous-page']"),
     ).toMatchObject({ display: 'none' });

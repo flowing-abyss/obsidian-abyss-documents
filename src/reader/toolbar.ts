@@ -6,6 +6,7 @@ import {
   type ReadingProfileId,
 } from '../document-core/reading.js';
 import { createIconButton } from './icon-button.js';
+import { shouldRestoreMenuTriggerFocus } from './menu-focus.js';
 
 export type ReaderToolbarIntent =
   | { readonly type: 'toggle-sidebar' }
@@ -324,9 +325,8 @@ export class ReaderToolbar {
 
   private addOverflowChoices(menu: Menu): void {
     if (this.isCompact()) {
-      menu.addItem((item) => item.setTitle('Zoom & fit').setIsLabel(true));
       menu.addItem((item) =>
-        item.setTitle(`Current zoom: ${scaleLabel(this.currentScale).long}`).setIsLabel(true),
+        item.setTitle(`Zoom · ${scaleLabel(this.currentScale).long}`).setIsLabel(true),
       );
       menu.addItem((item) => {
         item
@@ -353,6 +353,7 @@ export class ReaderToolbar {
             this.onIntent({ type: 'zoom-step', direction: 1 });
           });
       });
+      menu.addItem((item) => item.setTitle('Fit').setIsLabel(true));
       this.addFitChoices(menu);
       menu.addSeparator();
     }
@@ -425,7 +426,14 @@ export class ReaderToolbar {
   private restoreMenuTriggerFocus(trigger: HTMLButtonElement): void {
     const frame = this.root.win.requestAnimationFrame(() => {
       this.focusFrames.delete(frame);
-      if (!this.destroyed && this.menus.size === 0 && trigger.isConnected) trigger.focus();
+      if (
+        !this.destroyed &&
+        this.menus.size === 0 &&
+        trigger.isConnected &&
+        shouldRestoreMenuTriggerFocus(trigger)
+      ) {
+        trigger.focus();
+      }
     });
     this.focusFrames.add(frame);
   }

@@ -81,6 +81,25 @@ function setToolbarWidth(host: HTMLElement, width: number): void {
   });
 }
 
+function captureMenuHide(): { hide: () => void } {
+  const onHide = vi.spyOn(Menu.prototype, 'onHide');
+  return {
+    hide: () => {
+      const callback = onHide.mock.lastCall?.[0];
+      if (callback === undefined) throw new Error('Expected an open menu.');
+      callback();
+    },
+  };
+}
+
+async function nextAnimationFrame(owner: Window): Promise<void> {
+  await new Promise<void>((resolve) => {
+    owner.requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+}
+
 describe('ReaderToolbar', () => {
   it('clamps an entered page and navigates on Enter', () => {
     const { host, onIntent, toolbar } = fixture();
@@ -309,8 +328,8 @@ describe('ReaderToolbar', () => {
 
     expect(entries.map(({ title }) => title)).toEqual(
       expect.arrayContaining([
-        'Zoom & fit',
-        'Current zoom: 125%',
+        'Zoom · 125%',
+        'Fit',
         'Zoom out',
         'Reset zoom',
         'Zoom in',
@@ -340,6 +359,22 @@ describe('ReaderToolbar', () => {
 
     expect(entries.map(({ title }) => title)).not.toContain('Zoom & fit');
     expect(entries.map(({ title }) => title)).not.toContain('Fit height');
+  });
+
+  it.each([
+    [600, true],
+    [601, true],
+    [760, true],
+    [761, false],
+  ] as const)('uses the same compact boundary at %ipx for More', (width, isCompact) => {
+    const entries = captureMenuItems();
+    const { host } = fixture();
+    setToolbarWidth(host, width);
+
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+
+    expect(entries.some(({ title }) => title === 'Zoom · Fit width')).toBe(isCompact);
+    expect(entries.some(({ title }) => title === 'Fit height')).toBe(isCompact);
   });
 
   it('opens More from touch pointer and ArrowDown without duplicate menus', () => {
@@ -375,6 +410,45 @@ describe('ReaderToolbar', () => {
     expect(entries.map(({ title }) => title)).not.toContain('Recognize document');
     entries.find(({ title }) => title === 'Export annotations…')?.click();
     expect(intents).toContainEqual({ type: 'export-annotations' });
+  });
+
+  it('restores focus after nonfocusable dismissal but preserves a newly focused control', async () => {
+    const menu = captureMenuHide();
+    const { host, toolbar } = fixture();
+    document.body.append(host);
+    const trigger = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
+    if (trigger === null) throw new Error('Expected More options.');
+    const outside = document.body.createEl('button', { text: 'Outside control', type: 'button' });
+
+    trigger.click();
+    outside.focus();
+    menu.hide();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).toBe(outside);
+
+    trigger.click();
+    outside.focus();
+    host.querySelector<HTMLButtonElement>('[data-control="fit-menu"]')?.click();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).toBe(outside);
+    menu.hide();
+    await nextAnimationFrame(host.win);
+
+    trigger.click();
+    outside.remove();
+    trigger.blur();
+    menu.hide();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).toBe(trigger);
+
+    trigger.click();
+    trigger.remove();
+    menu.hide();
+    await nextAnimationFrame(host.win);
+    expect(document.activeElement).not.toBe(trigger);
+
+    toolbar.destroy();
+    host.remove();
   });
 
   it('removes owned listeners when destroyed', () => {
