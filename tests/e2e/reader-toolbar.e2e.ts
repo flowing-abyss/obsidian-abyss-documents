@@ -24,6 +24,14 @@ async function closeReaders(): Promise<void> {
   });
 }
 
+async function countDisplayedExactTooltips(expected: string): Promise<number> {
+  let count = 0;
+  for (const tooltip of await Promise.resolve(browser.$$('.tooltip'))) {
+    if ((await tooltip.isDisplayed()) && (await tooltip.getText()).trim() === expected) count += 1;
+  }
+  return count;
+}
+
 describe('reader compact toolbar', () => {
   beforeEach(async () => {
     await closeReaders();
@@ -40,8 +48,26 @@ describe('reader compact toolbar', () => {
 
     const sidebar = $('[data-control="sidebar"]');
     await expect(sidebar).toHaveAttribute('aria-label', 'Toggle sidebar');
+    await browser.execute(() => {
+      const hidden = document.body.createDiv({ cls: 'tooltip', text: 'Toggle sidebar' });
+      hidden.dataset['e2eHiddenTooltip'] = '';
+      hidden.hidden = true;
+    });
+    expect(
+      await browser.execute(
+        () =>
+          document.querySelector<HTMLElement>('[data-e2e-hidden-tooltip]')?.textContent ===
+          'Toggle sidebar',
+      ),
+    ).toBe(true);
+    expect(await countDisplayedExactTooltips('Toggle sidebar')).toBe(0);
+    await browser.execute(() => {
+      document.querySelector('[data-e2e-hidden-tooltip]')?.remove();
+    });
+
     await $('[data-control="page-field"]').click();
     await sidebar.moveTo();
+    let displayedTooltipFound = false;
     for (let attempt = 0; attempt < 8; attempt += 1) {
       await browser.execute(() => {
         window.focus();
@@ -58,26 +84,61 @@ describe('reader compact toolbar', () => {
         );
       });
       await browser.pause(350);
+      if ((await countDisplayedExactTooltips('Toggle sidebar')) > 0) {
+        displayedTooltipFound = true;
+        break;
+      }
     }
-    const tooltipState = await browser.execute(() => {
+    expect(displayedTooltipFound).toBe(true);
+    const tooltipState = await browser.execute((expected) => {
       const button = document.querySelector<HTMLElement>('[data-control="sidebar"]');
       const bounds = button?.getBoundingClientRect();
+      const matches = Array.from(document.querySelectorAll<HTMLElement>('.tooltip'))
+        .filter(({ textContent }) => textContent.trim() === expected)
+        .map((tooltip) => {
+          const style = getComputedStyle(tooltip);
+          const rect = tooltip.getBoundingClientRect();
+          return {
+            display: style.display,
+            hidden: tooltip.hidden,
+            intersectsViewport:
+              rect.bottom > 0 &&
+              rect.right > 0 &&
+              rect.top < window.innerHeight &&
+              rect.left < window.innerWidth,
+            opacity: Number(style.opacity),
+            pointerEvents: style.pointerEvents,
+            rect: { height: rect.height, width: rect.width },
+            visibility: style.visibility,
+          };
+        });
       return {
-        active: (document.activeElement as HTMLElement | null)?.outerHTML.slice(0, 200),
-        attributes: Array.from(button?.attributes ?? []).map(({ name, value }) => [name, value]),
-        elementAtButton:
+        elementAtButtonControl:
           bounds === undefined
             ? null
             : document
                 .elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)
-                ?.outerHTML.slice(0, 200),
+                ?.closest<HTMLElement>('[data-control]')?.dataset['control'],
         hasFocus: document.hasFocus(),
-        tooltips: Array.from(document.querySelectorAll<HTMLElement>('.tooltip')).map(
-          ({ outerHTML }) => outerHTML.slice(0, 300),
-        ),
+        matches,
       };
+    }, 'Toggle sidebar');
+    const validVisibleMatch = tooltipState.matches.some(
+      ({ display, hidden, intersectsViewport, opacity, pointerEvents, rect, visibility }) =>
+        display !== 'none' &&
+        !hidden &&
+        intersectsViewport &&
+        opacity > 0 &&
+        pointerEvents === 'none' &&
+        rect.height > 0 &&
+        rect.width > 0 &&
+        visibility === 'visible',
+    );
+    expect({ ...tooltipState, validVisibleMatch }).toMatchObject({
+      elementAtButtonControl: 'sidebar',
+      hasFocus: true,
+      validVisibleMatch: true,
     });
-    expect(tooltipState.tooltips.join('\n')).toContain('Toggle sidebar');
 
     const geometry = await browser.execute(() => {
       const toolbar = document.querySelector<HTMLElement>('.abyss-reader-toolbar');
@@ -160,6 +221,9 @@ describe('reader compact toolbar', () => {
 
     await quickMenu.click();
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
+    await browser.execute(() => {
+      document.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]')?.focus();
+    });
     await browser.keys(['Escape']);
     await expect($('.menu')).not.toBeDisplayed();
     await expect(quickMenu).toHaveAttribute('aria-expanded', 'false');
