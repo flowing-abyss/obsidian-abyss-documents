@@ -38,16 +38,45 @@ describe('PDF reader sidebar', () => {
     await expect($('[data-outline-id="outline-1-1"] [data-outline-label]')).toHaveText(
       expect.stringContaining('Section 2'),
     );
+    await expect($$('[data-outline-match]')).toBeElementsArrayOfSize(4);
+    expect(await $$('[data-outline-match]').map(async (match) => match.getText())).toEqual([
+      'Section 2',
+      'Section 2',
+      'Section 2',
+      'Section 2',
+    ]);
+    await expect($('[data-outline-id="outline-1-1"]')).toHaveAttribute(
+      'aria-label',
+      'Chapter 2 · Section 2',
+    );
     await expect($('[data-outline-item="outline-1"]')).toHaveAttribute('aria-expanded', 'true');
 
     await search.setValue('missing heading');
-    await expect($('[data-outline-empty="filtered"]')).toHaveText('No matching headings');
+    const status = $('[data-outline-status]');
+    await expect(status).toHaveAttribute('role', 'status');
+    await expect(status).toHaveText('No matching headings');
+    await expect(status).toBeDisplayed();
+    await expect($('[role="tree"]')).not.toBeDisplayed();
+    expect(
+      await browser.execute(() => {
+        const panel = document.querySelector('[data-sidebar-panel="outline"]');
+        const tree = panel?.querySelector('[role="tree"]');
+        const outlineStatus = panel?.querySelector('[data-outline-status]');
+        return {
+          statusInsidePanel: panel?.contains(outlineStatus ?? null) === true,
+          statusInsideTree: tree?.contains(outlineStatus ?? null) === true,
+          treeChildren: tree?.children.length ?? -1,
+        };
+      }),
+    ).toEqual({ statusInsidePanel: true, statusInsideTree: false, treeChildren: 0 });
     await search.clearValue();
     await browser.execute(() => {
       const input = document.querySelector<HTMLInputElement>('[data-outline-search]');
       input?.dispatchEvent(new InputEvent('input', { bubbles: true }));
     });
     await expect($$('[data-outline-row]')).toBeElementsArrayOfSize(12);
+    await expect($('[role="tree"]')).toBeDisplayed();
+    await expect(status).not.toBeDisplayed();
   });
 
   it('keeps the outline left aligned contained and keyboard navigable at narrow widths', async () => {

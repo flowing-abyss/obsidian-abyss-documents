@@ -474,6 +474,12 @@
   white-space: nowrap;
 }
 
+.abyss-documents .abyss-reader-outline-match {
+  border-radius: 2px;
+  background: var(--text-highlight-bg, var(--background-modifier-hover));
+  color: inherit;
+}
+
 .abyss-documents .abyss-reader-outline-treeitem:hover > .abyss-reader-outline-row-shell,
 .abyss-documents .abyss-reader-outline-treeitem:focus-visible > .abyss-reader-outline-row-shell {
   background: var(--background-modifier-hover);
@@ -781,13 +787,15 @@
 }
 
 @media (pointer: coarse) {
-  .abyss-documents .abyss-reader-outline-row-shell,
-  .abyss-documents .abyss-reader-outline-chevron {
-    min-height: 44px;
+  .abyss-documents .abyss-reader-outline-row-shell {
+    min-height: 2.75rem;
   }
 
   .abyss-documents .abyss-reader-outline-chevron {
-    height: 44px;
+    width: 2.75rem;
+    min-width: 2.75rem;
+    height: 2.75rem;
+    min-height: 2.75rem;
   }
 
   .abyss-documents .abyss-reader-toolbar-button,
@@ -811,6 +819,7 @@
 
   .abyss-documents .abyss-reader-toolbar-page-field,
   .abyss-documents .abyss-reader-sidebar-tab,
+  .abyss-documents .abyss-reader-outline-search,
   .abyss-documents .abyss-reader-search-input,
   .abyss-documents [data-action='retry'] {
     min-height: 2.75rem;

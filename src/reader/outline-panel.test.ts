@@ -104,6 +104,31 @@ describe('OutlinePanel', () => {
     expect(panel.root.querySelectorAll('[data-outline-row]')).toHaveLength(0);
   });
 
+  it('highlights every safe matching label fragment', () => {
+    const panel = new OutlinePanel(createDiv(), vi.fn());
+    const label = 'Ссылка [Link] и [link] <script>alert(1)</script>';
+    panel.render([{ id: 'special', label, target: { pageIndex: 0 }, children: [] }]);
+
+    search(panel, '[LINK]');
+
+    const row = panel.root.querySelector<HTMLElement>('[data-outline-id="special"]');
+    const renderedLabel = row?.querySelector<HTMLElement>('[data-outline-label]');
+    expect(
+      Array.from(renderedLabel?.querySelectorAll('[data-outline-match]') ?? []).map(
+        (match) => match.textContent,
+      ),
+    ).toEqual(['[Link]', '[link]']);
+    expect(renderedLabel?.textContent).toBe(label);
+    expect(row?.getAttribute('aria-label')).toBe(label);
+    expect(renderedLabel?.querySelector('script')).toBeNull();
+
+    panel.render(searchableOutline);
+    search(panel, 'инструмент');
+    expect(
+      panel.root.querySelector('[data-outline-id="tools"] [data-outline-match]')?.textContent,
+    ).toBe('Инструмент');
+  });
+
   it('restores expansion after clearing search', () => {
     const panel = new OutlinePanel(createDiv(), vi.fn());
     panel.render(searchableOutline);
@@ -267,6 +292,37 @@ describe('OutlinePanel', () => {
     panel.render([]);
     expect(panel.root.textContent).toContain('No outline available.');
     expect(panel.root.querySelectorAll('[data-outline-row]')).toHaveLength(0);
+  });
+
+  it('keeps empty and filtered status outside the semantic tree and recovers content', () => {
+    const panel = new OutlinePanel(createDiv(), vi.fn());
+    panel.render([]);
+    const tree = panel.root.querySelector<HTMLElement>('[role="tree"]');
+    const status = panel.root.querySelector<HTMLElement>('[data-outline-status]');
+
+    expect(tree?.children).toHaveLength(0);
+    expect(tree?.hidden).toBe(true);
+    expect(status?.parentElement).toBe(panel.root);
+    expect(status?.getAttribute('role')).toBe('status');
+    expect(status?.textContent).toBe('No outline available.');
+
+    panel.render(searchableOutline);
+    expect(tree?.hidden).toBe(false);
+    expect(status?.hidden).toBe(true);
+    expect(
+      Array.from(tree?.children ?? []).every((child) => child.getAttribute('role') === 'treeitem'),
+    ).toBe(true);
+
+    search(panel, 'missing heading');
+    expect(tree?.children).toHaveLength(0);
+    expect(tree?.hidden).toBe(true);
+    expect(status?.hidden).toBe(false);
+    expect(status?.textContent).toBe('No matching headings');
+
+    search(panel, 'appendix');
+    expect(tree?.hidden).toBe(false);
+    expect(status?.hidden).toBe(true);
+    expect(panel.root.querySelector('[data-outline-id="appendix"]')).not.toBeNull();
   });
 
   it('navigates resolved rows on Enter and marks the current location', () => {

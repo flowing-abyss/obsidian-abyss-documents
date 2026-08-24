@@ -186,6 +186,17 @@ describe('PDF.js style build', () => {
     expect(mobileDeclarations(touch, '.abyss-documents .abyss-reader-search-input')).toMatchObject({
       'min-height': '2.75rem',
     });
+    expect(
+      mobileDeclarations(touch, '.abyss-documents .abyss-reader-outline-chevron'),
+    ).toMatchObject({
+      width: '2.75rem',
+      'min-width': '2.75rem',
+      height: '2.75rem',
+      'min-height': '2.75rem',
+    });
+    expect(
+      mobileDeclarations(touch, '.abyss-documents .abyss-reader-outline-search'),
+    ).toMatchObject({ 'min-height': '2.75rem' });
     expect(mobileDeclarations(touch, ".abyss-documents [data-action='retry']")).toMatchObject({
       'min-height': '2.75rem',
     });

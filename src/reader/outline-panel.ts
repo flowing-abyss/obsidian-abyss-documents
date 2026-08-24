@@ -14,6 +14,7 @@ export class OutlinePanel {
   readonly root: HTMLElement;
 
   private readonly searchInput: HTMLInputElement;
+  private readonly status: HTMLElement;
   private readonly tree: HTMLUListElement;
   private readonly rows: OutlineRow[] = [];
   private readonly expanded = new Map<string, boolean>();
@@ -49,7 +50,12 @@ export class OutlinePanel {
     this.tree.className = 'abyss-reader-outline-tree';
     this.tree.setAttribute('role', 'tree');
     this.tree.setAttribute('aria-label', 'Document outline');
-    this.root.append(controls, this.tree);
+    this.status = owner.createEl('p');
+    this.status.className = 'abyss-reader-sidebar-empty abyss-reader-outline-empty';
+    this.status.dataset['outlineStatus'] = '';
+    this.status.setAttribute('role', 'status');
+    this.status.hidden = true;
+    this.root.append(controls, this.tree, this.status);
     host.append(this.root);
   }
 
@@ -82,13 +88,17 @@ export class OutlinePanel {
     for (const item of visibleItems) this.appendItem(this.tree, item, 1, null);
     this.restoreRovingRow(focusedId);
     this.updateCurrentPage();
-    if (visibleItems.length > 0) return;
+    this.updateStatus(visibleItems.length > 0);
+  }
 
-    const empty = ownerWindow(this.root).createEl('p');
-    empty.className = 'abyss-reader-sidebar-empty abyss-reader-outline-empty';
-    empty.dataset['outlineEmpty'] = this.query === '' ? 'document' : 'filtered';
-    empty.textContent = this.query === '' ? 'No outline available.' : 'No matching headings';
-    this.tree.append(empty);
+  private updateStatus(hasItems: boolean): void {
+    this.tree.hidden = !hasItems;
+    this.status.hidden = hasItems;
+    if (hasItems) {
+      this.status.textContent = '';
+      return;
+    }
+    this.status.textContent = this.query === '' ? 'No outline available.' : 'No matching headings';
   }
 
   private filteredItems(items: readonly OutlineItem[]): readonly OutlineItem[] {
@@ -110,10 +120,7 @@ export class OutlinePanel {
     const rowShell = this.createRowShell(listItem, level);
     const hasChildren = item.children.length > 0;
     const chevron = this.createChevron(item, hasChildren);
-    const label = ownerWindow(this.root).createSpan();
-    label.className = 'abyss-reader-outline-label';
-    label.dataset['outlineLabel'] = '';
-    label.textContent = item.label;
+    const label = this.createLabel(item.label);
     rowShell.append(chevron, label);
     const group = this.createGroup(listItem, hasChildren);
     const rowIndex = this.rows.length;
@@ -136,6 +143,7 @@ export class OutlinePanel {
     listItem.setAttribute('aria-level', String(level));
     listItem.dataset['outlineItem'] = item.id;
     listItem.dataset['outlineId'] = item.id;
+    listItem.setAttribute('aria-label', item.label);
     listItem.tabIndex = -1;
     listItem.title = item.label;
     if (item.target === null) listItem.setAttribute('aria-disabled', 'true');
@@ -150,6 +158,32 @@ export class OutlinePanel {
     rowShell.style.setProperty('--outline-depth', String(level - 1));
     listItem.append(rowShell);
     return rowShell;
+  }
+
+  private createLabel(text: string): HTMLElement {
+    const owner = ownerWindow(this.root);
+    const label = owner.createSpan();
+    label.className = 'abyss-reader-outline-label';
+    label.dataset['outlineLabel'] = '';
+    const normalized = text.toLocaleLowerCase();
+    if (this.query === '' || !normalized.includes(this.query)) {
+      label.textContent = text;
+      return label;
+    }
+
+    let cursor = 0;
+    for (let match = normalized.indexOf(this.query); match >= 0;) {
+      label.append(owner.document.createTextNode(text.slice(cursor, match)));
+      const highlighted = owner.createSpan();
+      highlighted.className = 'abyss-reader-outline-match';
+      highlighted.dataset['outlineMatch'] = '';
+      highlighted.textContent = text.slice(match, match + this.query.length);
+      label.append(highlighted);
+      cursor = match + this.query.length;
+      match = normalized.indexOf(this.query, cursor);
+    }
+    label.append(owner.document.createTextNode(text.slice(cursor)));
+    return label;
   }
 
   private createGroup(listItem: HTMLLIElement, hasChildren: boolean): HTMLUListElement | null {
