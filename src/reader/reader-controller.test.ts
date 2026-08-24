@@ -1,4 +1,4 @@
-import type { TFile } from 'obsidian';
+import { Menu, type TFile } from 'obsidian';
 import { App, TFile as MockTFile, Notice } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import type {
@@ -86,6 +86,39 @@ function resolved(colors: (typeof BUILTIN_PROFILES)[keyof typeof BUILTIN_PROFILE
     contrast: colors.contrast,
     imageDim: colors.imageDim,
   };
+}
+
+function captureMenuChoices() {
+  const choices: Array<{ checked: boolean | null; title: string }> = [];
+  vi.spyOn(Menu.prototype, 'addItem').mockImplementation(function (
+    this: Menu,
+    callback: Parameters<Menu['addItem']>[0],
+  ) {
+    const choice = { checked: null as boolean | null, title: '' };
+    const item = {
+      onClick() {
+        return item;
+      },
+      setChecked(checked: boolean | null) {
+        choice.checked = checked;
+        return item;
+      },
+      setIcon() {
+        return item;
+      },
+      setIsLabel() {
+        return item;
+      },
+      setTitle(title: string) {
+        choice.title = title;
+        return item;
+      },
+    };
+    callback(item as never);
+    choices.push(choice);
+    return this;
+  });
+  return choices;
 }
 
 function viewport(pageCount = 3) {
@@ -376,10 +409,10 @@ describe('ReaderController', () => {
     ).toBe('true');
     createdViewport.emitMode('disabled');
     expect(
-      shell.created.annotationToolbar?.root
-        .querySelector('[data-annotation-tool="select"]')
-        ?.getAttribute('aria-pressed'),
-    ).toBe('true');
+      Array.from(
+        shell.created.annotationToolbar?.root.querySelectorAll('[data-annotation-tool]') ?? [],
+      ).every((button) => button.getAttribute('aria-pressed') === 'false'),
+    ).toBe(true);
     await controller.close();
   });
   it('exports lazily loaded canonical annotations only after explicit toolbar intent', async () => {
@@ -777,9 +810,12 @@ describe('ReaderController', () => {
     controller.refreshReadingSettings();
 
     const refreshed = shell.created.annotationToolbar;
-    expect(refreshed?.root.querySelector('[data-annotation-color="#ffd400"]')).toBeNull();
-    const ocean = refreshed?.root.querySelector<HTMLElement>('[data-annotation-color="#123456"]');
-    expect(ocean?.title).toBe('Ocean — Question to revisit');
+    expect(refreshed?.root.querySelector('[data-annotation-color]')).toBeNull();
+    expect(
+      refreshed?.root
+        .querySelector('[data-annotation-tool="highlight"]')
+        ?.getAttribute('aria-label'),
+    ).toContain('Ocean — Question to revisit');
     expect(refreshed?.color).toBe('#123456');
   });
 
@@ -903,9 +939,9 @@ describe('ReaderController', () => {
     shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
     expect(
       shell.created.annotationToolbar?.root
-        .querySelector('[data-annotation-tool="select"]')
+        .querySelector('[data-annotation-tool="highlight"]')
         ?.getAttribute('aria-pressed'),
-    ).toBe('true');
+    ).toBe('false');
     shell.send({ type: 'set-annotation-tool', tool: 'ink' });
     highlight.reject(new DOMException('Superseded', 'AbortError'));
     ink.resolve();
@@ -947,9 +983,9 @@ describe('ReaderController', () => {
     expect(notices).not.toHaveBeenCalled();
     expect(
       shell.created.annotationToolbar?.root
-        .querySelector('[data-annotation-tool="select"]')
+        .querySelector('[data-annotation-tool="highlight"]')
         ?.getAttribute('aria-pressed'),
-    ).toBe('true');
+    ).toBe('false');
 
     createdViewport.setTool.mockRejectedValueOnce(new Error('mode failed'));
     shell.send({ type: 'set-annotation-tool', tool: 'ink' });
@@ -958,9 +994,9 @@ describe('ReaderController', () => {
     });
     expect(
       shell.created.annotationToolbar?.root
-        .querySelector('[data-annotation-tool="select"]')
+        .querySelector('[data-annotation-tool="ink"]')
         ?.getAttribute('aria-pressed'),
-    ).toBe('true');
+    ).toBe('false');
   });
 
   it('rolls native mode back when applying the committed tool color fails', async () => {
@@ -995,9 +1031,9 @@ describe('ReaderController', () => {
     });
     expect(
       shell.created.annotationToolbar?.root
-        .querySelector('[data-annotation-tool="select"]')
+        .querySelector('[data-annotation-tool="highlight"]')
         ?.getAttribute('aria-pressed'),
-    ).toBe('true');
+    ).toBe('false');
   });
   it('does zero annotation work until Annotations is explicitly requested and cancels stale work', async () => {
     const [pdf] = files('Books/First.pdf');
@@ -1443,13 +1479,14 @@ describe('ReaderController', () => {
       shell.createShell,
     );
     const layout: ReaderLayout = { pages: 'facing', scrolling: 'page-by-page' };
+    const menuChoices = captureMenuChoices();
     await controller.open(pdf, createDiv());
 
     shell.send({ type: 'set-layout', layout });
 
     expect(createdSession.createViewport).toHaveBeenCalledOnce();
-    const layoutButton = shell.created.root.querySelector('[data-control="layout"]');
-    expect(layoutButton?.getAttribute('aria-label')).toBe('Layout: Facing, page by page');
+    shell.created.root.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+    expect(menuChoices.find((choice) => choice.title === 'Two pages · Paged')?.checked).toBe(true);
   });
 
   it('applies the global layout and remembers later choices by fingerprint when enabled', async () => {

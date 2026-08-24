@@ -99,7 +99,7 @@ export class ReaderShell implements AnnotationInteractionHost {
   ): AnnotationToolbar {
     this.annotationToolbarValue?.destroy();
     this.annotationToolbarValue = new AnnotationToolbar(
-      this.toolbar.root,
+      this.toolbar.annotationHost,
       palette,
       readOnlyReason,
       (intent) => {

@@ -138,6 +138,12 @@ function capturedMenuItems() {
       setChecked() {
         return item;
       },
+      setIcon() {
+        return item;
+      },
+      setIsLabel() {
+        return item;
+      },
       setTitle(title: string) {
         entry.title = title;
         return item;
@@ -1099,9 +1105,9 @@ describe('AbyssDocumentsPlugin', () => {
 
     expect(session.setReadingColors).toHaveBeenLastCalledWith(resolved(BUILTIN_PROFILES.dark));
     const profile = reader.view.contentEl.querySelector<HTMLButtonElement>(
-      '[data-control="profile"]',
+      '[data-control="overflow"]',
     );
-    if (profile === null) throw new Error('Expected the profile button.');
+    if (profile === null) throw new Error('Expected More options.');
     profile.click();
     entries.find((entry) => entry.title === 'Light')?.click();
     await vi.waitFor(() => {
@@ -1138,9 +1144,9 @@ describe('AbyssDocumentsPlugin', () => {
 
     expect(session.setReadingColors).toHaveBeenLastCalledWith(resolved(BUILTIN_PROFILES.sepia));
     const profile = reader.view.contentEl.querySelector<HTMLButtonElement>(
-      '[data-control="profile"]',
+      '[data-control="overflow"]',
     );
-    if (profile === null) throw new Error('Expected the profile button.');
+    if (profile === null) throw new Error('Expected More options.');
     profile.click();
     entries.find((entry) => entry.title === 'Light')?.click();
     await Promise.resolve();
@@ -1169,11 +1175,12 @@ describe('AbyssDocumentsPlugin', () => {
     const reader = await loadedReader(data, session);
 
     expect(session.setLayout).toHaveBeenCalledWith(remembered);
-    const layout =
-      reader.view.contentEl.querySelector<HTMLButtonElement>('[data-control="layout"]');
-    if (layout === null) throw new Error('Expected the layout button.');
+    const layout = reader.view.contentEl.querySelector<HTMLButtonElement>(
+      '[data-control="overflow"]',
+    );
+    if (layout === null) throw new Error('Expected More options.');
     layout.click();
-    entries.find((entry) => entry.title === 'Single')?.click();
+    entries.find((entry) => entry.title === 'Single page · Paged')?.click();
     await vi.waitFor(() => {
       expect(reader.saveData).toHaveBeenCalledOnce();
     });

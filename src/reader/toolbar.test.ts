@@ -7,6 +7,7 @@ interface CapturedMenuItem {
   checked: boolean | null;
   click: () => void;
   disabled: boolean;
+  icon: string | null;
   title: string;
 }
 
@@ -20,6 +21,7 @@ function captureMenuItems(): CapturedMenuItem[] {
       checked: null,
       click: () => undefined,
       disabled: false,
+      icon: null,
       title: '',
     };
     const item = {
@@ -35,7 +37,12 @@ function captureMenuItems(): CapturedMenuItem[] {
         entry.disabled = disabled;
         return item;
       },
-      setIcon() {
+      setIcon(icon: string | null) {
+        entry.icon = icon;
+        return item;
+      },
+      setIsLabel(isLabel: boolean) {
+        entry.disabled = isLabel;
         return item;
       },
       setTitle(title: string) {
@@ -123,7 +130,7 @@ describe('ReaderToolbar', () => {
     expect(host.querySelector('[data-control="page-total"]')?.textContent).toBe('/ 0');
   });
 
-  it('keeps calm icon controls accessible without visible word labels', () => {
+  it('shows only the priority toolbar actions', () => {
     const { host, toolbar } = fixture();
     toolbar.setPageCount(702);
 
@@ -136,15 +143,14 @@ describe('ReaderToolbar', () => {
         'Zoom out',
         'Fit width',
         'Zoom in',
-        'Layout: Single, continuous',
-        'Reading profile: Default',
+        'More options',
       ]),
-    );
-    expect(buttons.every((button) => button.title === button.getAttribute('aria-label'))).toBe(
-      true,
     );
     expect(buttons.every((button) => button.textContent.trim() === '')).toBe(true);
     expect(host.querySelector('[data-control="selection"]')).toBeNull();
+    expect(host.querySelector('[data-control="layout"]')).toBeNull();
+    expect(host.querySelector('[data-control="profile"]')).toBeNull();
+    expect(host.querySelector('[data-control="zoom-level"]')?.textContent).toBe('Width');
     expect(host.querySelector('[data-control="overflow"]')).not.toBeNull();
     expect(host.querySelector('[data-control="sidebar"]')?.getAttribute('aria-pressed')).toBe(
       'false',
@@ -152,7 +158,20 @@ describe('ReaderToolbar', () => {
     expect(host.querySelector('[data-control="page-total"]')?.textContent).toBe('/ 702');
   });
 
-  it('keeps direct minus, Fit width, and plus controls adjacent while exposing Fit choices to keyboards and touch', () => {
+  it('renders Fit as one accessible split control', () => {
+    const { host } = fixture();
+    const split = host.querySelector('[data-control-group="fit"]');
+    const main = split?.querySelector('[data-control="fit"]');
+    const menu = split?.querySelector('[data-control="fit-menu"]');
+
+    expect(split?.getAttribute('role')).toBe('group');
+    expect(split?.getAttribute('aria-label')).toBe('Fit document');
+    expect(main?.getAttribute('aria-label')).toBe('Fit width');
+    expect(menu?.getAttribute('aria-haspopup')).toBe('menu');
+    expect(menu?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('opens Fit by pointer keyboard touch and context routes', () => {
     const entries = captureMenuItems();
     const { host, intents } = fixture();
     const controls = Array.from(host.querySelectorAll<HTMLElement>('[data-control]'));
@@ -167,7 +186,7 @@ describe('ReaderToolbar', () => {
     const OwnerMouseEvent = (fit.win as Window & { MouseEvent: typeof MouseEvent }).MouseEvent;
 
     expect(controls.indexOf(minus)).toBeLessThan(controls.indexOf(fit));
-    expect(controls.indexOf(fit)).toBeLessThan(controls.indexOf(plus));
+    expect(controls.indexOf(plus)).toBeLessThan(controls.indexOf(fit));
     expect(fit.getAttribute('aria-haspopup')).toBeNull();
     expect(fitMenu.getAttribute('aria-haspopup')).toBe('menu');
     minus.click();
@@ -175,6 +194,7 @@ describe('ReaderToolbar', () => {
     plus.click();
     fit.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'F10', shiftKey: true }));
     fit.dispatchEvent(new OwnerMouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    fitMenu.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
     fitMenu.click();
 
     expect(intents.slice(0, 3)).toEqual([
@@ -192,40 +212,37 @@ describe('ReaderToolbar', () => {
       'Fit width',
       'Fit page',
       'Fit height',
+      'Fit width',
+      'Fit page',
+      'Fit height',
     ]);
     expect(entries.every((entry) => entry.checked !== null)).toBe(true);
   });
 
-  it('presents two compact layout groups with the current choice checked and no duplicated scale or profile menu', () => {
+  it('implements the Layout icon matrix keyboard model', () => {
     const entries = captureMenuItems();
     const { host, intents, toolbar } = fixture();
     const layout: ReaderLayout = { pages: 'facing', scrolling: 'page-by-page' };
     toolbar.setLayout(layout);
-    const button = host.querySelector<HTMLButtonElement>('[data-control="layout"]');
-    if (button === null) throw new Error('Expected the layout control.');
+    const button = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
+    if (button === null) throw new Error('Expected More options.');
 
-    expect(button.getAttribute('aria-label')).toBe('Layout: Facing, page by page');
-    expect(button.dataset['layoutIcon']).toBe('columns-2');
     button.click();
 
-    expect(entries.map((entry) => entry.title)).toEqual([
-      'Pages',
-      'Single',
-      'Facing',
-      'Scrolling',
-      'Continuous',
-      'Page by page',
+    const layouts = entries.filter((entry) => entry.title.includes('·'));
+    expect(layouts.map((entry) => entry.title)).toEqual([
+      'Single page · Continuous',
+      'Single page · Paged',
+      'Two pages · Continuous',
+      'Two pages · Paged',
     ]);
-    expect(entries.find((entry) => entry.title === 'Facing')?.checked).toBe(true);
-    expect(entries.find((entry) => entry.title === 'Page by page')?.checked).toBe(true);
-    expect(entries.find((entry) => entry.title === 'Pages')?.disabled).toBe(true);
-    expect(entries.find((entry) => entry.title === 'Scrolling')?.disabled).toBe(true);
-    entries.find((entry) => entry.title === 'Single')?.click();
-    entries.find((entry) => entry.title === 'Continuous')?.click();
-    expect(intents).toEqual([
-      { type: 'set-layout', layout: { pages: 'single', scrolling: 'page-by-page' } },
-      { type: 'set-layout', layout: { pages: 'facing', scrolling: 'continuous' } },
-    ]);
+    expect(layouts.every((entry) => entry.icon !== null)).toBe(true);
+    expect(layouts.find((entry) => entry.title === 'Two pages · Paged')?.checked).toBe(true);
+    layouts.find((entry) => entry.title === 'Single page · Continuous')?.click();
+    expect(intents).toContainEqual({
+      type: 'set-layout',
+      layout: { pages: 'single', scrolling: 'continuous' },
+    });
   });
 
   it('emits navigation intents and disables unavailable page steps', () => {
@@ -244,14 +261,17 @@ describe('ReaderToolbar', () => {
     expect(intents).toEqual([{ type: 'next-page' }, { type: 'previous-page' }]);
   });
 
-  it('uses one direct profile menu so Default and Follow Obsidian remain distinct', () => {
+  it('moves Layout appearance and Export into More', () => {
     const entries = captureMenuItems();
     const setUseNativeMenu = vi.spyOn(Menu.prototype, 'setUseNativeMenu');
     const { host, intents } = fixture();
-    const profile = host.querySelector<HTMLButtonElement>('[data-control="profile"]');
-    if (profile === null) throw new Error('Expected profile menu.');
+    const profile = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
+    if (profile === null) throw new Error('Expected More options.');
 
     profile.click();
+    expect(entries.map((entry) => entry.title)).toContain('Layout');
+    expect(entries.map((entry) => entry.title)).toContain('Appearance');
+    expect(entries.map((entry) => entry.title)).toContain('Export annotations…');
     expect(entries.map((entry) => entry.title)).toContain('Follow Obsidian');
     expect(entries.map((entry) => entry.title)).not.toContain('Auto');
     entries.find((entry) => entry.title === 'Dark')?.click();
@@ -263,30 +283,18 @@ describe('ReaderToolbar', () => {
     expect(intents).toEqual([{ type: 'set-profile', profile: 'dark' }]);
   });
 
-  it('keeps the profile menu available without adding an overflow duplicate', () => {
-    const entries = captureMenuItems();
-    const { host, intents } = fixture();
-    const profile = host.querySelector<HTMLButtonElement>('[data-control="profile"]');
-    if (profile === null) throw new Error('Expected the profile button.');
-
-    profile.click();
-    entries.find((entry) => entry.title === 'Sepia')?.click();
-
-    expect(intents).toContainEqual({ type: 'set-profile', profile: 'sepia' });
-  });
-
-  it('exposes only the functional annotation export operation in overflow', () => {
+  it('omits OCR when no provider is qualified', () => {
     const entries = captureMenuItems();
     const { host, intents } = fixture();
     const overflow = host.querySelector<HTMLButtonElement>('[data-control="overflow"]');
     if (overflow === null) throw new Error('Expected overflow control.');
 
     overflow.click();
-    expect(entries.map(({ title }) => title)).toEqual(['Export annotations…']);
+    expect(entries.map(({ title }) => title)).toContain('Export annotations…');
     expect(entries.map(({ title }) => title)).not.toContain('Recognize page');
     expect(entries.map(({ title }) => title)).not.toContain('Recognize document');
-    entries[0]?.click();
-    expect(intents).toEqual([{ type: 'export-annotations' }]);
+    entries.find(({ title }) => title === 'Export annotations…')?.click();
+    expect(intents).toContainEqual({ type: 'export-annotations' });
   });
 
   it('removes owned listeners when destroyed', () => {

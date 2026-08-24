@@ -1,3 +1,4 @@
+import { Menu } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { AnnotationToolbar } from './annotation-toolbar.js';
 
@@ -7,7 +8,7 @@ const palette = [
 ] as const;
 
 describe('AnnotationToolbar', () => {
-  it('offers only Select, Highlight, Ink, and Text in native order', () => {
+  it('shows semantic Quick Highlight color and pressed state', () => {
     const host = document.body.createDiv();
     const onIntent = vi.fn();
     const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
@@ -18,7 +19,7 @@ describe('AnnotationToolbar', () => {
       Array.from(host.querySelectorAll<HTMLElement>('[data-annotation-tool]')).map(
         (button) => button.dataset['annotationTool'],
       ),
-    ).toEqual(['select', 'highlight', 'ink', 'freetext']);
+    ).toEqual(['highlight', 'ink', 'freetext']);
     expect(host.textContent).not.toContain('Underline');
     expect(host.textContent).not.toContain('Text Note');
     expect(
@@ -26,27 +27,61 @@ describe('AnnotationToolbar', () => {
     ).toBe('Text');
     host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')?.click();
     expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-tool', tool: 'highlight' });
-    expect(
-      host.querySelector('[data-annotation-tool="select"]')?.getAttribute('aria-pressed'),
-    ).toBe('true');
     toolbar.setTool('highlight');
     expect(
       host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-pressed'),
     ).toBe('true');
+    expect(
+      host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-label'),
+    ).toContain('Key idea');
     toolbar.destroy();
     host.remove();
   });
 
-  it('names palette colors with their meanings and supports keyboard selection', () => {
+  it('selects semantic colors from the Quick Highlight menu without a permanent swatch strip', () => {
+    const redChoice: { click: (() => void) | null; title: DocumentFragment | null } = {
+      click: null,
+      title: null,
+    };
+    vi.spyOn(Menu.prototype, 'addItem').mockImplementation(function (
+      this: Menu,
+      callback: Parameters<Menu['addItem']>[0],
+    ) {
+      let isRed = false;
+      const item = {
+        onClick(handler: () => void) {
+          if (isRed) redChoice.click = handler;
+          return item;
+        },
+        setChecked() {
+          return item;
+        },
+        setIcon() {
+          return item;
+        },
+        setTitle(title: DocumentFragment | string) {
+          isRed = (typeof title === 'string' ? title : title.textContent) === 'Red';
+          if (isRed && typeof title !== 'string') redChoice.title = title;
+          return item;
+        },
+      };
+      callback(item as never);
+      return this;
+    });
     const host = document.body.createDiv();
     const onIntent = vi.fn();
     const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
-    const keyIdea = host.querySelector<HTMLButtonElement>('[data-annotation-color="#ffd400"]');
-    expect(keyIdea?.getAttribute('aria-label')).toBe('Yellow — Key idea');
-    expect(keyIdea?.title).toBe('Yellow — Key idea');
-    keyIdea?.click();
-    expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-color', color: '#ffd400' });
-    expect(keyIdea?.getAttribute('aria-pressed')).toBe('true');
+    expect(host.querySelector('.abyss-annotation-colors')).toBeNull();
+    expect(host.querySelector('[data-annotation-color]')).toBeNull();
+    host.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]')?.click();
+    redChoice.click?.();
+    expect(onIntent).toHaveBeenCalledTimes(1);
+    expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-color', color: '#ff6666' });
+    expect(
+      redChoice.title
+        ?.querySelector<HTMLElement>('.abyss-documents-menu-color')
+        ?.style.getPropertyValue('--abyss-documents-menu-color'),
+    ).toBe('#ff6666');
     toolbar.destroy();
     host.remove();
   });
@@ -67,25 +102,19 @@ describe('AnnotationToolbar', () => {
     expect(
       host.querySelector('[data-region="annotation-toolbar"]')?.getAttribute('aria-description'),
     ).toContain('Signed PDF');
-    expect(
-      host.querySelector('[data-region="annotation-read-only-reason"]')?.textContent,
-    ).toContain('Signed PDF');
+    expect(host.querySelector('[data-region="annotation-read-only-reason"]')).toBeNull();
     toolbar.destroy();
     host.remove();
   });
 
-  it('exposes reader-scoped undo and redo without claiming global shortcuts', () => {
+  it('keeps Undo Redo and Delete out of the toolbar', () => {
     const host = document.body.createDiv();
     const onIntent = vi.fn();
     const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
-    host.querySelector<HTMLButtonElement>('[data-action="undo-annotation"]')?.click();
-    host.querySelector<HTMLButtonElement>('[data-action="redo-annotation"]')?.click();
-    host.querySelector<HTMLButtonElement>('[data-action="delete-annotation"]')?.click();
-    expect(onIntent.mock.calls).toEqual([
-      [{ type: 'undo-annotation' }],
-      [{ type: 'redo-annotation' }],
-      [{ type: 'delete-annotation' }],
-    ]);
+    expect(host.querySelector('[data-action="undo-annotation"]')).toBeNull();
+    expect(host.querySelector('[data-action="redo-annotation"]')).toBeNull();
+    expect(host.querySelector('[data-action="delete-annotation"]')).toBeNull();
+    expect(onIntent).not.toHaveBeenCalled();
     toolbar.destroy();
     host.remove();
   });
@@ -94,18 +123,23 @@ describe('AnnotationToolbar', () => {
     const host = document.body.createDiv();
     const onIntent = vi.fn();
     const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
-    const red = host.querySelector<HTMLButtonElement>('[data-annotation-color="#ff6666"]');
-    red?.click();
     toolbar.setColor('#FF6666');
     expect(toolbar.color).toBe('#FF6666');
-    expect(red?.getAttribute('aria-pressed')).toBe('true');
+    expect(
+      host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-label'),
+    ).toContain('Red');
     toolbar.setColor('#000000');
-    expect(red?.getAttribute('aria-pressed')).toBe('false');
+    expect(
+      host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-label'),
+    ).toContain('#000000');
     toolbar.destroy();
     toolbar.destroy();
 
     const empty = new AnnotationToolbar(host, [], null, vi.fn());
     expect(empty.root.querySelector('[data-annotation-color]')).toBeNull();
+    expect(
+      empty.root.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-label'),
+    ).toContain('#ffd400');
     empty.destroy();
     host.remove();
   });

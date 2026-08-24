@@ -25,33 +25,48 @@
 }
 
 .abyss-documents .abyss-reader-toolbar {
+  --abyss-reader-toolbar-control-size: 2rem;
+
   display: flex;
   min-width: 0;
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--size-4-1);
-  padding: var(--size-2-1) var(--size-4-2);
+  flex-wrap: nowrap;
+  gap: var(--size-2-1);
+  padding: var(--size-2-1) var(--size-4-1);
   border-bottom: var(--border-width) solid var(--background-modifier-border);
   background: var(--background-primary);
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
+.abyss-documents .abyss-reader-toolbar::-webkit-scrollbar {
+  display: none;
 }
 
 .abyss-documents .abyss-reader-toolbar-navigation {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: var(--size-2-1);
+  gap: 0;
 }
 
-.abyss-documents .abyss-reader-toolbar-button {
-  width: var(--input-height);
-  min-height: var(--input-height);
+.abyss-documents .abyss-reader-toolbar-button,
+.abyss-documents .abyss-annotation-tool {
+  width: var(--abyss-reader-toolbar-control-size);
+  min-width: var(--abyss-reader-toolbar-control-size);
+  min-height: var(--abyss-reader-toolbar-control-size);
   flex: 0 0 auto;
+}
+
+.abyss-documents .abyss-reader-icon-button > * {
+  pointer-events: none;
 }
 
 .abyss-documents .abyss-reader-toolbar-page-field {
   width: calc(3ch + var(--size-4-3));
   min-width: 0;
-  height: var(--input-height);
+  height: var(--abyss-reader-toolbar-control-size);
   padding-inline: var(--size-4-1);
   text-align: end;
 }
@@ -77,11 +92,24 @@
 .abyss-documents .abyss-reader-toolbar-zoom {
   display: flex;
   align-items: center;
-  gap: var(--size-2-1);
+  gap: 0;
+}
+
+.abyss-documents .abyss-reader-toolbar-zoom-level {
+  min-width: 3.25rem;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.abyss-documents .abyss-reader-toolbar-annotations {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
 }
 
 .abyss-documents .abyss-annotation-toolbar,
-.abyss-documents .abyss-annotation-colors,
 .abyss-documents .abyss-annotation-color-rows {
   display: flex;
   align-items: center;
@@ -99,20 +127,63 @@
 
 .abyss-documents .abyss-annotation-toolbar {
   flex: 0 0 auto;
-  padding-inline-start: var(--size-4-1);
-  border-inline-start: var(--border-width) solid var(--background-modifier-border);
+  padding: 0;
+  border: 0;
 }
 
-.abyss-documents .abyss-annotation-tool,
-.abyss-documents .abyss-annotation-color {
-  width: var(--input-height);
-  min-width: var(--input-height);
-  min-height: var(--input-height);
+.abyss-documents .abyss-reader-split-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  overflow: hidden;
+  border-radius: var(--radius-s);
+  box-shadow: inset 0 0 0 var(--border-width) var(--background-modifier-border);
+}
+
+.abyss-documents .abyss-reader-split-control .abyss-reader-split-main {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.abyss-documents .abyss-reader-split-control .abyss-reader-split-menu {
+  width: 1.375rem;
+  min-width: 1.375rem;
+  padding-inline: 0;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  border-inline-start: var(--border-width) solid var(--background-modifier-border);
 }
 
 .abyss-documents .abyss-annotation-tool[aria-pressed='true'] {
   background: var(--background-modifier-hover);
   color: var(--text-accent);
+}
+
+.abyss-documents .abyss-reader-quick-control .abyss-reader-split-main {
+  position: relative;
+}
+
+.abyss-documents .abyss-reader-quick-color {
+  position: absolute;
+  inset-inline-end: 0.25rem;
+  inset-block-end: 0.2rem;
+  width: 0.4rem;
+  height: 0.4rem;
+  border: var(--border-width) solid var(--background-primary);
+  border-radius: 50%;
+  background: var(--abyss-quick-highlight-color, #ffd400);
+  box-shadow: 0 0 0 var(--border-width) var(--background-modifier-border);
+}
+
+.abyss-documents-menu-color {
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  margin-inline-end: var(--size-4-2);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: 50%;
+  background: var(--abyss-documents-menu-color);
+  vertical-align: -0.0625rem;
 }
 
 .abyss-documents .abyss-annotation-color {
@@ -232,12 +303,6 @@
   justify-content: flex-end;
   gap: var(--size-2-1);
   flex-wrap: wrap;
-}
-
-.abyss-documents .abyss-reader-toolbar-zoom-button {
-  width: var(--input-height);
-  min-height: var(--input-height);
-  flex: 0 0 auto;
 }
 
 .abyss-documents [data-region='document'] {
@@ -626,6 +691,13 @@
   .abyss-documents .abyss-reader-toolbar-spacer {
     display: none;
   }
+
+  .abyss-documents .abyss-reader-fit-control,
+  .abyss-documents .abyss-reader-toolbar-zoom-level,
+  .abyss-documents [data-control='previous-page'],
+  .abyss-documents [data-control='next-page'] {
+    display: none;
+  }
 }
 
 @media (width <= 600px), (pointer: coarse) {
@@ -658,6 +730,12 @@
   /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
   .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar .buttons > :not(.divider) {
     min-width: 2.75rem;
+  }
+}
+
+@media (width <= 600px) and (pointer: coarse) {
+  .abyss-documents .abyss-reader-toolbar-zoom {
+    display: none;
   }
 }
 

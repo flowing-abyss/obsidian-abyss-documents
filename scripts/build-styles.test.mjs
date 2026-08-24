@@ -189,18 +189,42 @@ describe('PDF.js style build', () => {
     });
   });
 
-  it('wraps a narrow reader leaf independently of viewport width and keeps coarse pointers 44px above 600px', async () => {
+  it('keeps a narrow reader leaf on one row and keeps coarse pointers 44px above 600px', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const narrow = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
+    );
+    const narrowCoarse = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' &&
+        node.name === 'media' &&
+        node.params === '(width <= 600px) and (pointer: coarse)',
+    );
     const coarsePointer = root.nodes.find(
       (node) =>
         node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
     );
 
     expect(topLevelDeclarations(root, '.abyss-documents .abyss-reader-toolbar')).toMatchObject({
-      'flex-wrap': 'wrap',
+      'flex-wrap': 'nowrap',
+    });
+    expect(mobileDeclarations(narrow, '.abyss-documents .abyss-reader-fit-control')).toMatchObject({
+      display: 'none',
     });
     expect(
-      mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
+      mobileDeclarations(narrow, '.abyss-documents .abyss-reader-toolbar-zoom-level'),
+    ).toMatchObject({
+      display: 'none',
+    });
+    expect(
+      mobileDeclarations(narrowCoarse, '.abyss-documents .abyss-reader-toolbar-zoom'),
+    ).toMatchObject({ display: 'none' });
+    expect(
+      mobileDeclarations(narrow, ".abyss-documents [data-control='previous-page']"),
+    ).toMatchObject({ display: 'none' });
+    expect(
+      mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar-button'),
     ).toMatchObject({
       width: '2.75rem',
       'min-width': '2.75rem',
@@ -222,7 +246,7 @@ describe('PDF.js style build', () => {
       'inset-inline-start': '0',
     });
     expect(
-      mobileDeclarations(touch, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
+      mobileDeclarations(touch, '.abyss-documents .abyss-reader-toolbar-button'),
     ).toMatchObject({
       width: '2.75rem',
       'min-width': '2.75rem',
