@@ -6660,36 +6660,109 @@
   overflow: auto;
 }
 
-.abyss-documents .abyss-reader-outline-tree,
-.abyss-documents .abyss-reader-outline-tree [role='group'] {
+.abyss-documents .abyss-reader-outline {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.abyss-documents .abyss-reader-outline-controls {
+  padding: var(--size-4-2) var(--size-4-2) var(--size-2-2);
+}
+
+.abyss-documents .abyss-reader-outline-search {
+  width: 100%;
+  min-width: 0;
+}
+
+.abyss-documents .abyss-reader-outline-tree {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden auto;
   margin: 0;
-  padding: var(--size-4-1);
+  padding: var(--size-2-1) var(--size-4-2) var(--size-4-2);
   list-style: none;
 }
 
 .abyss-documents .abyss-reader-outline-tree [role='group'] {
-  padding-block: 0;
-  padding-inline-start: var(--size-4-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.abyss-documents .abyss-reader-outline-row {
+.abyss-documents .abyss-reader-outline-row-shell {
+  display: flex;
   width: 100%;
-  padding: var(--size-2-1) var(--size-4-1);
-  border: 0;
+  min-width: 0;
+  min-height: 30px;
+  align-items: center;
+  padding-inline: calc(var(--outline-depth) * 15px) var(--size-4-1);
   border-radius: var(--radius-s);
   background: transparent;
   color: var(--text-normal);
   text-align: start;
 }
 
-.abyss-documents .abyss-reader-outline-row:hover,
-.abyss-documents .abyss-reader-outline-row:focus-visible,
-.abyss-documents .abyss-reader-outline-row[aria-current='location'] {
+.abyss-documents .abyss-reader-outline-chevron {
+  display: inline-flex;
+  width: 24px;
+  min-width: 24px;
+  height: 30px;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-s);
+  color: var(--text-faint);
+}
+
+.abyss-documents .abyss-reader-outline-chevron.is-interactive:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-muted);
+}
+
+.abyss-documents .abyss-reader-outline-chevron .svg-icon {
+  width: var(--icon-xs);
+  height: var(--icon-xs);
+}
+
+.abyss-documents .abyss-reader-outline-treeitem {
+  min-width: 0;
+  list-style: none;
+  outline: none;
+}
+
+.abyss-documents .abyss-reader-outline-label {
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.abyss-documents .abyss-reader-outline-treeitem:hover > .abyss-reader-outline-row-shell,
+.abyss-documents .abyss-reader-outline-treeitem:focus-visible > .abyss-reader-outline-row-shell {
   background: var(--background-modifier-hover);
 }
 
-.abyss-documents .abyss-reader-outline-row[aria-disabled='true'] {
+.abyss-documents
+  .abyss-reader-outline-treeitem[aria-current='location']
+  > .abyss-reader-outline-row-shell {
+  background: var(--background-modifier-hover);
+  box-shadow: inset 2px 0 0 var(--interactive-accent);
+  font-weight: var(--font-medium);
+}
+
+.abyss-documents
+  .abyss-reader-outline-treeitem[aria-disabled='true']
+  > .abyss-reader-outline-row-shell {
   color: var(--text-faint);
+}
+
+.abyss-documents .abyss-reader-outline-empty {
+  margin: var(--size-4-2) var(--size-4-1);
 }
 
 .abyss-documents .abyss-reader-search-controls {
@@ -6835,11 +6908,15 @@
 .abyss-documents .abyss-reader-toolbar-page-field:focus-visible,
 .abyss-documents .abyss-reader-sidebar-tab:focus-visible,
 .abyss-documents .abyss-reader-sidebar-close:focus-visible,
-.abyss-documents .abyss-reader-outline-row:focus-visible,
 .abyss-documents .abyss-reader-search-input:focus-visible,
 .abyss-documents .abyss-reader-search-result:focus-visible {
   outline: var(--border-width) solid var(--interactive-accent);
   outline-offset: var(--size-2-1);
+}
+
+.abyss-documents .abyss-reader-outline-treeitem:focus-visible > .abyss-reader-outline-row-shell {
+  outline: var(--border-width) solid var(--interactive-accent);
+  outline-offset: calc(-1 * var(--border-width));
 }
 
 .abyss-documents .abyss-reader-search-page {
@@ -6972,6 +7049,15 @@
 }
 
 @media (pointer: coarse) {
+  .abyss-documents .abyss-reader-outline-row-shell,
+  .abyss-documents .abyss-reader-outline-chevron {
+    min-height: 44px;
+  }
+
+  .abyss-documents .abyss-reader-outline-chevron {
+    height: 44px;
+  }
+
   .abyss-documents .abyss-reader-toolbar-button,
   .abyss-documents .abyss-annotation-tool,
   .abyss-documents .abyss-annotation-color,
