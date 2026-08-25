@@ -85,6 +85,39 @@ describe('extractAnnotations', () => {
     expect(batches.flat()[0]).toMatchObject({ tags: ['ＴＡＧ'], links: ['Ｆｏｏ'] });
   });
 
+  it('does not project a highlight comment popup as a duplicate annotation', async () => {
+    const batches: DocumentAnnotation[][] = [];
+
+    await extractAnnotations(
+      {
+        numPages: 1,
+        getPage: vi.fn(async () =>
+          page([
+            {
+              annotationType: 9,
+              id: 'highlight-with-comment',
+              rect: [0, 0, 10, 10],
+              contentsObj: { str: 'One comment' },
+            },
+            {
+              annotationType: 16,
+              id: 'highlight-comment-popup',
+              parentId: 'highlight-with-comment',
+              rect: [0, 0, 10, 10],
+              contentsObj: { str: 'One comment' },
+            },
+          ]),
+        ),
+      },
+      new AbortController().signal,
+      (batch) => batches.push([...batch]),
+    );
+
+    expect(batches.flat().map(({ identity }) => identity)).toEqual([
+      { kind: 'stable', id: 'highlight-with-comment' },
+    ]);
+  });
+
   it('stops before reading a stale page and yields batches within a configurable deadline', async () => {
     const controller = new AbortController();
     const second = page([]);

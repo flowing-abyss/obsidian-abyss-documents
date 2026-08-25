@@ -4,8 +4,25 @@ import { Key } from 'webdriverio';
 
 async function closeReaderLeaves(): Promise<void> {
   await browser.executeObsidian(async ({ app }) => {
-    for (const leaf of app.workspace.getLeavesOfType('abyss-document-view'))
-      await leaf.setViewState({ type: 'empty', state: {} });
+    for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
+      const controller = (leaf.view as unknown as { controller?: { close(): Promise<void> } })
+        .controller;
+      await controller?.close();
+    }
+    app.workspace.detachLeavesOfType('abyss-document-view');
+    const metrics = (
+      window as Window & {
+        __abyssDocumentsPerformance?: {
+          activeAnnotationOperations: { serializations: number; writes: number };
+        };
+      }
+    ).__abyssDocumentsPerformance;
+    if (
+      app.workspace.getLeavesOfType('abyss-document-view').length !== 0 ||
+      metrics?.activeAnnotationOperations.serializations !== 0 ||
+      metrics.activeAnnotationOperations.writes !== 0
+    )
+      throw new Error('Reader teardown did not settle.');
   });
 }
 

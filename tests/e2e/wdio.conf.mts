@@ -19,6 +19,9 @@ const desktopVersions = await parseObsidianVersions(
     cacheDir,
   },
 );
+const coarseVersion = desktopVersions[desktopVersions.length - 1];
+if (coarseVersion === undefined) throw new Error('No Obsidian version was selected.');
+const [coarseAppVersion, coarseInstallerVersion] = coarseVersion;
 
 if (env['CI']) {
   // Printed so the CI workflow can key its Obsidian-binary cache off the resolved
@@ -32,19 +35,46 @@ export const config: WebdriverIO.Config = {
 
   // Resolved relative to this config file's own directory (tests/e2e/), not the cwd
   // it's invoked from.
-  specs: ['./smoke.e2e.ts', './reader.e2e.ts'],
+  specs: [
+    './smoke.e2e.ts',
+    './reader.e2e.ts',
+    './reader-selection.e2e.ts',
+    './reader-toolbar.e2e.ts',
+    './reader-toolbar-coarse.e2e.ts',
+    './reader-sidebar.e2e.ts',
+  ],
 
-  maxInstances: Number(env['WDIO_MAX_INSTANCES'] ?? 2),
+  // Native tooltip and focus restoration assertions need one foreground Electron window.
+  maxInstances: Number(env['WDIO_MAX_INSTANCES'] ?? 1),
 
-  capabilities: desktopVersions.map(([appVersion, installerVersion]) => ({
-    browserName: 'obsidian',
-    'wdio:obsidianOptions': {
-      appVersion,
-      installerVersion,
-      plugins: [repoRoot],
-      vault,
+  capabilities: [
+    ...desktopVersions.map(([appVersion, installerVersion]) => ({
+      browserName: 'obsidian',
+      'wdio:exclude': ['./reader-toolbar-coarse.e2e.ts'],
+      'wdio:obsidianOptions': {
+        appVersion,
+        installerVersion,
+        plugins: [repoRoot],
+        vault,
+      },
+    })),
+    {
+      browserName: 'obsidian',
+      'goog:chromeOptions': {
+        mobileEmulation: {
+          deviceMetrics: { height: 844, pixelRatio: 3, touch: true, width: 390 },
+        },
+      },
+      'wdio:specs': ['./reader-toolbar-coarse.e2e.ts'],
+      'wdio:obsidianOptions': {
+        appVersion: coarseAppVersion,
+        emulateMobile: true,
+        installerVersion: coarseInstallerVersion,
+        plugins: [repoRoot],
+        vault,
+      },
     },
-  })),
+  ],
 
   services: ['obsidian'],
   // Wraps wdio's spec-reporter to show the Obsidian version a test ran under

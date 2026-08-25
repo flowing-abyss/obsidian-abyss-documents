@@ -29,19 +29,6 @@ async function openPdf(path: string): Promise<void> {
   );
   try {
     await $('[data-abyss-document]').waitForDisplayed({ timeout: 15_000 });
-    await browser.executeObsidian(({ app }) => {
-      const host = window as Window & {
-        __abyssClosedReaderControllers?: WeakSet<object>;
-      };
-      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
-        controller?: object;
-      };
-      if (
-        view.controller !== undefined &&
-        host.__abyssClosedReaderControllers?.has(view.controller) === true
-      )
-        throw new Error('PDF reopen reused a controller from the closed reader session.');
-    });
   } catch (error) {
     const diagnostics = await browser.execute(() => {
       const root = document.querySelector<HTMLElement>('[data-abyss-document]');
@@ -73,17 +60,46 @@ async function openPdf(path: string): Promise<void> {
 
 async function closeReaderLeaves(): Promise<void> {
   await browser.executeObsidian(async ({ app }) => {
-    const host = window as Window & {
-      __abyssClosedReaderControllers?: WeakSet<object>;
-    };
-    const closed = host.__abyssClosedReaderControllers ?? new WeakSet<object>();
-    host.__abyssClosedReaderControllers = closed;
     for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
-      const view = leaf.view as unknown as { controller?: object };
-      if (view.controller !== undefined) closed.add(view.controller);
-      await leaf.setViewState({ type: 'empty', state: {} });
+      const controller = (leaf.view as unknown as { controller?: { close(): Promise<void> } })
+        .controller;
+      await controller?.close();
     }
+    app.workspace.detachLeavesOfType('abyss-document-view');
+    const metrics = (
+      window as Window & {
+        __abyssDocumentsPerformance?: {
+          activeAnnotationOperations: { serializations: number; writes: number };
+        };
+      }
+    ).__abyssDocumentsPerformance;
+    if (
+      app.workspace.getLeavesOfType('abyss-document-view').length !== 0 ||
+      metrics?.activeAnnotationOperations.serializations !== 0 ||
+      metrics.activeAnnotationOperations.writes !== 0
+    )
+      throw new Error('Reader teardown did not settle.');
   });
+}
+
+async function chooseMoreOption(label: string): Promise<void> {
+  await $('[data-control="overflow"]').click();
+  const choice = $(`//*[contains(@class, "menu-item-title") and normalize-space(.)="${label}"]`);
+  await choice.waitForClickable({ timeout: 5_000 });
+  await choice.click();
+}
+
+async function inputValue(selector: string, value: string): Promise<void> {
+  await browser.execute(
+    (inputSelector, nextValue) => {
+      const input = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(inputSelector);
+      if (input === null) throw new Error(`Input unavailable: ${inputSelector}`);
+      input.value = nextValue;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+    selector,
+    value,
+  );
 }
 
 async function activateLeaf(id: string): Promise<void> {
@@ -324,24 +340,42 @@ async function createFreeText(text: string): Promise<void> {
   await expect(input).toHaveText(text);
   await browser.keys(Key.Escape);
   await expect(input).toHaveAttribute('contenteditable', 'false');
-  await $('[data-annotation-tool="select"]').click();
+  await $('[data-annotation-tool="freetext"]').click();
+  await expect($('[data-annotation-tool="freetext"]')).toHaveAttribute('aria-pressed', 'false');
 }
 
 async function createInk(): Promise<void> {
   await $('[data-annotation-tool="ink"]').click();
   await expect($('[data-annotation-tool="ink"]')).toHaveAttribute('aria-pressed', 'true');
-  const layer = $('[data-page-number="1"] .annotationEditorLayer');
+  await drawInk('[data-page-number="1"] .annotationEditorLayer');
+  await $('[data-annotation-tool="ink"]').click();
+  await expect($('[data-annotation-tool="ink"]')).toHaveAttribute('aria-pressed', 'false');
+  await $('.inkEditor').waitForExist({ timeout: 5_000 });
+}
+
+async function drawInk(selector: string): Promise<void> {
+  await $(selector).waitForDisplayed({ timeout: 5_000 });
+  const points = await browser.execute((layerSelector) => {
+    const layer = document.querySelector<HTMLElement>(layerSelector);
+    if (layer === null) throw new Error(`Ink editor layer unavailable: ${layerSelector}`);
+    const bounds = layer.getBoundingClientRect();
+    return [
+      { x: Math.round(bounds.left + bounds.width * 0.3), y: Math.round(bounds.top + 30) },
+      { x: Math.round(bounds.left + bounds.width * 0.45), y: Math.round(bounds.top + 60) },
+      { x: Math.round(bounds.left + bounds.width * 0.6), y: Math.round(bounds.top + 35) },
+    ];
+  }, selector);
+  const [start, middle, end] = points;
+  if (start === undefined || middle === undefined || end === undefined)
+    throw new Error('Ink gesture points unavailable.');
   await browser
     .action('pointer')
-    .move({ origin: layer, x: -120, y: 30 })
+    .move({ origin: 'viewport', ...start })
     .down()
-    .move({ duration: 120, origin: layer, x: -40, y: 60 })
-    .move({ duration: 120, origin: layer, x: 40, y: 35 })
+    .move({ duration: 120, origin: 'viewport', ...middle })
+    .move({ duration: 120, origin: 'viewport', ...end })
     .up()
     .perform();
-  await $('[data-annotation-tool="select"]').click();
-  await expect($('[data-annotation-tool="select"]')).toHaveAttribute('aria-pressed', 'true');
-  await $('.inkEditor').waitForExist({ timeout: 5_000 });
 }
 
 async function selectNativeEditor(selector: string): Promise<void> {
@@ -370,6 +404,50 @@ async function selectNativeEditor(selector: string): Promise<void> {
       ),
     { timeout: 5_000, timeoutMsg: `Native editor was not selected: ${selector}` },
   );
+}
+
+async function inspectPassiveImportedAnnotation(selector: string): Promise<{
+  readonly editableControls: number;
+  readonly nativeEditors: number;
+  readonly selectedEditors: number;
+}> {
+  return browser.execute(async (annotationSelector) => {
+    const annotation = document.querySelector<HTMLElement>(annotationSelector);
+    if (annotation === null)
+      throw new Error(`Imported annotation unavailable: ${annotationSelector}`);
+    const bounds = annotation.getBoundingClientRect();
+    const init = {
+      bubbles: true,
+      button: 0,
+      clientX: bounds.left + bounds.width / 2,
+      clientY: bounds.top + bounds.height / 2,
+      isPrimary: true,
+      pointerId: 31,
+      pointerType: 'mouse',
+    };
+    annotation.dispatchEvent(new PointerEvent('pointerdown', init));
+    window.dispatchEvent(new PointerEvent('pointerup', init));
+    annotation.dispatchEvent(new MouseEvent('click', init));
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+    return {
+      editableControls: document.querySelectorAll(
+        '[data-annotation-popover]:not([hidden]) :is([data-action="edit-comment"], [data-action="annotation-color"], [data-action="delete-annotation"])',
+      ).length,
+      nativeEditors: document.querySelectorAll(
+        '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)',
+      ).length,
+      selectedEditors: document.querySelectorAll('.annotationEditorLayer .selectedEditor').length,
+    };
+  }, selector);
 }
 
 describe('PDF reader foundation', () => {
@@ -448,13 +526,13 @@ describe('PDF reader foundation', () => {
     await openPdf('Documents/text-12-pages.pdf');
     await waitForFirstPage();
 
-    await $('[data-control="profile"]').click();
+    await $('[data-control="overflow"]').click();
     const sepia = $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Sepia"]');
     try {
       await sepia.waitForExist({ timeout: 5_000 });
     } catch (error) {
       const diagnostics = await browser.execute(() => {
-        const button = document.querySelector<HTMLElement>('[data-control="profile"]');
+        const button = document.querySelector<HTMLElement>('[data-control="overflow"]');
         button?.dispatchEvent(
           new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 20, clientY: 20 }),
         );
@@ -492,6 +570,75 @@ describe('PDF reader foundation', () => {
     await obsidian.enablePlugin(pluginId);
     await openPdf('Documents/text-12-pages.pdf');
     await expect($('[data-page-number="1"] canvas')).toExist();
+  });
+
+  it('opens in a popout and tears down its owner-window session before reopening', async () => {
+    const mainWindow = await browser.getWindowHandle();
+    const leafId = await browser.executeObsidian(async ({ app }, documentPath) => {
+      const file = app.vault.getFileByPath(documentPath);
+      if (file === null) throw new Error(`PDF fixture unavailable: ${documentPath}`);
+      const leaf = app.workspace.openPopoutLeaf();
+      await leaf.openFile(file);
+      return (leaf as unknown as { id: string }).id;
+    }, 'Documents/text-12-pages.pdf');
+    let popoutWindow: string | null = null;
+    try {
+      await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 2, {
+        timeout: 10_000,
+        timeoutMsg: 'PDF popout window did not open.',
+      });
+      popoutWindow =
+        (await browser.getWindowHandles()).find((handle) => handle !== mainWindow) ?? null;
+      if (popoutWindow === null) throw new Error('PDF popout window handle unavailable.');
+      await browser.switchToWindow(popoutWindow);
+      await $('[data-abyss-document]').waitForDisplayed({ timeout: 15_000 });
+      await $('[data-page-number="1"] canvas').waitForExist({ timeout: 15_000 });
+      expect(
+        await browser.execute(() => {
+          const root = document.querySelector<HTMLElement>('[data-abyss-document]');
+          return root?.ownerDocument.defaultView === window;
+        }),
+      ).toBe(true);
+
+      await browser.switchToWindow(mainWindow);
+      await browser.executeObsidian(async ({ app }, id) => {
+        const leaf = app.workspace.getLeafById(id);
+        if (leaf === null) throw new Error(`Popout reader leaf unavailable: ${id}`);
+        const controller = (leaf.view as unknown as { controller?: { close(): Promise<void> } })
+          .controller;
+        await controller?.close();
+        leaf.detach();
+        const metrics = (
+          window as Window & {
+            __abyssDocumentsPerformance?: {
+              activeAnnotationOperations: { serializations: number; writes: number };
+            };
+          }
+        ).__abyssDocumentsPerformance;
+        if (
+          app.workspace.getLeafById(id) !== null ||
+          metrics?.activeAnnotationOperations.serializations !== 0 ||
+          metrics.activeAnnotationOperations.writes !== 0
+        )
+          throw new Error('Popout reader teardown did not settle.');
+      }, leafId);
+      await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 1, {
+        timeout: 10_000,
+        timeoutMsg: 'PDF popout window did not close after leaf teardown.',
+      });
+
+      await openPdf('Documents/text-12-pages.pdf');
+      await waitForFirstPage();
+      await expect($('[data-abyss-document]')).toBeDisplayed();
+    } finally {
+      const handles = await browser.getWindowHandles();
+      if (handles.includes(mainWindow)) await browser.switchToWindow(mainWindow);
+      if (popoutWindow !== null && handles.includes(popoutWindow)) {
+        await browser.switchToWindow(popoutWindow);
+        await browser.closeWindow();
+        await browser.switchToWindow(mainWindow);
+      }
+    }
   });
 
   it('shows a retry boundary for invalid bytes', async () => {
@@ -600,28 +747,23 @@ describe('PDF reader foundation', () => {
     await openPdf('Documents/text-12-pages.pdf');
     await waitForFirstPage();
 
-    await expect($('[data-control="profile"]')).toHaveAttribute(
-      'aria-label',
-      'Reading profile: Default',
-    );
-    await expect($('[data-control="layout"]')).toHaveAttribute(
-      'aria-label',
-      'Layout: Single, continuous',
-    );
+    await expect($('[data-abyss-document]')).toHaveAttribute('data-reading-profile', 'default');
 
-    for (const [pages, scrolling, label] of [
-      ['Facing', 'Continuous', 'Layout: Facing, continuous'],
-      ['Facing', 'Page by page', 'Layout: Facing, page by page'],
-      ['Single', 'Page by page', 'Layout: Single, page by page'],
-      ['Single', 'Continuous', 'Layout: Single, continuous'],
+    for (const [choice, pages, scrolling] of [
+      ['Two pages · Continuous', 'facing', 'continuous'],
+      ['Two pages · Paged', 'facing', 'page-by-page'],
+      ['Single page · Paged', 'single', 'page-by-page'],
+      ['Single page · Continuous', 'single', 'continuous'],
     ] as const) {
-      await $('[data-control="layout"]').click();
-      await $(`//*[contains(@class, "menu-item-title") and normalize-space(.)="${pages}"]`).click();
-      await $('[data-control="layout"]').click();
-      await $(
-        `//*[contains(@class, "menu-item-title") and normalize-space(.)="${scrolling}"]`,
-      ).click();
-      await expect($('[data-control="layout"]')).toHaveAttribute('aria-label', label);
+      await chooseMoreOption(choice);
+      expect(
+        await browser.executeObsidian(({ app }) => {
+          const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+            controller?: { currentLayout?: unknown };
+          };
+          return view.controller?.currentLayout ?? null;
+        }),
+      ).toEqual({ pages, scrolling });
     }
   });
 
@@ -732,16 +874,12 @@ describe('PDF reader foundation', () => {
     await $(`${active} .annotationLayer .highlightAnnotation`).waitForExist({ timeout: 10_000 });
     saveBaseline = await captureAnnotationSaveBaseline();
     await $(`${active} [data-annotation-tool="ink"]`).click();
-    const layer = $(`${active} [data-page-number="1"] .annotationEditorLayer`);
-    await browser
-      .action('pointer')
-      .move({ origin: layer, x: -120, y: 30 })
-      .down()
-      .move({ duration: 120, origin: layer, x: -40, y: 60 })
-      .move({ duration: 120, origin: layer, x: 40, y: 35 })
-      .up()
-      .perform();
-    await $(`${active} [data-annotation-tool="select"]`).click();
+    await drawInk(`${active} [data-page-number="1"] .annotationEditorLayer`);
+    await $(`${active} [data-annotation-tool="ink"]`).click();
+    await expect($(`${active} [data-annotation-tool="ink"]`)).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
     await waitForAnnotationSave(saveBaseline);
 
     await activateLeaf(leaves.primary);
@@ -841,8 +979,12 @@ describe('PDF reader foundation', () => {
     const commentButton = $('.highlightEditor .editToolbar .comment');
     await commentButton.waitForClickable({ timeout: 5_000 });
     await commentButton.click();
-    await $('[data-annotation-popover] textarea').setValue('Comment [[Linked note]] #review');
-    await $('[data-action="save-comment"]').click();
+    await inputValue(
+      '.workspace-leaf.mod-active [data-annotation-popover]:not([hidden]) textarea:not([hidden])',
+      'Comment [[Linked note]] #review',
+    );
+    await browser.keys(Key.Escape);
+    await expect($('[data-annotation-popover]')).not.toBeDisplayed();
     await waitForAnnotationSave(saveBaseline);
 
     await closeReaderLeaves();
@@ -876,9 +1018,17 @@ describe('PDF reader foundation', () => {
       timeoutMsg: 'Selected native comment did not expose its Edit action.',
     });
     await editComment.click();
-    await $('[data-annotation-popover] textarea').waitForDisplayed({ timeout: 5_000 });
-    await $('[data-annotation-popover] textarea').setValue('Revised [[Linked note]] #verified');
-    await $('[data-action="save-comment"]').click();
+    const revisedComment = $(
+      '.workspace-leaf.mod-active [data-annotation-popover]:not([hidden]) textarea:not([hidden])',
+    );
+    await revisedComment.waitForDisplayed({ timeout: 5_000 });
+    await inputValue(
+      '.workspace-leaf.mod-active [data-annotation-popover]:not([hidden]) textarea:not([hidden])',
+      'Revised [[Linked note]] #verified',
+    );
+    await expect(revisedComment).toHaveValue('Revised [[Linked note]] #verified');
+    await browser.keys(Key.Escape);
+    await expect($('[data-annotation-popover]')).not.toBeDisplayed();
     await waitForAnnotationSave(saveBaseline);
 
     await closeReaderLeaves();
@@ -905,6 +1055,16 @@ describe('PDF reader foundation', () => {
     await waitForFirstPage();
     await expect($('.underlineAnnotation')).toExist();
     await expect($('.textAnnotation')).toExist();
+    expect(await inspectPassiveImportedAnnotation('.underlineAnnotation')).toEqual({
+      editableControls: 0,
+      nativeEditors: 0,
+      selectedEditors: 0,
+    });
+    expect(await inspectPassiveImportedAnnotation('.textAnnotation')).toEqual({
+      editableControls: 0,
+      nativeEditors: 0,
+      selectedEditors: 0,
+    });
     const saveBaseline = await captureAnnotationSaveBaseline();
 
     await $('[data-annotation-tool="highlight"]').click();
@@ -964,7 +1124,8 @@ describe('PDF reader foundation', () => {
       await openPdf(qualification.path);
       await waitForFirstPage();
 
-      await expect($('[data-region="annotation-read-only-reason"]')).toHaveText(
+      await expect($('[data-region="annotation-toolbar"]')).toHaveAttribute(
+        'aria-description',
         qualification.message,
       );
       expect(
@@ -1022,9 +1183,9 @@ describe('PDF reader foundation', () => {
     expect(exported).toContain('Existing text note');
     const link = /!\[\[([^\]]+#annotation=[^\]]+)\]\]/u.exec(exported)?.[1];
     expect(link).toBeDefined();
+    await closeReaderLeaves();
     await browser.executeObsidian(
       async ({ app }, input) => {
-        app.workspace.detachLeavesOfType('abyss-document-view');
         await app.vault.adapter.write(
           input.sourcePath,
           `${await app.vault.adapter.read(input.sourcePath)}\n\n[Open annotation](${input.link})\n`,

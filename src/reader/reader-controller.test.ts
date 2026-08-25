@@ -38,6 +38,7 @@ import {
   endPluginActivation,
   readerPerformanceSnapshot,
 } from '../reader-performance.js';
+import { DEFAULT_SETTINGS } from '../settings.js';
 import {
   ReaderController,
   type ReaderProfileState,
@@ -436,6 +437,65 @@ describe('ReaderController', () => {
         shell.created.annotationToolbar?.root.querySelectorAll('[data-annotation-tool]') ?? [],
       ).every((button) => button.getAttribute('aria-pressed') === 'false'),
     ).toBe(true);
+    await controller.close();
+  });
+
+  it('retains a selected semantic color and reports a current selection writer failure', async () => {
+    const [pdf] = files('Books/Selection-failure.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const cause = new Error('writer rejected annotation');
+    createdViewport.commitSelection.mockRejectedValueOnce(cause);
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const state = profileState();
+    const palette = [
+      { color: '#ffd400', meaning: 'Key idea', name: 'Yellow' },
+      { color: '#5fb236', meaning: 'Definition', name: 'Green' },
+    ];
+    const profileValue: ReaderProfileState = {
+      ...state.value,
+      annotations: { ...DEFAULT_SETTINGS.annotations, palette },
+    };
+    const shell = capturingShellFactory();
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      profileValue,
+    );
+    await controller.open(pdf, createDiv());
+
+    createdViewport.emitSelection(pdfSelection('writer-failure'));
+    shell.created.root
+      .querySelector<HTMLButtonElement>('[data-selection-color="#5fb236"]')
+      ?.click();
+
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledWith(
+        'Could not create selection annotation: writer rejected annotation',
+        undefined,
+      );
+    });
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to edit PDF annotation', {
+      action: 'create selection annotation',
+      path: pdf.path,
+      intent: 'highlight',
+      token: 'writer-failure',
+      cause,
+    });
+
+    shell.send({ tool: 'highlight', type: 'set-annotation-tool' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setQuickHighlight).toHaveBeenLastCalledWith({
+        color: '#5fb236',
+        enabled: true,
+      });
+    });
     await controller.close();
   });
   it('exports lazily loaded canonical annotations only after explicit toolbar intent', async () => {
@@ -2224,6 +2284,43 @@ describe('ReaderController', () => {
       profile: 'dark',
       cause,
     });
+  });
+
+  it('reports a failed remembered-layout write without changing the active layout', async () => {
+    const [pdf] = files('Books/Layout-persistence-failure.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const adapter = adapterFor(pdf.path, createdSession);
+    const profiles = profileState({ rememberLayoutPerDocument: true });
+    const cause = new Error('layout settings write failed');
+    profiles.updateLayout.mockRejectedValueOnce(cause);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      profiles.value,
+    );
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    const layout = { pages: 'facing', scrolling: 'page-by-page' } as const;
+
+    shell.send({ type: 'set-layout', layout });
+    await vi.waitFor(() => {
+      expect(notice).toHaveBeenCalledWith(
+        'Could not remember page layout: layout settings write failed',
+        undefined,
+      );
+    });
+
+    expect(createdViewport.setLayout).toHaveBeenLastCalledWith(layout);
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to remember PDF page layout', {
+      fingerprint: pdf.path,
+      layout,
+      cause,
+    });
+    await controller.close();
   });
 
   it('falls back to Default when persisted settings contain an unknown profile id', async () => {

@@ -19,8 +19,24 @@ async function openPdf(): Promise<void> {
 async function closeReaders(): Promise<void> {
   await browser.executeObsidian(async ({ app }) => {
     for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
-      await leaf.setViewState({ type: 'empty', state: {} });
+      const controller = (leaf.view as unknown as { controller?: { close(): Promise<void> } })
+        .controller;
+      await controller?.close();
     }
+    app.workspace.detachLeavesOfType('abyss-document-view');
+    const metrics = (
+      window as Window & {
+        __abyssDocumentsPerformance?: {
+          activeAnnotationOperations: { serializations: number; writes: number };
+        };
+      }
+    ).__abyssDocumentsPerformance;
+    if (
+      app.workspace.getLeavesOfType('abyss-document-view').length !== 0 ||
+      metrics?.activeAnnotationOperations.serializations !== 0 ||
+      metrics.activeAnnotationOperations.writes !== 0
+    )
+      throw new Error('Reader teardown did not settle.');
   });
 }
 
@@ -34,6 +50,10 @@ async function countDisplayedExactTooltips(expected: string): Promise<number> {
 
 describe('reader compact toolbar', () => {
   beforeEach(async () => {
+    await browser.executeObsidian(({ app }) => {
+      app.workspace.leftSplit.collapse();
+      app.workspace.rightSplit.collapse();
+    });
     await closeReaders();
     await openPdf();
   });
@@ -67,29 +87,25 @@ describe('reader compact toolbar', () => {
 
     await $('[data-control="page-field"]').click();
     await sidebar.moveTo();
-    let displayedTooltipFound = false;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      await browser.execute(() => {
-        window.focus();
-        const button = document.querySelector<HTMLElement>('[data-control="sidebar"]');
-        const bounds = button?.getBoundingClientRect();
-        button?.dispatchEvent(
-          new PointerEvent('pointerover', {
-            bubbles: true,
-            clientX: bounds?.left ?? 0,
-            clientY: bounds?.top ?? 0,
-            isPrimary: true,
-            pointerType: 'mouse',
-          }),
-        );
-      });
-      await browser.pause(350);
-      if ((await countDisplayedExactTooltips('Toggle sidebar')) > 0) {
-        displayedTooltipFound = true;
-        break;
-      }
-    }
-    expect(displayedTooltipFound).toBe(true);
+    await browser.execute(() => {
+      window.focus();
+      const button = document.querySelector<HTMLElement>('[data-control="sidebar"]');
+      const bounds = button?.getBoundingClientRect();
+      button?.dispatchEvent(
+        new PointerEvent('pointerover', {
+          bubbles: true,
+          clientX: bounds?.left ?? 0,
+          clientY: bounds?.top ?? 0,
+          isPrimary: true,
+          pointerType: 'mouse',
+        }),
+      );
+    });
+    await browser.waitUntil(async () => (await countDisplayedExactTooltips('Toggle sidebar')) > 0, {
+      interval: 100,
+      timeout: 3_000,
+      timeoutMsg: 'Native toolbar tooltip did not become visible.',
+    });
     const tooltipState = await browser.execute((expected) => {
       const button = document.querySelector<HTMLElement>('[data-control="sidebar"]');
       const bounds = button?.getBoundingClientRect();
@@ -207,12 +223,16 @@ describe('reader compact toolbar', () => {
     await expect(quick).toHaveAttribute('aria-pressed', 'true');
 
     const quickMenu = $('[data-control="quick-highlight-menu"]');
-    await quickMenu.click();
+    await browser.execute(() => {
+      document.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]')?.focus();
+    });
+    await browser.keys(['ArrowDown']);
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await expect($('.menu')).toHaveText(expect.stringContaining('Yellow'));
     await $('[data-control="page-field"]').click();
     await expect($('.menu')).not.toBeDisplayed();
     await expect(quickMenu).toHaveAttribute('aria-expanded', 'false');
+    await expect(quick).toHaveAttribute('aria-pressed', 'true');
     expect(
       await browser.execute(
         () => (document.activeElement as HTMLElement | null)?.dataset['control'] ?? '',
@@ -232,6 +252,8 @@ describe('reader compact toolbar', () => {
         () => (document.activeElement as HTMLElement | null)?.dataset['control'] ?? '',
       ),
     ).toBe('quick-highlight-menu');
+    await browser.keys(['Escape']);
+    await expect(quick).toHaveAttribute('aria-pressed', 'false');
 
     const more = $('[data-control="overflow"]');
     await browser.execute(() => {
@@ -328,5 +350,37 @@ describe('reader compact toolbar', () => {
     expect(menuText).toContain('Fit width');
     expect(menuText).toContain('Fit page');
     expect(menuText).toContain('Fit height');
+  });
+
+  it('keeps the toolbar single-row and contained across its responsive boundary', async () => {
+    for (const width of [761, 760, 680, 390]) {
+      const geometry = await browser.execute((readerWidth) => {
+        const reader = document.querySelector<HTMLElement>('.abyss-documents');
+        if (reader === null) throw new Error('Reader is missing.');
+        const toolbar = reader.querySelector<HTMLElement>('.abyss-reader-toolbar');
+        if (toolbar === null) throw new Error('Reader toolbar is missing.');
+        reader.setAttribute(
+          'style',
+          `align-self: flex-start; width: ${readerWidth}px; max-width: ${readerWidth}px`,
+        );
+        const visible = Array.from(
+          toolbar.querySelectorAll<HTMLElement>('[data-toolbar-control], [data-control-group]'),
+        ).filter((element) => element.offsetParent !== null);
+        const centers = visible.map((element) => {
+          const bounds = element.getBoundingClientRect();
+          return Math.round(bounds.top + bounds.height / 2);
+        });
+        const fit = toolbar.querySelector<HTMLElement>('.abyss-reader-fit-control');
+        return {
+          centers,
+          clientWidth: toolbar.clientWidth,
+          fitVisible: fit?.offsetParent !== null,
+          scrollWidth: toolbar.scrollWidth,
+        };
+      }, width);
+      expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
+      expect(Math.max(...geometry.centers) - Math.min(...geometry.centers)).toBeLessThanOrEqual(1);
+      expect(geometry.fitVisible).toBe(width > 760);
+    }
   });
 });

@@ -1,4 +1,4 @@
-export interface PdfSelectionRect {
+interface PdfSelectionRect {
   readonly left: number;
   readonly top: number;
   readonly right: number;

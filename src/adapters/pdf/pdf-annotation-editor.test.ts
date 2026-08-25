@@ -354,6 +354,58 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(modes).toEqual(['neutral', 'ink', 'freetext', 'neutral', 'disabled']);
   });
 
+  it('hardens public selection, mode, id, and native-editor boundaries', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    uiManager.getEditor.mockImplementation((internalId: string) => {
+      if (internalId === 'valid') return selectedEditor('public-id', 9);
+      if (internalId === 'blank-uid') return selectedEditor('   ', 9);
+      if (internalId === 'unknown-mode') return selectedEditor('public-id', 99);
+      if (internalId === 'invalid-mode') return { mode: '9', uid: 'public-id' };
+      return undefined;
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    await expect(
+      fixtureValue.editor.editAnnotation({ editComment: false, id: '   ', kind: 'highlight' }),
+    ).rejects.toMatchObject({ name: 'InvalidStateError' });
+    expect(fixtureValue.editor.resolveNativeEditor(' valid ')).toEqual({
+      id: 'public-id',
+      kind: 'highlight',
+      mode: 9,
+    });
+    expect(fixtureValue.editor.resolveNativeEditor('missing')).toBeNull();
+    expect(fixtureValue.editor.resolveNativeEditor('blank-uid')).toBeNull();
+    expect(fixtureValue.editor.resolveNativeEditor('invalid-mode')).toBeNull();
+    expect(fixtureValue.editor.resolveNativeEditor('unknown-mode')).toBeNull();
+
+    const selectionListener = vi.fn();
+    fixtureValue.editor.onSelection(selectionListener);
+    expect(fixtureValue.selectionObserver.onSelection).toHaveBeenCalledExactlyOnceWith(
+      selectionListener,
+    );
+
+    const modes: string[] = [];
+    const unsubscribe = fixtureValue.editor.onMode((mode) => modes.push(mode));
+    expect(modes).toEqual(['neutral']);
+    unsubscribe();
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 15,
+    });
+    expect(modes).toEqual(['neutral']);
+
+    fixtureValue.editor.destroy();
+    expect(fixtureValue.editor.resolveNativeEditor('valid')).toBeNull();
+    const inertCleanup = fixtureValue.editor.onMode(() => {
+      throw new Error('Destroyed mode listeners must stay inert.');
+    });
+    inertCleanup();
+  });
+
   it('does not double-create while quick highlight is armed', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();

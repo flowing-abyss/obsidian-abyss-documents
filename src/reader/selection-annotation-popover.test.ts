@@ -187,6 +187,98 @@ describe('SelectionAnnotationPopover', () => {
     host.remove();
   });
 
+  it('supports the full roving-key matrix and ignores unsupported keyboard targets', () => {
+    const { host, intents, popover } = createPopover();
+    const runFrame = runNextFrame(host);
+    popover.open({ onIntent: (intent) => intents.push(intent), palette, selection: selection() });
+    runFrame();
+    const buttons = Array.from(popover.element.querySelectorAll<HTMLButtonElement>('button'));
+    const key = (target: EventTarget, value: string) => {
+      const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: value });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+    if (first === undefined || last === undefined) throw new Error('Expected action buttons.');
+    first.focus();
+    expect(key(first, 'ArrowLeft').defaultPrevented).toBe(true);
+    expect(host.doc.activeElement).toBe(last);
+    expect(key(last, 'ArrowDown').defaultPrevented).toBe(true);
+    expect(host.doc.activeElement).toBe(first);
+    expect(key(first, 'End').defaultPrevented).toBe(true);
+    expect(host.doc.activeElement).toBe(last);
+    expect(key(last, 'Home').defaultPrevented).toBe(true);
+    expect(host.doc.activeElement).toBe(first);
+    expect(key(first, 'ArrowUp').defaultPrevented).toBe(true);
+    expect(host.doc.activeElement).toBe(last);
+    expect(key(last, 'Enter').defaultPrevented).toBe(false);
+    expect(key(popover.element, 'ArrowRight').defaultPrevented).toBe(false);
+
+    popover.destroy();
+    host.remove();
+  });
+
+  it('dismisses on an outside pointer and restores focus to the document body without a host', () => {
+    const { host, intents, popover } = createPopover();
+    const invoker = host.createEl('button');
+    invoker.focus();
+    const runFrame = runNextFrame(host);
+    popover.open({ onIntent: (intent) => intents.push(intent), palette, selection: selection() });
+    runFrame();
+    invoker.remove();
+    host.remove();
+
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+
+    expect(popover.isOpen).toBe(false);
+    expect(intents).toEqual([{ type: 'dismiss' }]);
+    expect(document.activeElement).toBe(document.body);
+    popover.destroy();
+  });
+
+  it('ignores malformed or stale action buttons and uses the default metadata color', () => {
+    const { host, intents, popover } = createPopover();
+    const runFrame = runNextFrame(host);
+
+    popover.open({ onIntent: (intent) => intents.push(intent), palette, selection: selection() });
+    runFrame();
+    const swatch = popover.element.querySelector<HTMLButtonElement>('[data-selection-color]');
+    if (swatch === null) throw new Error('Expected swatch.');
+    delete swatch.dataset['selectionColor'];
+    swatch.click();
+    expect(popover.isOpen).toBe(true);
+
+    const comment = popover.element.querySelector<HTMLButtonElement>(
+      '[data-selection-intent="comment"]',
+    );
+    if (comment === null) throw new Error('Expected comment action.');
+    comment.dataset['selectionIntent'] = 'unknown';
+    comment.click();
+    expect(popover.isOpen).toBe(true);
+
+    popover.close();
+    comment.click();
+    expect(intents).toEqual([]);
+
+    popover.open({
+      onIntent: (intent) => intents.push(intent),
+      palette: [],
+      selection: selection(),
+    });
+    runFrame();
+    popover.element.querySelector<HTMLButtonElement>('[data-selection-intent="tag"]')?.click();
+    expect(intents).toEqual([{ color: '#ffd400', type: 'tag' }]);
+
+    popover.destroy();
+    popover.destroy();
+    expect(() => {
+      popover.open({ onIntent: vi.fn(), palette, selection: selection() });
+    }).toThrow(expect.objectContaining({ name: 'InvalidStateError' }));
+    host.remove();
+  });
+
   it('returns focus without forcing comment focus', () => {
     const { host, intents, popover } = createPopover();
     const invoker = host.createEl('button');

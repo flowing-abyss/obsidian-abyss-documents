@@ -127,6 +127,90 @@ describe('ReaderShell', () => {
     shell.destroy();
     host.remove();
   });
+
+  it('leaves Escape available to an open Obsidian menu before disarming Quick Highlight', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar([], null);
+    shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
+    const menu = document.body.createDiv({ cls: 'menu' });
+    vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({
+      bottom: 80,
+      height: 40,
+      left: 40,
+      right: 120,
+      top: 40,
+      width: 80,
+      x: 40,
+      y: 40,
+      toJSON: () => undefined,
+    });
+    const trigger = shell.root.createEl('button');
+    trigger.setAttribute('aria-expanded', 'true');
+    trigger.setAttribute('aria-haspopup', 'menu');
+    const escape = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'Escape',
+    });
+
+    trigger.dispatchEvent(escape);
+
+    expect(escape.defaultPrevented).toBe(false);
+    expect(intents).toEqual([]);
+    menu.remove();
+    shell.destroy();
+    host.remove();
+  });
+
+  it('disarms Quick Highlight when only a hidden stale Obsidian menu remains', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar([], null);
+    shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
+    const menu = document.body.createDiv({ cls: 'menu' });
+    menu.hidden = true;
+
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(intents).toEqual([{ tool: 'select', type: 'set-annotation-tool' }]);
+    menu.remove();
+    shell.destroy();
+    host.remove();
+  });
+
+  it('disarms Quick Highlight while an unrelated visible Obsidian menu is open', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar([], null);
+    shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
+    const unrelatedMenu = document.body.createDiv({ cls: 'menu' });
+    vi.spyOn(unrelatedMenu, 'getBoundingClientRect').mockReturnValue({
+      bottom: 80,
+      height: 40,
+      left: 40,
+      right: 120,
+      top: 40,
+      width: 80,
+      x: 40,
+      y: 40,
+      toJSON: () => undefined,
+    });
+
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(intents).toEqual([{ tool: 'select', type: 'set-annotation-tool' }]);
+    unrelatedMenu.remove();
+    shell.destroy();
+    host.remove();
+  });
   it('starts with the sidebar absent from layout', () => {
     const host = createDiv();
 

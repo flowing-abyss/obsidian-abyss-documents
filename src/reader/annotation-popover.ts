@@ -5,6 +5,8 @@ export interface AnnotationPopoverRequest {
   readonly canDeleteAnnotation?: boolean | undefined;
   readonly color?: string | undefined;
   readonly comment: string;
+  readonly deferFocus?: boolean | undefined;
+  readonly protectFocus?: boolean | undefined;
   readonly onChange: (comment: string) => boolean | void;
   readonly onColor?: ((color: string) => void) | undefined;
   readonly onClose: (reason: AnnotationCommentCloseReason) => void;
@@ -40,6 +42,8 @@ export class AnnotationPopover {
   private active: AnnotationPopoverRequest | null = null;
   private passiveEdit: (() => void) | null = null;
   private previousFocus: HTMLElement | null = null;
+  private focusFrame: number | null = null;
+  private externalFocusIntent = false;
   private destroyed = false;
   private mutationClose: AnnotationCommentCloseReason | null = null;
   private suggestionItems: readonly LinkSuggestion[] = [];
@@ -111,12 +115,71 @@ export class AnnotationPopover {
     this.listen(this.input, 'select', () => {
       this.updateSuggestions();
     });
+    this.registerFocusProtection();
+  }
+
+  private registerFocusProtection(): void {
     this.listen(this.input, 'focusout', (event) => {
       const related = event.relatedTarget;
-      if (related instanceof ownerWindow(this.host).HTMLElement && this.element.contains(related))
+      if (related instanceof ownerWindow(this.host).HTMLElement && this.element.contains(related)) {
+        this.externalFocusIntent = false;
         return;
+      }
+      if (this.active?.protectFocus === true && !this.externalFocusIntent) {
+        this.scheduleInputFocus();
+        return;
+      }
+      this.externalFocusIntent = false;
       this.close(false, 'blur');
     });
+    const markPointerFocusIntent = (event: PointerEvent): void => {
+      const target = event.target;
+      if (
+        this.active !== null &&
+        target instanceof ownerWindow(this.host).Element &&
+        !this.element.contains(target)
+      )
+        this.externalFocusIntent = true;
+    };
+    const markKeyboardFocusIntent = (event: KeyboardEvent): void => {
+      if (this.active !== null && event.key === 'Tab') this.externalFocusIntent = true;
+    };
+    const clearUntransferredPointerIntent = (): void => {
+      const activeElement = this.host.ownerDocument.activeElement;
+      if (
+        this.active !== null &&
+        (activeElement === this.input || this.element.contains(activeElement))
+      )
+        this.externalFocusIntent = false;
+    };
+    this.host.ownerDocument.addEventListener('pointerdown', markPointerFocusIntent, true);
+    this.host.ownerDocument.addEventListener('pointerup', clearUntransferredPointerIntent, true);
+    this.host.ownerDocument.addEventListener(
+      'pointercancel',
+      clearUntransferredPointerIntent,
+      true,
+    );
+    this.host.ownerDocument.addEventListener('keydown', markKeyboardFocusIntent, true);
+    this.cleanups.push(
+      () => {
+        this.host.ownerDocument.removeEventListener('pointerdown', markPointerFocusIntent, true);
+      },
+      () => {
+        this.host.ownerDocument.removeEventListener(
+          'pointerup',
+          clearUntransferredPointerIntent,
+          true,
+        );
+        this.host.ownerDocument.removeEventListener(
+          'pointercancel',
+          clearUntransferredPointerIntent,
+          true,
+        );
+      },
+      () => {
+        this.host.ownerDocument.removeEventListener('keydown', markKeyboardFocusIntent, true);
+      },
+    );
   }
 
   private createSuggestions(owner: ReturnType<typeof ownerWindow>): HTMLDivElement {
@@ -137,6 +200,7 @@ export class AnnotationPopover {
     const owner = ownerWindow(this.host);
     this.capturePreviousFocus(owner);
     this.active = request;
+    this.externalFocusIntent = false;
     this.passiveEdit = null;
     this.input.hidden = false;
     this.input.value = request.comment;
@@ -148,8 +212,8 @@ export class AnnotationPopover {
     this.renderActions(request);
     this.element.hidden = false;
     this.place(request.x, request.y, owner);
-    this.input.focus();
-    this.input.setSelectionRange(this.input.value.length, this.input.value.length);
+    if (request.deferFocus === true) this.scheduleInputFocus(request);
+    else this.focusInput();
   }
 
   openPassive(request: AnnotationPassivePopupRequest): void {
@@ -186,9 +250,11 @@ export class AnnotationPopover {
   close(restoreFocus = false, reason: AnnotationCommentCloseReason = 'external'): void {
     if (this.mutationClose !== null) return;
     if (this.element.hidden) return;
+    this.cancelFocusFrame();
     const request = this.active;
     this.element.hidden = true;
     this.active = null;
+    this.externalFocusIntent = false;
     this.passiveEdit = null;
     if (restoreFocus) this.previousFocus?.focus();
     this.previousFocus = null;
@@ -215,6 +281,26 @@ export class AnnotationPopover {
     this.close(false);
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     this.element.remove();
+  }
+
+  private focusInput(): void {
+    this.input.focus();
+    this.input.setSelectionRange(this.input.value.length, this.input.value.length);
+  }
+
+  private scheduleInputFocus(request = this.active): void {
+    this.cancelFocusFrame();
+    if (request === null) return;
+    this.focusFrame = ownerWindow(this.host).requestAnimationFrame(() => {
+      this.focusFrame = null;
+      if (this.active === request) this.focusInput();
+    });
+  }
+
+  private cancelFocusFrame(): void {
+    if (this.focusFrame === null) return;
+    ownerWindow(this.host).cancelAnimationFrame(this.focusFrame);
+    this.focusFrame = null;
   }
 
   private button(action: string, label: string, text: string): HTMLButtonElement {

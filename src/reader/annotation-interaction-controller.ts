@@ -247,5 +247,7 @@ function selectionAction(
 }
 
 function isAbortFailure(cause: unknown): boolean {
-  return cause instanceof Error && cause.name === 'AbortError';
+  return (
+    typeof cause === 'object' && cause !== null && 'name' in cause && cause.name === 'AbortError'
+  );
 }

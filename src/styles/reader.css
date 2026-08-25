@@ -337,7 +337,7 @@
 }
 
 .abyss-documents .abyss-reader-sidebar[hidden],
-.abyss-documents .abyss-reader-sidebar-panel[hidden] {
+.abyss-documents .abyss-reader-sidebar-panels > [role='tabpanel'][hidden] {
   display: none;
 }
 
@@ -1199,6 +1199,10 @@
   .abyss-documents .abyss-reader-search-input,
   .abyss-documents [data-action='retry'] {
     min-height: 2.75rem;
+  }
+
+  .abyss-documents .abyss-reader-toolbar-page-field {
+    min-width: 2.75rem;
   }
 
   /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */

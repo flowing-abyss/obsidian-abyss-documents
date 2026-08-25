@@ -41,7 +41,11 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
   const modeListeners = new Set<(value: PdfAnnotationLogicalMode) => void>();
   const selectionListeners = new Set<(value: PdfTextSelection | null) => void>();
   const commitSelection = vi.fn(
-    async (_token: string, _action: PdfSelectionAction): Promise<'created'> => 'created',
+    async (
+      _token: string,
+      _action: PdfSelectionAction,
+      _signal?: AbortSignal,
+    ): Promise<'created'> => 'created',
   );
   const setQuickHighlight = vi.fn(
     async (state: { readonly enabled: boolean; readonly color: string }): Promise<void> => {
@@ -93,6 +97,8 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
     opened,
     observedColors,
     observedModes,
+    modeListenerCount: () => modeListeners.size,
+    selectionListenerCount: () => selectionListeners.size,
     setQuickHighlight,
     states,
   };
@@ -280,5 +286,130 @@ describe('AnnotationInteractionController', () => {
     expect(test.commitSelection).not.toHaveBeenCalled();
     expect(test.setQuickHighlight).not.toHaveBeenCalled();
     test.controller.destroy();
+  });
+
+  it('rejects unsupported or closed tool requests and releases native listeners once', () => {
+    const test = fixture();
+
+    expect(test.controller.requestTool('ink')).toBe(false);
+    expect(test.controller.quickHighlightArmed).toBe(false);
+    expect(test.modeListenerCount()).toBe(1);
+    expect(test.selectionListenerCount()).toBe(1);
+
+    test.controller.destroy();
+    test.controller.destroy();
+
+    expect(test.controller.requestTool('highlight')).toBe(false);
+    expect(test.controller.selectColor('#5fb236')).toBe(false);
+    expect(test.modeListenerCount()).toBe(0);
+    expect(test.selectionListenerCount()).toBe(0);
+    expect(test.setQuickHighlight).not.toHaveBeenCalled();
+  });
+
+  it('updates the available palette and reapplies an armed semantic color', async () => {
+    const test = fixture('quick-highlight');
+
+    expect(test.controller.quickHighlightArmed).toBe(true);
+    expect(test.controller.selectColor('#5FB236')).toBe(true);
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
+        color: '#5FB236',
+        enabled: true,
+      });
+    });
+
+    test.controller.updatePalette([{ color: '#e56eee', meaning: 'Question', name: 'Magenta' }]);
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
+        color: '#e56eee',
+        enabled: true,
+      });
+    });
+    expect(test.controller.color).toBe('#e56eee');
+    expect(test.observedColors).toEqual(['#5FB236', '#e56eee']);
+
+    test.controller.destroy();
+    test.controller.updatePalette(palette);
+    expect(test.controller.color).toBe('#e56eee');
+  });
+
+  it('keeps palette selection passive outside neutral and quick modes', () => {
+    for (const mode of ['ink', 'freetext', 'disabled'] as const) {
+      const test = fixture(mode);
+      expect(test.controller.selectColor('#5fb236')).toBe(false);
+      expect(test.controller.color).toBe('#ffd400');
+      expect(test.observedColors).toEqual([]);
+      expect(test.setQuickHighlight).not.toHaveBeenCalled();
+      test.controller.destroy();
+    }
+
+    const neutral = fixture();
+    expect(neutral.controller.selectColor('#ffd400')).toBe(true);
+    expect(neutral.observedColors).toEqual([]);
+    expect(neutral.setQuickHighlight).not.toHaveBeenCalled();
+    neutral.controller.destroy();
+  });
+
+  it('ignores dismissed and stale selection intents', () => {
+    const test = fixture();
+    test.emitSelection(textSelection('first'));
+    const first = test.opened[0];
+    test.emitSelection(textSelection('second'));
+
+    first?.onIntent({ color: '#5fb236', type: 'highlight' });
+    test.opened[1]?.onIntent({ type: 'dismiss' });
+
+    expect(test.commitSelection).not.toHaveBeenCalled();
+    expect(test.controller.color).toBe('#ffd400');
+    test.controller.destroy();
+  });
+
+  it('reports a current commit failure with intent context but suppresses abort failures', async () => {
+    const failed = fixture();
+    const cause = new Error('writer rejected annotation');
+    failed.commitSelection.mockRejectedValueOnce(cause);
+    failed.emitSelection(textSelection('failure-token'));
+    failed.opened[0]?.onIntent({ color: '#5fb236', type: 'tag' });
+
+    await vi.waitFor(() => {
+      expect(failed.failures).toEqual([{ action: 'create selection annotation', cause }]);
+    });
+    expect(failed.closeSelectionPopover).toHaveBeenCalled();
+    failed.controller.destroy();
+
+    const aborted = fixture();
+    aborted.commitSelection.mockRejectedValueOnce(new DOMException('cancelled', 'AbortError'));
+    aborted.emitSelection(textSelection('abort-token'));
+    aborted.opened[0]?.onIntent({ color: '#ffd400', type: 'comment' });
+    await vi.waitFor(() => {
+      expect(aborted.commitSelection).toHaveBeenCalledOnce();
+    });
+    await Promise.resolve();
+    expect(aborted.failures).toEqual([]);
+    aborted.controller.destroy();
+  });
+
+  it('aborts an active selection commit during teardown', async () => {
+    const test = fixture();
+    const pending = deferred<'created'>();
+    test.commitSelection.mockImplementationOnce((_token, _action, signal) => {
+      signal?.addEventListener('abort', () => {
+        pending.reject(signal.reason);
+      });
+      return pending.promise;
+    });
+    test.emitSelection(textSelection('pending'));
+    test.opened[0]?.onIntent({ color: '#ffd400', type: 'highlight' });
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledOnce();
+    });
+
+    const signal = test.commitSelection.mock.calls[0]?.[2];
+    test.controller.destroy();
+
+    expect(signal?.aborted).toBe(true);
+    expect(signal?.reason).toMatchObject({ name: 'AbortError' });
+    await Promise.resolve();
+    expect(test.failures).toEqual([]);
   });
 });

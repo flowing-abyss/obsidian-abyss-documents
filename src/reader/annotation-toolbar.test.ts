@@ -126,6 +126,49 @@ describe('AnnotationToolbar', () => {
     host.remove();
   });
 
+  it('opens the Quick Highlight palette with ArrowDown and leaves other keys untouched', () => {
+    const addItem = vi.spyOn(Menu.prototype, 'addItem');
+    const host = document.body.createDiv();
+    const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
+    const trigger = host.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]');
+    if (trigger === null) throw new Error('Expected Quick Highlight menu.');
+
+    const ignored = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' });
+    trigger.dispatchEvent(ignored);
+    expect(ignored.defaultPrevented).toBe(false);
+    expect(addItem).not.toHaveBeenCalled();
+
+    const open = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'ArrowDown',
+    });
+    trigger.dispatchEvent(open);
+    expect(open.defaultPrevented).toBe(true);
+    expect(addItem).toHaveBeenCalledTimes(palette.length);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('toggles active Quick Highlight and Ink tools back to Select', () => {
+    const host = document.body.createDiv();
+    const onIntent = vi.fn();
+    const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
+
+    toolbar.setTool('highlight');
+    host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')?.click();
+    expect(onIntent).toHaveBeenLastCalledWith({ type: 'set-annotation-tool', tool: 'select' });
+
+    toolbar.setTool('ink');
+    host.querySelector<HTMLButtonElement>('[data-annotation-tool="ink"]')?.click();
+    expect(onIntent).toHaveBeenLastCalledWith({ type: 'set-annotation-tool', tool: 'select' });
+
+    toolbar.destroy();
+    host.remove();
+  });
+
   it('keeps tools visible but disabled with a stable qualified read-only reason', () => {
     const host = document.body.createDiv();
     const toolbar = new AnnotationToolbar(

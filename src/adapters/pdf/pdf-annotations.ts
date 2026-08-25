@@ -107,6 +107,7 @@ async function extractPageAnnotations(
   let batchStartedAt = performance.now();
   for (const [index, annotation] of raw.entries()) {
     throwIfAborted(signal);
+    if (annotation.annotationType === 16) continue;
     batch.push(mapPdfAnnotation(annotation, page, pageNumber - 1, index));
     if (performance.now() < nextDeadline) continue;
     flushBatch(batch, onBatch, batchStartedAt);

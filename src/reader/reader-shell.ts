@@ -208,7 +208,12 @@ export class ReaderShell implements AnnotationInteractionHost {
   }
 
   private handleQuickHighlightEscape(event: KeyboardEvent): boolean {
-    if (event.key !== 'Escape' || !this.quickHighlightState.armed || this.selectionPopover.isOpen)
+    if (
+      event.key !== 'Escape' ||
+      !this.quickHighlightState.armed ||
+      this.selectionPopover.isOpen ||
+      hasOpenReaderMenu(this.root)
+    )
       return false;
     event.preventDefault();
     event.stopPropagation();
@@ -239,6 +244,21 @@ export class ReaderShell implements AnnotationInteractionHost {
         : this.toolbar.sidebarButton;
     this.focusReturn.capture(invoker);
   }
+}
+
+function hasOpenReaderMenu(root: HTMLElement): boolean {
+  const trigger = root.querySelector<HTMLElement>(
+    '[aria-haspopup="menu"][aria-expanded="true"]:not([disabled])',
+  );
+  if (trigger === null) return false;
+  return Array.from(root.ownerDocument.querySelectorAll<HTMLElement>('.menu')).some((menu) => {
+    if (menu.hidden) return false;
+    const style = menu.win.getComputedStyle(menu);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
+      return false;
+    const bounds = menu.getBoundingClientRect();
+    return bounds.width > 0 && bounds.height > 0;
+  });
 }
 
 function isTextEditingTarget(target: EventTarget | null, root: HTMLElement): boolean {

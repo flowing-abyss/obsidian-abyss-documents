@@ -201,4 +201,58 @@ describe('PdfDomSelectionObserver', () => {
     expect(add).toHaveBeenCalledWith('selectionchange', expect.any(Function));
     expect(remove).toHaveBeenCalledWith('selectionchange', expect.any(Function));
   });
+
+  it('cancels pending publication, unsubscribes, and stays inert after teardown', () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const scheduled: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      scheduled.push(callback);
+      return 42;
+    });
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    const unsubscribe = observer.onSelection(listener);
+
+    selectText(document, text);
+    dispatchSelection(document);
+    observer.invalidate();
+
+    expect(cancel).toHaveBeenCalledWith(42);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(null);
+    unsubscribe();
+    unsubscribe();
+    scheduled.shift()?.(0);
+    expect(listener).toHaveBeenCalledOnce();
+
+    observer.destroy();
+    observer.invalidate();
+    const inertCleanup = observer.onSelection(listener);
+    inertCleanup();
+    dispatchSelection(document);
+    root.dispatchEvent(new Event('pointerdown'));
+    root.dispatchEvent(new Event('touchstart'));
+    root.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }));
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('dismisses whitespace-only text-layer selections', async () => {
+    const root = selectionRoot();
+    const layer = root.querySelector('.textLayer');
+    if (layer === null) throw new Error('Expected a text layer.');
+    const whitespace = document.createTextNode('   \n  ');
+    layer.replaceChildren(whitespace);
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    selectText(document, whitespace, 0, whitespace.data.length);
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(null);
+    observer.destroy();
+  });
 });

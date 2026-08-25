@@ -214,6 +214,42 @@ describe('AnnotationPopover', () => {
     host.remove();
   });
 
+  it('clears a prevented outside pointer intent before later protected focus churn', () => {
+    const host = document.body.createDiv();
+    const outside = document.body.createEl('button');
+    outside.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+    });
+    const onClose = vi.fn();
+    const popover = new AnnotationPopover(host);
+    popover.open({
+      comment: 'Protected',
+      onChange: vi.fn(),
+      onClose,
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      protectFocus: true,
+      x: 0,
+      y: 0,
+    });
+    const input = host.querySelector<HTMLTextAreaElement>('textarea');
+    if (input === null) throw new Error('Expected protected annotation input.');
+    outside.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' }),
+    );
+    outside.dispatchEvent(
+      new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse' }),
+    );
+
+    input.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+
+    expect(popover.element.hidden).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+    popover.destroy();
+    outside.remove();
+    host.remove();
+  });
+
   it('fires one close reason for blur Escape delete and external close', () => {
     const cases = [
       ['blur', 'blur'],

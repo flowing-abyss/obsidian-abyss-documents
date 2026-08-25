@@ -109,8 +109,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   private popupSelected = false;
   private popupVisible = false;
   private sidebarUiManager: PdfCommentUiManager | null = null;
+  private activeDialogEditor: PdfCommentEditor | null = null;
   private activeDialogReservation: PendingCommentDialogReservation | null = null;
   private nextDialogReservation: PendingCommentDialogReservation | null = null;
+  private nativeMutationDepth = 0;
   private disposed = false;
 
   constructor(
@@ -188,6 +190,13 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     posY: number,
     options?: { readonly height?: number | undefined },
   ): Promise<void> {
+    if (
+      this.nextDialogReservation === null &&
+      this.activeDialogReservation !== null &&
+      sameCommentEditor(this.activeDialogEditor, editor) &&
+      !this.dialogElement.hidden
+    )
+      return;
     const reservation = this.nextDialogReservation;
     try {
       if (this.disposed)
@@ -198,18 +207,22 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         reservation.clearOpenTimeout();
         reservation.active = true;
         this.activeDialogReservation = reservation;
+        this.activeDialogEditor = editor;
       }
       const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
       const readOnlyReason = annotationReadOnlyReason(editor, manager);
       this.applyDialogHeight(options?.height);
       const editable = readOnlyReason === undefined && manager !== null;
       const comment = reservation?.seed ?? data.contentsObj?.str ?? '';
-      if (reservation !== null) editor.comment = comment;
+      let changed = false;
       this.popover.open({
         ...(editable ? this.colorActions(editor, data, manager) : {}),
         canDeleteAnnotation: editable,
         comment,
+        deferFocus: reservation !== null,
+        protectFocus: reservation !== null,
         onChange: (comment) => {
+          changed = true;
           return this.mutate('save-comment', () => {
             editor.comment = comment;
           });
@@ -225,6 +238,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
           });
         },
         onClose: (reason) => {
+          this.commitAcceptedSeed(reservation, { changed, comment, reason }, editor);
           this.closeReservation(reservation, reason);
         },
         ...(readOnlyReason === undefined ? {} : { readOnlyReason }),
@@ -272,6 +286,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   destroyPopup(): void {
+    if (this.activeDialogReservation !== null || this.nativeMutationDepth > 0) return;
     this.popover.close(false);
     this.releasePopupState();
   }
@@ -350,6 +365,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     reservation.settled = true;
     reservation.cleanup();
     if (this.activeDialogReservation === reservation) this.activeDialogReservation = null;
+    if (this.activeDialogReservation === null) this.activeDialogEditor = null;
     reservation.resolveClosed(reason);
   }
 
@@ -359,6 +375,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     reservation.cleanup();
     if (this.nextDialogReservation === reservation) this.nextDialogReservation = null;
     if (this.activeDialogReservation === reservation) this.activeDialogReservation = null;
+    if (this.activeDialogReservation === null) this.activeDialogEditor = null;
     if (!reservation.isOpen) reservation.rejectOpened(cause);
     reservation.rejectClosed(cause);
     if (reservation.active) this.popover.close(false, 'external');
@@ -475,6 +492,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   private mutate(action: PdfCommentMutationFailure['action'], mutation: () => void): boolean {
+    this.nativeMutationDepth += 1;
     try {
       mutation();
       this.options.onNativeMutation?.();
@@ -482,7 +500,31 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     } catch (cause) {
       this.options.onFailure?.({ action, cause });
       return false;
+    } finally {
+      this.nativeMutationDepth -= 1;
     }
+  }
+
+  private commitAcceptedSeed(
+    reservation: PendingCommentDialogReservation | null,
+    state: {
+      readonly changed: boolean;
+      readonly comment: string;
+      readonly reason: AnnotationCommentCloseReason;
+    },
+    editor: PdfCommentEditor,
+  ): void {
+    const { changed, comment, reason } = state;
+    if (
+      reservation === null ||
+      changed ||
+      comment.length === 0 ||
+      (reason !== 'blur' && reason !== 'escape')
+    )
+      return;
+    this.mutate('save-comment', () => {
+      editor.comment = comment;
+    });
   }
 }
 
@@ -546,6 +588,18 @@ function isSupportedNativeEditor(editor: PdfCommentEditor): boolean {
     ((editor.mode === 3 && editor.editorType === 'freetext') ||
       (editor.mode === 9 && editor.editorType === 'highlight') ||
       (editor.mode === 15 && editor.editorType === 'ink'))
+  );
+}
+
+function sameCommentEditor(active: PdfCommentEditor | null, candidate: PdfCommentEditor): boolean {
+  if (active === candidate) return true;
+  const activeId = active?.uid?.trim();
+  const candidateId = candidate.uid?.trim();
+  return (
+    activeId !== undefined &&
+    activeId.length > 0 &&
+    candidateId !== undefined &&
+    candidateId === activeId
   );
 }
 
