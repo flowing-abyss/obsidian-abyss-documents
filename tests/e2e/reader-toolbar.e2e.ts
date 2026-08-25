@@ -66,6 +66,16 @@ describe('reader compact toolbar', () => {
     await expect($('[data-action="redo-annotation"]')).not.toExist();
     await expect($('[data-action="delete-annotation"]')).not.toExist();
 
+    const disclosures = await browser.execute(() =>
+      ['fit-menu', 'quick-highlight-menu'].flatMap((control) => {
+        const element = document.querySelector<HTMLElement>(`[data-control="${control}"]`);
+        if (element?.offsetParent == null) return [];
+        const bounds = element.getBoundingClientRect();
+        return [{ control, height: bounds.height, width: bounds.width }];
+      }),
+    );
+    expect(disclosures.filter(({ height, width }) => height < 32 || width < 32)).toEqual([]);
+
     const sidebar = $('[data-control="sidebar"]');
     await expect(sidebar).toHaveAttribute('aria-label', 'Toggle sidebar');
     await browser.execute(() => {

@@ -49,6 +49,7 @@ export interface PdfCommentMutationFailure {
 }
 
 export interface PdfCommentBridgeOptions {
+  readonly onColorChange?: ((color: string) => void) | undefined;
   readonly onFailure?: ((failure: PdfCommentMutationFailure) => void) | undefined;
   readonly onNativeMutation?: (() => void) | undefined;
 }
@@ -414,10 +415,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       onColor: (color) => {
         const parameter = annotationColorParameter(editor);
         if (parameter === null) return;
-        this.mutate('change-color', () => {
+        const changed = this.mutate('change-color', () => {
           manager.setSelected(editor);
           manager.updateParams(parameter, color);
         });
+        if (changed) this.options.onColorChange?.(color);
       },
     };
   }

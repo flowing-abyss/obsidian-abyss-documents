@@ -504,6 +504,46 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.annotationEditorRequests).toHaveLength(1);
   });
 
+  it('opens a supported annotation from contextmenu without a duplicate click transaction', async () => {
+    const fixture = await mountedViewport(3, {
+      annotations: [{ annotationType: 9, id: 'highlight-1', isEditable: true }],
+    });
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager({ editorType: 'highlight', mode: 9, uid: 'highlight-1' }),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'highlight-1';
+    annotation.createDiv({ cls: 'annotationContent highlight' });
+
+    const contextmenu = new MouseEvent('contextmenu', {
+      bubbles: true,
+      button: 2,
+      cancelable: true,
+    });
+    annotation.dispatchEvent(contextmenu);
+    annotation.click();
+
+    await vi.waitFor(() => {
+      expect(viewer.annotationEditorRequests).toContainEqual({
+        editComment: false,
+        editId: 'highlight-1',
+        mode: 9,
+      });
+    });
+    expect(contextmenu.defaultPrevented).toBe(true);
+    expect(viewer.annotationEditorRequests).toHaveLength(1);
+  });
+
   it('returns to NONE before a dismissing pointer gesture can create another annotation', async () => {
     const fixture = await mountedViewport(3, {
       annotations: [{ annotationType: 9, id: 'highlight-1', isEditable: true }],
@@ -1081,6 +1121,13 @@ describe('PdfDocumentViewport', () => {
     for (const className of ['underlineAnnotation', 'textAnnotation', 'stampAnnotation']) {
       const annotation = layer.createEl('section', { cls: className });
       annotation.dataset['annotationId'] = className;
+      const contextmenu = new MouseEvent('contextmenu', {
+        bubbles: true,
+        button: 2,
+        cancelable: true,
+      });
+      annotation.dispatchEvent(contextmenu);
+      expect(contextmenu.defaultPrevented).toBe(false);
       annotation.click();
     }
     await Promise.resolve();
@@ -1108,9 +1155,16 @@ describe('PdfDocumentViewport', () => {
       .createEl('section', { cls: 'highlightAnnotation' });
     annotation.dataset['annotationId'] = 'locked-highlight';
 
+    const contextmenu = new MouseEvent('contextmenu', {
+      bubbles: true,
+      button: 2,
+      cancelable: true,
+    });
+    annotation.dispatchEvent(contextmenu);
     annotation.click();
     await Promise.resolve();
 
+    expect(contextmenu.defaultPrevented).toBe(false);
     expect(viewer.annotationEditorRequests).toEqual([]);
   });
 
@@ -1235,6 +1289,55 @@ describe('PdfDocumentViewport', () => {
       expect(viewer.annotationEditorRequests).toEqual([]);
     },
   );
+
+  it('evicts a rejected annotation metadata lookup so a second click can succeed', async () => {
+    const fixture = await mountedViewport(3);
+    const cause = new Error('transient annotation metadata failure');
+    const getPage = vi
+      .spyOn(fixture.documentProxy, 'getPage')
+      .mockResolvedValueOnce({
+        getAnnotations: vi.fn(async () => Promise.reject(cause)),
+      } as never)
+      .mockResolvedValue({
+        getAnnotations: vi.fn(async () => [
+          { annotationType: 9, id: 'retry-highlight', isEditable: true },
+        ]),
+      } as never);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager({ editorType: 'highlight', mode: 9, uid: 'retry-highlight' }),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'retry-highlight';
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    annotation.click();
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledWith(
+        '[abyss-documents] Failed to open the PDF annotation editor',
+        expect.objectContaining({ cause, id: 'retry-highlight', pageNumber: 1 }),
+      );
+    });
+    annotation.click();
+
+    await vi.waitFor(() => {
+      expect(viewer.annotationEditorRequests).toContainEqual({
+        editComment: false,
+        editId: 'retry-highlight',
+        mode: 9,
+      });
+    });
+    expect(getPage).toHaveBeenCalledTimes(2);
+  });
 
   it('dismisses stale tokens without a failure Notice', async () => {
     const fixture = await mountedViewport(3);

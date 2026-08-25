@@ -11,6 +11,7 @@ export type SelectionAnnotationIntent =
   | { readonly type: 'dismiss' };
 
 export interface SelectionAnnotationPopoverRequest {
+  readonly color?: string | undefined;
   readonly selection: PdfTextSelection;
   readonly palette: readonly AnnotationPaletteEntry[];
   readonly onIntent: (intent: SelectionAnnotationIntent) => void;
@@ -163,7 +164,10 @@ export class SelectionAnnotationPopover {
     } else {
       const type = metadataIntent(action);
       if (type === null) return;
-      request.onIntent({ color: request.palette[0]?.color ?? DEFAULT_COLOR, type });
+      request.onIntent({
+        color: request.color ?? request.palette[0]?.color ?? DEFAULT_COLOR,
+        type,
+      });
     }
     this.close(false);
   }

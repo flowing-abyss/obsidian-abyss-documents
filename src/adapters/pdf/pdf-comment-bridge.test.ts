@@ -48,8 +48,9 @@ function uiManager(selected: PdfCommentEditor | null = null) {
 describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
   it('routes native comment Link Tag color and trash mutations', async () => {
     const host = document.body.createDiv();
+    const onColorChange = vi.fn();
     const onNativeMutation = vi.fn();
-    const bridge = new PdfCommentBridge(host, { onNativeMutation });
+    const bridge = new PdfCommentBridge(host, { onColorChange, onNativeMutation });
     const native = editor('Existing');
     const manager = uiManager(native);
     await bridge.showDialog(manager, native, 20, 30);
@@ -64,6 +65,7 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
 
     expect(native.comment).toBe('Existing [[Link]] #tag');
     expect(manager.updateParams).toHaveBeenCalledWith(31, '#123456');
+    expect(onColorChange).toHaveBeenCalledExactlyOnceWith('#123456');
     expect(manager.delete).toHaveBeenCalledOnce();
     expect(onNativeMutation).toHaveBeenCalledTimes(4);
     bridge.dispose();

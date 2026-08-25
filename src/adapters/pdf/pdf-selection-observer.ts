@@ -45,6 +45,13 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   private frame: number | null = null;
   private revision = 0;
   private input: PdfTextSelection['input'] = 'keyboard';
+  private pointerGesture: {
+    cancelled: boolean;
+    readonly pointerId: number;
+    readonly pointerType: string;
+  } | null = null;
+  private touchGesture = false;
+  private suppressPointerSelection = false;
   private destroyed = false;
 
   constructor(private readonly root: HTMLElement) {
@@ -56,6 +63,11 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     this.root.addEventListener('pointerdown', this.onPointerDown);
     this.root.addEventListener('touchstart', this.onTouchStart);
     this.root.addEventListener('keydown', this.onKeyDown);
+    this.ownerWindow.addEventListener('pointercancel', this.onPointerCancel, true);
+    this.ownerWindow.addEventListener('pointermove', this.onPointerMove, true);
+    this.ownerWindow.addEventListener('pointerup', this.onPointerUp, true);
+    this.ownerWindow.addEventListener('touchcancel', this.onTouchCancel, true);
+    this.ownerWindow.addEventListener('touchend', this.onTouchEnd, true);
   }
 
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void {
@@ -78,6 +90,9 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     if (this.destroyed) return;
     this.revision += 1;
     this.active = null;
+    this.pointerGesture = null;
+    this.touchGesture = false;
+    this.suppressPointerSelection = true;
     this.cancelFrame();
     this.emit(null);
   }
@@ -91,37 +106,122 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     this.root.removeEventListener('pointerdown', this.onPointerDown);
     this.root.removeEventListener('touchstart', this.onTouchStart);
     this.root.removeEventListener('keydown', this.onKeyDown);
+    this.ownerWindow.removeEventListener('pointercancel', this.onPointerCancel, true);
+    this.ownerWindow.removeEventListener('pointermove', this.onPointerMove, true);
+    this.ownerWindow.removeEventListener('pointerup', this.onPointerUp, true);
+    this.ownerWindow.removeEventListener('touchcancel', this.onTouchCancel, true);
+    this.ownerWindow.removeEventListener('touchend', this.onTouchEnd, true);
     this.listeners.clear();
   }
 
   private readonly onSelectionChange = (): void => {
+    if (
+      this.destroyed ||
+      this.frame !== null ||
+      this.pointerGesture !== null ||
+      this.touchGesture ||
+      this.suppressPointerSelection
+    )
+      return;
+    this.schedulePublication();
+  };
+
+  private schedulePublication(): void {
     if (this.destroyed || this.frame !== null) return;
     this.frame = this.ownerWindow.requestAnimationFrame(() => {
       this.frame = null;
       this.publishCurrentSelection();
     });
-  };
+  }
 
-  private readonly onPointerDown = (): void => {
-    this.input = 'pointer';
+  private readonly onPointerDown = (event: PointerEvent): void => {
+    if (!isPrimaryPointer(event)) return;
+    this.input = event.pointerType === 'touch' ? 'touch' : 'pointer';
+    this.suppressPointerSelection = false;
+    this.pointerGesture = {
+      cancelled: false,
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+    };
+    this.dismissPublishedSelection();
   };
 
   private readonly onTouchStart = (): void => {
     this.input = 'touch';
+    this.suppressPointerSelection = false;
+    this.touchGesture = true;
+    this.dismissPublishedSelection();
   };
 
   private readonly onKeyDown = (): void => {
+    if (this.pointerGesture !== null || this.touchGesture) return;
     this.input = 'keyboard';
+    this.suppressPointerSelection = false;
+  };
+
+  private readonly onPointerMove = (event: PointerEvent): void => {
+    const gesture = this.pointerGesture;
+    if (gesture === null || !samePointer(event, gesture.pointerId) || gesture.cancelled) return;
+    if (eventTargetInside(event, this.root)) return;
+    gesture.cancelled = true;
+    if (gesture.pointerType === 'touch') this.touchGesture = false;
+    this.dismissPublishedSelection();
+  };
+
+  private readonly onPointerCancel = (event: PointerEvent): void => {
+    const gesture = this.pointerGesture;
+    if (gesture === null || !samePointer(event, gesture.pointerId)) return;
+    gesture.cancelled = true;
+    if (gesture.pointerType === 'touch') this.touchGesture = false;
+    this.pointerGesture = null;
+    this.suppressPointerSelection = true;
+    this.dismissPublishedSelection();
+  };
+
+  private readonly onPointerUp = (event: PointerEvent): void => {
+    const gesture = this.pointerGesture;
+    if (gesture === null || !samePointer(event, gesture.pointerId)) return;
+    const cancelled = gesture.cancelled || !eventTargetInside(event, this.root);
+    if (gesture.pointerType === 'touch') this.touchGesture = false;
+    this.pointerGesture = null;
+    if (cancelled) {
+      this.suppressPointerSelection = true;
+      this.dismissPublishedSelection();
+      return;
+    }
+    this.suppressPointerSelection = false;
+    this.schedulePublication();
+  };
+
+  private readonly onTouchCancel = (): void => {
+    if (!this.touchGesture) return;
+    this.touchGesture = false;
+    this.suppressPointerSelection = true;
+    this.dismissPublishedSelection();
+  };
+
+  private readonly onTouchEnd = (event: TouchEvent): void => {
+    if (!this.touchGesture) return;
+    this.touchGesture = false;
+    if (!eventTargetInside(event, this.root)) {
+      this.suppressPointerSelection = true;
+      this.dismissPublishedSelection();
+      return;
+    }
+    this.suppressPointerSelection = false;
+    this.schedulePublication();
   };
 
   private publishCurrentSelection(): void {
     const identity = this.selectionIdentity();
-    this.revision += 1;
     if (identity === null) {
+      this.revision += 1;
       this.active = null;
       this.emit(null);
       return;
     }
+    if (this.active !== null && sameSelection(identity, this.active)) return;
+    this.revision += 1;
     const token = `${this.session}.${this.revision}.${++nextSelectionIdentity}`;
     this.active = { ...identity, token };
     this.emit({
@@ -152,11 +252,57 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     for (const listener of this.listeners) listener(selection);
   }
 
+  private dismissPublishedSelection(): void {
+    this.cancelFrame();
+    if (this.active === null) return;
+    this.revision += 1;
+    this.active = null;
+    this.emit(null);
+  }
+
   private cancelFrame(): void {
     if (this.frame === null) return;
     this.ownerWindow.cancelAnimationFrame(this.frame);
     this.frame = null;
   }
+}
+
+function isPrimaryPointer(event: PointerEvent): boolean {
+  return event.button === 0 && event.isPrimary !== false;
+}
+
+function samePointer(event: PointerEvent, pointerId: number): boolean {
+  return event.pointerId === pointerId || event.pointerId === 0 || pointerId === 0;
+}
+
+function eventTargetInside(event: Event, root: HTMLElement): boolean {
+  const point = eventClientPoint(event);
+  if (point !== null && pointOutside(point, root.getBoundingClientRect())) return false;
+  const target = event.target;
+  return target !== null && 'nodeType' in target && root.contains(target as Node);
+}
+
+function eventClientPoint(event: Event): { readonly x: number; readonly y: number } | null {
+  if (
+    'clientX' in event &&
+    'clientY' in event &&
+    typeof event.clientX === 'number' &&
+    typeof event.clientY === 'number'
+  )
+    return { x: event.clientX, y: event.clientY };
+  if (!('changedTouches' in event)) return null;
+  const touch = (event.changedTouches as readonly Touch[] | undefined)?.[0];
+  return touch === undefined ? null : { x: touch.clientX, y: touch.clientY };
+}
+
+function pointOutside(point: { readonly x: number; readonly y: number }, bounds: DOMRect): boolean {
+  if (bounds.width <= 0 && bounds.height <= 0) return false;
+  return (
+    point.x < bounds.left ||
+    point.x > bounds.right ||
+    point.y < bounds.top ||
+    point.y > bounds.bottom
+  );
 }
 
 function closestTextLayer(node: Node, root: HTMLElement): Element | null {

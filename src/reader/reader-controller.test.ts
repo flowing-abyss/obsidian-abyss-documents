@@ -197,6 +197,7 @@ function editableViewport(pageCount = 3) {
 function interactiveViewport(pageCount = 3) {
   const created = editableViewport(pageCount);
   let mode: PdfAnnotationLogicalMode = 'neutral';
+  const colorListeners = new Set<(value: string) => void>();
   const modeListeners = new Set<(value: PdfAnnotationLogicalMode) => void>();
   const selectionListeners = new Set<(value: PdfTextSelection | null) => void>();
   const commitSelection = vi.fn(
@@ -210,6 +211,10 @@ function interactiveViewport(pageCount = 3) {
   );
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
+    onColor(listener) {
+      colorListeners.add(listener);
+      return () => colorListeners.delete(listener);
+    },
     onMode(listener) {
       modeListeners.add(listener);
       listener(mode);
@@ -234,6 +239,9 @@ function interactiveViewport(pageCount = 3) {
     emitMode(next: PdfAnnotationLogicalMode) {
       mode = next;
       for (const listener of modeListeners) listener(next);
+    },
+    emitColor(color: string) {
+      for (const listener of colorListeners) listener(color);
     },
     emitSelection(selection: PdfTextSelection | null) {
       for (const listener of selectionListeners) listener(selection);

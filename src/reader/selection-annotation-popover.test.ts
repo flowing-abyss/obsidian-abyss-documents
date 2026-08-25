@@ -130,7 +130,12 @@ describe('SelectionAnnotationPopover', () => {
     const { host, intents, popover } = createPopover();
     const runFrame = runNextFrame(host);
     const open = () => {
-      popover.open({ onIntent: (intent) => intents.push(intent), palette, selection: selection() });
+      popover.open({
+        color: '#123456',
+        onIntent: (intent) => intents.push(intent),
+        palette,
+        selection: selection(),
+      });
       runFrame();
     };
 
@@ -145,9 +150,9 @@ describe('SelectionAnnotationPopover', () => {
 
     expect(intents).toEqual([
       { color: '#123456', type: 'highlight' },
-      { color: '#ffd400', type: 'comment' },
-      { color: '#ffd400', type: 'link' },
-      { color: '#ffd400', type: 'tag' },
+      { color: '#123456', type: 'comment' },
+      { color: '#123456', type: 'link' },
+      { color: '#123456', type: 'tag' },
     ]);
     expect(
       Array.from(popover.element.querySelectorAll<HTMLButtonElement>('[data-selection-color]')).map(

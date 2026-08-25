@@ -1077,6 +1077,33 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(uiManager.delete).toHaveBeenCalledOnce();
   });
 
+  it('emits one session color for direct and external native color changes', async () => {
+    const { editor, eventBus, viewer } = fixture();
+    const uiManager = manager();
+    const colors: string[] = [];
+    editor.onColor((color) => colors.push(color));
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+
+    await editor.setParameter('ink-color', '#112233');
+    eventBus.dispatch('switchannotationeditorparams', {
+      source: {},
+      type: 31,
+      value: '#ff6666',
+    });
+    eventBus.dispatch('switchannotationeditorparams', { source: {}, type: 31, value: 42 });
+    eventBus.dispatch('switchannotationeditorparams', { source: {}, type: 31, value: ' ' });
+    eventBus.dispatch('switchannotationeditorparams', { source: {}, type: 22, value: 4 });
+
+    expect(colors).toEqual(['#112233', '#ff6666']);
+    editor.destroy();
+    eventBus.dispatch('switchannotationeditorparams', {
+      source: {},
+      type: 12,
+      value: '#000000',
+    });
+    expect(colors).toEqual(['#112233', '#ff6666']);
+  });
+
   it('does not request a mode change when the requested tool is already active', async () => {
     const { changedModes, editor, eventBus, viewer } = fixture();
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
@@ -1316,6 +1343,7 @@ describe('PdfAnnotationEditor save boundary', () => {
 
     const saving = fixtureValue.editor.save(new AbortController().signal);
     fixtureValue.editor.destroy();
+    expect(fixtureValue.eventBus.listeners.get('annotationeditormodechanged')?.size ?? 0).toBe(0);
     fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
       source: fixtureValue.viewer,
       mode: 0,

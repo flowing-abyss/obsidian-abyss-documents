@@ -1083,7 +1083,7 @@ describe('AnnotationsPanel', () => {
     expect(onInsert).toHaveBeenCalledWith(item);
   });
 
-  it('keeps uncommitted annotations pending with no transfer surface', () => {
+  it('keeps uncommitted annotations silent with no transfer surface', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, {
       onNavigate: vi.fn(),
@@ -1094,7 +1094,8 @@ describe('AnnotationsPanel', () => {
     panel.setAnnotations([
       { ...annotation(1), identity: { kind: 'legacy', fingerprint: 'pending' } },
     ]);
-    expect(root.textContent).toContain('Pending save');
+    expect(root.textContent).not.toMatch(/save|autosave|pending/iu);
+    expect(root.querySelector('[data-annotation-provisional="true"]')).not.toBeNull();
     expect(root.querySelector('[draggable="true"]')).toBeNull();
     expect(root.querySelector('[data-action="copy-annotation-link"]')).toBeNull();
     expect(root.querySelector('[data-action="insert-annotation"]')).toBeNull();

@@ -513,6 +513,7 @@ export class AnnotationsPanel {
     button.style.setProperty('--abyss-annotation-color', annotation.color ?? 'transparent');
     button.dataset['annotationId'] = annotationId(annotation);
     button.dataset['annotationRowId'] = this.rowId(annotation);
+    if (annotation.identity.kind !== 'stable') button.dataset['annotationProvisional'] = 'true';
     button.tabIndex = index === this.windowStart ? 0 : -1;
     if (annotationPage(annotation) === this.currentPage)
       button.setAttribute('aria-current', 'location');
@@ -560,12 +561,6 @@ export class AnnotationsPanel {
     meaning.style.setProperty('--abyss-annotation-color', annotation.color ?? 'transparent');
     meaning.textContent = annotationMeaning(annotation, this.options.colorMeanings);
     header.append(page, meaning);
-    if (annotation.identity.kind !== 'stable') {
-      const pending = owner.createSpan();
-      pending.className = 'abyss-annotation-card-pending';
-      pending.textContent = 'Pending save';
-      header.append(pending);
-    }
     return header;
   }
 

@@ -37,6 +37,7 @@ function deferred<T>() {
 }
 
 function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
+  const colorListeners = new Set<(value: string) => void>();
   let mode = initialMode;
   const modeListeners = new Set<(value: PdfAnnotationLogicalMode) => void>();
   const selectionListeners = new Set<(value: PdfTextSelection | null) => void>();
@@ -55,6 +56,10 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
   );
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
+    onColor(listener) {
+      colorListeners.add(listener);
+      return () => colorListeners.delete(listener);
+    },
     onMode(listener) {
       modeListeners.add(listener);
       listener(mode);
@@ -90,6 +95,9 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
       mode = next;
       for (const listener of modeListeners) listener(next);
     },
+    emitColor(color: string) {
+      for (const listener of colorListeners) listener(color);
+    },
     emitSelection(selection: PdfTextSelection | null) {
       for (const listener of selectionListeners) listener(selection);
     },
@@ -120,6 +128,7 @@ describe('AnnotationInteractionController', () => {
 
   it('maps comment link and tag to one seeded comment commit', async () => {
     const test = fixture();
+    test.controller.selectColor('#5fb236');
     let expectedCommitCount = 0;
     for (const [type, token] of [
       ['comment', 'comment-selection'],
@@ -128,16 +137,17 @@ describe('AnnotationInteractionController', () => {
     ] as const) {
       expectedCommitCount += 1;
       test.emitSelection(textSelection(token));
-      test.opened[test.opened.length - 1]?.onIntent({ color: '#ffd400', type });
+      expect(test.opened[test.opened.length - 1]?.color).toBe('#5fb236');
+      test.opened[test.opened.length - 1]?.onIntent({ color: '#5fb236', type });
       await vi.waitFor(() => {
         expect(test.commitSelection).toHaveBeenCalledTimes(expectedCommitCount);
       });
     }
 
     expect(test.commitSelection.mock.calls.map(([token, action]) => [token, action])).toEqual([
-      ['comment-selection', { color: '#ffd400', kind: 'comment', seed: '' }],
-      ['link-selection', { color: '#ffd400', kind: 'comment', seed: '[[' }],
-      ['tag-selection', { color: '#ffd400', kind: 'comment', seed: '#' }],
+      ['comment-selection', { color: '#5fb236', kind: 'comment', seed: '' }],
+      ['link-selection', { color: '#5fb236', kind: 'comment', seed: '[[' }],
+      ['tag-selection', { color: '#5fb236', kind: 'comment', seed: '#' }],
     ]);
     test.controller.destroy();
   });
@@ -306,7 +316,7 @@ describe('AnnotationInteractionController', () => {
     expect(test.setQuickHighlight).not.toHaveBeenCalled();
   });
 
-  it('updates the available palette and reapplies an armed semantic color', async () => {
+  it('updates the available palette without resetting the session color', async () => {
     const test = fixture('quick-highlight');
 
     expect(test.controller.quickHighlightArmed).toBe(true);
@@ -321,33 +331,55 @@ describe('AnnotationInteractionController', () => {
     test.controller.updatePalette([{ color: '#e56eee', meaning: 'Question', name: 'Magenta' }]);
     await vi.waitFor(() => {
       expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
-        color: '#e56eee',
+        color: '#5FB236',
         enabled: true,
       });
     });
-    expect(test.controller.color).toBe('#e56eee');
-    expect(test.observedColors).toEqual(['#5FB236', '#e56eee']);
+    expect(test.controller.color).toBe('#5FB236');
+    expect(test.observedColors).toEqual(['#5FB236']);
 
     test.controller.destroy();
     test.controller.updatePalette(palette);
-    expect(test.controller.color).toBe('#e56eee');
+    expect(test.controller.color).toBe('#5FB236');
   });
 
-  it('keeps palette selection passive outside neutral and quick modes', () => {
-    for (const mode of ['ink', 'freetext', 'disabled'] as const) {
+  it('owns palette color across Ink and FreeText while leaving native parameter application', () => {
+    for (const mode of ['ink', 'freetext'] as const) {
       const test = fixture(mode);
       expect(test.controller.selectColor('#5fb236')).toBe(false);
       expect(test.controller.color).toBe('#ffd400');
-      expect(test.observedColors).toEqual([]);
+      test.emitColor('#5fb236');
+      expect(test.controller.color).toBe('#5fb236');
+      expect(test.observedColors).toEqual(['#5fb236']);
       expect(test.setQuickHighlight).not.toHaveBeenCalled();
       test.controller.destroy();
     }
+
+    const disabled = fixture('disabled');
+    expect(disabled.controller.selectColor('#5fb236')).toBe(false);
+    expect(disabled.controller.color).toBe('#ffd400');
+    expect(disabled.observedColors).toEqual([]);
+    disabled.controller.destroy();
 
     const neutral = fixture();
     expect(neutral.controller.selectColor('#ffd400')).toBe(true);
     expect(neutral.observedColors).toEqual([]);
     expect(neutral.setQuickHighlight).not.toHaveBeenCalled();
     neutral.controller.destroy();
+  });
+
+  it('synchronizes an external native color without stale snap-back', () => {
+    const test = fixture('ink');
+
+    test.emitColor('#ff6666');
+    test.emitMode('neutral');
+    test.emitSelection(textSelection('external-color'));
+
+    expect(test.controller.color).toBe('#ff6666');
+    expect(test.states[test.states.length - 1]).toEqual({ armed: false, color: '#ff6666' });
+    expect(test.opened[test.opened.length - 1]?.color).toBe('#ff6666');
+    expect(test.observedColors).toEqual(['#ff6666']);
+    test.controller.destroy();
   });
 
   it('ignores dismissed and stale selection intents', () => {

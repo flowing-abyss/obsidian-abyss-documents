@@ -97,6 +97,20 @@ async function selectFixtureText(index = 1): Promise<void> {
     const start = (selectionOrdinal - 1) * 8;
     const end = Math.min(node.length, start + 7);
     if (end <= start) throw new Error(`Fixture selection ${selectionOrdinal} is out of range.`);
+    const bounds = text.getBoundingClientRect();
+    const clientX = Math.round(bounds.left + bounds.width / 2);
+    const clientY = Math.round(bounds.top + bounds.height / 2);
+    text.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        clientX,
+        clientY,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+      }),
+    );
     const range = document.createRange();
     range.setStart(node, start);
     range.setEnd(node, end);
@@ -106,13 +120,64 @@ async function selectFixtureText(index = 1): Promise<void> {
     text.dispatchEvent(
       new PointerEvent('pointerup', {
         bubbles: true,
-        clientX: 200,
-        clientY: 200,
+        button: 0,
+        clientX,
+        clientY,
+        isPrimary: true,
+        pointerId: 1,
         pointerType: 'mouse',
       }),
     );
     document.dispatchEvent(new Event('selectionchange'));
   }, index);
+}
+
+async function dragFixtureTextWhileInspectingPalette(): Promise<void> {
+  await waitForNativeHighlightReadiness();
+  const points = await browser.execute(() => {
+    const spans = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-page-number="1"] .textLayer span'),
+    );
+    const span = spans.find((candidate) => candidate.getBoundingClientRect().width >= 40);
+    if (span === undefined)
+      throw new Error('Expected a wide selectable text span on fixture page 1.');
+    const bounds = span.getBoundingClientRect();
+    return {
+      end: {
+        x: Math.round(bounds.left + bounds.width * 0.8),
+        y: Math.round(bounds.top + bounds.height / 2),
+      },
+      start: {
+        x: Math.round(bounds.left + bounds.width * 0.2),
+        y: Math.round(bounds.top + bounds.height / 2),
+      },
+    };
+  });
+  try {
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'selection-drag-pointer',
+        parameters: { pointerType: 'mouse' },
+        actions: [
+          { type: 'pointerMove', duration: 0, origin: 'viewport', ...points.start },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pointerMove', duration: 400, origin: 'viewport', ...points.end },
+          { type: 'pause', duration: 150 },
+        ],
+      },
+    ]);
+    const held = await browser.execute(() => ({
+      paletteVisible:
+        document.querySelector<HTMLElement>('[data-region="selection-annotation-popover"]')
+          ?.hidden === false,
+      selectedText: window.getSelection()?.toString().trim() ?? '',
+    }));
+    expect(held.selectedText.length).toBeGreaterThan(0);
+    expect(held.paletteVisible).toBe(false);
+  } finally {
+    await browser.releaseActions();
+  }
 }
 
 async function vaultFileSha256(path: string): Promise<string> {
@@ -301,6 +366,13 @@ describe('reader selection-first annotations', () => {
     await expect($('[data-selection-intent="comment"]')).toExist();
   });
 
+  it('waits for a genuine primary text drag to end before showing selection actions', async () => {
+    await dragFixtureTextWhileInspectingPalette();
+
+    await $('[data-region="selection-annotation-popover"]').waitForDisplayed({ timeout: 5_000 });
+    await expect($('[data-selection-intent="comment"]')).toExist();
+  });
+
   it('lets native Quick Highlight create one editor without opening the selection palette', async () => {
     await $('[data-annotation-tool="highlight"]').click();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
@@ -324,6 +396,11 @@ describe('reader selection-first annotations', () => {
     await $('.highlightEditor').waitForExist({ timeout: 10_000 });
     hash = await waitForPdfBytesToChange(workingPath, hash);
 
+    await $('[data-control="quick-highlight-menu"]').click();
+    await $(
+      '//*[contains(@class, "menu-item-title") and contains(normalize-space(.), "Green")]',
+    ).click();
+
     await createSeededComment(2, 'link', '[[', '[[Linked note]] neutral link');
     hash = await waitForPdfBytesToChange(workingPath, hash);
     await createSeededComment(3, 'tag', '#', '#review neutral tag');
@@ -344,11 +421,11 @@ describe('reader selection-first annotations', () => {
       { annotationType: 9, color: [255, 212, 0], contents: '' },
       {
         annotationType: 9,
-        color: [255, 212, 0],
+        color: [95, 178, 54],
         contents: '[[Linked note]] neutral link',
       },
-      { annotationType: 9, color: [255, 212, 0], contents: '#review neutral tag' },
-      { annotationType: 9, color: [255, 212, 0], contents: 'Neutral comment' },
+      { annotationType: 9, color: [95, 178, 54], contents: '#review neutral tag' },
+      { annotationType: 9, color: [95, 178, 54], contents: 'Neutral comment' },
     ]);
     expect(reopened.filter(({ annotationType }) => annotationType === 16)).toHaveLength(3);
     await $('[data-control="sidebar"]').click();
@@ -451,7 +528,8 @@ describe('reader selection-first annotations', () => {
 
     await reopenPdf(workingPath);
     await $('.annotationLayer .highlightAnnotation').waitForExist({ timeout: 10_000 });
-    await selectNativeEditor('.annotationLayer .highlightAnnotation', '.highlightEditor');
+    await $('.annotationLayer .highlightAnnotation').click({ button: 'right' });
+    await $('.highlightEditor.selectedEditor').waitForExist({ timeout: 5_000 });
     const nativeComment = $('.highlightEditor .editToolbar .comment');
     await nativeComment.waitForClickable({ timeout: 5_000 });
     await nativeComment.click();

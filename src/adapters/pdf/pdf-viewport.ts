@@ -411,6 +411,9 @@ export class PdfDocumentViewport implements DocumentViewport {
         ? new PdfCommentBridge(
             root,
             {
+              onColorChange: (color) => {
+                this.annotationEditorInstance?.notifyNativeColorChange(color);
+              },
               onFailure: ({ action, cause }) => {
                 this.events.emit({ type: 'annotation-mutation-error', action, cause });
               },
@@ -727,6 +730,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private registerRootListeners(root: HTMLElement): void {
     root.addEventListener('click', this.onRootClick, true);
+    root.addEventListener('contextmenu', this.onRootContextMenu, true);
     root.addEventListener('keydown', this.onRootKeyDown);
     root.addEventListener('pointercancel', this.onRootPointerCancel, true);
     root.addEventListener('pointerdown', this.onRootPointerDown, true);
@@ -738,6 +742,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private unregisterRootListeners(root: HTMLElement): void {
     root.removeEventListener('click', this.onRootClick, true);
+    root.removeEventListener('contextmenu', this.onRootContextMenu, true);
     root.removeEventListener('keydown', this.onRootKeyDown);
     root.removeEventListener('pointercancel', this.onRootPointerCancel, true);
     root.removeEventListener('pointerdown', this.onRootPointerDown, true);
@@ -766,6 +771,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private bindEvents(): void {
     this.bind('pagesinit', () => {
       this.invalidateAnnotationEditCandidate();
+      this.pageAnnotations.clear();
       this.pagesInitialized = true;
       if (this.colorRebindActive) return;
       if (this.viewer !== null) {
@@ -795,11 +801,14 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.bind('annotationlayerrendered', (event) => {
       const pageNumber = positiveInteger(record(event)?.['pageNumber']);
       if (pageNumber === null) return;
+      this.invalidateAnnotationEditCandidate();
+      this.pageAnnotations.delete(pageNumber);
       const page = this.pageElement(pageNumber);
       if (page !== null) replacePdfAnnotationImageSources(page, annotationImageData);
     });
     this.bind('annotationeditoruimanager', () => {
       this.invalidateAnnotationEditCandidate();
+      this.pageAnnotations.clear();
     });
   }
 
@@ -1167,6 +1176,16 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.editClickedAnnotation(target);
   };
 
+  private readonly onRootContextMenu = (event: MouseEvent): void => {
+    const target = event.target;
+    if (!isElementTarget(target)) return;
+    this.clearContextualSwitchClick();
+    const candidate = this.editClickedAnnotation(target);
+    if (candidate?.inlineKind == null) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+
   private readonly onRootPointerDown = (event: PointerEvent): void => {
     const revision = this.invalidateAnnotationEditCandidate();
     if (event.button !== 0) return;
@@ -1290,7 +1309,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.invalidateAnnotationEditCandidate();
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const target = event.target;
-    if (!isElementTarget(target) || !this.editClickedAnnotation(target)) return;
+    if (!isElementTarget(target) || this.editClickedAnnotation(target) === null) return;
     event.preventDefault();
   };
 
@@ -1299,12 +1318,12 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.invalidateAnnotationEditCandidate();
   };
 
-  private editClickedAnnotation(target: Element): boolean {
+  private editClickedAnnotation(target: Element): ClickedAnnotationCandidate | null {
     const editor = this.annotationEditorInstance;
     const root = this.root;
-    if (editor === null || root === null) return false;
+    if (editor === null || root === null) return null;
     const candidate = clickedAnnotationCandidate(target, root);
-    if (candidate === null) return false;
+    if (candidate === null) return null;
     const revision = this.invalidateAnnotationEditCandidate();
     void this.resolveEditableAnnotation(candidate)
       .then((kind) => {
@@ -1319,7 +1338,7 @@ export class PdfDocumentViewport implements DocumentViewport {
           pageNumber: candidate.pageNumber,
         });
       });
-    return true;
+    return candidate;
   }
 
   private async resolveEditableAnnotation(
@@ -1332,6 +1351,11 @@ export class PdfDocumentViewport implements DocumentViewport {
         return (await page.getAnnotations({ intent: 'display' })) as PdfEditableAnnotationData[];
       });
       this.pageAnnotations.set(candidate.pageNumber, annotations);
+      void annotations.catch(() => {
+        if (this.pageAnnotations.get(candidate.pageNumber) === annotations) {
+          this.pageAnnotations.delete(candidate.pageNumber);
+        }
+      });
     }
     const annotation = (await annotations).find((item) => item.id === candidate.id);
     return annotation === undefined ? null : importedEditableAnnotationKind(annotation);

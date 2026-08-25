@@ -27,12 +27,30 @@ function dispatchSelection(document: Document): void {
 function emitSelection(root: HTMLElement, input: 'pointer' | 'touch' | 'keyboard'): void {
   const ownerWindow = root.ownerDocument.defaultView;
   if (ownerWindow === null) throw new Error('Expected an owner window.');
-  let event: Event;
-  if (input === 'pointer') event = new ownerWindow.Event('pointerdown');
-  else if (input === 'touch') event = new ownerWindow.Event('touchstart');
-  else event = new ownerWindow.KeyboardEvent('keydown', { key: 'ArrowRight' });
-  root.dispatchEvent(event);
+  if (input === 'pointer') {
+    root.dispatchEvent(
+      new ownerWindow.PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+      }),
+    );
+  } else if (input === 'touch') root.dispatchEvent(new ownerWindow.Event('touchstart'));
+  else root.dispatchEvent(new ownerWindow.KeyboardEvent('keydown', { key: 'ArrowRight' }));
   dispatchSelection(root.ownerDocument);
+  if (input === 'pointer') {
+    root.dispatchEvent(
+      new ownerWindow.PointerEvent('pointerup', {
+        bubbles: true,
+        button: 0,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+      }),
+    );
+  } else if (input === 'touch') root.dispatchEvent(new ownerWindow.Event('touchend'));
 }
 
 function setSelectionRect(range: Range): void {
@@ -50,6 +68,25 @@ async function nextFrame(): Promise<void> {
   );
 }
 
+function primaryPointer(
+  target: EventTarget,
+  type: 'pointercancel' | 'pointerdown' | 'pointermove' | 'pointerup',
+  init: PointerEventInit = {},
+): void {
+  target.dispatchEvent(
+    new PointerEvent(type, {
+      bubbles: true,
+      button: 0,
+      clientX: 12,
+      clientY: 24,
+      isPrimary: true,
+      pointerId: 7,
+      pointerType: 'mouse',
+      ...init,
+    }),
+  );
+}
+
 afterEach(() => {
   document.getSelection()?.removeAllRanges();
   document.body.replaceChildren();
@@ -57,6 +94,218 @@ afterEach(() => {
 });
 
 describe('PdfDomSelectionObserver', () => {
+  it('publishes a pointer selection once after its primary drag ends', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text, 2, 6);
+    dispatchSelection(document);
+    await nextFrame();
+    selectText(document, text, 2, 10);
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(listener).not.toHaveBeenCalled();
+
+    primaryPointer(text, 'pointerup');
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener.mock.calls[0]?.[0]).toMatchObject({ input: 'pointer', text: 'selected' });
+    observer.destroy();
+  });
+
+  it('does not revive a drag selection after lifecycle invalidation', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text);
+    dispatchSelection(document);
+    observer.invalidate();
+    await nextFrame();
+
+    expect(listener.mock.calls.map(([selection]) => selection)).toEqual([null]);
+
+    selectText(document, text, 3, 9);
+    root.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowRight' }));
+    dispatchSelection(document);
+    await nextFrame();
+    expect(listener.mock.calls.map(([selection]) => selection)).toEqual([
+      null,
+      expect.objectContaining({ input: 'keyboard' }),
+    ]);
+    primaryPointer(text, 'pointerup');
+    await nextFrame();
+    expect(listener).toHaveBeenCalledTimes(2);
+    observer.destroy();
+  });
+
+  it('keeps keyboard modifiers from publishing during a held pointer drag', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text);
+    root.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Shift' }));
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(listener).not.toHaveBeenCalled();
+    primaryPointer(text, 'pointerup');
+    await nextFrame();
+    expect(listener).toHaveBeenCalledOnce();
+    observer.destroy();
+  });
+
+  it.each([
+    { clientX: 500, clientY: 50 },
+    { clientX: 50, clientY: -10 },
+    { clientX: 50, clientY: 110 },
+  ])('cancels a captured pointer outside at $clientX,$clientY', async (position) => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({
+      bottom: 100,
+      height: 100,
+      left: 0,
+      right: 100,
+      top: 0,
+      width: 100,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text);
+    dispatchSelection(document);
+    primaryPointer(root, 'pointermove', position);
+    primaryPointer(root, 'pointerup', position);
+    await nextFrame();
+
+    expect(listener).not.toHaveBeenCalled();
+    observer.destroy();
+  });
+
+  it.each(['pointercancel', 'outside'] as const)(
+    'cancels a primary drag after %s without publishing its selection',
+    async (ending) => {
+      const root = selectionRoot();
+      const text = root.querySelector('.textLayer')?.firstChild;
+      if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+      const outside = document.body.createDiv();
+      vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 100,
+        top: 0,
+        width: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      const observer = new PdfDomSelectionObserver(root);
+      const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+      observer.onSelection(listener);
+
+      primaryPointer(root, 'pointerdown');
+      selectText(document, text);
+      dispatchSelection(document);
+      if (ending === 'pointercancel') primaryPointer(window, 'pointercancel');
+      else {
+        primaryPointer(outside, 'pointermove', { clientX: 500, clientY: 500 });
+        primaryPointer(outside, 'pointerup', { clientX: 500, clientY: 500 });
+      }
+      dispatchSelection(document);
+      await nextFrame();
+
+      expect(listener).not.toHaveBeenCalled();
+      observer.destroy();
+    },
+  );
+
+  it('keeps a cancelled touch-pointer gesture suppressed through its compatibility touchend', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown', { pointerType: 'touch' });
+    root.dispatchEvent(new Event('touchstart', { bubbles: true }));
+    selectText(document, text);
+    dispatchSelection(document);
+    primaryPointer(window, 'pointercancel', { pointerType: 'touch' });
+    root.dispatchEvent(new Event('touchend', { bubbles: true }));
+    await nextFrame();
+
+    expect(listener).not.toHaveBeenCalled();
+    observer.destroy();
+  });
+
+  it.each(['touchcancel', 'outside'] as const)(
+    'keeps a touch selection suppressed after %s',
+    async (ending) => {
+      const root = selectionRoot();
+      const text = root.querySelector('.textLayer')?.firstChild;
+      if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+      vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 100,
+        top: 0,
+        width: 100,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      const observer = new PdfDomSelectionObserver(root);
+      const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+      observer.onSelection(listener);
+
+      root.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      selectText(document, text);
+      dispatchSelection(document);
+      const end = new Event(ending === 'touchcancel' ? 'touchcancel' : 'touchend', {
+        bubbles: true,
+      });
+      if (ending === 'outside') {
+        Object.defineProperty(end, 'changedTouches', {
+          configurable: true,
+          value: [{ clientX: 500, clientY: 500 }],
+        });
+      }
+      (ending === 'touchcancel' ? window : root).dispatchEvent(end);
+      dispatchSelection(document);
+      await nextFrame();
+
+      expect(listener).not.toHaveBeenCalled();
+      observer.destroy();
+    },
+  );
+
   it('emits one rAF-coalesced token for an owned selection', async () => {
     const root = selectionRoot();
     const text = root.querySelector('.textLayer')?.firstChild;
@@ -79,6 +328,10 @@ describe('PdfDomSelectionObserver', () => {
     });
     expect(selections[0]?.token).toEqual(expect.any(String));
     expect(observer.validate(selections[0]?.token ?? '')).toBe('current');
+
+    dispatchSelection(document);
+    await nextFrame();
+    expect(selections).toHaveLength(1);
   });
 
   it('dismisses collapsed outside and cross-page selections', async () => {
@@ -126,20 +379,22 @@ describe('PdfDomSelectionObserver', () => {
     selectText(document, text, 2, 10);
     emitSelection(root, 'pointer');
     await nextFrame();
-    const first = selections[0];
-    if (first === null || first === undefined) throw new Error('Expected the first selection.');
+    const first = selections.find((selection): selection is PdfTextSelection => selection !== null);
+    if (first === undefined) throw new Error('Expected the first selection.');
     selectText(document, text, 11, 18);
     emitSelection(root, 'pointer');
     await nextFrame();
-    const second = selections[1];
-    if (second === null || second === undefined) throw new Error('Expected the second selection.');
+    const second = selections.find(
+      (selection): selection is PdfTextSelection =>
+        selection !== null && selection.token !== first.token,
+    );
+    if (second === undefined) throw new Error('Expected the second selection.');
 
     expect(observer.validate(first.token)).toBe('stale');
     expect(observer.validate(second.token)).toBe('current');
     observer.invalidate();
     expect(observer.validate(second.token)).toBe('stale');
-    expect(selections).toHaveLength(3);
-    expect(selections[2]).toBeNull();
+    expect(selections).toEqual([first, null, second, null]);
   });
 
   it('uses ownerDocument and ownerWindow in popouts', async () => {
@@ -149,8 +404,13 @@ describe('PdfDomSelectionObserver', () => {
       frames.push(callback);
       return frames.length;
     });
+    const windowListeners = new Map<string, EventListener>();
     const ownerWindow = {
+      addEventListener: vi.fn((type: string, listener: EventListener) => {
+        windowListeners.set(type, listener);
+      }),
       cancelAnimationFrame: vi.fn(),
+      removeEventListener: vi.fn(),
       requestAnimationFrame,
     } as unknown as Window;
     Object.defineProperty(popup, 'defaultView', { configurable: true, value: ownerWindow });
@@ -183,6 +443,9 @@ describe('PdfDomSelectionObserver', () => {
 
     root.dispatchEvent(new Event('touchstart'));
     popup.dispatchEvent(new Event('selectionchange'));
+    const touchEnd = new Event('touchend');
+    Object.defineProperty(touchEnd, 'target', { configurable: true, value: root });
+    windowListeners.get('touchend')?.(touchEnd);
     frames.shift()?.(0);
 
     expect(requestAnimationFrame).toHaveBeenCalledOnce();

@@ -15,6 +15,7 @@ export type PdfSelectionAction =
   | { readonly kind: 'comment'; readonly color: string; readonly seed: '' | '[[' | '#' };
 
 export interface PdfAnnotationInteraction {
+  onColor(listener: (color: string) => void): () => void;
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void;
   onMode(listener: (mode: PdfAnnotationLogicalMode) => void): () => void;
   commitSelection(
@@ -140,6 +141,7 @@ interface PendingModeChange {
   readonly clearTimeout: () => void;
   readonly reject: (reason: Error) => void;
   readonly listener: (event: unknown) => void;
+  readonly resolve: () => void;
 }
 
 interface QueuedToolIntent {
@@ -187,6 +189,7 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 export class PdfAnnotationEditor {
+  private readonly colorListeners = new Set<(color: string) => void>();
   private readonly dirtyListeners = new Set<(dirty: boolean) => void>();
   private readonly editorAddedListeners = new Set<(type: number | null) => void>();
   private readonly modeListeners = new Set<(mode: PdfAnnotationLogicalMode) => void>();
@@ -210,6 +213,7 @@ export class PdfAnnotationEditor {
     dependencies.eventBus.on('annotationeditoruimanager', this.onManager);
     dependencies.eventBus.on('annotationeditormodechanged', this.onNativeMode);
     dependencies.eventBus.on('editingstateschanged', this.onEditingState);
+    dependencies.eventBus.on('switchannotationeditorparams', this.onNativeParameter);
   }
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
@@ -261,6 +265,14 @@ export class PdfAnnotationEditor {
     return this.dependencies.selectionObserver.onSelection(listener);
   }
 
+  onColor(listener: (color: string) => void): () => void {
+    if (this.destroyed) return () => undefined;
+    this.colorListeners.add(listener);
+    return () => {
+      this.colorListeners.delete(listener);
+    };
+  }
+
   get hasContextualEdit(): boolean {
     return this.contextualEditSession !== null;
   }
@@ -304,6 +316,7 @@ export class PdfAnnotationEditor {
         this.dependencies.annotationEditorParamsType.HIGHLIGHT_COLOR,
         action.color,
       );
+      this.emitColor(action.color);
       this.setLogicalMode('one-shot');
       await waitWithSignal(
         this.changeMode(this.dependencies.annotationEditorType.HIGHLIGHT),
@@ -420,7 +433,7 @@ export class PdfAnnotationEditor {
         if (pending !== null && pending.listener === listener) this.pendingModeChange = null;
         resolve();
       };
-      this.pendingModeChange = { clearTimeout, listener, reject };
+      this.pendingModeChange = { clearTimeout, listener, reject, resolve };
       this.dependencies.eventBus.on('annotationeditormodechanged', listener);
       try {
         this.dependencies.viewer.annotationEditorMode = {
@@ -445,8 +458,13 @@ export class PdfAnnotationEditor {
   }
 
   setParameter(parameter: PdfAnnotationParameter, value: unknown): Promise<void> {
-    return this.runOrQueueMutation((manager) => {
+    const operation = this.runOrQueueMutation((manager) => {
       manager.updateParams(this.parameterFor(parameter), value);
+    });
+    if (!isColorParameter(parameter) || typeof value !== 'string' || value.trim().length === 0)
+      return operation;
+    return operation.then(() => {
+      this.emitColor(value);
     });
   }
 
@@ -480,6 +498,12 @@ export class PdfAnnotationEditor {
   notifyNativeMutation(): void {
     this.requireManager();
     this.emitDirty(true);
+  }
+
+  /** Synchronizes a successful native color mutation performed by the comment bridge. */
+  notifyNativeColorChange(color: string): void {
+    if (this.destroyed || color.trim().length === 0) return;
+    this.emitColor(color);
   }
 
   async save(signal: AbortSignal): Promise<Uint8Array> {
@@ -656,7 +680,7 @@ export class PdfAnnotationEditor {
     this.lifecycleRevision += 1;
     if (transaction === null) {
       this.cancelPendingModeChange('The PDF annotation editor was detached from its document.');
-    }
+    } else this.completePendingModeChange();
     this.cancelQueuedToolIntent('The PDF annotation editor was detached from its document.');
     this.cancelQueuedMutations();
     if (this.manager !== null) this.retiredManagers.add(this.manager);
@@ -679,9 +703,10 @@ export class PdfAnnotationEditor {
     this.dependencies.eventBus.off('annotationeditoruimanager', this.onManager);
     this.dependencies.eventBus.off('annotationeditormodechanged', this.onNativeMode);
     this.dependencies.eventBus.off('editingstateschanged', this.onEditingState);
+    this.dependencies.eventBus.off('switchannotationeditorparams', this.onNativeParameter);
     if (transaction === null) {
       this.cancelPendingModeChange('The PDF annotation editor was destroyed.');
-    }
+    } else this.completePendingModeChange();
     this.cancelQueuedToolIntent('The PDF annotation editor was destroyed.');
     this.cancelQueuedMutations();
     this.restoreCallbacks();
@@ -689,6 +714,7 @@ export class PdfAnnotationEditor {
     this.dirtyListeners.clear();
     this.editorAddedListeners.clear();
     this.modeListeners.clear();
+    this.colorListeners.clear();
     this.releaseContextualEditSession();
   }
 
@@ -706,7 +732,7 @@ export class PdfAnnotationEditor {
     this.lifecycleRevision += 1;
     if (transaction === null) {
       this.cancelPendingModeChange('The PDF annotation editor was rebound.');
-    }
+    } else this.completePendingModeChange();
     this.cancelQueuedToolIntent('The PDF annotation editor was rebound.');
     this.cancelQueuedMutations();
     this.releaseContextualEditSession();
@@ -729,6 +755,29 @@ export class PdfAnnotationEditor {
     if (this.contextualEditSession?.mode === mode) return;
     this.setLogicalMode(this.logicalModeForNative(mode));
   };
+
+  private readonly onNativeParameter = (event: unknown): void => {
+    if (this.destroyed) return;
+    const data = record(event);
+    const type = data?.['type'];
+    const value = data?.['value'];
+    if (!this.isColorParameterType(type) || typeof value !== 'string' || value.trim().length === 0)
+      return;
+    this.emitColor(value);
+  };
+
+  private isColorParameterType(type: unknown): boolean {
+    const parameters = this.dependencies.annotationEditorParamsType;
+    return (
+      type === parameters.FREETEXT_COLOR ||
+      type === parameters.INK_COLOR ||
+      type === parameters.HIGHLIGHT_COLOR
+    );
+  }
+
+  private emitColor(color: string): void {
+    for (const listener of this.colorListeners) listener(color);
+  }
 
   private readonly onEditingState = (event: unknown): void => {
     const session = this.contextualEditSession;
@@ -834,9 +883,8 @@ export class PdfAnnotationEditor {
     const controller = new AbortController();
     let timeoutId: number | null = null;
     const onExternalAbort = (): void => {
-      void this.abortSelectionTransaction(
-        signal === undefined ? undefined : abortReason(signal),
-      ).catch(() => undefined);
+      if (signal === undefined) return;
+      void this.abortSelectionTransaction(abortReason(signal)).catch(() => undefined);
     };
     if (signal !== undefined) signal.addEventListener('abort', onExternalAbort, { once: true });
     const clearTransactionTimeout = (): void => {
@@ -873,13 +921,11 @@ export class PdfAnnotationEditor {
     transaction.settled.resolve(undefined);
   }
 
-  private abortSelectionTransaction(reason?: Error): Promise<void> {
+  private abortSelectionTransaction(reason: Error): Promise<void> {
     const transaction = this.pendingSelectionTransaction;
     if (transaction === null) return Promise.resolve();
     if (transaction.restoration !== null) return transaction.restoration;
-    const failure =
-      reason ?? new DOMException('The PDF annotation interaction was cancelled.', 'AbortError');
-    transaction.controller.abort(failure);
+    transaction.controller.abort(reason);
     transaction.clearTimeout();
     transaction.restoration = this.restoreNeutralMode();
     void transaction.restoration.catch(() => undefined);
@@ -1149,6 +1195,15 @@ export class PdfAnnotationEditor {
     pending.reject(new DOMException(message, 'AbortError'));
   }
 
+  private completePendingModeChange(): void {
+    const pending = this.pendingModeChange;
+    if (pending === null) return;
+    this.pendingModeChange = null;
+    this.dependencies.eventBus.off('annotationeditormodechanged', pending.listener);
+    pending.clearTimeout();
+    pending.resolve();
+  }
+
   private throwIfAborted(signal: AbortSignal): void {
     if (!signal.aborted) return;
     if (signal.reason instanceof Error) throw signal.reason;
@@ -1165,6 +1220,12 @@ function asError(cause: unknown): Error {
     return cause as Error;
   }
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function isColorParameter(parameter: PdfAnnotationParameter): boolean {
+  return (
+    parameter === 'freetext-color' || parameter === 'ink-color' || parameter === 'highlight-color'
+  );
 }
 
 function ownPdfBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {

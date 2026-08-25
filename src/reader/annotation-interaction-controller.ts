@@ -57,6 +57,9 @@ export class AnnotationInteractionController {
     this.palette = palette;
     this.activeColor = options.color ?? palette[0]?.color ?? DEFAULT_COLOR;
     this.cleanups.push(
+      interaction.onColor((color) => {
+        this.handleColor(color);
+      }),
       interaction.onMode((mode) => {
         this.handleMode(mode);
       }),
@@ -102,10 +105,6 @@ export class AnnotationInteractionController {
   updatePalette(palette: readonly AnnotationPaletteEntry[]): void {
     if (this.destroyed) return;
     this.palette = palette;
-    const stillAvailable = palette.some(
-      (entry) => entry.color.toLocaleLowerCase() === this.activeColor.toLocaleLowerCase(),
-    );
-    if (!stillAvailable) this.setActiveColor(palette[0]?.color ?? DEFAULT_COLOR);
     this.closeActiveSelection();
     this.publishQuickHighlightState();
     if (this.mode !== 'quick-highlight') return;
@@ -136,6 +135,12 @@ export class AnnotationInteractionController {
     this.publishQuickHighlightState();
   }
 
+  private handleColor(color: string): void {
+    if (this.destroyed || color.trim().length === 0) return;
+    this.setActiveColor(color);
+    this.publishQuickHighlightState();
+  }
+
   private handleSelection(selection: PdfTextSelection | null): void {
     if (this.destroyed || this.mode !== 'neutral' || selection === null) {
       this.closeActiveSelection();
@@ -143,6 +148,7 @@ export class AnnotationInteractionController {
     }
     const revision = ++this.activeSelectionRevision;
     const request: SelectionAnnotationPopoverRequest = {
+      color: this.activeColor,
       palette: this.palette,
       selection,
       onIntent: (intent) => {
