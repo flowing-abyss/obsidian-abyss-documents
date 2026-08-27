@@ -27,4 +27,30 @@ describe('TypedEventSource', () => {
     expect(first).not.toHaveBeenCalled();
     expect(second).not.toHaveBeenCalled();
   });
+
+  it('delivers normalized annotation changes and mounted snapshots in source order', () => {
+    const events = new TypedEventSource<ViewportEvent>();
+    const delivered: ViewportEvent[] = [];
+    events.subscribe((event) => delivered.push(event));
+    const annotation = {
+      nativeId: 'native-1',
+      pageIndex: 0,
+      type: 'highlight' as const,
+      rects: [{ x: 1, y: 2, width: 3, height: 4 }],
+      selectedText: 'Selected',
+      color: '#ffd400',
+      comment: '',
+      tags: [],
+      links: [],
+      writable: true,
+    };
+
+    events.emit({ type: 'annotation-change', change: { operation: 'upsert', annotation } });
+    events.emit({ type: 'annotation-snapshot', annotations: [annotation] });
+
+    expect(delivered.map((event) => event.type)).toEqual([
+      'annotation-change',
+      'annotation-snapshot',
+    ]);
+  });
 });

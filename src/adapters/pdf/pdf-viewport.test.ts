@@ -1,5 +1,6 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
+import type { DocumentAnnotation } from '../../document-core/annotations.js';
 import type { ViewportEvent } from '../../document-core/document.js';
 import {
   beginPluginActivation,
@@ -7,16 +8,28 @@ import {
   readerPerformanceSnapshot,
 } from '../../reader-performance.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
+import { extractAnnotations } from './pdf-annotations.js';
 import type { PdfRuntime } from './pdf-runtime.js';
+import type { PdfTextSelection } from './pdf-selection-observer.js';
 import { PdfTextSearch } from './pdf-text-search.js';
 import { createPdfDocumentViewport, PdfDocumentViewport } from './pdf-viewport.js';
 
 type Listener = (event: unknown) => void;
 
 interface FakePageView {
+  readonly div: HTMLElement;
   draw: ReturnType<typeof vi.fn<() => Promise<void>>>;
   renderingState: 'FINISHED' | 'INITIAL' | 'RUNNING';
   reset: ReturnType<typeof vi.fn<() => void>>;
+  readonly viewport: {
+    convertToPdfPoint(x: number, y: number): readonly [number, number];
+    readonly rawDims: {
+      readonly pageHeight: number;
+      readonly pageWidth: number;
+      readonly pageX: number;
+      readonly pageY: number;
+    };
+  };
 }
 
 function deferred<T>() {
@@ -27,6 +40,14 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, reject, resolve };
+}
+
+async function nextFrame(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => {
+      resolve();
+    });
+  });
 }
 
 class FakeEventBus {
@@ -328,6 +349,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
         page.dataset['pageNumber'] = String(pageNumber);
         this.options.viewer.append(page);
         const pageView: FakePageView = {
+          div: page,
           draw: vi.fn(async () => {
             pageView.renderingState = 'RUNNING';
           }),
@@ -336,6 +358,10 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
             pageView.renderingState = 'INITIAL';
             page.replaceChildren();
           }),
+          viewport: {
+            convertToPdfPoint: (x, y) => [x / 2, 500 - y / 2],
+            rawDims: { pageHeight: 500, pageWidth: 300, pageX: 0, pageY: 0 },
+          },
         };
         this.pageViews.push(pageView);
       }
@@ -473,6 +499,213 @@ async function mountedContextualSwitchFixture(options: ContextualSwitchFixtureOp
 }
 
 describe('PdfDocumentViewport', () => {
+  it('converts every selection client rectangle through its rendered page viewport', async () => {
+    const { host, viewport } = await mountedViewport(3);
+    const page = host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (page === null) throw new Error('Expected a rendered page.');
+    vi.spyOn(page, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 700,
+      bottom: 1000,
+      width: 600,
+      height: 800,
+      x: 100,
+      y: 200,
+      toJSON: () => ({}),
+    });
+    const selection = {
+      token: 'selection-geometry',
+      text: 'Two lines',
+      pageIndex: 0,
+      clientRect: { left: 110, top: 220, right: 160, bottom: 280, width: 50, height: 60 },
+      clientRects: [
+        { left: 110, top: 220, right: 150, bottom: 240, width: 40, height: 20 },
+        { left: 120, top: 250, right: 160, bottom: 280, width: 40, height: 30 },
+      ],
+      input: 'pointer',
+    } satisfies PdfTextSelection;
+
+    expect(viewport.projectSelectionRects(selection)).toEqual([
+      { x: 5, y: 10, width: 20, height: 10 },
+      { x: 10, y: 25, width: 20, height: 15 },
+    ]);
+  });
+
+  it('matches extracted top-left geometry across scale, rotation, crop origin, and page border', async () => {
+    const { host, runtime, viewport } = await mountedViewport(3);
+    const viewer = runtime.state.viewer;
+    const page = host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (page === null || viewer === undefined) throw new Error('Expected a rendered page.');
+    vi.spyOn(page, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 1704,
+      bottom: 1406,
+      width: 1604,
+      height: 1206,
+      x: 100,
+      y: 200,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(page, 'clientLeft', 'get').mockReturnValue(4);
+    vi.spyOn(page, 'clientTop', 'get').mockReturnValue(6);
+    const pageView = viewer.getPageView(0);
+    if (pageView === undefined) throw new Error('Expected a rendered page view.');
+    Object.assign(pageView.viewport, {
+      // Inverse of PDF.js's scale=2, rotation=90 transform for [10, 20, 610, 820].
+      convertToPdfPoint: (x: number, y: number) => [(y + 20) / 2, (x + 40) / 2],
+      rawDims: { pageHeight: 800, pageWidth: 600, pageX: 10, pageY: 20 },
+    });
+    const extracted: DocumentAnnotation[] = [];
+    await extractAnnotations(
+      {
+        numPages: 1,
+        getPage: async () => ({
+          getAnnotations: async () => [
+            { annotationType: 3, id: 'geometry-match', rect: [30, 700, 80, 740] },
+          ],
+          view: [10, 20, 610, 820],
+        }),
+      },
+      new AbortController().signal,
+      (batch) => extracted.push(...batch),
+    );
+    const annotation = extracted[0];
+    if (annotation?.anchor.kind !== 'fixed-page') throw new Error('Expected a fixed-page row.');
+    const geometry = annotation.anchor.geometry;
+    if (geometry.kind !== 'rectangle') throw new Error('Expected rectangle geometry.');
+    const selection = {
+      token: 'rotated-crop-geometry',
+      text: 'Rotated crop',
+      pageIndex: 0,
+      clientRect: {
+        left: 1464,
+        top: 246,
+        right: 1544,
+        bottom: 346,
+        width: 80,
+        height: 100,
+      },
+      clientRects: [{ left: 1464, top: 246, right: 1544, bottom: 346, width: 80, height: 100 }],
+      input: 'pointer',
+    } satisfies PdfTextSelection;
+
+    expect(viewport.projectSelectionRects(selection)).toEqual([geometry.rectangle]);
+  });
+
+  it('emits a normalized mounted-editor upsert by the next animation frame', async () => {
+    const { host, runtime, viewport } = await mountedViewport(3);
+    const eventBus = runtime.state.eventBus;
+    const viewer = runtime.state.viewer;
+    const page = host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (eventBus === undefined || viewer === undefined || page === null)
+      throw new Error('Expected mounted PDF state.');
+    vi.spyOn(page, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 700,
+      bottom: 1000,
+      width: 600,
+      height: 800,
+      x: 100,
+      y: 200,
+      toJSON: () => ({}),
+    });
+    const native = page
+      .createDiv({ cls: 'annotationEditorLayer' })
+      .createDiv({ cls: 'highlightEditor' });
+    native.id = 'internal-created';
+    vi.spyOn(native, 'getBoundingClientRect').mockReturnValue({
+      left: 110,
+      top: 220,
+      right: 150,
+      bottom: 240,
+      width: 40,
+      height: 20,
+      x: 110,
+      y: 220,
+      toJSON: () => ({}),
+    });
+    const uiManager = annotationManager(null, [
+      ['internal-created', { editorType: 'highlight', mode: 9, uid: 'native-created' }],
+    ]);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    await nextFrame();
+
+    expect(events).toContainEqual({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'native-created',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 5, y: 10, width: 20, height: 10 }],
+          selectedText: '',
+          color: '',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+
+    events.length = 0;
+    native.remove();
+    viewport.annotationEditor?.notifyNativeMutation();
+    await nextFrame();
+
+    expect(events).toContainEqual({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'native-created' },
+    });
+  });
+
+  it('bounds mounted snapshot work after visiting many virtualized pages and mutating', async () => {
+    const { runtime, viewport } = await mountedViewport(700);
+    const eventBus = runtime.state.eventBus;
+    const viewer = runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined)
+      throw new Error('Expected PDF viewer state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+    for (let pageNumber = 1; pageNumber <= 64; pageNumber += 1) {
+      viewer.options.viewer.replaceChildren();
+      const page = viewer.options.viewer.createDiv({ cls: 'page' });
+      page.dataset['pageNumber'] = String(pageNumber);
+      const layer = page.createDiv({ cls: 'annotationLayer' });
+      const annotation = layer.createDiv({ cls: 'highlightAnnotation' });
+      annotation.dataset['annotationId'] = `visited-${String(pageNumber)}`;
+      eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber });
+    }
+    events.length = 0;
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    await nextFrame();
+
+    const snapshots = (
+      viewport as unknown as {
+        readonly mountedAnnotationSnapshots: ReadonlyMap<string, unknown>;
+      }
+    ).mountedAnnotationSnapshots;
+    expect({
+      removed: events.filter(
+        (event) => event.type === 'annotation-change' && event.change.operation === 'remove',
+      ),
+      snapshotCount: snapshots.size,
+    }).toEqual({ removed: [], snapshotCount: 1 });
+  });
+
   it('delegates one supported annotation click without pointer double firing', async () => {
     const fixture = await mountedViewport(3, {
       annotations: [{ annotationType: 9, id: 'highlight-1', isEditable: true }],

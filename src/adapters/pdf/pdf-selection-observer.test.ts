@@ -3,7 +3,8 @@ import { PdfDomSelectionObserver, type PdfTextSelection } from './pdf-selection-
 
 function selectionRoot(ownerDocument: Document = window.document): HTMLElement {
   const root = ownerDocument.body.createDiv();
-  const page = root.createDiv();
+  const page = root.createDiv({ cls: 'page' });
+  page.dataset['pageNumber'] = '3';
   const layer = page.createDiv({ cls: 'textLayer' });
   const text = ownerDocument.createTextNode('A selected passage');
   layer.append(text);
@@ -54,9 +55,17 @@ function emitSelection(root: HTMLElement, input: 'pointer' | 'touch' | 'keyboard
 }
 
 function setSelectionRect(range: Range): void {
+  const rects = [
+    { left: 10, top: 20, right: 40, bottom: 32, width: 30, height: 12 },
+    { left: 12, top: 36, right: 38, bottom: 60, width: 26, height: 24 },
+  ];
   Object.defineProperty(range, 'getBoundingClientRect', {
     configurable: true,
     value: () => ({ left: 10, top: 20, right: 40, bottom: 60, width: 30, height: 40 }),
+  });
+  Object.defineProperty(range, 'getClientRects', {
+    configurable: true,
+    value: () => rects,
   });
 }
 
@@ -323,7 +332,12 @@ describe('PdfDomSelectionObserver', () => {
     expect(selections).toHaveLength(1);
     expect(selections[0]).toMatchObject({
       text: 'selected',
+      pageIndex: 2,
       clientRect: { left: 10, top: 20, right: 40, bottom: 60, width: 30, height: 40 },
+      clientRects: [
+        { left: 10, top: 20, right: 40, bottom: 32, width: 30, height: 12 },
+        { left: 12, top: 36, right: 38, bottom: 60, width: 26, height: 24 },
+      ],
       input: 'pointer',
     });
     expect(selections[0]?.token).toEqual(expect.any(String));

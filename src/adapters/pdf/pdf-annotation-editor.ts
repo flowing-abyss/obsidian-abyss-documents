@@ -192,6 +192,7 @@ export class PdfAnnotationEditor {
   private readonly colorListeners = new Set<(color: string) => void>();
   private readonly dirtyListeners = new Set<(dirty: boolean) => void>();
   private readonly editorAddedListeners = new Set<(type: number | null) => void>();
+  private readonly mutationListeners = new Set<() => void>();
   private readonly modeListeners = new Set<(mode: PdfAnnotationLogicalMode) => void>();
   private readonly storage: MutableAnnotationStorage;
   private callbackOwnership: CallbackOwnership | null = null;
@@ -494,9 +495,18 @@ export class PdfAnnotationEditor {
     };
   }
 
+  onMutation(listener: () => void): () => void {
+    if (this.destroyed) return () => undefined;
+    this.mutationListeners.add(listener);
+    return () => {
+      this.mutationListeners.delete(listener);
+    };
+  }
+
   /** Signals that PDF.js successfully mutated a native editor object outside AnnotationStorage. */
   notifyNativeMutation(): void {
     this.requireManager();
+    this.emitMutation();
     this.emitDirty(true);
   }
 
@@ -713,6 +723,7 @@ export class PdfAnnotationEditor {
     this.manager = null;
     this.dirtyListeners.clear();
     this.editorAddedListeners.clear();
+    this.mutationListeners.clear();
     this.modeListeners.clear();
     this.colorListeners.clear();
     this.releaseContextualEditSession();
@@ -991,10 +1002,12 @@ export class PdfAnnotationEditor {
     const previousReset = this.storage.onResetModified;
     const ownedEditor = (type: number | null): void => {
       previousEditor?.(type);
+      this.emitMutation();
       for (const listener of [...this.editorAddedListeners]) listener(type);
     };
     const ownedSet = (): void => {
       previousSet?.();
+      this.emitMutation();
       this.emitDirty(true);
     };
     const ownedReset = (): void => {
@@ -1031,6 +1044,10 @@ export class PdfAnnotationEditor {
 
   private emitDirty(dirty: boolean): void {
     for (const listener of [...this.dirtyListeners]) listener(dirty);
+  }
+
+  private emitMutation(): void {
+    for (const listener of [...this.mutationListeners]) listener();
   }
 
   private onEditorAdded(listener: (type: number | null) => void): () => void {

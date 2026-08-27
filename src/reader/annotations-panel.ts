@@ -2,6 +2,7 @@ import { setIcon, setTooltip } from 'obsidian';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation } from '../document-core/document.js';
 import { maximizeReaderCounter, recordReaderPerformanceSample } from '../reader-performance.js';
+import type { AnnotationProjectionRow } from './annotation-projection.js';
 import { ownerWindow, type ReaderOwnerWindow } from './owner-dom.js';
 
 const MAX_CARDS = 48;
@@ -77,6 +78,7 @@ export class AnnotationsPanel {
   private displayTags: ReadonlyArray<readonly [string, string]> = [];
   private displayColors: readonly AnnotationColorFacet[] = [];
   private annotations: readonly DocumentAnnotation[] = [];
+  private projectionRows: readonly AnnotationProjectionRow[] | null = null;
   private filtered: readonly DocumentAnnotation[] = [];
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
   private currentPage = 0;
@@ -260,6 +262,7 @@ export class AnnotationsPanel {
     this.clearLoadingTimer();
     this.loadingVisible = false;
     this.resetContextualActions();
+    this.projectionRows = null;
     this.annotations = [...annotations];
     this.rowIds = new WeakMap();
     this.nextRowId = 0;
@@ -267,6 +270,25 @@ export class AnnotationsPanel {
     this.resetVirtualScroll();
     this.renderFacets();
     this.applyFilter();
+  }
+
+  setProjectedAnnotations(rows: readonly AnnotationProjectionRow[]): void {
+    if (sameProjectionRows(this.projectionRows, rows)) return;
+    this.clearResolutionFeedback();
+    this.clearLoadingTimer();
+    this.loadingVisible = false;
+    const scrollTop = this.scrollHost.scrollTop;
+    this.projectionRows = rows;
+    this.annotations = rows.map((row) => row.annotation);
+    this.rowIds = new WeakMap();
+    for (const row of rows) this.rowIds.set(row.annotation, row.key);
+    const retainedKeys = new Set(rows.map((row) => row.key));
+    for (const key of this.measuredHeights.keys()) {
+      if (!retainedKeys.has(key)) this.measuredHeights.delete(key);
+    }
+    this.renderFacets();
+    this.applyFilter();
+    this.scrollHost.scrollTop = scrollTop;
   }
 
   setFilter(filter: AnnotationPanelFilter): void {
@@ -282,7 +304,9 @@ export class AnnotationsPanel {
   }
 
   setCurrentPage(pageIndex: number): void {
-    this.currentPage = Math.max(0, Math.floor(pageIndex));
+    const nextPage = Math.max(0, Math.floor(pageIndex));
+    if (this.currentPage === nextPage) return;
+    this.currentPage = nextPage;
     const selected = this.filtered.findIndex(
       (annotation) => annotationPage(annotation) === this.currentPage,
     );
@@ -1065,6 +1089,26 @@ export class AnnotationsPanel {
         : `Color ${String(peers.indexOf(facet) + 1)} of ${String(peers.length)}`;
     return `${facet.meaning} — ${qualifier}, ${count}`;
   }
+}
+
+function sameProjectionRows(
+  current: readonly AnnotationProjectionRow[] | null,
+  next: readonly AnnotationProjectionRow[],
+): boolean {
+  return (
+    current !== null &&
+    current.length === next.length &&
+    current.every((row, index) => {
+      const candidate = next[index];
+      return (
+        row.key === candidate?.key &&
+        row.annotation === candidate.annotation &&
+        row.nativeId === candidate.nativeId &&
+        row.provisionalId === candidate.provisionalId &&
+        row.writable === candidate.writable
+      );
+    })
+  );
 }
 
 function createColorFacetControls(owner: ReaderOwnerWindow): {

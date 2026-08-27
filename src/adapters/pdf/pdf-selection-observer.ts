@@ -1,4 +1,4 @@
-interface PdfSelectionRect {
+export interface PdfSelectionRect {
   readonly left: number;
   readonly top: number;
   readonly right: number;
@@ -10,7 +10,9 @@ interface PdfSelectionRect {
 export interface PdfTextSelection {
   readonly token: string;
   readonly text: string;
+  readonly pageIndex: number;
   readonly clientRect: PdfSelectionRect;
+  readonly clientRects: readonly PdfSelectionRect[];
   readonly input: 'pointer' | 'touch' | 'keyboard';
 }
 
@@ -27,6 +29,7 @@ interface SelectionIdentity {
   readonly focusOffset: number;
   readonly textLayer: Element;
   readonly text: string;
+  readonly pageIndex: number;
 }
 
 interface ActiveSelection extends SelectionIdentity {
@@ -224,10 +227,13 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     this.revision += 1;
     const token = `${this.session}.${this.revision}.${++nextSelectionIdentity}`;
     this.active = { ...identity, token };
+    const range = this.ownerDocument.getSelection()?.getRangeAt(0) ?? null;
     this.emit({
       token,
       text: identity.text,
-      clientRect: selectionRect(this.ownerDocument.getSelection()?.getRangeAt(0) ?? null),
+      pageIndex: identity.pageIndex,
+      clientRect: selectionRect(range),
+      clientRects: selectionRects(range),
       input: this.input,
     });
   }
@@ -245,7 +251,17 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     // cross-page selection has no palette instead of risking an invalid action.
     // Source: https://raw.githubusercontent.com/mozilla/pdf.js/v6.2.108/src/display/editor/tools.js
     if (anchorLayer === null || anchorLayer !== focusLayer) return null;
-    return { anchorNode, anchorOffset, focusNode, focusOffset, textLayer: anchorLayer, text };
+    const pageIndex = selectionPageIndex(anchorLayer);
+    if (pageIndex === null) return null;
+    return {
+      anchorNode,
+      anchorOffset,
+      focusNode,
+      focusOffset,
+      textLayer: anchorLayer,
+      text,
+      pageIndex,
+    };
   }
 
   private emit(selection: PdfTextSelection | null): void {
@@ -312,6 +328,13 @@ function closestTextLayer(node: Node, root: HTMLElement): Element | null {
   return textLayer !== null && root.contains(textLayer) ? textLayer : null;
 }
 
+function selectionPageIndex(textLayer: Element): number | null {
+  const pageNumber = Number(
+    textLayer.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber'],
+  );
+  return Number.isInteger(pageNumber) && pageNumber >= 1 ? pageNumber - 1 : null;
+}
+
 function sameSelection(left: SelectionIdentity, right: SelectionIdentity): boolean {
   return (
     left.anchorNode === right.anchorNode &&
@@ -319,7 +342,8 @@ function sameSelection(left: SelectionIdentity, right: SelectionIdentity): boole
     left.focusNode === right.focusNode &&
     left.focusOffset === right.focusOffset &&
     left.textLayer === right.textLayer &&
-    left.text === right.text
+    left.text === right.text &&
+    left.pageIndex === right.pageIndex
   );
 }
 
@@ -327,4 +351,16 @@ function selectionRect(range: Range | null): PdfSelectionRect {
   if (range === null) return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
   const { left, top, right, bottom, width, height } = range.getBoundingClientRect();
   return { left, top, right, bottom, width, height };
+}
+
+function selectionRects(range: Range | null): readonly PdfSelectionRect[] {
+  if (range === null || typeof range.getClientRects !== 'function') return [];
+  return Array.from(range.getClientRects(), ({ left, top, right, bottom, width, height }) => ({
+    left,
+    top,
+    right,
+    bottom,
+    width,
+    height,
+  }));
 }

@@ -5,7 +5,9 @@ import { ReaderShell } from './reader-shell.js';
 function selection(): PdfTextSelection {
   return {
     clientRect: { bottom: 40, height: 20, left: 10, right: 110, top: 20, width: 100 },
+    clientRects: [{ bottom: 40, height: 20, left: 10, right: 110, top: 20, width: 100 }],
     input: 'pointer',
+    pageIndex: 0,
     text: 'Selected text',
     token: 'selection-token',
   };

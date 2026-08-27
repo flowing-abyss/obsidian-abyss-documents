@@ -732,13 +732,14 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it('signals a successful native comment mutation without writing parallel annotation state', () => {
     const { annotationStorage, editor, eventBus, viewer } = fixture();
-    const dirty = vi.fn();
-    editor.onDirty(dirty);
+    const notifications: string[] = [];
+    editor.onMutation(() => notifications.push('mutation'));
+    editor.onDirty((dirty) => notifications.push(`dirty:${String(dirty)}`));
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager() });
 
     (editor as PdfAnnotationEditor & { notifyNativeMutation(): void }).notifyNativeMutation();
 
-    expect(dirty).toHaveBeenCalledWith(true);
+    expect(notifications).toEqual(['mutation', 'dirty:true']);
     expect(annotationStorage.resetModified).not.toHaveBeenCalled();
   });
   it('does not widen generic setTool edit options', () => {

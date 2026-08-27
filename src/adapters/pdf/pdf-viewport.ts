@@ -3,7 +3,9 @@ import annotationImageData from 'pdfjs-dist/web/images/annotation-assets?data-ur
 import type {
   DocumentLocation,
   DocumentViewport,
+  PdfPageRect,
   SearchHit,
+  ViewportAnnotationSnapshot,
   ViewportEvent,
 } from '../../document-core/document.js';
 import { TypedEventSource } from '../../document-core/events.js';
@@ -32,7 +34,11 @@ import {
   PDFJS_ANNOTATION_EDITOR_TYPE,
   type PdfRuntime,
 } from './pdf-runtime.js';
-import { PdfDomSelectionObserver, type PdfSelectionObserver } from './pdf-selection-observer.js';
+import {
+  PdfDomSelectionObserver,
+  type PdfSelectionObserver,
+  type PdfTextSelection,
+} from './pdf-selection-observer.js';
 import type { PdfViewportContext, PdfViewportFactory } from './pdf-session.js';
 import type { PdfTextSearch } from './pdf-text-search.js';
 
@@ -91,6 +97,23 @@ interface PreservedViewState {
 interface RetryablePdfPageView {
   reset(): void;
   draw(): Promise<void>;
+}
+
+interface PdfPageViewGeometry {
+  readonly viewport: {
+    convertToPdfPoint(x: number, y: number): readonly [number, number];
+    readonly rawDims: {
+      readonly pageHeight: number;
+      readonly pageWidth: number;
+      readonly pageX: number;
+      readonly pageY: number;
+    };
+  };
+}
+
+interface MountedAnnotationContext {
+  readonly internalId: string;
+  readonly pageIndex: number;
 }
 
 interface FindRequest {
@@ -166,6 +189,100 @@ function importedEditableAnnotationKind(
     return annotation.it === 'InkHighlight' ? 'highlight' : 'ink';
   }
   return null;
+}
+
+const ANNOTATION_NODE_TYPES: ReadonlyArray<
+  readonly [selector: string, type: ViewportAnnotationSnapshot['type']]
+> = [
+  ['.highlightEditor, .highlightAnnotation, .highlight', 'highlight'],
+  ['.underlineAnnotation, .underline', 'underline'],
+  ['.inkEditor, .inkAnnotation, .ink', 'ink'],
+  ['.freeTextEditor, .freeTextAnnotation, .freetext', 'free-text'],
+  ['.textAnnotation', 'text-note'],
+];
+
+function annotationTypeForNode(
+  node: Element,
+  kind: PdfEditableAnnotationKind | null,
+): ViewportAnnotationSnapshot['type'] {
+  const editableType = annotationTypeForEditableKind(kind);
+  if (editableType !== null) return editableType;
+  return (
+    ANNOTATION_NODE_TYPES.find(
+      ([selector]) => node.matches(selector) || node.querySelector(selector) !== null,
+    )?.[1] ?? 'unsupported'
+  );
+}
+
+function annotationTypeForEditableKind(
+  kind: PdfEditableAnnotationKind | null,
+): ViewportAnnotationSnapshot['type'] | null {
+  if (kind === 'highlight') return 'highlight';
+  if (kind === 'ink') return 'ink';
+  if (kind === 'freetext') return 'free-text';
+  return null;
+}
+
+function annotationNodeColor(node: HTMLElement): string {
+  const dataColor = node.dataset['color']?.trim();
+  if (dataColor !== undefined && dataColor.length > 0) return dataColor;
+  const inlineColor = node.style.getPropertyValue('--editor-highlight-color').trim();
+  if (inlineColor.length > 0) return inlineColor;
+  return '';
+}
+
+function annotationNodePageIndex(node: Element): number | null {
+  const pageNumber = positiveInteger(
+    Number(node.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber']),
+  );
+  return pageNumber === null ? null : pageNumber - 1;
+}
+
+function annotationNodeInternalId(node: HTMLElement): string {
+  const elementId = node.id.trim();
+  return elementId.length > 0 ? elementId : (node.dataset['annotationId']?.trim() ?? '');
+}
+
+function mountedAnnotationContext(node: HTMLElement): MountedAnnotationContext | null {
+  const pageIndex = annotationNodePageIndex(node);
+  const internalId = annotationNodeInternalId(node);
+  return pageIndex === null || internalId.length === 0 ? null : { pageIndex, internalId };
+}
+
+function annotationNodeNativeId(
+  node: HTMLElement,
+  bindingId: string | undefined,
+  internalId: string,
+): string {
+  return bindingId ?? node.dataset['annotationId']?.trim() ?? internalId;
+}
+
+function annotationNodeSelectedText(node: HTMLElement, selection: PdfTextSelection | null): string {
+  return selection === null
+    ? (node.dataset['selectedText'] ?? node.textContent.trim())
+    : selection.text;
+}
+
+function annotationNodeList(value: string | undefined): readonly string[] {
+  if (value === undefined || value.trim().length === 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (Array.isArray(parsed))
+      return parsed.filter((item): item is string => typeof item === 'string');
+  } catch {
+    // PDF.js DOM metadata is not required to use JSON; accept a compact comma list.
+  }
+  return value
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function sameViewportAnnotation(
+  left: ViewportAnnotationSnapshot,
+  right: ViewportAnnotationSnapshot,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function clickedAnnotationCandidate(
@@ -311,11 +428,16 @@ export class PdfDocumentViewport implements DocumentViewport {
   private annotationEditorInstance: PdfAnnotationEditor | null = null;
   private commentBridge: PdfCommentBridge | null = null;
   private selectionObserverInstance: PdfDomSelectionObserver | null = null;
+  private selectionSnapshotUnsubscribe: (() => void) | null = null;
+  private annotationMutationUnsubscribe: (() => void) | null = null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
   private searchAbort: AbortController | null = null;
   private selectionAbort: AbortController | null = null;
+  private currentSelection: PdfTextSelection | null = null;
+  private annotationSnapshotFrame: number | null = null;
+  private mountedAnnotationSnapshots = new Map<string, ViewportAnnotationSnapshot>();
   private lastQuery = '';
   private readonly failedPages = new Set<number>();
   private pagesInitialized = false;
@@ -392,6 +514,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
     this.viewer = viewer;
     this.annotationEditorInstance = this.createAnnotationEditor(eventBus, viewer);
+    this.bindAnnotationProjection(this.annotationEditorInstance);
     this.bindEvents();
     this.registerRootListeners(root);
     if (typeof ResizeObserver === 'function') {
@@ -626,6 +749,44 @@ export class PdfDocumentViewport implements DocumentViewport {
     return this.requireMounted(this.selectionObserverInstance);
   }
 
+  projectSelectionRects(selection: PdfTextSelection): readonly PdfPageRect[] {
+    const clientRects =
+      selection.clientRects.length === 0 ? [selection.clientRect] : selection.clientRects;
+    return this.projectClientRects(selection.pageIndex, clientRects);
+  }
+
+  private projectClientRects(
+    pageIndex: number,
+    clientRects: ReadonlyArray<Pick<DOMRect, 'left' | 'top' | 'right' | 'bottom'>>,
+  ): readonly PdfPageRect[] {
+    const viewer = this.requireMounted(this.viewer);
+    const page = this.pageElement(pageIndex + 1);
+    const pageView = viewer.getPageView(pageIndex) as unknown as PdfPageViewGeometry | undefined;
+    if (page === null || pageView?.viewport === undefined) return [];
+    const pageBounds = page.getBoundingClientRect();
+    const contentLeft = pageBounds.left + page.clientLeft;
+    const contentTop = pageBounds.top + page.clientTop;
+    const pageTop = pageView.viewport.rawDims.pageY + pageView.viewport.rawDims.pageHeight;
+    return clientRects.map((rect) => {
+      const first = pageView.viewport.convertToPdfPoint(
+        rect.left - contentLeft,
+        rect.top - contentTop,
+      );
+      const second = pageView.viewport.convertToPdfPoint(
+        rect.right - contentLeft,
+        rect.bottom - contentTop,
+      );
+      const x = Math.min(first[0], second[0]);
+      const y = pageTop - Math.max(first[1], second[1]);
+      return {
+        x,
+        y,
+        width: Math.abs(second[0] - first[0]),
+        height: Math.abs(second[1] - first[1]),
+      };
+    });
+  }
+
   destroy(): Promise<void> {
     this.destroyPromise ??= this.destroyOnce();
     return this.destroyPromise;
@@ -693,6 +854,14 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private destroyEditorBridges(attempt: (operation: () => void) => void): void {
     attempt(() => {
+      this.selectionSnapshotUnsubscribe?.();
+      this.selectionSnapshotUnsubscribe = null;
+    });
+    attempt(() => {
+      this.annotationMutationUnsubscribe?.();
+      this.annotationMutationUnsubscribe = null;
+    });
+    attempt(() => {
       this.selectionObserverInstance?.destroy();
     });
     attempt(() => {
@@ -712,6 +881,9 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.pageAnnotations.clear();
     this.clearPendingContextualSwitchGesture();
     this.clearContextualSwitchClick();
+    this.currentSelection = null;
+    this.mountedAnnotationSnapshots.clear();
+    this.cancelAnnotationSnapshotFrame();
   }
 
   private clearOwnedViewerReferences(): void {
@@ -726,6 +898,9 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.root = root;
     this.viewerElement = viewerElement;
     this.selectionObserverInstance = new PdfDomSelectionObserver(root);
+    this.selectionSnapshotUnsubscribe = this.selectionObserverInstance.onSelection((selection) => {
+      this.currentSelection = selection;
+    });
   }
 
   private registerRootListeners(root: HTMLElement): void {
@@ -768,6 +943,14 @@ export class PdfDocumentViewport implements DocumentViewport {
     });
   }
 
+  private bindAnnotationProjection(editor: PdfAnnotationEditor | null): void {
+    this.annotationMutationUnsubscribe?.();
+    this.annotationMutationUnsubscribe =
+      editor?.onMutation(() => {
+        this.scheduleAnnotationSnapshot();
+      }) ?? null;
+  }
+
   private bindEvents(): void {
     this.bind('pagesinit', () => {
       this.invalidateAnnotationEditCandidate();
@@ -805,11 +988,156 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.pageAnnotations.delete(pageNumber);
       const page = this.pageElement(pageNumber);
       if (page !== null) replacePdfAnnotationImageSources(page, annotationImageData);
+      this.publishMountedAnnotationSnapshot();
     });
     this.bind('annotationeditoruimanager', () => {
       this.invalidateAnnotationEditCandidate();
       this.pageAnnotations.clear();
     });
+  }
+
+  private scheduleAnnotationSnapshot(): void {
+    const root = this.root;
+    if (root === null) return;
+    const ownerWindow = root.ownerDocument.defaultView;
+    if (ownerWindow === null || this.annotationSnapshotFrame !== null) return;
+    this.annotationSnapshotFrame = ownerWindow.requestAnimationFrame(() => {
+      this.annotationSnapshotFrame = null;
+      this.publishMountedAnnotationSnapshot(true);
+    });
+  }
+
+  private cancelAnnotationSnapshotFrame(): void {
+    if (this.annotationSnapshotFrame === null) return;
+    this.root?.ownerDocument.defaultView?.cancelAnimationFrame(this.annotationSnapshotFrame);
+    this.annotationSnapshotFrame = null;
+  }
+
+  private publishMountedAnnotationSnapshot(detectRemovals = false): void {
+    if (this.destroyPromise !== null || this.root === null || this.viewer === null) return;
+    const annotations = this.collectMountedAnnotationSnapshots();
+    const loadedPages = this.loadedAnnotationPages();
+    const next = new Map(
+      [...this.mountedAnnotationSnapshots].filter(([, annotation]) =>
+        loadedPages.has(annotation.pageIndex),
+      ),
+    );
+    for (const annotation of annotations) next.set(annotation.nativeId, annotation);
+    this.emitMountedAnnotationUpserts(annotations);
+    if (detectRemovals) this.removeMissingMountedAnnotations(annotations, next, loadedPages);
+    this.mountedAnnotationSnapshots = next;
+    this.events.emit({ type: 'annotation-snapshot', annotations });
+  }
+
+  private emitMountedAnnotationUpserts(annotations: readonly ViewportAnnotationSnapshot[]): void {
+    for (const annotation of annotations) {
+      const previous = this.mountedAnnotationSnapshots.get(annotation.nativeId);
+      if (previous !== undefined && sameViewportAnnotation(previous, annotation)) continue;
+      this.events.emit({
+        type: 'annotation-change',
+        change: { operation: 'upsert', annotation },
+      });
+    }
+  }
+
+  private removeMissingMountedAnnotations(
+    annotations: readonly ViewportAnnotationSnapshot[],
+    next: Map<string, ViewportAnnotationSnapshot>,
+    loadedPages: ReadonlySet<number>,
+  ): void {
+    const currentIds = new Set(annotations.map((annotation) => annotation.nativeId));
+    for (const previous of this.mountedAnnotationSnapshots.values()) {
+      if (!loadedPages.has(previous.pageIndex) || currentIds.has(previous.nativeId)) continue;
+      next.delete(previous.nativeId);
+      this.emitMountedAnnotationRemoval(previous);
+    }
+  }
+
+  private emitMountedAnnotationRemoval(previous: ViewportAnnotationSnapshot): void {
+    this.events.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'remove',
+        nativeId: previous.nativeId,
+        ...(previous.provisionalId === undefined ? {} : { provisionalId: previous.provisionalId }),
+      },
+    });
+  }
+
+  private loadedAnnotationPages(): ReadonlySet<number> {
+    const root = this.requireMounted(this.root);
+    const pages = new Set<number>();
+    const layers = Array.from(
+      root.querySelectorAll<HTMLElement>('.annotationLayer, .annotationEditorLayer'),
+    );
+    for (const layer of layers) {
+      const pageNumber = positiveInteger(
+        Number(layer.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber']),
+      );
+      if (pageNumber !== null) pages.add(pageNumber - 1);
+    }
+    return pages;
+  }
+
+  private collectMountedAnnotationSnapshots(): readonly ViewportAnnotationSnapshot[] {
+    const root = this.requireMounted(this.root);
+    const nodes = Array.from(
+      root.querySelectorAll<HTMLElement>(
+        '.annotationLayer [data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
+      ),
+    );
+    const snapshots = new Map<string, ViewportAnnotationSnapshot>();
+    for (const node of nodes) {
+      const snapshot = this.snapshotForMountedAnnotation(node);
+      if (snapshot !== null) snapshots.set(snapshot.nativeId, snapshot);
+    }
+    return [...snapshots.values()];
+  }
+
+  private snapshotForMountedAnnotation(node: HTMLElement): ViewportAnnotationSnapshot | null {
+    const context = mountedAnnotationContext(node);
+    if (context === null) return null;
+    const binding = this.annotationEditorInstance?.resolveNativeEditor(context.internalId) ?? null;
+    const nativeId = annotationNodeNativeId(node, binding?.id, context.internalId);
+    if (nativeId.length === 0) return null;
+    return this.createMountedAnnotationSnapshot(node, context.pageIndex, nativeId, binding);
+  }
+
+  private createMountedAnnotationSnapshot(
+    node: HTMLElement,
+    pageIndex: number,
+    nativeId: string,
+    binding: ReturnType<PdfAnnotationEditor['resolveNativeEditor']>,
+  ): ViewportAnnotationSnapshot {
+    const selected = this.annotationSelectionFor(node, pageIndex);
+    return {
+      nativeId,
+      ...(selected === null ? {} : { provisionalId: selected.token }),
+      pageIndex,
+      type: annotationTypeForNode(node, binding?.kind ?? null),
+      rects: this.annotationNodeRects(node, pageIndex, selected),
+      selectedText: annotationNodeSelectedText(node, selected),
+      color: annotationNodeColor(node),
+      comment: node.dataset['comment'] ?? '',
+      tags: annotationNodeList(node.dataset['tags']),
+      links: annotationNodeList(node.dataset['links']),
+      writable: binding !== null,
+    };
+  }
+
+  private annotationSelectionFor(node: HTMLElement, pageIndex: number): PdfTextSelection | null {
+    const selection = this.currentSelection;
+    return selection?.pageIndex === pageIndex && node.matches('.selectedEditor') ? selection : null;
+  }
+
+  private annotationNodeRects(
+    node: HTMLElement,
+    pageIndex: number,
+    selected: PdfTextSelection | null,
+  ): readonly PdfPageRect[] {
+    return selected === null
+      ? this.projectClientRects(pageIndex, [node.getBoundingClientRect()])
+      : this.projectSelectionRects(selected);
   }
 
   private bind(name: string, listener: PdfEventListener): void {

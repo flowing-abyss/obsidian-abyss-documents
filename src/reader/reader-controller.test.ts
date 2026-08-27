@@ -256,7 +256,9 @@ function interactiveViewport(pageCount = 3) {
 function pdfSelection(token = 'selection-token'): PdfTextSelection {
   return {
     clientRect: { bottom: 40, height: 20, left: 10, right: 110, top: 20, width: 100 },
+    clientRects: [{ bottom: 40, height: 20, left: 10, right: 110, top: 20, width: 100 }],
     input: 'pointer',
+    pageIndex: 0,
     text: 'Selected text',
     token,
   };
@@ -362,6 +364,231 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('projects a native annotation event immediately without remounting the viewport', async () => {
+    const [pdf] = files('Books/Immediate-annotation.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const extraction = deferred<void>();
+    Object.assign(createdSession.value, {
+      listAnnotations: async () => extraction.promise,
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'native-immediate',
+          provisionalId: 'selection-immediate',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+          selectedText: 'Immediate annotation',
+          color: '#ffd400',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+
+    expect({
+      visibleIds: shell.created.sidebar?.annotationsPanel.visibleIds(),
+      viewportMounts: createdViewport.mount.mock.calls.length,
+    }).toEqual({ visibleIds: ['native-immediate'], viewportMounts: 1 });
+    extraction.resolve();
+  });
+
+  it('discards and retries verified extraction that races a newer live edit', async () => {
+    const [pdf] = files('Books/Stale-edit-race.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const staleGate = deferred<void>();
+    const retryGate = deferred<void>();
+    const staleReturned = deferred<void>();
+    const stale = {
+      ...annotationRecord('same-native-id', 0, {
+        kind: 'rectangle',
+        rectangle: { x: 10, y: 20, width: 30, height: 8 },
+      }),
+      comment: 'Stale verified comment',
+    };
+    const fresh = { ...stale, comment: 'New live comment' };
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      if (listAnnotations.mock.calls.length === 1) {
+        await staleGate.promise;
+        sink([stale]);
+        staleReturned.resolve();
+        return;
+      }
+      await retryGate.promise;
+      sink([fresh]);
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledOnce();
+    });
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'same-native-id',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+          selectedText: 'same-native-id',
+          color: '#ffd400',
+          comment: 'New live comment',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+
+    staleGate.resolve();
+    await staleReturned.promise;
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledTimes(2);
+    });
+    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain('New live comment');
+    retryGate.resolve();
+  });
+
+  it('does not resurrect an unseen annotation removed during verified extraction', async () => {
+    const [pdf] = files('Books/Stale-delete-race.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const staleGate = deferred<void>();
+    const stale = annotationRecord('deleted-native-id', 0, {
+      kind: 'rectangle',
+      rectangle: { x: 10, y: 20, width: 30, height: 8 },
+    });
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      if (listAnnotations.mock.calls.length === 1) {
+        await staleGate.promise;
+        sink([stale]);
+        return;
+      }
+      sink([]);
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledOnce();
+    });
+
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'deleted-native-id' },
+    });
+    staleGate.resolve();
+
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledTimes(2);
+    });
+    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+  });
+
+  it('carries projection row identity through controller provisional reconciliation', async () => {
+    const [pdf] = files('Books/Controller-row-identity.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const extractionGate = deferred<void>();
+    const geometry = {
+      kind: 'rectangle' as const,
+      rectangle: { x: 10, y: 20, width: 30, height: 8 },
+    };
+    const verified = {
+      ...annotationRecord('stable-native-id', 0, geometry),
+      color: '#ffd400',
+      selectedText: 'Projected quote',
+    };
+    Object.assign(createdSession.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        await extractionGate.promise;
+        sink([verified]);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    const host = createDiv();
+    host.doc.body.append(host);
+    await controller.open(pdf, host);
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'temporary-native-id',
+          provisionalId: 'selection-token',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [geometry.rectangle],
+          selectedText: 'Projected quote',
+          color: '#ffd400',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    const panel = shell.created.sidebar?.annotationsPanel;
+    const before = panel?.root.querySelector<HTMLElement>('.abyss-annotation-card');
+    before?.focus();
+    const scrollHost = panel?.root.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+    if (scrollHost === null || scrollHost === undefined)
+      throw new Error('Expected annotation scroll host.');
+    scrollHost.scrollTop = 137;
+    const rowId = before?.dataset['annotationRowId'];
+
+    extractionGate.resolve();
+    await vi.waitFor(() => {
+      expect(panel?.visibleIds()).toEqual(['stable-native-id']);
+    });
+
+    expect({
+      focusedRowId: host.doc.activeElement?.getAttribute('data-annotation-row-id'),
+      rowId:
+        panel?.root.querySelector<HTMLElement>('.abyss-annotation-card')?.dataset[
+          'annotationRowId'
+        ],
+      scrollTop: scrollHost.scrollTop,
+    }).toEqual({ focusedRowId: rowId, rowId, scrollTop: 137 });
+    host.remove();
+  });
+
   it('renders unavailable without retry when annotation listing is unsupported', async () => {
     const [pdf] = files('Books/No-annotation-listing.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -694,6 +921,83 @@ describe('ReaderController', () => {
       expect(notices).toHaveBeenCalledOnce();
     });
     expect(exporter.run).not.toHaveBeenCalled();
+  });
+
+  it('keeps a projected card visible when verified extraction fails', async () => {
+    const [pdf] = files('Books/Failed-refresh-projection.pdf');
+    if (pdf === undefined) throw new Error('Expected PDF.');
+    const activeViewport = viewport();
+    const active = session(pdf.path, activeViewport);
+    Object.assign(active.value, {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([]);
+      },
+    });
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      pendingRevision: 1,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload: vi.fn(),
+    } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
+    Object.assign(active.value, { createNativeEditableSession: () => source });
+    let broadcast: VerifiedReloadListener | undefined;
+    const adapter = adapterFor(pdf.path, active);
+    adapter.open
+      .mockResolvedValueOnce(active.value)
+      .mockRejectedValue(new Error('verified extraction failed'));
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    });
+    activeViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'visible-during-failure',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 1, y: 2, width: 3, height: 4 }],
+          selectedText: 'Still visible',
+          color: '#ffd400',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+    if (broadcast === undefined) throw new Error('Expected save listener.');
+
+    await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
+    await vi.waitFor(() => {
+      expect(adapter.open).toHaveBeenCalledTimes(2);
+    });
+
+    expect({
+      visibleIds: shell.created.sidebar?.annotationsPanel.visibleIds(),
+      loading: shell.created.sidebar?.annotationsPanel.root.textContent.includes('Loading'),
+    }).toEqual({ visibleIds: ['visible-during-failure'], loading: false });
   });
 
   it('opens annotations lazily and resolves id first or unique geometry fallback without arbitrary navigation', async () => {

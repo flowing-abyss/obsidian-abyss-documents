@@ -6,6 +6,7 @@ import {
   endPluginActivation,
   readerPerformanceSnapshot,
 } from '../reader-performance.js';
+import type { AnnotationProjectionRow } from './annotation-projection.js';
 import { AnnotationsPanel } from './annotations-panel.js';
 import { ownerWindow } from './owner-dom.js';
 
@@ -64,6 +65,64 @@ function toggleDocumentTags(root: HTMLElement): void {
 }
 
 describe('AnnotationsPanel', () => {
+  it('preserves projected row identity, focus, and scroll through provisional reconciliation', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const provisional = annotation(0, {
+      identity: { kind: 'legacy', fingerprint: 'provisional-native-id' },
+      selectedText: 'Provisional quote',
+    });
+    const stable = annotation(0, { selectedText: 'Verified quote' });
+    const row = {
+      key: 'annotation-row-stable-key',
+      annotation: provisional,
+      nativeId: 'provisional-native-id',
+      provisionalId: 'selection-token',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([row]);
+    const before = root.querySelector<HTMLElement>('.abyss-annotation-card');
+    before?.focus();
+    const scrollHost = annotationScrollHost(root);
+    scrollHost.scrollTop = 137;
+
+    panel.setProjectedAnnotations([{ ...row, annotation: stable, nativeId: 'annotation-0' }]);
+
+    const after = root.querySelector<HTMLElement>('[data-annotation-id="annotation-0"]');
+    expect({
+      focusedRowId: root.doc.activeElement?.getAttribute('data-annotation-row-id'),
+      rowId: after?.dataset['annotationRowId'],
+      scrollTop: scrollHost.scrollTop,
+    }).toEqual({
+      focusedRowId: 'annotation-row-stable-key',
+      rowId: 'annotation-row-stable-key',
+      scrollTop: 137,
+    });
+    root.remove();
+  });
+
+  it('does not rerender an unchanged projected snapshot', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const rows = [
+      {
+        key: 'annotation-row-unchanged',
+        annotation: annotation(0),
+        nativeId: 'annotation-0',
+        writable: false,
+      },
+    ] satisfies readonly AnnotationProjectionRow[];
+    panel.setProjectedAnnotations(rows);
+    panel.setCurrentPage(0);
+    const card = root.querySelector('.abyss-annotation-card');
+
+    panel.setProjectedAnnotations(rows);
+    panel.setCurrentPage(0);
+
+    expect(root.querySelector('.abyss-annotation-card')).toBe(card);
+  });
+
   it('renders exactly No annotations when empty', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });

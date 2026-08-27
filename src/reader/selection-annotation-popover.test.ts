@@ -19,7 +19,18 @@ function selection(overrides: Partial<PdfTextSelection['clientRect']> = {}): Pdf
       width: 100,
       ...overrides,
     },
+    clientRects: [
+      {
+        bottom: overrides.bottom ?? 160,
+        height: overrides.height ?? 20,
+        left: overrides.left ?? 200,
+        right: overrides.right ?? 300,
+        top: overrides.top ?? 140,
+        width: overrides.width ?? 100,
+      },
+    ],
     input: 'pointer',
+    pageIndex: 0,
     text: 'Selected text',
     token: 'selection-token',
   };

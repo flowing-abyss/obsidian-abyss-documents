@@ -1,4 +1,5 @@
 import type { TFile } from 'obsidian';
+import type { DocumentAnnotation } from './annotations.js';
 import type { ReaderLayout, ReaderScale, ReadingAppearance } from './reading.js';
 
 export type DocumentCapability =
@@ -24,6 +25,35 @@ export interface DocumentLocation {
   readonly y?: number;
 }
 
+export interface PdfPageRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface ViewportAnnotationSnapshot {
+  readonly nativeId: string;
+  readonly provisionalId?: string;
+  readonly pageIndex: number;
+  readonly type: DocumentAnnotation['type'];
+  readonly rects: readonly PdfPageRect[];
+  readonly selectedText: string;
+  readonly color: string;
+  readonly comment: string;
+  readonly tags: readonly string[];
+  readonly links: readonly string[];
+  readonly writable: boolean;
+}
+
+export type ViewportAnnotationChange =
+  | { readonly operation: 'upsert'; readonly annotation: ViewportAnnotationSnapshot }
+  | {
+      readonly operation: 'remove';
+      readonly nativeId: string;
+      readonly provisionalId?: string;
+    };
+
 export interface SearchHit {
   readonly id: string;
   readonly pageIndex: number;
@@ -41,6 +71,11 @@ export type ViewportEvent =
   | { readonly type: 'page-change'; readonly pageIndex: number }
   | { readonly type: 'scale-change'; readonly scale: ReaderScale }
   | { readonly type: 'search-results'; readonly results: SearchResultSet }
+  | { readonly type: 'annotation-change'; readonly change: ViewportAnnotationChange }
+  | {
+      readonly type: 'annotation-snapshot';
+      readonly annotations: readonly ViewportAnnotationSnapshot[];
+    }
   | {
       readonly type: 'annotation-mutation-error';
       readonly action: 'change-color' | 'delete-annotation' | 'delete-comment' | 'save-comment';
