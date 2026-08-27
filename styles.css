@@ -6566,9 +6566,55 @@
 
 .abyss-documents .abyss-annotation-popover-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: var(--size-2-1);
   flex-wrap: wrap;
+}
+
+.abyss-documents .abyss-annotation-popover-button,
+.abyss-documents .abyss-annotation-popover-color {
+  box-sizing: border-box;
+  width: var(--input-height);
+  min-width: var(--input-height);
+  min-height: var(--input-height);
+  padding: 0;
+}
+
+.abyss-documents .abyss-annotation-popover-button.is-destructive {
+  color: var(--text-muted);
+}
+
+.abyss-documents .abyss-annotation-popover-button.is-destructive:is(:hover, :focus-visible) {
+  color: var(--text-error);
+}
+
+.abyss-documents .abyss-annotation-popover-color {
+  overflow: hidden;
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.abyss-documents .abyss-annotation-comment-popup {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* The four page-flow choices form one compact, scannable two-axis matrix. */
+.abyss-documents-menu-open .menu-group:has(> .menu-item[data-section='abyss-documents-layout']) {
+  display: grid;
+  box-sizing: border-box;
+  min-width: min(22rem, calc(100vw - var(--size-4-4)));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.abyss-documents-menu-open .menu-item.is-label[data-section='abyss-documents-layout'] {
+  grid-column: 1 / -1;
+}
+
+.abyss-documents-menu-open .menu-item[data-section='abyss-documents-layout'] {
+  min-width: 0;
 }
 
 .abyss-documents [data-region='document'] {

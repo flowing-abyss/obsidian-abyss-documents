@@ -65,6 +65,33 @@ describe('SelectionAnnotationPopover', () => {
     host.remove();
   });
 
+  it('keeps viewport coordinates adjacent to the selection inside a contained workspace leaf', () => {
+    const { host, intents, popover } = createPopover();
+    const runFrame = runNextFrame(host);
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      value: () => new DOMRect(0, 0, 120, 40),
+    });
+    Object.defineProperty(popover.element, 'offsetParent', {
+      value: { getBoundingClientRect: () => new DOMRect(50, 30, 800, 600) },
+    });
+
+    popover.open({ onIntent: (intent) => intents.push(intent), palette, selection: selection() });
+    runFrame();
+
+    expect(popover.element.style.left).toBe('140px');
+    expect(popover.element.style.top).toBe('138px');
+
+    popover.open({
+      onIntent: (intent) => intents.push(intent),
+      palette,
+      selection: selection({ left: 0, right: 10, width: 10 }),
+    });
+    runFrame();
+    expect(popover.element.style.left).toBe('0px');
+    popover.destroy();
+    host.remove();
+  });
+
   it('preserves Selection on pointerdown', () => {
     const { host, intents, popover } = createPopover();
     const runFrame = runNextFrame(host);

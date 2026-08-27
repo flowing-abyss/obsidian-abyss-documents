@@ -449,8 +449,8 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
   );
 
   it.each([
-    ['underlineAnnotation', 'Underline annotations'],
-    ['textAnnotation', 'Text Note annotations'],
+    ['underlineAnnotation', 'Underline annotations are read-only.'],
+    ['textAnnotation', 'Text Note annotations are read-only.'],
   ])(
     'forces existing %s comments read-only from the actual annotation subtype',
     (className, reason) => {
@@ -472,9 +472,9 @@ describe('PdfCommentBridge exact PDF.js 6.2.108 seam', () => {
 
       bridge.toggleCommentPopup(source, true, true, true);
 
-      expect(
-        host.querySelector('[data-region="annotation-read-only-reason"]')?.textContent,
-      ).toContain(reason);
+      expect(host.querySelector('[data-region="annotation-read-only-reason"]')?.textContent).toBe(
+        reason,
+      );
       expect(host.querySelector('[data-action="save-comment"]')).toBeNull();
       expect(host.querySelector('[data-action="delete-annotation"]')).toBeNull();
       expect(setCommentButtonStates).toHaveBeenCalledWith({ hasPopup: true, selected: true });

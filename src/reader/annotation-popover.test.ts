@@ -1,7 +1,51 @@
+import type * as ObsidianModule from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { AnnotationPopover } from './annotation-popover.js';
 
+const iconMocks = vi.hoisted(() => ({ setIcon: vi.fn(), setTooltip: vi.fn() }));
+
+vi.mock('obsidian', async (importOriginal) => {
+  const original: typeof ObsidianModule = await importOriginal();
+  return { ...original, setIcon: iconMocks.setIcon, setTooltip: iconMocks.setTooltip };
+});
+
 describe('AnnotationPopover', () => {
+  it('renders metadata and destructive actions as compact native icon controls', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationPopover(host);
+    popover.open({
+      color: '#ffd400',
+      comment: 'Professional controls',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
+      onColor: vi.fn(),
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+
+    const expected = [
+      ['insert-tag', 'Add tag', 'tag'],
+      ['insert-link', 'Add link', 'link-2'],
+      ['delete-comment', 'Delete comment', 'message-square-x'],
+      ['delete-annotation', 'Delete annotation', 'trash-2'],
+    ] as const;
+    for (const [action, label, icon] of expected) {
+      const button = host.querySelector<HTMLButtonElement>(`[data-action="${action}"]`);
+      expect(button?.classList.contains('clickable-icon')).toBe(true);
+      expect(button?.textContent).toBe('');
+      expect(button?.getAttribute('aria-label')).toBe(label);
+      expect(iconMocks.setIcon).toHaveBeenCalledWith(button, icon);
+      expect(iconMocks.setTooltip).toHaveBeenCalledWith(button, label, { delay: 250 });
+    }
+    const color = host.querySelector<HTMLInputElement>('[data-action="annotation-color"]');
+    expect(iconMocks.setTooltip).toHaveBeenCalledWith(color, 'Annotation color', { delay: 250 });
+
+    popover.destroy();
+    host.remove();
+  });
+
   it('offers metadata-backed wiki-link suggestions after [[ with keyboard selection', () => {
     const host = document.body.createDiv();
     const provider = {
@@ -492,6 +536,48 @@ describe('AnnotationPopover', () => {
 
     expect(popover.element.style.left).toBe('560px');
     expect(popover.element.style.top).toBe('420px');
+    Reflect.deleteProperty(window, 'visualViewport');
+    popover.destroy();
+    host.remove();
+  });
+
+  it('converts viewport coordinates for a fixed popover inside a contained workspace leaf', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationPopover(host);
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      value: () => new DOMRect(0, 0, 240, 180),
+    });
+    Object.defineProperty(popover.element, 'offsetParent', {
+      value: { getBoundingClientRect: () => new DOMRect(50, 30, 800, 600) },
+    });
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: { height: 600, offsetLeft: 0, offsetTop: 0, width: 800 },
+    });
+    popover.open({
+      comment: '',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      x: 780,
+      y: 590,
+    });
+
+    expect(popover.element.style.left).toBe('510px');
+    expect(popover.element.style.top).toBe('390px');
+
+    popover.open({
+      comment: '',
+      onChange: vi.fn(),
+      onClose: vi.fn(),
+      onDeleteAnnotation: vi.fn(),
+      onDeleteComment: vi.fn(),
+      x: 0,
+      y: 0,
+    });
+    expect(popover.element.style.left).toBe('0px');
+    expect(popover.element.style.top).toBe('0px');
     Reflect.deleteProperty(window, 'visualViewport');
     popover.destroy();
     host.remove();

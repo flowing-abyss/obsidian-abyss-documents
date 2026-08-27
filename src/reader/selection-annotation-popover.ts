@@ -227,8 +227,9 @@ export class SelectionAnnotationPopover {
     const desiredTop =
       spaceBelow >= bounds.height + POPOVER_GAP || spaceBelow >= spaceAbove ? below : above;
     const desiredLeft = selectionRect.left + selectionRect.width / 2 - bounds.width / 2;
-    this.element.style.left = `${clamp(desiredLeft, viewport.left, viewport.right - bounds.width)}px`;
-    this.element.style.top = `${clamp(desiredTop, viewport.top, viewport.bottom - bounds.height)}px`;
+    const origin = fixedPositionOrigin(this.element);
+    this.element.style.left = `${clamp(desiredLeft, viewport.left, viewport.right - bounds.width) - origin.left}px`;
+    this.element.style.top = `${clamp(desiredTop, viewport.top, viewport.bottom - bounds.height) - origin.top}px`;
   }
 
   private applyViewportSize(): void {
@@ -295,12 +296,25 @@ function semanticLabel(entry: AnnotationPaletteEntry): string {
 function viewportBounds(owner: Window, element: HTMLElement): VisualViewportBounds {
   const viewport = rawViewportBounds(owner);
   const insets = safeAreaInsets(owner, element);
-  return {
+  const safeViewport = {
     bottom: viewport.bottom - insets.bottom,
     left: viewport.left + insets.left,
     right: viewport.right - insets.right,
     top: viewport.top + insets.top,
   };
+  const containingBlock = element.offsetParent?.getBoundingClientRect();
+  if (containingBlock === undefined) return safeViewport;
+  return {
+    bottom: Math.min(safeViewport.bottom, containingBlock.bottom),
+    left: Math.max(safeViewport.left, containingBlock.left),
+    right: Math.min(safeViewport.right, containingBlock.right),
+    top: Math.max(safeViewport.top, containingBlock.top),
+  };
+}
+
+function fixedPositionOrigin(element: HTMLElement): Pick<DOMRect, 'left' | 'top'> {
+  const containingBlock = element.offsetParent;
+  return containingBlock?.getBoundingClientRect() ?? { left: 0, top: 0 };
 }
 
 function rawViewportBounds(owner: Window): VisualViewportBounds {

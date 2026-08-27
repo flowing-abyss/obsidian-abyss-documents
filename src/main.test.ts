@@ -144,6 +144,9 @@ function capturedMenuItems() {
       setIsLabel() {
         return item;
       },
+      setSection() {
+        return item;
+      },
       setTitle(title: string) {
         entry.title = title;
         return item;

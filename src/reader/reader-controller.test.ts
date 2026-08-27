@@ -110,6 +110,9 @@ function captureMenuChoices() {
       setIsLabel() {
         return item;
       },
+      setSection() {
+        return item;
+      },
       setTitle(title: string) {
         choice.title = title;
         return item;

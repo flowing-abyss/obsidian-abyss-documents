@@ -8,6 +8,7 @@ interface CapturedMenuItem {
   click: () => void;
   disabled: boolean;
   icon: string | null;
+  section: string | null;
   title: string;
 }
 
@@ -22,6 +23,7 @@ function captureMenuItems(): CapturedMenuItem[] {
       click: () => undefined,
       disabled: false,
       icon: null,
+      section: null,
       title: '',
     };
     const item = {
@@ -43,6 +45,10 @@ function captureMenuItems(): CapturedMenuItem[] {
       },
       setIsLabel(isLabel: boolean) {
         entry.disabled = isLabel;
+        return item;
+      },
+      setSection(section: string) {
+        entry.section = section;
         return item;
       },
       setTitle(title: string) {
@@ -270,6 +276,10 @@ describe('ReaderToolbar', () => {
       'Two pages · Paged',
     ]);
     expect(layouts.every((entry) => entry.icon !== null)).toBe(true);
+    expect(layouts.every((entry) => entry.section === 'abyss-documents-layout')).toBe(true);
+    expect(entries.find((entry) => entry.title === 'Layout')?.section).toBe(
+      'abyss-documents-layout',
+    );
     expect(layouts.find((entry) => entry.title === 'Two pages · Paged')?.checked).toBe(true);
     layouts.find((entry) => entry.title === 'Single page · Continuous')?.click();
     expect(intents).toContainEqual({
@@ -446,6 +456,20 @@ describe('ReaderToolbar', () => {
     menu.hide();
     await nextAnimationFrame(host.win);
     expect(document.activeElement).not.toBe(trigger);
+
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('contains visual menu styling to the owner document while a reader menu is open', () => {
+    const menu = captureMenuHide();
+    const { host, toolbar } = fixture();
+    document.body.append(host);
+
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+    expect(host.doc.body.classList.contains('abyss-documents-menu-open')).toBe(true);
+    menu.hide();
+    expect(host.doc.body.classList.contains('abyss-documents-menu-open')).toBe(false);
 
     toolbar.destroy();
     host.remove();

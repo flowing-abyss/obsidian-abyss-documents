@@ -535,12 +535,10 @@ function annotationReadOnlyReason(
   manager: PdfCommentUiManager | null,
 ): string | undefined {
   const subtype = annotationDomSubtype(editor);
-  if (subtype === 'underlineAnnotation')
-    return 'Underline annotations are read-only in this PDF.js version.';
-  if (subtype === 'textAnnotation')
-    return 'Text Note annotations are read-only in this PDF.js version.';
+  if (subtype === 'underlineAnnotation') return 'Underline annotations are read-only.';
+  if (subtype === 'textAnnotation') return 'Text Note annotations are read-only.';
   if (!isSupportedNativeEditor(editor) || manager?.firstSelectedEditor !== editor)
-    return 'This imported annotation is read-only in this PDF.js version.';
+    return 'This annotation is read-only.';
   return undefined;
 }
 

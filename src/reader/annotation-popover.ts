@@ -1,3 +1,5 @@
+import { setIcon, setTooltip, type IconName } from 'obsidian';
+
 export type AnnotationCommentCloseReason =
   'blur' | 'escape' | 'delete-comment' | 'delete-annotation' | 'external';
 
@@ -236,9 +238,9 @@ export class AnnotationPopover {
     this.actions.append(content);
     if (request.selected === true) {
       if (request.onEdit !== undefined) {
-        this.actions.append(this.button('edit-comment', 'Edit comment', 'Edit comment'));
+        this.actions.append(this.button('edit-comment', 'Edit comment', 'pencil'));
       }
-      this.actions.append(this.button('cancel-comment', 'Close', 'Close'));
+      this.actions.append(this.button('cancel-comment', 'Close', 'x'));
     }
     this.element.hidden = false;
     this.place(request.x, request.y, owner);
@@ -303,20 +305,23 @@ export class AnnotationPopover {
     this.focusFrame = null;
   }
 
-  private button(action: string, label: string, text: string): HTMLButtonElement {
+  private button(action: string, label: string, icon: IconName): HTMLButtonElement {
     const button = ownerWindow(this.host).createEl('button');
     button.type = 'button';
-    button.className = 'abyss-annotation-popover-button';
+    button.className = 'clickable-icon abyss-annotation-popover-button';
     button.dataset['action'] = action;
+    button.dataset['touchTarget'] = '44';
     button.setAttribute('aria-label', label);
-    button.textContent = text;
+    if (action.startsWith('delete-')) button.classList.add('is-destructive');
+    setIcon(button, icon);
+    setTooltip(button, label, { delay: 250 });
     return button;
   }
 
   private renderActions(request: AnnotationPopoverRequest): void {
     this.actions.replaceChildren();
     if (request.readOnlyReason !== undefined) {
-      this.actions.append(this.button('cancel-comment', 'Close', 'Close'));
+      this.actions.append(this.button('cancel-comment', 'Close', 'x'));
       return;
     }
     if (request.color !== undefined && request.onColor !== undefined) {
@@ -326,16 +331,16 @@ export class AnnotationPopover {
       color.value = request.color;
       color.dataset['action'] = 'annotation-color';
       color.setAttribute('aria-label', 'Annotation color');
-      color.title = 'Annotation color';
+      setTooltip(color, 'Annotation color', { delay: 250 });
       this.actions.append(color);
     }
     this.actions.append(
-      this.button('insert-tag', 'Add tag', '#'),
-      this.button('insert-link', 'Add link', '[[]]'),
-      this.button('delete-comment', 'Delete comment', 'Delete comment'),
+      this.button('insert-tag', 'Add tag', 'tag'),
+      this.button('insert-link', 'Add link', 'link-2'),
+      this.button('delete-comment', 'Delete comment', 'message-square-x'),
       ...(request.canDeleteAnnotation === false
         ? []
-        : [this.button('delete-annotation', 'Delete annotation', 'Delete annotation')]),
+        : [this.button('delete-annotation', 'Delete annotation', 'trash-2')]),
     );
   }
 
@@ -370,14 +375,10 @@ export class AnnotationPopover {
   }
 
   private place(x: number, y: number, owner: Window): void {
-    const viewport = owner.visualViewport;
-    const left = viewport?.offsetLeft ?? 0;
-    const top = viewport?.offsetTop ?? 0;
-    const width = viewport?.width ?? owner.innerWidth;
-    const height = viewport?.height ?? owner.innerHeight;
+    const viewport = fixedViewportBounds(owner, this.element);
     const bounds = this.element.getBoundingClientRect();
-    this.element.style.left = `${Math.max(left, Math.min(x, left + width - bounds.width))}px`;
-    this.element.style.top = `${Math.max(top, Math.min(y, top + height - bounds.height))}px`;
+    this.element.style.left = `${Math.max(viewport.left, Math.min(x, viewport.right - bounds.width)) - viewport.originLeft}px`;
+    this.element.style.top = `${Math.max(viewport.top, Math.min(y, viewport.bottom - bounds.height)) - viewport.originTop}px`;
   }
 
   private insertText(text: string): void {
@@ -515,6 +516,34 @@ export class AnnotationPopover {
       target.removeEventListener(type, listener);
     });
   }
+}
+
+interface FixedViewportBounds {
+  readonly bottom: number;
+  readonly left: number;
+  readonly originLeft: number;
+  readonly originTop: number;
+  readonly right: number;
+  readonly top: number;
+}
+
+function fixedViewportBounds(owner: Window, element: HTMLElement): FixedViewportBounds {
+  const viewport = owner.visualViewport;
+  const left = viewport?.offsetLeft ?? 0;
+  const top = viewport?.offsetTop ?? 0;
+  const right = left + (viewport?.width ?? owner.innerWidth);
+  const bottom = top + (viewport?.height ?? owner.innerHeight);
+  const containingBlock = element.offsetParent;
+  if (containingBlock === null) return { bottom, left, originLeft: 0, originTop: 0, right, top };
+  const bounds = containingBlock.getBoundingClientRect();
+  return {
+    bottom: Math.min(bottom, bounds.bottom),
+    left: Math.max(left, bounds.left),
+    originLeft: bounds.left,
+    originTop: bounds.top,
+    right: Math.min(right, bounds.right),
+    top: Math.max(top, bounds.top),
+  };
 }
 
 interface AnnotationLinkToken {

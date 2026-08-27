@@ -357,12 +357,15 @@ export class ReaderToolbar {
       this.addFitChoices(menu);
       menu.addSeparator();
     }
-    menu.addItem((item) => item.setTitle('Layout').setIsLabel(true));
+    menu.addItem((item) =>
+      item.setTitle('Layout').setIsLabel(true).setSection('abyss-documents-layout'),
+    );
     for (const choice of LAYOUT_CHOICES) {
       menu.addItem((item) => {
         item
           .setTitle(choice.label)
           .setIcon(choice.icon)
+          .setSection('abyss-documents-layout')
           .setChecked(sameLayout(choice.value, this.currentLayout))
           .onClick(() => {
             this.onIntent({ type: 'set-layout', layout: choice.value });
@@ -414,10 +417,13 @@ export class ReaderToolbar {
     const menu = new Menu();
     menu.setUseNativeMenu(false);
     this.menus.add(menu);
+    this.root.doc.body.addClass('abyss-documents-menu-open');
     trigger.setAttribute('aria-expanded', 'true');
     menu.onHide(() => {
       this.menus.delete(menu);
       trigger.setAttribute('aria-expanded', 'false');
+      if (this.root.doc.querySelector('.abyss-reader-toolbar [aria-expanded="true"]') === null)
+        this.root.doc.body.removeClass('abyss-documents-menu-open');
       this.restoreMenuTriggerFocus(trigger);
     });
     return menu;
