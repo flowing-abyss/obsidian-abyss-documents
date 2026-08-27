@@ -69,6 +69,32 @@ function cachedAnnotation(): Record<string, unknown> {
 }
 
 describe('AnnotationCache', () => {
+  it('uses a bounded SHA-256 partition for long Cyrillic paths and still verifies the source path', async () => {
+    const documentPath =
+      'Библиотека/Очень длинное название документа на русском языке с повторяющимися словами и символами.pdf';
+    const neighboringPath = documentPath.replace('символами', 'символом');
+    expect(
+      new TextEncoder().encode(`${encodeURIComponent(documentPath)}.json`).byteLength,
+    ).toBeGreaterThan(255);
+    const fixture = adapter();
+    const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
+
+    const path = await cache.partitionPath(documentPath);
+    const repeatedPath = await cache.partitionPath(documentPath);
+    const neighboringPartition = await cache.partitionPath(neighboringPath);
+    const basename = path.slice(path.lastIndexOf('/') + 1);
+
+    expect(path).toBe(repeatedPath);
+    expect(basename).toMatch(/^[0-9a-f]{64}\.json$/u);
+    expect(new TextEncoder().encode(basename).byteLength).toBeLessThanOrEqual(255);
+    expect(neighboringPartition).not.toBe(path);
+
+    const longPathRecord = { ...record, documentPath };
+    await cache.write(longPathRecord);
+    await expect(cache.read(documentPath, record.fingerprint)).resolves.toEqual(record.annotations);
+    await expect(cache.read(neighboringPath, record.fingerprint)).resolves.toBeNull();
+  });
+
   it('stores the derived partition below configDir and reads only a matching fingerprint', async () => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
@@ -86,7 +112,7 @@ describe('AnnotationCache', () => {
     async (payload) => {
       const fixture = adapter();
       const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-      const path = cache.partitionPath(record.documentPath);
+      const path = await cache.partitionPath(record.documentPath);
       fixture.files.set(path, payload);
 
       await expect(cache.read(record.documentPath, record.fingerprint)).resolves.toBeNull();
@@ -99,7 +125,7 @@ describe('AnnotationCache', () => {
   it('deletes a partition containing malformed annotation records', async () => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-    const path = cache.partitionPath(record.documentPath);
+    const path = await cache.partitionPath(record.documentPath);
     fixture.files.set(path, JSON.stringify({ ...record, annotations: [{}] }));
     await expect(cache.read(record.documentPath, record.fingerprint)).resolves.toBeNull();
     expect(fixture.files.has(path)).toBe(false);
@@ -110,7 +136,7 @@ describe('AnnotationCache', () => {
     async (annotation) => {
       const fixture = adapter();
       const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-      const path = cache.partitionPath(record.documentPath);
+      const path = await cache.partitionPath(record.documentPath);
       fixture.files.set(path, JSON.stringify({ ...record, annotations: [annotation] }));
       await expect(cache.read(record.documentPath, record.fingerprint)).resolves.toBeNull();
     },
@@ -138,7 +164,7 @@ describe('AnnotationCache', () => {
   ])('deletes a cache record with %s', async (_label, override) => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-    const path = cache.partitionPath(record.documentPath);
+    const path = await cache.partitionPath(record.documentPath);
     fixture.files.set(
       path,
       JSON.stringify({
@@ -154,7 +180,7 @@ describe('AnnotationCache', () => {
   it('accepts every persisted annotation, anchor, geometry, identity, and reason discriminant', async () => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-    const path = cache.partitionPath(record.documentPath);
+    const path = await cache.partitionPath(record.documentPath);
     const types = ['highlight', 'underline', 'ink', 'text-note', 'free-text', 'unsupported'];
     const reasons = [
       'document-read-only',
@@ -226,7 +252,7 @@ describe('AnnotationCache', () => {
   ])('deletes malformed cache root: %s', async (_label, override) => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-    const path = cache.partitionPath(record.documentPath);
+    const path = await cache.partitionPath(record.documentPath);
     fixture.files.set(path, JSON.stringify({ ...record, ...override }));
     await expect(cache.read(record.documentPath, record.fingerprint)).resolves.toBeNull();
   });
@@ -305,7 +331,7 @@ describe('AnnotationCache', () => {
   ])('rejects malformed nested persisted field: %s', async (_label, override) => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-    const path = cache.partitionPath(record.documentPath);
+    const path = await cache.partitionPath(record.documentPath);
     fixture.files.set(
       path,
       JSON.stringify({ ...record, annotations: [{ ...cachedAnnotation(), ...override }] }),
@@ -347,7 +373,7 @@ describe('AnnotationCache', () => {
   it('rejects a read invalidated while the adapter is loading it', async () => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-    const path = cache.partitionPath(record.documentPath);
+    const path = await cache.partitionPath(record.documentPath);
     fixture.files.set(path, JSON.stringify(record));
     let releaseRead: (() => void) | undefined;
     const blocked = new Promise<void>((resolve) => {
@@ -371,7 +397,7 @@ describe('AnnotationCache', () => {
   it('rejects valid-shaped data for a different path without deleting it', async () => {
     const fixture = adapter();
     const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
-    const path = cache.partitionPath(record.documentPath);
+    const path = await cache.partitionPath(record.documentPath);
     fixture.files.set(path, JSON.stringify({ ...record, documentPath: 'Other.pdf' }));
     await expect(cache.read(record.documentPath, record.fingerprint)).resolves.toBeNull();
     expect(fixture.files.has(path)).toBe(true);

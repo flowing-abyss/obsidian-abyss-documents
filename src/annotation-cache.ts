@@ -35,8 +35,12 @@ export class AnnotationCache {
     this.root = `${configDir}/plugins/abyss-documents/cache/annotations-v1`;
   }
 
-  partitionPath(documentPath: string): string {
-    return `${this.root}/${encodeURIComponent(documentPath)}.json`;
+  async partitionPath(documentPath: string): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(documentPath));
+    const key = Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('');
+    return `${this.root}/${key}.json`;
   }
 
   async read(
@@ -44,7 +48,7 @@ export class AnnotationCache {
     fingerprint: string,
     generation = this.generation(documentPath),
   ): Promise<readonly DocumentAnnotation[] | null> {
-    const path = this.partitionPath(documentPath);
+    const path = await this.partitionPath(documentPath);
     this.assertCurrent(documentPath, generation);
     const exists = await this.adapter.exists(path);
     this.assertCurrent(documentPath, generation);
@@ -83,15 +87,16 @@ export class AnnotationCache {
     if (generation !== this.generation(value.documentPath)) return false;
     await this.ensureRoot();
     if (generation !== this.generation(value.documentPath)) return false;
-    await this.adapter.write(this.partitionPath(value.documentPath), JSON.stringify(value));
+    const path = await this.partitionPath(value.documentPath);
+    await this.adapter.write(path, JSON.stringify(value));
     if (generation === this.generation(value.documentPath)) return true;
-    await this.removeIfPresent(this.partitionPath(value.documentPath));
+    await this.removeIfPresent(path);
     return false;
   }
 
   async invalidate(documentPath: string): Promise<void> {
     this.generations.set(documentPath, this.generation(documentPath) + 1);
-    await this.removeIfPresent(this.partitionPath(documentPath));
+    await this.removeIfPresent(await this.partitionPath(documentPath));
   }
 
   private async ensureRoot(): Promise<void> {

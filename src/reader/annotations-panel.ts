@@ -1,4 +1,4 @@
-import { setTooltip } from 'obsidian';
+import { setIcon, setTooltip } from 'obsidian';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation } from '../document-core/document.js';
 import { maximizeReaderCounter, recordReaderPerformanceSample } from '../reader-performance.js';
@@ -10,13 +10,10 @@ const MAX_TAG_FACETS = 48;
 const ESTIMATED_CARD_HEIGHT = 112;
 const SCROLL_OVERSCAN = 10;
 const HEIGHT_EPSILON = 0.5;
+const LOADING_SPINNER_DELAY_MS = 250;
 let nextDocumentTagsBodyId = 0;
 
 type AnnotationPanelState = 'loading' | 'empty' | 'content' | 'filtered-empty' | 'unavailable';
-
-interface AnnotationPanelUnavailableOptions {
-  readonly onRetry?: () => void;
-}
 
 interface AnnotationFocusTarget {
   readonly action: string | null;
@@ -84,7 +81,8 @@ export class AnnotationsPanel {
   private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
   private currentPage = 0;
   private state: AnnotationPanelState = 'loading';
-  private unavailableOptions: AnnotationPanelUnavailableOptions = {};
+  private loadingVisible = false;
+  private loadingTimer: number | null = null;
   private selectedAnnotationId: string | null = null;
   private windowStart = 0;
   private estimatedCardHeight = ESTIMATED_CARD_HEIGHT;
@@ -189,7 +187,7 @@ export class AnnotationsPanel {
     this.scrollHost = createScrollHost(owner, this.status, this.list);
     this.mount(host);
     this.bindEvents();
-    this.renderState();
+    this.setLoading();
   }
 
   destroy(): void {
@@ -206,6 +204,7 @@ export class AnnotationsPanel {
       ownerWindow(this.root).cancelAnimationFrame(this.measurementFrame);
       this.measurementFrame = null;
     }
+    this.clearLoadingTimer();
   }
 
   private configureRoot(): void {
@@ -236,27 +235,36 @@ export class AnnotationsPanel {
 
   setLoading(): void {
     this.clearResolutionFeedback();
+    this.clearLoadingTimer();
+    this.loadingVisible = false;
     this.state = 'loading';
-    this.unavailableOptions = {};
     this.renderState();
+    this.loadingTimer = ownerWindow(this.root).setTimeout(() => {
+      this.loadingTimer = null;
+      if (this.destroyed || this.state !== 'loading') return;
+      this.loadingVisible = true;
+      this.renderState();
+    }, LOADING_SPINNER_DELAY_MS);
   }
 
-  setUnavailable(options: AnnotationPanelUnavailableOptions = {}): void {
+  setUnavailable(): void {
     this.clearResolutionFeedback();
-    this.unavailableOptions = options;
+    this.clearLoadingTimer();
+    this.loadingVisible = false;
     this.state = this.annotations.length === 0 ? 'unavailable' : this.dataState();
     this.renderState();
   }
 
   setAnnotations(annotations: readonly DocumentAnnotation[]): void {
     this.clearResolutionFeedback();
+    this.clearLoadingTimer();
+    this.loadingVisible = false;
     this.resetContextualActions();
     this.annotations = [...annotations];
     this.rowIds = new WeakMap();
     this.nextRowId = 0;
     this.clearMeasurements();
     this.resetVirtualScroll();
-    this.unavailableOptions = {};
     this.renderFacets();
     this.applyFilter();
   }
@@ -966,31 +974,34 @@ export class AnnotationsPanel {
     this.query.hidden = !hasControls;
     this.tags.hidden = !hasControls || this.displayTags.length === 0;
     this.list.hidden = this.state !== 'content';
-    this.status.hidden = this.state === 'content';
+    this.status.hidden =
+      this.state === 'content' || (this.state === 'loading' && !this.loadingVisible);
     this.status.removeAttribute('role');
     this.status.replaceChildren();
     if (this.state === 'content') return;
-    this.status.setAttribute('role', this.state === 'unavailable' ? 'alert' : 'status');
-    const copy: Readonly<Record<Exclude<AnnotationPanelState, 'content'>, string>> = {
-      loading: 'Loading annotations…',
+    this.status.setAttribute('role', 'status');
+    if (this.state === 'loading') {
+      if (!this.loadingVisible) return;
+      const spinner = ownerWindow(this.root).createSpan();
+      spinner.className = 'abyss-annotations-spinner';
+      spinner.dataset['annotationsSpinner'] = '';
+      spinner.setAttribute('aria-label', 'Loading annotations');
+      setIcon(spinner, 'loader-circle');
+      this.status.append(spinner);
+      return;
+    }
+    const copy: Readonly<Record<Exclude<AnnotationPanelState, 'content' | 'loading'>, string>> = {
       empty: 'No annotations',
       'filtered-empty': 'No matching annotations',
-      unavailable: 'Annotations unavailable',
+      unavailable: 'Couldn’t load annotations',
     };
     this.status.append(copy[this.state]);
-    if (this.state !== 'unavailable' || this.unavailableOptions.onRetry === undefined) return;
-    const retry = ownerWindow(this.root).createEl('button');
-    retry.type = 'button';
-    retry.className = 'mod-cta abyss-annotations-retry';
-    retry.dataset['action'] = 'retry-annotations';
-    retry.textContent = 'Try again';
-    retry.addEventListener('click', () => {
-      const onRetry = this.unavailableOptions.onRetry;
-      if (onRetry === undefined) return;
-      this.setLoading();
-      onRetry();
-    });
-    this.status.append(retry);
+  }
+
+  private clearLoadingTimer(): void {
+    if (this.loadingTimer === null) return;
+    ownerWindow(this.root).clearTimeout(this.loadingTimer);
+    this.loadingTimer = null;
   }
 
   private clearResolutionFeedback(): void {

@@ -91,6 +91,32 @@ describe('AnnotationsPanel', () => {
     expect(root.querySelector<HTMLElement>('[data-annotations-status]')?.hidden).toBe(true);
   });
 
+  it('delays the textless loading spinner for 250 ms and cancels it on resolution', () => {
+    vi.useFakeTimers();
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    try {
+      const status = root.querySelector<HTMLElement>('[data-annotations-status]');
+      expect(status?.hidden).toBe(true);
+      expect(status?.textContent).toBe('');
+
+      vi.advanceTimersByTime(249);
+      expect(root.querySelector('[data-annotations-spinner]')).toBeNull();
+
+      vi.advanceTimersByTime(1);
+      expect(status?.hidden).toBe(false);
+      expect(root.querySelector('[data-annotations-spinner]')).not.toBeNull();
+      expect(status?.textContent).toBe('');
+
+      panel.setAnnotations([]);
+      expect(root.querySelector('[data-annotations-spinner]')).toBeNull();
+      expect(status?.textContent).toBe('No annotations');
+    } finally {
+      panel.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it('hides controls and tags when empty', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
@@ -293,25 +319,18 @@ describe('AnnotationsPanel', () => {
     expect(root.textContent).not.toContain('unavailable');
   });
 
-  it('renders actionable unavailable without technical jargon', () => {
+  it('renders a quiet annotation failure without a button or technical jargon', () => {
     const root = createDiv();
-    const retry = vi.fn();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
 
-    panel.setUnavailable({ onRetry: retry });
-
-    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
-      'Annotations unavailableTry again',
-    );
-    expect(root.textContent).not.toMatch(/index|cache|reopen/i);
-    root.querySelector<HTMLButtonElement>('[data-action="retry-annotations"]')?.click();
-    expect(retry).toHaveBeenCalledOnce();
-
     panel.setUnavailable();
-    expect(root.querySelector('[data-action="retry-annotations"]')).toBeNull();
+
     expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
-      'Annotations unavailable',
+      'Couldn’t load annotations',
     );
+    expect(root.querySelector('[data-annotations-status]')?.getAttribute('role')).toBe('status');
+    expect(root.querySelector('[data-action="retry-annotations"]')).toBeNull();
+    expect(root.textContent).not.toMatch(/unavailable|try again|index|cache|reopen/i);
   });
 
   it('keeps resolution feedback through scroll resize filter and page renders until navigation', () => {
@@ -1059,7 +1078,7 @@ describe('AnnotationsPanel', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
     panel.setUnavailable();
-    expect(root.querySelector('[role="alert"]')?.textContent).toBe('Annotations unavailable');
+    expect(root.querySelector('[role="status"]')?.textContent).toBe('Couldn’t load annotations');
   });
 
   it('sets drag payloads and exposes keyboard/mobile Copy and Insert actions', () => {

@@ -376,8 +376,8 @@ describe('ReaderController', () => {
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
 
     expect(
-      shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')?.textContent,
-    ).toBe('Annotations unavailable');
+      shell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]')?.textContent,
+    ).toBe('Couldn’t load annotations');
     expect(
       shell.created.sidebar?.annotationsPanel.root.querySelector(
         '[data-action="retry-annotations"]',
@@ -1211,12 +1211,97 @@ describe('ReaderController', () => {
       ?.click();
     await vi.waitFor(() => {
       expect(
-        secondShell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]'),
-      ).not.toBeNull();
+        secondShell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]')
+          ?.textContent,
+      ).toBe('Couldn’t load annotations');
     });
     expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to extract PDF annotations', {
       path: pdf.path,
       page: 1,
+      cause,
+    });
+  });
+  it('extracts annotations when the derived cache read fails', async () => {
+    const [pdf] = files('Books/Cache-read-failure.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const extracted = annotationRecord('extracted-id', 0, {
+      kind: 'point',
+      point: { x: 1, y: 2 },
+    });
+    const createdSession = session(pdf.path);
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      sink([extracted]);
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const cause = new Error('cache read failed');
+    const cache = {
+      generation: vi.fn(() => 0),
+      read: vi.fn(async () => {
+        throw cause;
+      }),
+      write: vi.fn(async () => true),
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationCache: cache },
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['extracted-id']);
+    });
+    expect(listAnnotations).toHaveBeenCalledOnce();
+    expect(shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')).toBeNull();
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Annotation cache read failed', {
+      path: pdf.path,
+      cause,
+    });
+  });
+  it('keeps extracted annotations when the derived cache write fails', async () => {
+    const [pdf] = files('Books/Cache-write-failure.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const extracted = annotationRecord('extracted-id', 0, {
+      kind: 'point',
+      point: { x: 1, y: 2 },
+    });
+    const createdSession = session(pdf.path);
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      sink([extracted]);
+    });
+    Object.assign(createdSession.value, { listAnnotations });
+    const cause = new Error('cache write failed');
+    const cache = {
+      generation: vi.fn(() => 0),
+      read: vi.fn(async () => null),
+      write: vi.fn(async () => {
+        throw cause;
+      }),
+    } as unknown as AnnotationCache;
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { annotationCache: cache },
+    );
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['extracted-id']);
+    });
+    expect(listAnnotations).toHaveBeenCalledOnce();
+    expect(shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')).toBeNull();
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Annotation cache write failed', {
+      path: pdf.path,
       cause,
     });
   });
@@ -1255,7 +1340,7 @@ describe('ReaderController', () => {
       cause,
     });
   });
-  it('silently discards an extraction invalidated before its cache write', async () => {
+  it('keeps a confirmed empty extraction when its derived cache write is invalidated', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const createdSession = session(pdf.path);
@@ -1287,9 +1372,7 @@ describe('ReaderController', () => {
     await vi.waitFor(() => {
       expect(cacheWrite).toHaveBeenCalledOnce();
     });
-    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain(
-      'Loading annotations',
-    );
+    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain('No annotations');
     expect(log).not.toHaveBeenCalledWith(
       '[abyss-documents] Failed to extract PDF annotations',
       expect.anything(),
@@ -3005,7 +3088,7 @@ describe('ReaderController', () => {
     expect(reopened.close).toHaveBeenCalledOnce();
   });
 
-  it('keeps stale data after extraction failure and retries only on request', async () => {
+  it('refreshes verified annotations when derived cache invalidation fails', async () => {
     const [pdf] = files('Books/Refresh-failure.pdf');
     if (pdf === undefined) throw new Error('Expected PDF.');
     const active = session(pdf.path);
@@ -3014,10 +3097,10 @@ describe('ReaderController', () => {
         sink([annotationRecord('stale-id', 0, { kind: 'point', point: { x: 1, y: 2 } })]);
       },
     });
-    const retry = session(pdf.path);
-    Object.assign(retry.value, {
+    const reopened = session(pdf.path);
+    Object.assign(reopened.value, {
       listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
-        sink([annotationRecord('retried-id', 0, { kind: 'point', point: { x: 3, y: 4 } })]);
+        sink([annotationRecord('refreshed-id', 0, { kind: 'point', point: { x: 3, y: 4 } })]);
       },
     });
     const source = {
@@ -3032,11 +3115,9 @@ describe('ReaderController', () => {
     Object.assign(active.value, { createNativeEditableSession: () => source });
     let broadcast: VerifiedReloadListener | undefined;
     const adapter = adapterFor(pdf.path, active);
-    adapter.open.mockResolvedValueOnce(active.value).mockResolvedValueOnce(retry.value);
-    const invalidate = vi
-      .fn<AnnotationCache['invalidate']>()
-      .mockRejectedValueOnce(new Error('annotation cache invalidation failed'))
-      .mockResolvedValue(undefined);
+    adapter.open.mockResolvedValueOnce(active.value).mockResolvedValueOnce(reopened.value);
+    const cause = new Error('annotation cache invalidation failed');
+    const invalidate = vi.fn<AnnotationCache['invalidate']>().mockRejectedValue(cause);
     const cache = {
       generation: vi.fn(() => 1),
       read: vi.fn(async () => null),
@@ -3069,23 +3150,20 @@ describe('ReaderController', () => {
 
     await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 2 }, 1, source);
     await vi.waitFor(() => {
-      expect(log).toHaveBeenCalledWith(
-        '[abyss-documents] Failed to refresh verified PDF annotations',
-        expect.objectContaining({ path: pdf.path, revision: 1 }),
-      );
+      expect(log).toHaveBeenCalledWith('[abyss-documents] Annotation cache invalidation failed', {
+        path: pdf.path,
+        cause,
+      });
     });
-    expect(adapter.open).toHaveBeenCalledOnce();
-    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['stale-id']);
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['refreshed-id']);
+    });
+    expect(adapter.open).toHaveBeenCalledTimes(2);
     expect(shell.created.sidebar?.annotationsPanel.root.querySelector('[role="alert"]')).toBeNull();
     expect(shell.created.sidebar?.annotationsPanel.root.textContent).not.toMatch(
       /index|cache|reopen/i,
     );
-    shell.send({ type: 'open-sidebar', tab: 'annotations' });
-    await vi.waitFor(() => {
-      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['retried-id']);
-    });
-    expect(adapter.open).toHaveBeenCalledTimes(2);
-    expect(retry.close).toHaveBeenCalledOnce();
+    expect(reopened.close).toHaveBeenCalledOnce();
   });
 
   it('suppresses an older verified annotation refresh when a newer save finishes first', async () => {

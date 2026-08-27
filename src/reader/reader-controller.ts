@@ -694,17 +694,19 @@ export class ReaderController {
   }
 
   private startVerifiedAnnotationInvalidation(marker: VerifiedAnnotationMarker): void {
-    const task = Promise.resolve(this.annotationCache?.invalidate(marker.session.descriptor.path))
+    const path = marker.session.descriptor.path;
+    const task = Promise.resolve()
+      .then(async () => {
+        try {
+          await this.annotationCache?.invalidate(path);
+        } catch (cause) {
+          console.error('[abyss-documents] Annotation cache invalidation failed', { path, cause });
+        }
+      })
       .then(() => {
         if (!this.isCurrentAnnotationMarker(marker) || !this.hasAnnotationIntent(marker.session))
           return;
         this.verifiedAnnotationRefresh = this.scheduleVerifiedAnnotationRefresh(marker.session);
-      })
-      .catch((cause: unknown) => {
-        if (!this.isCurrentAnnotationMarker(marker)) return;
-        this.verifiedAnnotationFailureCause = cause;
-        this.verifiedAnnotationFailedMarker = marker;
-        this.reportVerifiedAnnotationRefreshFailure(marker, cause);
       })
       .finally(() => {
         if (this.verifiedAnnotationInvalidation !== task) return;
@@ -844,11 +846,7 @@ export class ReaderController {
     cause: unknown,
   ): void {
     if (isAbortFailure(cause)) return;
-    marker.shell.sidebar?.annotationsPanel.setUnavailable({
-      onRetry: () => {
-        this.loadAnnotations(marker.session, marker.shell);
-      },
-    });
+    marker.shell.sidebar?.annotationsPanel.setUnavailable();
     console.error('[abyss-documents] Failed to refresh verified PDF annotations', {
       path: marker.session.descriptor.path,
       revision: marker.revision,
@@ -1232,11 +1230,7 @@ export class ReaderController {
         if (isAbortFailure(cause)) return;
         if (Object.is(this.session, session) && Object.is(this.shell, shell)) {
           this.annotationsLoadingFor = null;
-          shell.sidebar?.annotationsPanel.setUnavailable({
-            onRetry: () => {
-              this.loadAnnotations(session, shell);
-            },
-          });
+          shell.sidebar?.annotationsPanel.setUnavailable();
         }
         this.reportAnnotationExportPreparationFailure(file, cause);
       },
@@ -1597,11 +1591,7 @@ export class ReaderController {
         )
           return;
         this.annotationsLoadingFor = null;
-        shell.sidebar?.annotationsPanel.setUnavailable({
-          onRetry: () => {
-            this.loadAnnotations(session, shell);
-          },
-        });
+        shell.sidebar?.annotationsPanel.setUnavailable();
         console.error('[abyss-documents] Failed to extract PDF annotations', {
           path: session.descriptor.path,
           page: annotationFailurePage(cause) ?? this.currentPageIndex + 1,
@@ -1681,9 +1671,12 @@ export class ReaderController {
         cacheGeneration,
       );
     } catch (cause) {
-      if (!(cause instanceof StaleAnnotationCacheReadError)) throw cause;
-      this.throwIfAnnotationCancelled(signal);
-      cacheGeneration = this.annotationCache?.generation(path);
+      if (cause instanceof StaleAnnotationCacheReadError) {
+        this.throwIfAnnotationCancelled(signal);
+        cacheGeneration = this.annotationCache?.generation(path);
+      } else {
+        console.error('[abyss-documents] Annotation cache read failed', { path, cause });
+      }
       cached = null;
     }
     this.throwIfAnnotationCancelled(signal);
@@ -1693,17 +1686,19 @@ export class ReaderController {
       annotations.push(...batch);
     });
     this.throwIfAnnotationCancelled(signal);
-    const stored = await this.annotationCache?.write(
-      {
-        version: 1,
-        documentPath: path,
-        fingerprint: session.descriptor.fingerprint,
-        annotations,
-      },
-      cacheGeneration,
-    );
-    if (stored === false)
-      throw new DOMException('Annotation extraction became stale.', 'AbortError');
+    try {
+      await this.annotationCache?.write(
+        {
+          version: 1,
+          documentPath: path,
+          fingerprint: session.descriptor.fingerprint,
+          annotations,
+        },
+        cacheGeneration,
+      );
+    } catch (cause) {
+      console.error('[abyss-documents] Annotation cache write failed', { path, cause });
+    }
     return annotations;
   }
 
