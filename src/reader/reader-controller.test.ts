@@ -200,11 +200,15 @@ function editableViewport(pageCount = 3) {
 function interactiveViewport(pageCount = 3) {
   const created = editableViewport(pageCount);
   let mode: PdfAnnotationLogicalMode = 'neutral';
+  const annotationFocusListeners = new Set<
+    Parameters<PdfAnnotationInteraction['onAnnotationFocus']>[0]
+  >();
   const colorListeners = new Set<(value: string) => void>();
   const modeListeners = new Set<(value: PdfAnnotationLogicalMode) => void>();
   const selectionListeners = new Set<(value: PdfTextSelection | null) => void>();
   const commitSelection = vi.fn(
-    async (_token: string, _action: PdfSelectionAction): Promise<'created'> => 'created',
+    async (_token: string, _action: PdfSelectionAction): Promise<DocumentAnnotation> =>
+      annotationRecord('created-native', 0, { kind: 'point', point: { x: 0, y: 0 } }),
   );
   const setQuickHighlight = vi.fn(
     async (state: { readonly enabled: boolean; readonly color: string }) => {
@@ -212,8 +216,14 @@ function interactiveViewport(pageCount = 3) {
       for (const listener of modeListeners) listener(mode);
     },
   );
+  const updateAnnotations = vi.fn(() => true);
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
+    deleteAnnotations: () => true,
+    onAnnotationFocus(listener) {
+      annotationFocusListeners.add(listener);
+      return () => annotationFocusListeners.delete(listener);
+    },
     onColor(listener) {
       colorListeners.add(listener);
       return () => colorListeners.delete(listener);
@@ -228,6 +238,7 @@ function interactiveViewport(pageCount = 3) {
       return () => selectionListeners.delete(listener);
     },
     setQuickHighlight,
+    updateAnnotations,
   };
   created.setTool.mockImplementation(async (tool) => {
     mode = 'neutral';
@@ -246,10 +257,16 @@ function interactiveViewport(pageCount = 3) {
     emitColor(color: string) {
       for (const listener of colorListeners) listener(color);
     },
+    emitAnnotationFocus(
+      focus: Parameters<Parameters<PdfAnnotationInteraction['onAnnotationFocus']>[0]>[0],
+    ) {
+      for (const listener of annotationFocusListeners) listener(focus);
+    },
     emitSelection(selection: PdfTextSelection | null) {
       for (const listener of selectionListeners) listener(selection);
     },
     setQuickHighlight,
+    updateAnnotations,
   };
 }
 
@@ -629,7 +646,13 @@ describe('ReaderController', () => {
     await controller.open(pdf, createDiv());
 
     createdViewport.emitSelection(pdfSelection());
-    shell.created.root.querySelector<HTMLButtonElement>('[data-selection-intent="link"]')?.click();
+    const comment = shell.created.root.querySelector<HTMLTextAreaElement>(
+      '.abyss-annotation-editor-comment',
+    );
+    if (comment === null) throw new Error('Expected unified selection comment field.');
+    comment.value = '[[';
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+    shell.created.root.querySelector<HTMLButtonElement>('[data-editor-color="#ffd400"]')?.click();
     await vi.waitFor(() => {
       expect(createdViewport.commitSelection).toHaveBeenCalledExactlyOnceWith(
         'selection-token',
@@ -709,9 +732,7 @@ describe('ReaderController', () => {
     await controller.open(pdf, createDiv());
 
     createdViewport.emitSelection(pdfSelection('writer-failure'));
-    shell.created.root
-      .querySelector<HTMLButtonElement>('[data-selection-color="#5fb236"]')
-      ?.click();
+    shell.created.root.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
 
     await vi.waitFor(() => {
       expect(notice).toHaveBeenCalledWith(
@@ -722,7 +743,6 @@ describe('ReaderController', () => {
     expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to edit PDF annotation', {
       action: 'create selection annotation',
       path: pdf.path,
-      intent: 'highlight',
       token: 'writer-failure',
       cause,
     });
@@ -2890,6 +2910,79 @@ describe('ReaderController', () => {
     }
   });
 
+  it('flushes unified annotation metadata before manual save inside the debounce window', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/Manual-editor-flush.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdViewport = interactiveViewport();
+      const createdSession = session(pdf.path, createdViewport);
+      const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      const dirtyListeners: Array<(revision: number) => void> = [];
+      let dirty = false;
+      const source: NativeEditableSaveSession = {
+        baseToken,
+        get pendingRevision() {
+          return 1;
+        },
+        get isDirty() {
+          return dirty;
+        },
+        prepare: vi.fn(async () => ({ revision: 1, baseToken, bytes: new Uint8Array([1]) })),
+        commit: vi.fn(() => {
+          dirty = false;
+        }),
+        destroy: vi.fn(),
+      };
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          dirtyListeners.push(onRevision);
+          return source;
+        },
+      });
+      const save = vi.fn(async () => ({
+        verified: true as const,
+        generation: 1,
+        sha256: 'b'.repeat(64),
+        byteSize: 5,
+        committedAt: '2026-08-28T00:00:00.000Z' as never,
+      }));
+      createdViewport.updateAnnotations.mockImplementation(() => {
+        dirty = true;
+        dirtyListeners[0]?.(1);
+        return true;
+      });
+      const shell = capturingShellFactory();
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        shell.createShell,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      const host = createDiv();
+      await controller.open(pdf, host);
+      createdViewport.emitAnnotationFocus({
+        annotations: [annotationRecord('manual-edit', 0, { kind: 'point', point: { x: 1, y: 2 } })],
+        editable: true,
+        position: { x: 10, y: 20 },
+      });
+      const comment = host.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+      if (comment === null) throw new Error('Expected unified annotation editor.');
+      comment.value = 'Save immediately';
+      comment.dispatchEvent(new Event('input', { bubbles: true }));
+
+      await controller.saveDocument();
+
+      expect(createdViewport.updateAnnotations).toHaveBeenCalledWith({
+        annotations: [expect.objectContaining({ identity: { id: 'manual-edit', kind: 'stable' } })],
+        comment: 'Save immediately',
+      });
+      expect(save).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('flushes a dirty debounce generation before controlled close', async () => {
     vi.useFakeTimers();
     try {
@@ -2933,6 +3026,96 @@ describe('ReaderController', () => {
       expect(save).toHaveBeenCalledOnce();
       expect(save.mock.calls[0]?.[0]).toMatchObject({ path: pdf.path, revision: 1, source });
       expect(source.destroy).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flushes unified metadata and keeps native lifecycle attached through an immediate close', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/Close-editor-flush.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdViewport = interactiveViewport();
+      const createdSession = session(pdf.path, createdViewport);
+      const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      const dirtyListeners: Array<(revision: number) => void> = [];
+      const operations: string[] = [];
+      let dirty = false;
+      const destroy = vi.fn(() => {
+        operations.push('destroy');
+      });
+      const source: NativeEditableSaveSession = {
+        baseToken,
+        get pendingRevision() {
+          return 1;
+        },
+        get isDirty() {
+          return dirty;
+        },
+        prepare: vi.fn(async () => ({ revision: 1, baseToken, bytes: new Uint8Array([1]) })),
+        commit: vi.fn(() => {
+          dirty = false;
+        }),
+        destroy,
+      };
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          dirtyListeners.push(onRevision);
+          return source;
+        },
+      });
+      createdViewport.updateAnnotations.mockImplementation(() => {
+        operations.push('update');
+        dirty = true;
+        dirtyListeners[0]?.(1);
+        return true;
+      });
+      const saved = deferred<{
+        readonly verified: true;
+        readonly generation: number;
+        readonly sha256: string;
+        readonly byteSize: number;
+        readonly committedAt: never;
+      }>();
+      const save = vi.fn(() => {
+        operations.push('save');
+        return saved.promise;
+      });
+      const shell = capturingShellFactory();
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        shell.createShell,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      const host = createDiv();
+      await controller.open(pdf, host);
+      createdViewport.emitAnnotationFocus({
+        annotations: [annotationRecord('close-edit', 0, { kind: 'point', point: { x: 1, y: 2 } })],
+        editable: true,
+        position: { x: 10, y: 20 },
+      });
+      const comment = host.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+      if (comment === null) throw new Error('Expected unified annotation editor.');
+      comment.value = 'Close immediately';
+      comment.dispatchEvent(new Event('input', { bubbles: true }));
+
+      const closing = controller.close();
+      await vi.waitFor(() => {
+        expect(save).toHaveBeenCalledOnce();
+      });
+      expect(destroy).not.toHaveBeenCalled();
+      saved.resolve({
+        verified: true,
+        generation: 1,
+        sha256: 'b'.repeat(64),
+        byteSize: 5,
+        committedAt: '2026-08-28T00:00:00.000Z' as never,
+      });
+      await closing;
+
+      expect(operations).toEqual(['update', 'save', 'destroy']);
     } finally {
       vi.useRealTimers();
     }

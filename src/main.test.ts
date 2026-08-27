@@ -18,7 +18,7 @@ import { DocumentSaveCoordinator } from './document-core/save-coordinator.js';
 import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1, type PluginDataV2 } from './plugin-data.js';
 import { readerPerformanceSnapshot } from './reader-performance.js';
-import { AnnotationPopover } from './reader/annotation-popover.js';
+import { AnnotationEditorPopover } from './reader/annotation-editor-popover.js';
 import {
   AbyssDocumentView,
   DOCUMENT_VIEW_TYPE,
@@ -246,18 +246,27 @@ describe('AbyssDocumentsPlugin', () => {
     const host = createDiv();
     const provider = (plugin as unknown as { linkSuggestions: LinkSuggestionService })
       .linkSuggestions;
-    const popover = new AnnotationPopover(host, provider, 'Books/Guide.pdf');
+    const popover = new AnnotationEditorPopover(host, provider, 'Books/Guide.pdf');
+    const annotation = {
+      ...({} as DocumentAnnotation),
+      color: '#ffd400',
+      comment: '',
+      identity: { id: 'suggestion-test' as never, kind: 'stable' as const },
+      links: [],
+      tags: [],
+    };
     popover.open({
-      comment: '[[con',
-      onChange: vi.fn(),
+      onCreate: vi.fn(),
       onClose: vi.fn(),
-      onDeleteAnnotation: vi.fn(),
-      onDeleteComment: vi.fn(),
-      x: 0,
-      y: 0,
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(),
+      palette: DEFAULT_DATA.settings.annotations.palette,
+      position: { x: 0, y: 0 },
+      target: { annotation, kind: 'annotation' },
     });
-    const input = host.querySelector<HTMLTextAreaElement>('textarea');
-    if (input === null) throw new Error('Expected comment input.');
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="Links"]');
+    if (input === null) throw new Error('Expected links input.');
+    input.value = '[[con';
     input.setSelectionRange(input.value.length, input.value.length);
     input.dispatchEvent(new Event('input', { bubbles: true }));
     expect(suggest).toHaveBeenCalledWith('con', 'Books/Guide.pdf');

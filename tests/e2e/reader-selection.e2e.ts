@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, it } from 'mocha';
 import { Key } from 'webdriverio';
 
 const pluginId = 'abyss-documents';
+const selectionEditorSelector =
+  '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
+const nativeEditorSelector = selectionEditorSelector;
 
 async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<void> {
   await browser.executeObsidian(
@@ -167,12 +170,13 @@ async function dragFixtureTextWhileInspectingPalette(): Promise<void> {
         ],
       },
     ]);
-    const held = await browser.execute(() => ({
-      paletteVisible:
-        document.querySelector<HTMLElement>('[data-region="selection-annotation-popover"]')
-          ?.hidden === false,
-      selectedText: window.getSelection()?.toString().trim() ?? '',
-    }));
+    const held = await browser.execute(
+      (editorSelector) => ({
+        paletteVisible: document.querySelector<HTMLElement>(editorSelector)?.hidden === false,
+        selectedText: window.getSelection()?.toString().trim() ?? '',
+      }),
+      selectionEditorSelector,
+    );
     expect(held.selectedText.length).toBeGreaterThan(0);
     expect(held.paletteVisible).toBe(false);
   } finally {
@@ -279,24 +283,21 @@ async function inputValue(selector: string, value: string): Promise<void> {
   );
 }
 
-async function createSeededComment(
-  spanIndex: number,
-  intent: 'comment' | 'link' | 'tag',
-  expectedSeed: string,
-  value: string,
-): Promise<void> {
+async function createSelectionComment(spanIndex: number, value: string): Promise<void> {
+  const editorCount = await browser.execute(
+    () => document.querySelectorAll('.highlightEditor').length,
+  );
   await selectFixtureText(spanIndex);
-  await $('[data-region="selection-annotation-popover"]').waitForDisplayed({ timeout: 5_000 });
-  await $(`[data-selection-intent="${intent}"]`).click();
-  const input = $('[data-annotation-popover] textarea');
+  const popover = $(selectionEditorSelector);
+  await popover.waitForDisplayed({ timeout: 5_000 });
+  const input = popover.$('[aria-label="Comment"]');
   await input.waitForDisplayed({ timeout: 5_000 });
-  await expect(input).toHaveValue(expectedSeed);
   try {
-    await inputValue('[data-annotation-popover]:not([hidden]) textarea', value);
+    await inputValue(`${selectionEditorSelector} [aria-label="Comment"]`, value);
     await expect(input).toHaveValue(value);
   } catch (cause) {
-    const diagnostics = await browser.execute(() => {
-      const popover = document.querySelector<HTMLElement>('[data-annotation-popover]');
+    const diagnostics = await browser.execute((editorSelector) => {
+      const popover = document.querySelector<HTMLElement>(editorSelector);
       const textarea = popover?.querySelector<HTMLTextAreaElement>('textarea') ?? null;
       const rect = textarea?.getBoundingClientRect();
       return {
@@ -308,13 +309,18 @@ async function createSeededComment(
         textareaStyle: textarea === null ? null : getComputedStyle(textarea).display,
         value: textarea?.value ?? null,
       };
-    });
+    }, selectionEditorSelector);
     throw new Error(
-      `Seeded ${intent} editor became unavailable: ${JSON.stringify(diagnostics)}; ${String(cause)}`,
+      `Selection editor became unavailable: ${JSON.stringify(diagnostics)}; ${String(cause)}`,
     );
   }
-  await browser.keys(Key.Escape);
-  await expect($('[data-annotation-popover]')).not.toBeDisplayed();
+  await browser.waitUntil(
+    async () =>
+      (await browser.execute(() => document.querySelectorAll('.highlightEditor').length)) ===
+      editorCount + 1,
+    { timeout: 10_000, timeoutMsg: 'Unified selection editor did not create one highlight.' },
+  );
+  await expect(popover).toBeDisplayed();
 }
 
 async function selectNativeEditor(selector: string, selectedSelector = selector): Promise<void> {
@@ -362,15 +368,15 @@ describe('reader selection-first annotations', () => {
 
     await selectFixtureText();
 
-    await $('[data-region="selection-annotation-popover"]').waitForDisplayed({ timeout: 5_000 });
-    await expect($('[data-selection-intent="comment"]')).toExist();
+    await $(selectionEditorSelector).waitForDisplayed({ timeout: 5_000 });
+    await expect($(`${selectionEditorSelector} [aria-label="Comment"]`)).toExist();
   });
 
   it('waits for a genuine primary text drag to end before showing selection actions', async () => {
     await dragFixtureTextWhileInspectingPalette();
 
-    await $('[data-region="selection-annotation-popover"]').waitForDisplayed({ timeout: 5_000 });
-    await expect($('[data-selection-intent="comment"]')).toExist();
+    await $(selectionEditorSelector).waitForDisplayed({ timeout: 5_000 });
+    await expect($(`${selectionEditorSelector} [aria-label="Comment"]`)).toExist();
   });
 
   it('lets native Quick Highlight create one editor without opening the selection palette', async () => {
@@ -384,29 +390,37 @@ describe('reader selection-first annotations', () => {
       () => document.querySelectorAll('.highlightEditor').length,
     );
     expect(editorCount).toBe(1);
-    await expect($('[data-region="selection-annotation-popover"]')).not.toBeDisplayed();
+    await expect($(selectionEditorSelector)).not.toBeDisplayed();
   });
 
   it('saves and reopens neutral highlight comment link and tag selections', async () => {
     let hash = await vaultFileSha256(workingPath);
 
     await selectFixtureText(1);
-    await $('[data-region="selection-annotation-popover"]').waitForDisplayed({ timeout: 5_000 });
-    await $('[data-selection-intent="highlight"][data-selection-color="#ffd400"]').click();
+    const selectionEditor = $(selectionEditorSelector);
+    await selectionEditor.waitForDisplayed({ timeout: 5_000 });
+    await selectionEditor.$('[data-editor-color="#ffd400"]').click();
     await $('.highlightEditor').waitForExist({ timeout: 10_000 });
+    await expect(selectionEditor).toBeDisplayed();
     hash = await waitForPdfBytesToChange(workingPath, hash);
+    await expect(selectionEditor).toBeDisplayed();
 
     await $('[data-control="quick-highlight-menu"]').click();
     await $(
       '//*[contains(@class, "menu-item-title") and contains(normalize-space(.), "Green")]',
     ).click();
 
-    await createSeededComment(2, 'link', '[[', '[[Linked note]] neutral link');
+    await createSelectionComment(2, 'neutral link [[Linked note]]');
     hash = await waitForPdfBytesToChange(workingPath, hash);
-    await createSeededComment(3, 'tag', '#', '#review neutral tag');
+    await expect($(selectionEditorSelector)).toBeDisplayed();
+    await browser.keys(Key.Escape);
+    await createSelectionComment(3, 'neutral tag #review');
     hash = await waitForPdfBytesToChange(workingPath, hash);
-    await createSeededComment(4, 'comment', '', 'Neutral comment');
+    await expect($(selectionEditorSelector)).toBeDisplayed();
+    await browser.keys(Key.Escape);
+    await createSelectionComment(4, 'Neutral comment');
     await waitForPdfBytesToChange(workingPath, hash);
+    await expect($(selectionEditorSelector)).toBeDisplayed();
 
     await reopenPdf(workingPath);
     await browser.waitUntil(
@@ -422,9 +436,9 @@ describe('reader selection-first annotations', () => {
       {
         annotationType: 9,
         color: [95, 178, 54],
-        contents: '[[Linked note]] neutral link',
+        contents: 'neutral link [[Linked note]]',
       },
-      { annotationType: 9, color: [95, 178, 54], contents: '#review neutral tag' },
+      { annotationType: 9, color: [95, 178, 54], contents: 'neutral tag #review' },
       { annotationType: 9, color: [95, 178, 54], contents: 'Neutral comment' },
     ]);
     expect(reopened.filter(({ annotationType }) => annotationType === 16)).toHaveLength(3);
@@ -436,8 +450,8 @@ describe('reader selection-first annotations', () => {
           const text = await $('[data-sidebar-panel="annotations"]').getText();
           return (
             text.includes('Neutral comment') &&
-            text.includes('[[Linked note]] neutral link') &&
-            text.includes('#review neutral tag')
+            text.includes('neutral link [[Linked note]]') &&
+            text.includes('neutral tag #review')
           );
         },
         { timeout: 15_000, timeoutMsg: 'Saved comment/link/tag content did not reopen from PDF.' },
@@ -494,7 +508,7 @@ describe('reader selection-first annotations', () => {
         (await browser.execute(() => document.querySelectorAll('.highlightEditor').length)) === 2,
       { timeout: 10_000, timeoutMsg: 'Second Quick Highlight gesture was not singular.' },
     );
-    await expect($('[data-region="selection-annotation-popover"]')).not.toBeDisplayed();
+    await expect($(selectionEditorSelector)).not.toBeDisplayed();
 
     await browser.keys(Key.Escape);
     await expect(quick).toHaveAttribute('aria-pressed', 'false');
@@ -521,33 +535,32 @@ describe('reader selection-first annotations', () => {
   it('recolors and enriches one writable annotation contextually then deletes it', async () => {
     let hash = await vaultFileSha256(workingPath);
     await selectFixtureText(1);
-    await $('[data-region="selection-annotation-popover"]').waitForDisplayed({ timeout: 5_000 });
-    await $('[data-selection-intent="highlight"][data-selection-color="#ffd400"]').click();
+    const selectionEditor = $(selectionEditorSelector);
+    await selectionEditor.waitForDisplayed({ timeout: 5_000 });
+    await selectionEditor.$('[data-editor-color="#ffd400"]').click();
     await $('.highlightEditor').waitForExist({ timeout: 10_000 });
+    await expect(selectionEditor).toBeDisplayed();
     hash = await waitForPdfBytesToChange(workingPath, hash);
+    await expect(selectionEditor).toBeDisplayed();
 
     await reopenPdf(workingPath);
     await $('.annotationLayer .highlightAnnotation').waitForExist({ timeout: 10_000 });
-    await $('.annotationLayer .highlightAnnotation').click({ button: 'right' });
-    await $('.highlightEditor.selectedEditor').waitForExist({ timeout: 5_000 });
-    const nativeComment = $('.highlightEditor .editToolbar .comment');
-    await nativeComment.waitForClickable({ timeout: 5_000 });
-    await nativeComment.click();
-    const popover = $('[data-annotation-popover]:not([hidden])');
+    await selectNativeEditor('.annotationLayer .highlightAnnotation', '.highlightEditor');
+    const popover = $(nativeEditorSelector);
     await popover.waitForDisplayed({ timeout: 5_000 });
-    const color = popover.$('[data-action="annotation-color"]');
-    await inputValue(
-      '[data-annotation-popover]:not([hidden]) [data-action="annotation-color"]',
-      '#5fb236',
+    await popover.$('[data-editor-color="#5fb236"]').click();
+    await expect(popover.$('[data-editor-color="#5fb236"]')).toHaveAttribute(
+      'aria-pressed',
+      'true',
     );
-    await expect(color).toHaveValue('#5fb236');
-    const comment = popover.$('textarea');
-    await inputValue('[data-annotation-popover]:not([hidden]) textarea', 'Contextual comment');
-    await popover.$('[data-action="insert-link"]').click();
-    await popover.$('[data-action="insert-tag"]').click();
-    await expect(comment).toHaveValue('Contextual comment [[Link]] #tag');
-    await browser.keys(Key.Escape);
+    const comment = popover.$('[aria-label="Comment"]');
+    await inputValue(`${nativeEditorSelector} [aria-label="Comment"]`, 'Contextual comment');
+    await inputValue(`${nativeEditorSelector} [aria-label="Links"]`, '[[Link]]');
+    await inputValue(`${nativeEditorSelector} [aria-label="Tags"]`, '#tag');
+    await expect(comment).toHaveValue('Contextual comment');
     hash = await waitForPdfBytesToChange(workingPath, hash);
+    await expect(popover).toBeDisplayed();
+    await expect(comment).toHaveValue('Contextual comment');
 
     await reopenPdf(workingPath);
     await $('.annotationLayer .highlightAnnotation').waitForExist({ timeout: 10_000 });
@@ -557,15 +570,11 @@ describe('reader selection-first annotations', () => {
       {
         annotationType: 9,
         color: [95, 178, 54],
-        contents: 'Contextual comment [[Link]] #tag',
+        contents: 'Contextual comment #tag [[Link]]',
       },
     ]);
     await selectNativeEditor('.annotationLayer .highlightAnnotation', '.highlightEditor');
-    const persistedComment = $('.highlightEditor .annotationCommentButton');
-    await persistedComment.waitForClickable({ timeout: 5_000 });
-    await persistedComment.click();
-    await $('[data-action="edit-comment"]').click();
-    const editable = $('[data-annotation-popover]:not([hidden])');
+    const editable = $(nativeEditorSelector);
     await editable.waitForDisplayed({ timeout: 5_000 });
     await editable.$('[data-action="delete-annotation"]').click();
     await waitForPdfBytesToChange(workingPath, hash);

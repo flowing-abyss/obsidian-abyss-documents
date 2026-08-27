@@ -298,7 +298,13 @@ export class ReaderController {
   }
 
   saveDocument(): Promise<void> {
-    this.annotationInteractionController?.invalidate('save');
+    if (this.shell?.flushAnnotationEditor() === false)
+      return Promise.reject(
+        new DOMException(
+          'The annotation editor still has changes that could not be persisted.',
+          'InvalidStateError',
+        ),
+      );
     return this.autosave?.flush() ?? Promise.resolve();
   }
 
@@ -416,7 +422,7 @@ export class ReaderController {
       this.releaseSaveLifecycle();
     }
     let failure = this.tryCleanup(() => {
-      annotationInteraction?.destroy();
+      this.destroyAnnotationInteraction(annotationInteraction);
     });
     failure ??= this.tryCleanup(unsubscribeViewport);
     failure ??= await this.releasePartial(viewport, session);
@@ -550,7 +556,6 @@ export class ReaderController {
     native: NativeEditableSaveSession,
     revision: number,
   ): Promise<void> {
-    this.annotationInteractionController?.invalidate('save');
     const finishSave = beginReaderTimedOperation('annotation-save');
     const abort = new AbortController();
     let verified = false;
@@ -1090,6 +1095,7 @@ export class ReaderController {
     const shell = this.shell;
     const unsubscribeViewport = this.unsubscribeViewport;
     const annotationInteraction = this.annotationInteractionController;
+    this.closeAnnotationEditorForRelease(shell);
     this.viewport = null;
     this.session = null;
     this.shell = null;
@@ -1099,7 +1105,7 @@ export class ReaderController {
     this.releaseSaveLifecycle();
 
     let failure = this.tryCleanup(() => {
-      annotationInteraction?.destroy();
+      this.destroyAnnotationInteraction(annotationInteraction);
     });
     failure ??= this.tryCleanup(unsubscribeViewport);
     const lifecycleFailure = await this.releasePartial(viewport, session);
@@ -1112,9 +1118,30 @@ export class ReaderController {
     if (failure !== undefined) throw failure;
   }
 
+  private closeAnnotationEditorForRelease(shell: ReaderShell | null): void {
+    if (shell?.closeAnnotationEditor() !== false) return;
+    throw new DOMException(
+      'The annotation editor still has changes that could not be persisted.',
+      'InvalidStateError',
+    );
+  }
+
+  private destroyAnnotationInteraction(interaction: AnnotationInteractionController | null): void {
+    if (interaction?.destroy() !== false) return;
+    throw new DOMException(
+      'The annotation editor still has changes that could not be persisted.',
+      'InvalidStateError',
+    );
+  }
+
   private async flushBeforeRelease(): Promise<void> {
     this.lifecycleFlushActive = true;
     try {
+      if (this.shell?.flushAnnotationEditor() === false)
+        throw new DOMException(
+          'The annotation editor still has changes that could not be persisted.',
+          'InvalidStateError',
+        );
       await this.autosave?.flush();
     } catch (cause) {
       if (!(cause instanceof SaveDiscardedError)) throw cause;

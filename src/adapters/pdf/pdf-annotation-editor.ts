@@ -1,6 +1,12 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
+import type { DocumentAnnotation } from '../../document-core/annotations.js';
 import { beginReaderTimedOperation } from '../../reader-performance.js';
-import type { PdfCommentBridge } from './pdf-comment-bridge.js';
+import type { AnnotationPaletteEntry } from '../../settings.js';
+import type {
+  PdfAnnotationFocus,
+  PdfAnnotationUpdate,
+  PdfCommentBridge,
+} from './pdf-comment-bridge.js';
 import type { PdfSelectionObserver, PdfTextSelection } from './pdf-selection-observer.js';
 
 const SELECTION_TRANSACTION_TIMEOUT_MS = 2_000;
@@ -12,18 +18,22 @@ export type PdfEditableAnnotationKind = 'highlight' | 'ink' | 'freetext';
 
 export type PdfSelectionAction =
   | { readonly kind: 'highlight'; readonly color: string }
-  | { readonly kind: 'comment'; readonly color: string; readonly seed: '' | '[[' | '#' };
+  | { readonly kind: 'comment'; readonly color: string; readonly seed: string };
 
 export interface PdfAnnotationInteraction {
   onColor(listener: (color: string) => void): () => void;
+  onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void;
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void;
   onMode(listener: (mode: PdfAnnotationLogicalMode) => void): () => void;
   commitSelection(
     token: string,
     action: PdfSelectionAction,
     signal?: AbortSignal,
-  ): Promise<'created' | 'dismissed'>;
+  ): Promise<DocumentAnnotation | 'dismissed'>;
+  deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean;
+  setPalette?(palette: readonly AnnotationPaletteEntry[]): void;
   setQuickHighlight(state: { readonly enabled: boolean; readonly color: string }): Promise<void>;
+  updateAnnotations(update: PdfAnnotationUpdate): boolean;
 }
 
 export type PdfAnnotationTool = 'select' | 'highlight' | 'ink' | 'freetext';
@@ -123,7 +133,17 @@ interface PdfAnnotationEditorDependencies {
   readonly annotationEditorType: AnnotationEditorTypeConstants;
   readonly eventBus: PdfAnnotationEventBus;
   readonly pdf: PDFDocumentProxy;
-  readonly commentBridge: Pick<PdfCommentBridge, 'reserveNextDialog'>;
+  readonly commentBridge: Pick<
+    PdfCommentBridge,
+    | 'beginPersistence'
+    | 'deleteAnnotations'
+    | 'endPersistence'
+    | 'normalizeCreatedAnnotation'
+    | 'onAnnotationFocus'
+    | 'reserveNextDialog'
+    | 'updateAnnotations'
+  > &
+    Partial<Pick<PdfCommentBridge, 'setSidebarUiManager'>>;
   readonly selectionObserver: PdfSelectionObserver;
   readonly viewer: PdfAnnotationViewer;
 }
@@ -266,6 +286,18 @@ export class PdfAnnotationEditor {
     return this.dependencies.selectionObserver.onSelection(listener);
   }
 
+  onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void {
+    return this.dependencies.commentBridge.onAnnotationFocus(listener);
+  }
+
+  deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean {
+    return this.dependencies.commentBridge.deleteAnnotations(annotations);
+  }
+
+  updateAnnotations(update: PdfAnnotationUpdate): boolean {
+    return this.dependencies.commentBridge.updateAnnotations(update);
+  }
+
   onColor(listener: (color: string) => void): () => void {
     if (this.destroyed) return () => undefined;
     this.colorListeners.add(listener);
@@ -306,7 +338,7 @@ export class PdfAnnotationEditor {
     token: string,
     action: PdfSelectionAction,
     signal?: AbortSignal,
-  ): Promise<'created' | 'dismissed'> {
+  ): Promise<DocumentAnnotation | 'dismissed'> {
     if (this.dependencies.selectionObserver.validate(token) === 'stale') return 'dismissed';
     const manager = this.requireManager();
     if (this.logicalMode !== 'neutral') return 'dismissed';
@@ -330,16 +362,15 @@ export class PdfAnnotationEditor {
         );
         return 'dismissed';
       }
-      if (action.kind === 'highlight') {
-        await this.createSelectionHighlight(manager, transaction);
-      } else {
-        await this.createSelectionComment(manager, action.seed, transaction);
-      }
+      const annotation =
+        action.kind === 'highlight'
+          ? await this.createSelectionHighlight(manager, transaction)
+          : await this.createSelectionComment(manager, action.seed, transaction);
       await waitWithSignal(
         this.changeMode(this.dependencies.annotationEditorType.NONE),
         transaction.controller.signal,
       );
-      return 'created';
+      return annotation;
     } catch (cause) {
       const failure = asError(cause);
       await this.abortSelectionTransaction(failure);
@@ -352,16 +383,16 @@ export class PdfAnnotationEditor {
   private async createSelectionHighlight(
     manager: PdfAnnotationUiManager,
     transaction: PendingSelectionTransaction,
-  ): Promise<void> {
-    const created = deferred<void>();
+  ): Promise<DocumentAnnotation> {
+    const created = deferred<DocumentAnnotation>();
     const unsubscribe = this.onEditorAdded((type) => {
-      if (type === this.dependencies.annotationEditorType.HIGHLIGHT) {
-        created.resolve(undefined);
-      }
+      if (type !== this.dependencies.annotationEditorType.HIGHLIGHT) return;
+      const annotation = this.dependencies.commentBridge.normalizeCreatedAnnotation(manager);
+      if (annotation !== null) created.resolve(annotation);
     });
     try {
       manager.highlightSelection('abyss-selection');
-      await waitWithSignal(created.promise, transaction.controller.signal);
+      return await waitWithSignal(created.promise, transaction.controller.signal);
     } finally {
       unsubscribe();
     }
@@ -369,18 +400,19 @@ export class PdfAnnotationEditor {
 
   private async createSelectionComment(
     manager: PdfAnnotationUiManager,
-    seed: '' | '[[' | '#',
+    seed: string,
     transaction: PendingSelectionTransaction,
-  ): Promise<void> {
+  ): Promise<DocumentAnnotation> {
     const reservation = this.dependencies.commentBridge.reserveNextDialog(
       seed,
       transaction.controller.signal,
     );
     manager.commentSelection('abyss-selection');
-    await waitWithSignal(reservation.opened, transaction.controller.signal);
+    const annotation = await waitWithSignal(reservation.opened, transaction.controller.signal);
     transaction.clearTimeout();
     await waitWithSignal(reservation.closed, transaction.controller.signal);
     transaction.armTimeout();
+    return annotation;
   }
 
   async setQuickHighlight(state: {
@@ -517,6 +549,15 @@ export class PdfAnnotationEditor {
   }
 
   async save(signal: AbortSignal): Promise<Uint8Array> {
+    this.dependencies.commentBridge.beginPersistence();
+    try {
+      return await this.saveDuringPersistence(signal);
+    } finally {
+      this.dependencies.commentBridge.endPersistence();
+    }
+  }
+
+  private async saveDuringPersistence(signal: AbortSignal): Promise<Uint8Array> {
     const prepared = this.prepareSave(signal);
     const context = prepared instanceof Promise ? await prepared : prepared;
     const { manager, restoreNeutral, revision } = context;
@@ -554,6 +595,7 @@ export class PdfAnnotationEditor {
       const failedDuringRestore = this.takeQueuedToolIntent();
       if (failedDuringRestore !== null) queuedIntents.push(failedDuringRestore);
       this.releaseSave(manager, revision);
+      this.synchronizeLogicalModeAfterSave();
       for (const queued of queuedIntents) this.settleQueuedToolIntent(queued, restoreFailure);
       outcome.failure ??= restoreFailure;
       finishSerialization();
@@ -749,6 +791,7 @@ export class PdfAnnotationEditor {
     this.releaseContextualEditSession();
     this.restoreCallbacks();
     this.manager = manager;
+    this.dependencies.commentBridge.setSidebarUiManager?.(manager);
     this.ownCallbacks();
   };
 
@@ -757,6 +800,7 @@ export class PdfAnnotationEditor {
     const data = record(event);
     if (data?.['source'] !== this.dependencies.viewer || typeof data['mode'] !== 'number') return;
     const mode = data['mode'];
+    if (this.saving) return;
     if (
       this.logicalMode === 'one-shot' &&
       mode === this.dependencies.annotationEditorType.HIGHLIGHT
@@ -766,6 +810,11 @@ export class PdfAnnotationEditor {
     if (this.contextualEditSession?.mode === mode) return;
     this.setLogicalMode(this.logicalModeForNative(mode));
   };
+
+  private synchronizeLogicalModeAfterSave(): void {
+    const mode = this.dependencies.viewer.annotationEditorMode;
+    if (typeof mode === 'number') this.setLogicalMode(this.logicalModeForNative(mode));
+  }
 
   private readonly onNativeParameter = (event: unknown): void => {
     if (this.destroyed) return;

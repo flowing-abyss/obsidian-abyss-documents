@@ -7,6 +7,8 @@ import {
 } from './annotation-save-oracle.js';
 
 const pluginId = 'abyss-documents';
+const nativeEditorSelector =
+  '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
 
 async function openPdf(path: string): Promise<void> {
   const openState = await browser.executeObsidian(
@@ -440,7 +442,7 @@ async function inspectPassiveImportedAnnotation(selector: string): Promise<{
     });
     return {
       editableControls: document.querySelectorAll(
-        '[data-annotation-popover]:not([hidden]) :is([data-action="edit-comment"], [data-action="annotation-color"], [data-action="delete-annotation"])',
+        '[data-annotation-editor-popover]:not([hidden]) :is([data-editor-color], [data-action="delete-annotation"])',
       ).length,
       nativeEditors: document.querySelectorAll(
         '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)',
@@ -976,16 +978,14 @@ describe('PDF reader foundation', () => {
     await waitForAnnotationSave(saveBaseline);
     saveBaseline = await captureAnnotationSaveBaseline();
     await selectNativeEditor('.highlightEditor');
-    const commentButton = $('.highlightEditor .editToolbar .comment');
-    await commentButton.waitForClickable({ timeout: 5_000 });
-    await commentButton.click();
-    await inputValue(
-      '.workspace-leaf.mod-active [data-annotation-popover]:not([hidden]) textarea:not([hidden])',
-      'Comment [[Linked note]] #review',
-    );
-    await browser.keys(Key.Escape);
-    await expect($('[data-annotation-popover]')).not.toBeDisplayed();
+    const commentEditor = $(nativeEditorSelector);
+    await commentEditor.waitForDisplayed({ timeout: 5_000 });
+    await inputValue(`${nativeEditorSelector} [aria-label="Comment"]`, 'Comment');
+    await inputValue(`${nativeEditorSelector} [aria-label="Tags"]`, '#review');
+    await inputValue(`${nativeEditorSelector} [aria-label="Links"]`, '[[Linked note]]');
     await waitForAnnotationSave(saveBaseline);
+    await expect(commentEditor).toBeDisplayed();
+    await expect(commentEditor.$('[aria-label="Comment"]')).toHaveValue('Comment');
 
     await closeReaderLeaves();
     await openPdf(workingPath);
@@ -1008,28 +1008,16 @@ describe('PDF reader foundation', () => {
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
     await $('.highlightEditor').waitForExist({ timeout: 5_000 });
     await selectNativeEditor('.highlightEditor');
-    const standaloneComment = $('.highlightEditor .annotationCommentButton');
-    await standaloneComment.waitForClickable({ timeout: 5_000 });
     saveBaseline = await captureAnnotationSaveBaseline();
-    await standaloneComment.click();
-    const editComment = $('[data-action="edit-comment"]');
-    await editComment.waitForClickable({
-      timeout: 5_000,
-      timeoutMsg: 'Selected native comment did not expose its Edit action.',
-    });
-    await editComment.click();
-    const revisedComment = $(
-      '.workspace-leaf.mod-active [data-annotation-popover]:not([hidden]) textarea:not([hidden])',
-    );
+    const revisedComment = $(`${nativeEditorSelector} [aria-label="Comment"]`);
     await revisedComment.waitForDisplayed({ timeout: 5_000 });
-    await inputValue(
-      '.workspace-leaf.mod-active [data-annotation-popover]:not([hidden]) textarea:not([hidden])',
-      'Revised [[Linked note]] #verified',
-    );
-    await expect(revisedComment).toHaveValue('Revised [[Linked note]] #verified');
-    await browser.keys(Key.Escape);
-    await expect($('[data-annotation-popover]')).not.toBeDisplayed();
+    await inputValue(`${nativeEditorSelector} [aria-label="Comment"]`, 'Revised');
+    await inputValue(`${nativeEditorSelector} [aria-label="Tags"]`, '#verified');
+    await inputValue(`${nativeEditorSelector} [aria-label="Links"]`, '[[Linked note]]');
+    await expect(revisedComment).toHaveValue('Revised');
     await waitForAnnotationSave(saveBaseline);
+    await expect($(nativeEditorSelector)).toBeDisplayed();
+    await expect(revisedComment).toHaveValue('Revised');
 
     await closeReaderLeaves();
     await openPdf(workingPath);

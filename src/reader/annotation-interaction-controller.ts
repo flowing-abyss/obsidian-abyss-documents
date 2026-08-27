@@ -2,14 +2,16 @@ import type {
   PdfAnnotationInteraction,
   PdfAnnotationLogicalMode,
   PdfAnnotationTool,
-  PdfSelectionAction,
 } from '../adapters/pdf/pdf-annotation-editor.js';
+import type { PdfAnnotationFocus } from '../adapters/pdf/pdf-comment-bridge.js';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
+import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import type {
-  SelectionAnnotationIntent,
-  SelectionAnnotationPopoverRequest,
-} from './selection-annotation-popover.js';
+  AnnotationEditorCreation,
+  AnnotationEditorPopoverRequest,
+  AnnotationEditorTarget,
+} from './annotation-editor-popover.js';
 
 export interface QuickHighlightState {
   readonly armed: boolean;
@@ -18,12 +20,11 @@ export interface QuickHighlightState {
 
 export interface AnnotationInteractionHost {
   setQuickHighlightState(state: QuickHighlightState): void;
-  openSelectionPopover(request: SelectionAnnotationPopoverRequest): void;
-  closeSelectionPopover(): void;
+  openAnnotationEditor(request: AnnotationEditorPopoverRequest): boolean;
+  closeAnnotationEditor(): boolean;
 }
 
-export type AnnotationInteractionInvalidation =
-  'zoom' | 'layout' | 'navigation' | 'save' | 'session';
+export type AnnotationInteractionInvalidation = 'zoom' | 'layout' | 'navigation' | 'session';
 
 export interface AnnotationInteractionControllerOptions {
   readonly color?: string;
@@ -56,6 +57,7 @@ export class AnnotationInteractionController {
   ) {
     this.palette = palette;
     this.activeColor = options.color ?? palette[0]?.color ?? DEFAULT_COLOR;
+    interaction.setPalette?.(palette);
     this.cleanups.push(
       interaction.onColor((color) => {
         this.handleColor(color);
@@ -65,6 +67,9 @@ export class AnnotationInteractionController {
       }),
       interaction.onSelection((selection) => {
         this.handleSelection(selection);
+      }),
+      interaction.onAnnotationFocus((focus) => {
+        this.handleAnnotationFocus(focus);
       }),
     );
   }
@@ -79,7 +84,7 @@ export class AnnotationInteractionController {
 
   requestTool(tool: PdfAnnotationTool): boolean {
     if (this.destroyed || (tool !== 'highlight' && tool !== 'select')) return false;
-    this.closeActiveSelection();
+    if (!this.closeActiveSelection()) return false;
     const enabled = tool === 'highlight';
     const revision = ++this.quickRequestRevision;
     this.contain(this.applyQuickHighlight(enabled, revision));
@@ -105,7 +110,8 @@ export class AnnotationInteractionController {
   updatePalette(palette: readonly AnnotationPaletteEntry[]): void {
     if (this.destroyed) return;
     this.palette = palette;
-    this.closeActiveSelection();
+    this.interaction.setPalette?.(palette);
+    if (!this.closeActiveSelection()) return;
     this.publishQuickHighlightState();
     if (this.mode !== 'quick-highlight') return;
     const revision = ++this.quickRequestRevision;
@@ -114,24 +120,29 @@ export class AnnotationInteractionController {
 
   invalidate(_reason: AnnotationInteractionInvalidation): void {
     if (this.destroyed) return;
-    this.closeActiveSelection();
+    if (!this.closeActiveSelection()) return;
     this.abortCommit('The PDF annotation selection was invalidated.');
   }
 
-  destroy(): void {
-    if (this.destroyed) return;
+  destroy(): boolean {
+    if (this.destroyed) return true;
+    if (!this.closeActiveSelection()) return false;
     this.destroyed = true;
     this.quickRequestRevision += 1;
-    this.closeActiveSelection();
     this.abortCommit('The PDF annotation interaction was closed.');
     for (const cleanup of this.cleanups.splice(0)) cleanup();
+    return true;
   }
 
   private handleMode(mode: PdfAnnotationLogicalMode): void {
     if (this.destroyed) return;
     this.mode = mode;
     this.options.onModeChange?.(mode);
-    if (mode !== 'neutral') this.closeActiveSelection();
+    if (mode === 'one-shot' && this.activeAbort !== null) {
+      this.publishQuickHighlightState();
+      return;
+    }
+    if (mode !== 'neutral' && !this.closeActiveSelection()) return;
     this.publishQuickHighlightState();
   }
 
@@ -146,51 +157,82 @@ export class AnnotationInteractionController {
       this.closeActiveSelection();
       return;
     }
-    const revision = ++this.activeSelectionRevision;
-    const request: SelectionAnnotationPopoverRequest = {
+    const revision = this.activeSelectionRevision + 1;
+    const opened = this.host.openAnnotationEditor({
       color: this.activeColor,
-      palette: this.palette,
-      selection,
-      onIntent: (intent) => {
-        this.handleSelectionIntent(revision, selection, intent);
+      onClose: () => {
+        if (revision !== this.activeSelectionRevision) return;
+        this.activeSelectionRevision += 1;
+        this.abortCommit('The PDF annotation selection editor was closed.');
       },
-    };
-    this.host.openSelectionPopover(request);
+      onCreate: (creation) => this.createSelection(revision, creation),
+      onDelete: (annotations) => this.interaction.deleteAnnotations(annotations),
+      onUpdate: (update) => this.interaction.updateAnnotations(update),
+      palette: this.palette,
+      target: { kind: 'selection', selection },
+    });
+    if (opened) this.activeSelectionRevision = revision;
   }
 
-  private handleSelectionIntent(
+  private handleAnnotationFocus(focus: PdfAnnotationFocus | null): void {
+    if (this.destroyed || this.activeAbort !== null) return;
+    const first = focus?.annotations[0];
+    if (focus === null || first === undefined) {
+      this.closeActiveSelection();
+      return;
+    }
+    let target: AnnotationEditorTarget;
+    if (!focus.editable) target = { annotation: first, kind: 'readonly' };
+    else if (focus.annotations.length === 1) target = { annotation: first, kind: 'annotation' };
+    else target = { annotations: focus.annotations, kind: 'multiple' };
+    const opened = this.host.openAnnotationEditor({
+      color: first.color ?? undefined,
+      onClose: () => undefined,
+      onCreate: () => 'dismissed' as const,
+      onDelete: (annotations) => this.interaction.deleteAnnotations(annotations),
+      onUpdate: (update) => this.interaction.updateAnnotations(update),
+      palette: this.palette,
+      position: focus.position,
+      target,
+    });
+    if (opened) this.activeSelectionRevision += 1;
+  }
+
+  private async createSelection(
     revision: number,
-    selection: PdfTextSelection,
-    intent: SelectionAnnotationIntent,
-  ): void {
-    if (this.destroyed || revision !== this.activeSelectionRevision) return;
-    this.closeActiveSelection();
-    if (intent.type === 'dismiss') return;
-    this.setActiveColor(intent.color);
+    creation: AnnotationEditorCreation,
+  ): Promise<DocumentAnnotation | 'dismissed'> {
+    if (this.destroyed || revision !== this.activeSelectionRevision) return 'dismissed';
+    this.setActiveColor(creation.color);
     this.publishQuickHighlightState();
-    const action = selectionAction(intent);
     const abort = new AbortController();
     this.abortCommit('The PDF annotation selection was superseded.');
     this.activeAbort = abort;
-    void this.interaction.commitSelection(selection.token, action, abort.signal).then(
-      () => {
-        if (this.activeAbort !== abort) return;
+    try {
+      const result = await this.interaction.commitSelection(
+        creation.selection.token,
+        creation.comment.length === 0
+          ? { color: creation.color, kind: 'highlight' }
+          : { color: creation.color, kind: 'comment', seed: creation.comment },
+        abort.signal,
+      );
+      if (this.activeAbort === abort) {
         this.activeAbort = null;
         this.publishQuickHighlightState();
-      },
-      (cause: unknown) => {
-        if (this.destroyed || this.activeAbort !== abort) return;
+      }
+      return result;
+    } catch (cause) {
+      if (this.activeAbort === abort) {
         this.activeAbort = null;
-        this.host.closeSelectionPopover();
         this.publishQuickHighlightState();
         if (!isAbortFailure(cause)) {
           this.options.onFailure?.('create selection annotation', cause, {
-            intent: intent.type,
-            token: selection.token,
+            token: creation.selection.token,
           });
         }
-      },
-    );
+      }
+      throw cause;
+    }
   }
 
   private async applyQuickHighlight(enabled: boolean, revision: number): Promise<void> {
@@ -200,7 +242,7 @@ export class AnnotationInteractionController {
       this.publishQuickHighlightState();
     } catch (cause) {
       if (this.destroyed || revision !== this.quickRequestRevision || isAbortFailure(cause)) return;
-      this.host.closeSelectionPopover();
+      this.host.closeAnnotationEditor();
       this.publishQuickHighlightState();
       this.options.onModeChange?.(this.mode);
       this.options.onFailure?.(enabled ? 'arm Quick Highlight' : 'disarm Quick Highlight', cause, {
@@ -209,9 +251,11 @@ export class AnnotationInteractionController {
     }
   }
 
-  private closeActiveSelection(): void {
-    this.activeSelectionRevision += 1;
-    this.host.closeSelectionPopover();
+  private closeActiveSelection(): boolean {
+    const revision = this.activeSelectionRevision;
+    if (!this.host.closeAnnotationEditor()) return false;
+    if (this.activeSelectionRevision === revision) this.activeSelectionRevision += 1;
+    return true;
   }
 
   private abortCommit(message: string): void {
@@ -240,16 +284,6 @@ export class AnnotationInteractionController {
       });
     });
   }
-}
-
-function selectionAction(
-  intent: Exclude<SelectionAnnotationIntent, { readonly type: 'dismiss' }>,
-): PdfSelectionAction {
-  if (intent.type === 'highlight') return { color: intent.color, kind: 'highlight' };
-  let seed: '' | '[[' | '#' = '';
-  if (intent.type === 'link') seed = '[[';
-  if (intent.type === 'tag') seed = '#';
-  return { color: intent.color, kind: 'comment', seed };
 }
 
 function isAbortFailure(cause: unknown): boolean {

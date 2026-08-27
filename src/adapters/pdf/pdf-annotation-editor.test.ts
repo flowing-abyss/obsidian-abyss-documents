@@ -1,5 +1,6 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
+import { asAnnotationId, type DocumentAnnotation } from '../../document-core/annotations.js';
 import {
   beginPluginActivation,
   endPluginActivation,
@@ -9,6 +10,36 @@ import { PdfAnnotationEditor, type PdfAnnotationToolOptions } from './pdf-annota
 import type { PdfCommentDialogReservation } from './pdf-comment-bridge.js';
 
 type Listener = (event: unknown) => void;
+
+function createdAnnotation(comment = ''): DocumentAnnotation {
+  const available = { available: true } as const;
+  return {
+    anchor: {
+      coordinateSpace: 'page-points-top-left',
+      geometry: { kind: 'point', point: { x: 0, y: 0 } },
+      kind: 'fixed-page',
+      pageIndex: 0,
+    },
+    author: '',
+    capabilities: {
+      color: available,
+      comment: available,
+      conversions: { highlight: available, underline: available },
+      deletion: available,
+      geometry: available,
+      metadata: available,
+    },
+    color: '#ffd400',
+    comment,
+    createdAt: null,
+    identity: { id: asAnnotationId('created-native'), kind: 'stable' },
+    links: [],
+    modifiedAt: null,
+    selectedText: null,
+    tags: [],
+    type: 'highlight',
+  };
+}
 
 class FakeEventBus {
   readonly listeners = new Map<string, Set<Listener>>();
@@ -132,12 +163,18 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     validate: vi.fn<(token: string) => 'current' | 'stale'>(() => 'current'),
   };
   const commentBridge = {
-    reserveNextDialog: vi.fn<
-      (seed: '' | '[[' | '#', signal?: AbortSignal) => PdfCommentDialogReservation
-    >(() => ({
-      closed: Promise.resolve('external' as const),
-      opened: Promise.resolve(),
-    })),
+    beginPersistence: vi.fn(),
+    deleteAnnotations: vi.fn(() => true),
+    endPersistence: vi.fn(),
+    normalizeCreatedAnnotation: vi.fn(() => createdAnnotation()),
+    onAnnotationFocus: vi.fn(() => () => undefined),
+    reserveNextDialog: vi.fn<(seed: string, signal?: AbortSignal) => PdfCommentDialogReservation>(
+      () => ({
+        closed: Promise.resolve('external' as const),
+        opened: Promise.resolve(createdAnnotation()),
+      }),
+    ),
+    updateAnnotations: vi.fn(() => true),
   };
   const editor = new PdfAnnotationEditor({
     annotationEditorParamsType: {
@@ -212,25 +249,14 @@ describe('PdfAnnotationEditor lifecycle', () => {
         source: fixtureValue.viewer,
         uiManager,
       });
-      const editor = fixtureValue.editor as PdfAnnotationEditor & {
-        commitSelection(
-          token: string,
-          action:
-            | { readonly kind: 'highlight'; readonly color: string }
-            | {
-                readonly kind: 'comment';
-                readonly color: string;
-                readonly seed: '' | '[[' | '#';
-              },
-        ): Promise<'created' | 'dismissed'>;
-      };
+      const editor = fixtureValue.editor;
 
       await expect(
         editor.commitSelection(
           'current',
           kind === 'highlight' ? { kind, color: '#ffd400' } : { kind, color: '#ffd400', seed: '' },
         ),
-      ).resolves.toBe('created');
+      ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
 
       expect(calls).toEqual(['color', kind]);
     }
@@ -272,7 +298,9 @@ describe('PdfAnnotationEditor lifecycle', () => {
       mode: 0,
     });
 
-    await expect(committing).resolves.toBe('created');
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'created-native', kind: 'stable' },
+    });
   });
 
   it('resolves a created highlight when annotation storage was already dirty', async () => {
@@ -292,7 +320,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
         kind: 'highlight',
         color: '#ffd400',
       }),
-    ).resolves.toBe('created');
+    ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
 
     expect(fixtureValue.annotationStorage.addEditor).toHaveBeenCalledTimes(2);
   });
@@ -429,7 +457,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it('resolves comment after bridge open close and NONE', async () => {
     const fixtureValue = fixture();
-    const opened = deferred<void>();
+    const opened = deferred<DocumentAnnotation>();
     const closed = deferred<'escape'>();
     fixtureValue.commentBridge.reserveNextDialog.mockReturnValue({
       opened: opened.promise,
@@ -459,12 +487,14 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect.any(AbortSignal),
     );
     expect(settled).toBe(false);
-    opened.resolve(undefined);
+    opened.resolve(createdAnnotation('#'));
     await Promise.resolve();
     expect(settled).toBe(false);
     closed.resolve('escape');
 
-    await expect(committing).resolves.toBe('created');
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'created-native', kind: 'stable' },
+    });
     expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
   });
 
@@ -474,7 +504,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       const fixtureValue = fixture();
       const closed = deferred<'escape'>();
       fixtureValue.commentBridge.reserveNextDialog.mockReturnValue({
-        opened: Promise.resolve(),
+        opened: Promise.resolve(createdAnnotation()),
         closed: closed.promise,
       });
       const uiManager = manager();
@@ -505,7 +535,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect(outcome).toBe('pending');
       closed.resolve('escape');
       await committing;
-      expect(outcome).toBe('created');
+      expect(outcome).toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
     } finally {
       vi.useRealTimers();
     }
@@ -517,7 +547,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       const fixtureValue = fixture({ dispatchModeChanges: false });
       const closed = deferred<'escape'>();
       fixtureValue.commentBridge.reserveNextDialog.mockReturnValue({
-        opened: Promise.resolve(),
+        opened: Promise.resolve(createdAnnotation()),
         closed: closed.promise,
       });
       const uiManager = manager();
@@ -676,7 +706,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       (_seed: string, signal?: AbortSignal) => {
         reservationSignal = signal;
         return {
-          opened: new Promise<void>(() => undefined),
+          opened: new Promise<DocumentAnnotation>(() => undefined),
           closed: new Promise<'external'>(() => undefined),
         };
       },

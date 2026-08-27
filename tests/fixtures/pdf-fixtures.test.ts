@@ -132,11 +132,10 @@ async function saveWithNativePdfjsEditors(
         const commentEditor = editor as unknown as PdfCommentEditor;
         commentEditor.comment = 'Initial comment';
         uiManager.setSelected(editor);
-        await commentBridge.showDialog(uiManager, commentEditor, 0, 0);
-        const input = container.querySelector<HTMLTextAreaElement>('textarea');
-        if (input === null) throw new Error('Expected the native comment bridge input.');
-        input.value = commentText;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
+        const annotation = commentBridge.normalizeCreatedAnnotation(uiManager);
+        if (annotation === null) throw new Error('Expected a normalized native annotation.');
+        if (!commentBridge.updateAnnotations({ annotations: [annotation], comment: commentText }))
+          throw new Error('Expected the headless bridge comment update to succeed.');
       }
     }
     return await annotationEditor.save(new AbortController().signal);
@@ -330,14 +329,14 @@ async function editExistingNativeComment(
       },
       { idleDelay: 0 },
     );
-    await commentBridge.showDialog(uiManager, existing, 0, 0);
-    const input = container.querySelector<HTMLTextAreaElement>('textarea');
-    if (input === null) throw new Error('Expected native comment editor for reopened annotation.');
-    input.value = comment;
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    const annotation = commentBridge.normalizeCreatedAnnotation(uiManager);
+    if (annotation === null) throw new Error('Expected a normalized existing native annotation.');
+    if (!commentBridge.updateAnnotations({ annotations: [annotation], comment }))
+      throw new Error('Expected the headless bridge comment update to succeed.');
+    await vi.waitFor(() => {
+      expect(saveReasons).toContain('autosave');
+    });
     await scheduler.flush();
-    expect(saveReasons).toContain('autosave');
     expect(verified).toHaveBeenCalledOnce();
     const written = writes[writes.length - 1];
     if (written === undefined) throw new Error('Expected a verified native comment autosave.');

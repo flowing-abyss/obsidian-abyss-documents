@@ -343,130 +343,6 @@
   font-size: var(--font-ui-smaller);
 }
 
-.abyss-documents .abyss-annotation-popover {
-  position: fixed;
-  z-index: var(--layer-popover);
-  display: flex;
-  width: min(22rem, calc(100vw - var(--size-4-6)));
-  flex-direction: column;
-  gap: var(--size-4-2);
-  padding: var(--size-4-2);
-  border: var(--border-width) solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  background: var(--background-primary);
-  box-shadow: var(--shadow-s);
-}
-
-.abyss-documents .abyss-annotation-popover[hidden] {
-  display: none;
-}
-
-.abyss-documents .abyss-selection-annotation-popover {
-  --abyss-selection-safe-area-bottom: env(safe-area-inset-bottom, 0px);
-  --abyss-selection-safe-area-left: env(safe-area-inset-left, 0px);
-  --abyss-selection-safe-area-right: env(safe-area-inset-right, 0px);
-  --abyss-selection-safe-area-top: env(safe-area-inset-top, 0px);
-
-  position: fixed;
-  z-index: var(--layer-popover);
-  box-sizing: border-box;
-  display: flex;
-  max-width: 100%;
-  align-items: center;
-  gap: var(--size-2-1);
-  padding: var(--size-2-1);
-  border: var(--border-width) solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  background: var(--background-primary);
-  box-shadow: var(--shadow-s);
-}
-
-.abyss-documents .abyss-selection-annotation-popover[hidden] {
-  display: none;
-}
-
-.abyss-documents .abyss-selection-annotation-popover-button {
-  width: var(--input-height);
-  min-width: var(--input-height);
-  min-height: var(--input-height);
-  padding: 0;
-}
-
-.abyss-documents .abyss-selection-annotation-swatch-strip,
-.abyss-documents .abyss-selection-annotation-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--size-2-1);
-}
-
-.abyss-documents .abyss-selection-annotation-swatch-strip {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow-x: auto;
-  overscroll-behavior-inline: contain;
-  scrollbar-width: none;
-}
-
-.abyss-documents .abyss-selection-annotation-swatch-strip::-webkit-scrollbar {
-  display: none;
-}
-
-.abyss-documents .abyss-selection-annotation-actions {
-  flex: 0 0 auto;
-}
-
-.abyss-documents .abyss-selection-annotation-swatch {
-  border: var(--border-width) solid var(--background-modifier-border);
-  border-radius: 50%;
-}
-
-.abyss-documents .abyss-selection-annotation-popover-button:focus-visible {
-  outline: 2px solid var(--interactive-accent);
-  outline-offset: 2px;
-}
-
-.abyss-documents .abyss-annotation-comment {
-  min-height: var(--abyss-comment-height, 6rem);
-  resize: vertical;
-}
-
-.abyss-documents .abyss-annotation-popover-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--size-2-1);
-  flex-wrap: wrap;
-}
-
-.abyss-documents .abyss-annotation-popover-button,
-.abyss-documents .abyss-annotation-popover-color {
-  box-sizing: border-box;
-  width: var(--input-height);
-  min-width: var(--input-height);
-  min-height: var(--input-height);
-  padding: 0;
-}
-
-.abyss-documents .abyss-annotation-popover-button.is-destructive {
-  color: var(--text-muted);
-}
-
-.abyss-documents .abyss-annotation-popover-button.is-destructive:is(:hover, :focus-visible) {
-  color: var(--text-error);
-}
-
-.abyss-documents .abyss-annotation-popover-color {
-  overflow: hidden;
-  border: var(--border-width) solid var(--background-modifier-border);
-  border-radius: 50%;
-  background: transparent;
-}
-
-.abyss-documents .abyss-annotation-comment-popup {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
 /* The four page-flow choices form one compact, scannable two-axis matrix. */
 .abyss-documents-menu-open .menu-group:has(> .menu-item[data-section='abyss-documents-layout']) {
   display: grid;
@@ -1251,43 +1127,10 @@
   opacity: calc(1 - var(--abyss-reader-image-dim));
 }
 
-/* PDF.js owns the contextual editor DOM; these variables make its controls read as Obsidian UI. */
+/* The unified editor is primary; PDF.js still owns hit-testing and selection beneath it. */
 /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
 .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar {
-  --editor-toolbar-bg-color: var(--background-primary);
-  --editor-toolbar-fg-color: var(--text-normal);
-  --editor-toolbar-border-color: var(--background-modifier-border);
-  --editor-toolbar-hover-border-color: var(--background-modifier-border-hover);
-  --editor-toolbar-hover-bg-color: var(--background-modifier-hover);
-  --editor-toolbar-hover-fg-color: var(--text-normal);
-  --editor-toolbar-focus-outline-color: var(--interactive-accent);
-  --editor-toolbar-shadow: var(--shadow-s);
-  --editor-toolbar-height: 2rem;
-  --editor-toolbar-padding: 0.125rem;
-
-  border-radius: var(--radius-s);
-}
-
-/* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
-.abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar .buttons > :not(.divider) {
-  min-width: 2rem;
-  border-radius: var(--radius-s);
-}
-
-@media (forced-colors: active) {
-  /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
-  .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar {
-    --editor-toolbar-bg-color: ButtonFace;
-    --editor-toolbar-fg-color: ButtonText;
-    --editor-toolbar-border-color: ButtonText;
-    --editor-toolbar-hover-border-color: Highlight;
-    --editor-toolbar-hover-bg-color: Highlight;
-    --editor-toolbar-hover-fg-color: HighlightText;
-    --editor-toolbar-focus-outline-color: Highlight;
-    --editor-toolbar-shadow: none;
-
-    forced-color-adjust: auto;
-  }
+  display: none;
 }
 
 @media (width <= 600px) {
@@ -1347,11 +1190,8 @@
   .abyss-documents .abyss-reader-toolbar-button,
   .abyss-documents .abyss-annotation-tool,
   .abyss-documents .abyss-annotation-color,
-  .abyss-documents .abyss-annotation-popover-button,
-  .abyss-documents .abyss-annotation-popover-color,
   .abyss-documents .abyss-annotation-editor-delete,
   .abyss-documents .abyss-annotation-editor-swatch,
-  .abyss-documents .abyss-selection-annotation-popover-button,
   .abyss-documents .abyss-reader-sidebar-close,
   .abyss-documents .abyss-reader-search-button {
     width: 2.75rem;
@@ -1384,16 +1224,6 @@
   }
 
   .abyss-documents .abyss-reader-toolbar-page-field {
-    min-width: 2.75rem;
-  }
-
-  /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
-  .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar {
-    --editor-toolbar-height: 2.75rem;
-  }
-
-  /* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
-  .abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar .buttons > :not(.divider) {
     min-width: 2.75rem;
   }
 }

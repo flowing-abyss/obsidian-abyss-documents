@@ -1,11 +1,12 @@
-import {
-  AnnotationPopover,
-  type AnnotationCommentCloseReason,
-} from '../../reader/annotation-popover.js';
-import type { AnnotationLinkSuggestionProvider } from '../../reader/link-suggestions.js';
+import { asAnnotationId, type DocumentAnnotation } from '../../document-core/annotations.js';
+import { ownerWindow } from '../../reader/owner-dom.js';
 import { PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE } from './pdf-runtime.js';
 
 const COMMENT_DIALOG_RESERVATION_TIMEOUT_MS = 2_000;
+const NATIVE_EDITOR_SELECTOR = '.highlightEditor[id], .inkEditor[id], .freeTextEditor[id]';
+const ANNOTATION_FOCUS_SELECTOR = `${NATIVE_EDITOR_SELECTOR}, .annotationLayer [data-annotation-id]`;
+const SELECTED_EDITOR_SELECTOR =
+  '.annotationEditorLayer .selectedEditor[id], .annotationLayer .selectedEditor[data-annotation-id]';
 
 interface PdfCommentData {
   readonly annotationType?: number | undefined;
@@ -37,10 +38,15 @@ export interface PdfCommentEditor {
 
 interface PdfCommentUiManager {
   delete(): void;
-  deleteComment?(editor: PdfCommentEditor, savedData: unknown): void;
   readonly firstSelectedEditor?: PdfCommentEditor | undefined;
+  getEditor?(id: string): PdfCommentEditor | undefined;
   setSelected(editor: PdfCommentEditor): void;
   updateParams(type: number, value: unknown): void;
+}
+
+interface NativeAnnotationBinding {
+  readonly editor: PdfCommentEditor;
+  readonly manager: PdfCommentUiManager;
 }
 
 export interface PdfCommentMutationFailure {
@@ -55,21 +61,36 @@ export interface PdfCommentBridgeOptions {
 }
 
 export interface PdfCommentDialogReservation {
-  readonly closed: Promise<AnnotationCommentCloseReason>;
-  readonly opened: Promise<void>;
+  readonly closed: Promise<PdfCommentDialogCloseReason>;
+  readonly opened: Promise<DocumentAnnotation>;
+}
+
+export type PdfCommentDialogCloseReason =
+  'blur' | 'click-away' | 'delete-annotation' | 'escape' | 'external' | 'focus-away';
+
+export interface PdfAnnotationFocus {
+  readonly annotations: readonly DocumentAnnotation[];
+  readonly editable: boolean;
+  readonly position: { readonly x: number; readonly y: number };
+}
+
+export interface PdfAnnotationUpdate {
+  readonly annotations: readonly DocumentAnnotation[];
+  readonly color?: string | undefined;
+  readonly comment?: string | undefined;
 }
 
 interface PendingCommentDialogReservation extends PdfCommentDialogReservation {
   active: boolean;
   isOpen: boolean;
   settled: boolean;
-  readonly seed: '' | '[[' | '#';
+  readonly seed: string;
   readonly clearOpenTimeout: () => void;
   readonly cleanup: () => void;
   readonly rejectClosed: (cause: unknown) => void;
   readonly rejectOpened: (cause: unknown) => void;
-  readonly resolveClosed: (reason: AnnotationCommentCloseReason) => void;
-  readonly resolveOpened: () => void;
+  readonly resolveClosed: (reason: PdfCommentDialogCloseReason) => void;
+  readonly resolveOpened: (annotation: DocumentAnnotation) => void;
 }
 
 export interface PdfJsCommentManagerRuntime {
@@ -100,33 +121,86 @@ export interface PdfJsCommentManagerRuntime {
   updatePopupColor(editor: PdfCommentEditor): void;
 }
 
-/** Exact structural seam consumed by pdfjs-dist 6.2.108 but omitted from PDFViewerOptions. */
+/** Headless structural seam consumed by pdfjs-dist 6.2.108's comment manager. */
 export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   readonly dialogElement: HTMLElement;
 
-  private readonly popover: AnnotationPopover;
+  private readonly bindings = new Map<string, NativeAnnotationBinding>();
   private readonly comments = new Map<string, PdfCommentData>();
+  private readonly fallbackIds = new WeakMap<object, string>();
+  private readonly focusListeners = new Set<(focus: PdfAnnotationFocus | null) => void>();
   private activeSource: PdfCommentEditor | null = null;
-  private popupSelected = false;
-  private popupVisible = false;
+  private activeBinding: NativeAnnotationBinding | null = null;
   private sidebarUiManager: PdfCommentUiManager | null = null;
-  private activeDialogEditor: PdfCommentEditor | null = null;
   private activeDialogReservation: PendingCommentDialogReservation | null = null;
   private nextDialogReservation: PendingCommentDialogReservation | null = null;
   private nativeMutationDepth = 0;
+  private persistenceDepth = 0;
+  private persistenceFocusInvalidated = false;
+  private fallbackIdSequence = 0;
   private disposed = false;
 
   constructor(
-    host: HTMLElement,
+    private readonly host: HTMLElement,
     private readonly options: PdfCommentBridgeOptions = {},
-    sourcePath = '',
-    linkSuggestions: AnnotationLinkSuggestionProvider | null = null,
   ) {
-    this.popover = new AnnotationPopover(host, linkSuggestions, sourcePath);
-    this.dialogElement = this.popover.element;
+    this.dialogElement = ownerWindow(host).createDiv();
+    this.dialogElement.dataset['pdfCommentBridge'] = '';
+    this.dialogElement.hidden = true;
+    host.append(this.dialogElement);
   }
 
-  reserveNextDialog(seed: '' | '[[' | '#', signal?: AbortSignal): PdfCommentDialogReservation {
+  onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void {
+    if (this.disposed) return () => undefined;
+    this.focusListeners.add(listener);
+    return () => this.focusListeners.delete(listener);
+  }
+
+  beginPersistence(): void {
+    if (this.disposed) return;
+    this.persistenceDepth += 1;
+  }
+
+  endPersistence(): void {
+    if (this.persistenceDepth === 0) return;
+    if (this.persistenceDepth > 1) {
+      this.persistenceDepth -= 1;
+      return;
+    }
+    try {
+      if (!this.persistenceFocusInvalidated) return;
+      const binding = this.activeBinding;
+      if (binding !== null) binding.manager.setSelected(binding.editor);
+      this.activeSource?.setCommentButtonStates?.({ hasPopup: true, selected: true });
+    } finally {
+      this.persistenceFocusInvalidated = false;
+      this.persistenceDepth = 0;
+    }
+  }
+
+  focusFromPointer(target: EventTarget | null): void {
+    if (this.disposed) return;
+    const owner = this.host.ownerDocument.defaultView;
+    if (owner === null) return;
+    const node = nativeEditorNode(target, owner);
+    if (node === null) return;
+    const manager = this.sidebarUiManager;
+    const id = selectedEditorId(node);
+    const editor = id.length === 0 ? undefined : manager?.getEditor?.(id);
+    if (editor !== undefined) {
+      this.publishFocus(editor, true, true, node.getBoundingClientRect());
+      return;
+    }
+    if (id.length === 0 || !node.matches('.annotationLayer [data-annotation-id]')) return;
+    const anchor = node.getBoundingClientRect();
+    this.emitFocus({
+      annotations: [readOnlyAnnotationFromNode(node, id)],
+      editable: false,
+      position: { x: anchor.left, y: anchor.bottom },
+    });
+  }
+
+  reserveNextDialog(seed: string, signal?: AbortSignal): PdfCommentDialogReservation {
     if (this.disposed) throw new DOMException('PDF comment bridge disposed.', 'InvalidStateError');
     if (this.nextDialogReservation !== null) {
       this.cancelReservation(
@@ -134,8 +208,8 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         new DOMException('The PDF comment reservation was superseded.', 'AbortError'),
       );
     }
-    const opened = deferred<void>();
-    const closed = deferred<AnnotationCommentCloseReason>();
+    const opened = deferred<DocumentAnnotation>();
+    const closed = deferred<PdfCommentDialogCloseReason>();
     void opened.promise.catch(() => undefined);
     void closed.promise.catch(() => undefined);
     const owner = this.dialogElement.ownerDocument.defaultView;
@@ -162,9 +236,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       },
       rejectClosed: closed.reject,
       rejectOpened: opened.reject,
-      resolveOpened: () => {
-        opened.resolve(undefined);
-      },
+      resolveOpened: opened.resolve,
       resolveClosed: closed.resolve,
     };
     this.nextDialogReservation = reservation;
@@ -182,79 +254,141 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     return reservation;
   }
 
-  // PDF.js 6.2.108 calls this exact five-argument manager seam.
-  // eslint-disable-next-line complexity, max-params, sonarjs/cognitive-complexity -- exact upstream callback and dialog transaction orchestration
+  // eslint-disable-next-line max-params -- exact upstream PDF.js callback signature
   async showDialog(
     uiManager: unknown,
     editor: PdfCommentEditor,
     posX: number,
     posY: number,
-    options?: { readonly height?: number | undefined },
+    _options?: { readonly height?: number | undefined },
   ): Promise<void> {
-    if (
-      this.nextDialogReservation === null &&
-      this.activeDialogReservation !== null &&
-      sameCommentEditor(this.activeDialogEditor, editor) &&
-      !this.dialogElement.hidden
-    )
-      return;
     const reservation = this.nextDialogReservation;
     try {
       if (this.disposed)
         throw new DOMException('PDF comment bridge disposed.', 'InvalidStateError');
-      const data = editor.getData();
+      const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
       this.nextDialogReservation = null;
       if (reservation !== null) {
         reservation.clearOpenTimeout();
         reservation.active = true;
         this.activeDialogReservation = reservation;
-        this.activeDialogEditor = editor;
+        this.commitReservedSelection(reservation, editor, manager);
+        return;
       }
-      const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
-      const readOnlyReason = annotationReadOnlyReason(editor, manager);
-      this.applyDialogHeight(options?.height);
-      const editable = readOnlyReason === undefined && manager !== null;
-      const comment = reservation?.seed ?? data.contentsObj?.str ?? '';
-      let changed = false;
-      this.popover.open({
-        ...(editable ? this.colorActions(editor, data, manager) : {}),
-        canDeleteAnnotation: editable,
-        comment,
-        deferFocus: reservation !== null,
-        protectFocus: reservation !== null,
-        onChange: (comment) => {
-          changed = true;
-          return this.mutate('save-comment', () => {
-            editor.comment = comment;
-          });
-        },
-        onDeleteAnnotation: () => {
-          return this.mutate('delete-annotation', () => {
-            this.deleteAnnotation(manager, editor);
-          });
-        },
-        onDeleteComment: () => {
-          return this.mutate('delete-comment', () => {
-            this.deleteComment(manager, editor);
-          });
-        },
-        onClose: (reason) => {
-          this.commitAcceptedSeed(reservation, { changed, comment, reason }, editor);
-          this.closeReservation(reservation, reason);
-        },
-        ...(readOnlyReason === undefined ? {} : { readOnlyReason }),
-        x: posX,
-        y: posY,
-      });
-      if (reservation !== null) {
-        reservation.isOpen = true;
-        reservation.resolveOpened();
-      }
+      this.publishFocus(editor, true, true, { bottom: posY, left: posX });
     } catch (cause) {
       const failure = asError(cause);
       if (reservation !== null) this.cancelReservation(reservation, failure);
-      console.error('[abyss-documents] Failed to open PDF annotation comment', { cause: failure });
+      console.error('[abyss-documents] Failed to normalize PDF annotation comment', {
+        cause: failure,
+      });
     }
+  }
+
+  private commitReservedSelection(
+    reservation: PendingCommentDialogReservation,
+    editor: PdfCommentEditor,
+    manager: PdfCommentUiManager | null,
+  ): void {
+    if (
+      manager === null ||
+      !isSupportedNativeEditor(editor) ||
+      !this.mutate('save-comment', () => {
+        editor.comment = reservation.seed;
+      })
+    ) {
+      throw new DOMException(
+        'The PDF selection comment could not be persisted.',
+        'InvalidStateError',
+      );
+    }
+    const annotation = this.annotationFromEditor(editor, reservation.seed, true, manager);
+    this.retainActiveBinding(editor, manager);
+    reservation.isOpen = true;
+    reservation.resolveOpened(annotation);
+    this.closeReservation(reservation, 'external');
+  }
+
+  normalizeCreatedAnnotation(uiManager: unknown): DocumentAnnotation | null {
+    const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
+    if (manager === null) return null;
+    const editor = manager.firstSelectedEditor ?? this.firstSelectedEditor(manager);
+    if (editor === undefined || !isSupportedNativeEditor(editor)) return null;
+    const annotation = this.annotationFromEditor(
+      editor,
+      editor.getData().contentsObj?.str ?? '',
+      true,
+      manager,
+    );
+    this.retainActiveBinding(editor, manager);
+    return annotation;
+  }
+
+  updateAnnotations(update: PdfAnnotationUpdate): boolean {
+    const bindings = this.resolveBindings(update.annotations);
+    if (bindings === null) return false;
+    if (update.color !== undefined && !this.updateColors(bindings, update.color)) return false;
+    if (update.comment !== undefined && !this.updateComments(bindings, update.comment))
+      return false;
+    return true;
+  }
+
+  private updateColors(bindings: readonly NativeAnnotationBinding[], color: string): boolean {
+    const changes: Array<{
+      readonly binding: NativeAnnotationBinding;
+      readonly parameter: number;
+    }> = [];
+    for (const binding of bindings) {
+      const parameter = annotationColorParameter(binding.editor);
+      if (parameter === null) return false;
+      changes.push({ binding, parameter });
+    }
+    for (const { binding, parameter } of changes) {
+      if (
+        !this.mutate('change-color', () => {
+          binding.manager.setSelected(binding.editor);
+          binding.manager.updateParams(parameter, color);
+        })
+      )
+        return false;
+    }
+    this.options.onColorChange?.(color);
+    return true;
+  }
+
+  private updateComments(bindings: readonly NativeAnnotationBinding[], comment: string): boolean {
+    for (const { editor } of bindings) {
+      if (
+        !this.mutate('save-comment', () => {
+          editor.comment = comment;
+        })
+      )
+        return false;
+    }
+    return true;
+  }
+
+  deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean {
+    const bindings = this.resolveBindings(annotations);
+    if (bindings === null) return false;
+    return this.mutate('delete-annotation', () => {
+      for (const { editor, manager } of bindings) {
+        manager.setSelected(editor);
+        manager.delete();
+      }
+    });
+  }
+
+  private resolveBindings(
+    annotations: readonly DocumentAnnotation[],
+  ): readonly NativeAnnotationBinding[] | null {
+    const bindings = annotations.map((annotation) => {
+      const id = stableAnnotationId(annotation);
+      return id === null ? undefined : this.bindings.get(id);
+    });
+    return bindings.some((binding) => binding === undefined)
+      ? null
+      : (bindings as readonly NativeAnnotationBinding[]);
   }
 
   toggleCommentPopup(
@@ -263,40 +397,100 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     visibility?: boolean,
     isEditable = true,
   ): void {
-    if (editor === null) {
+    if (editor === null || visibility === false) {
       this.destroyPopup();
       return;
     }
-    if (!isSelected && this.popupSelected) return;
-    const nextVisibility = this.resolvePopupVisibility(editor, isSelected, visibility);
-    if (!nextVisibility) {
-      this.destroyPopup();
-      return;
+    this.publishFocus(editor, isSelected, isEditable, popupAnchor(editor)?.getBoundingClientRect());
+  }
+
+  private publishFocus(
+    editor: PdfCommentEditor,
+    isSelected: boolean,
+    isEditable: boolean,
+    anchor: Pick<DOMRect, 'bottom' | 'left'> | undefined,
+  ): void {
+    const manager = this.sidebarUiManager;
+    const selected = this.selectedEditors(editor, isSelected, manager);
+    const editable = isWritableFocus(selected, manager, isSelected, isEditable);
+    const sources = selected.length > 0 ? selected : [editor];
+    const annotations = sources.map((source) =>
+      this.annotationFromEditor(
+        source,
+        source.getData().contentsObj?.str ?? '',
+        editable,
+        editable ? manager : null,
+      ),
+    );
+    if (editable && manager !== null) this.retainActiveBinding(editor, manager);
+    else {
+      this.activeSource = editor;
+      this.activeBinding = null;
     }
-    this.activatePopupSource(editor, isSelected);
-    this.openPassivePopup(editor, {
-      isEditable,
-      isSelected,
-      ...this.popupPosition(editor),
+    editor.setCommentButtonStates?.({ hasPopup: true, selected: isSelected });
+    this.emitFocus({
+      annotations,
+      editable,
+      position: { x: anchor?.left ?? 0, y: anchor?.bottom ?? 0 },
     });
   }
 
-  private popupPosition(editor: PdfCommentEditor): { readonly x: number; readonly y: number } {
-    const rect = popupAnchor(editor)?.getBoundingClientRect();
-    return { x: rect?.x ?? 0, y: rect?.bottom ?? 0 };
+  private selectedEditors(
+    editor: PdfCommentEditor,
+    isSelected: boolean,
+    manager: PdfCommentUiManager | null,
+  ): readonly PdfCommentEditor[] {
+    if (!isSelected || manager?.getEditor === undefined) return [editor];
+    const selected: PdfCommentEditor[] = [];
+    const seen = new Set<PdfCommentEditor>();
+    for (const node of Array.from(
+      this.host.querySelectorAll<HTMLElement>(SELECTED_EDITOR_SELECTOR),
+    )) {
+      const id = selectedEditorId(node);
+      const resolved = id.length === 0 ? undefined : manager.getEditor(id);
+      if (resolved === undefined || seen.has(resolved)) continue;
+      seen.add(resolved);
+      selected.push(resolved);
+    }
+    if (!seen.has(editor)) selected.unshift(editor);
+    return selected;
+  }
+
+  private firstSelectedEditor(manager: PdfCommentUiManager): PdfCommentEditor | undefined {
+    if (manager.getEditor === undefined) return undefined;
+    for (const node of Array.from(
+      this.host.querySelectorAll<HTMLElement>(SELECTED_EDITOR_SELECTOR),
+    )) {
+      const id = selectedEditorId(node);
+      const resolved = id.length === 0 ? undefined : manager.getEditor(id);
+      if (resolved !== undefined) return resolved;
+    }
+    return undefined;
+  }
+
+  private emitFocus(focus: PdfAnnotationFocus | null): void {
+    for (const listener of [...this.focusListeners]) listener(focus);
   }
 
   destroyPopup(): void {
     if (this.activeDialogReservation !== null || this.nativeMutationDepth > 0) return;
-    this.popover.close(false);
+    if (this.persistenceDepth > 0) {
+      this.persistenceFocusInvalidated = true;
+      return;
+    }
     this.releasePopupState();
+    this.emitFocus(null);
   }
 
   private releasePopupState(): void {
     this.activeSource?.setCommentButtonStates?.({ hasPopup: false, selected: false });
     this.activeSource = null;
-    this.popupSelected = false;
-    this.popupVisible = false;
+    this.activeBinding = null;
+  }
+
+  private retainActiveBinding(editor: PdfCommentEditor, manager: PdfCommentUiManager): void {
+    this.activeSource = editor;
+    this.activeBinding = { editor, manager };
   }
 
   makeCommentColor(color: readonly number[] | null, opacity = 1): string | null {
@@ -308,15 +502,18 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   setSidebarUiManager(uiManager: unknown): void {
     this.sidebarUiManager = isPdfCommentUiManager(uiManager) ? uiManager : null;
   }
+
   showSidebar(annotations: readonly unknown[]): void {
     this.comments.clear();
     for (const annotation of annotations) this.storeComment(annotation);
     this.dialogElement.dataset['sidebarVisible'] = 'true';
     this.updateCommentCount();
   }
+
   hideSidebar(): void {
     this.dialogElement.dataset['sidebarVisible'] = 'false';
   }
+
   removeComments(ids: readonly string[]): void {
     for (const id of ids) this.comments.delete(id);
     if (ids.includes(this.dialogElement.dataset['selectedCommentId'] ?? '')) {
@@ -324,49 +521,60 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     }
     this.updateCommentCount();
   }
+
   selectComment(id: string): void {
     if (this.comments.has(id)) this.dialogElement.dataset['selectedCommentId'] = id;
   }
+
   addComment(annotation: unknown): void {
     this.storeComment(annotation);
     this.updateCommentCount();
   }
+
   updateComment(annotation: unknown): void {
     this.storeComment(annotation);
     this.updateCommentCount();
   }
+
   updatePopupColor(editor: PdfCommentEditor): void {
     if (this.activeSource !== editor) return;
-    this.popover.updateColor(rgbToHex(editor.getData().color));
+    this.publishFocus(editor, true, true, popupAnchor(editor)?.getBoundingClientRect());
   }
 
   destroy(): void {
-    if (this.disposed) return;
-    this.destroyPopup();
+    this.dispose();
   }
 
-  dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
-    const failure = new DOMException('PDF comment bridge disposed.', 'AbortError');
-    if (this.nextDialogReservation !== null) {
-      this.cancelReservation(this.nextDialogReservation, failure);
+  dispose(): boolean {
+    if (this.disposed) return true;
+    try {
+      const failure = new DOMException('PDF comment bridge disposed.', 'AbortError');
+      if (this.nextDialogReservation !== null)
+        this.cancelReservation(this.nextDialogReservation, failure);
+      if (this.activeDialogReservation !== null)
+        this.cancelReservation(this.activeDialogReservation, failure);
+      this.disposed = true;
+      this.releasePopupState();
+      this.emitFocus(null);
+      this.focusListeners.clear();
+      this.bindings.clear();
+      this.persistenceDepth = 0;
+      this.persistenceFocusInvalidated = false;
+      this.dialogElement.remove();
+      return true;
+    } catch {
+      return false;
     }
-    if (this.activeDialogReservation !== null) {
-      this.cancelReservation(this.activeDialogReservation, failure);
-    }
-    this.popover.destroy();
   }
 
   private closeReservation(
-    reservation: PendingCommentDialogReservation | null,
-    reason: AnnotationCommentCloseReason,
+    reservation: PendingCommentDialogReservation,
+    reason: PdfCommentDialogCloseReason,
   ): void {
-    if (reservation === null || reservation.settled) return;
+    if (reservation.settled) return;
     reservation.settled = true;
     reservation.cleanup();
     if (this.activeDialogReservation === reservation) this.activeDialogReservation = null;
-    if (this.activeDialogReservation === null) this.activeDialogEditor = null;
     reservation.resolveClosed(reason);
   }
 
@@ -376,10 +584,8 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     reservation.cleanup();
     if (this.nextDialogReservation === reservation) this.nextDialogReservation = null;
     if (this.activeDialogReservation === reservation) this.activeDialogReservation = null;
-    if (this.activeDialogReservation === null) this.activeDialogEditor = null;
     if (!reservation.isOpen) reservation.rejectOpened(cause);
     reservation.rejectClosed(cause);
-    if (reservation.active) this.popover.close(false, 'external');
   }
 
   private storeComment(value: unknown): void {
@@ -390,107 +596,6 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
 
   private updateCommentCount(): void {
     this.dialogElement.dataset['commentCount'] = String(this.comments.size);
-  }
-
-  private applyDialogHeight(height: number | undefined): void {
-    if (height === undefined) this.dialogElement.style.removeProperty('--abyss-comment-height');
-    else this.dialogElement.style.setProperty('--abyss-comment-height', `${height}px`);
-  }
-
-  private activatePopupSource(editor: PdfCommentEditor, isSelected: boolean): void {
-    this.activeSource?.setCommentButtonStates?.({ hasPopup: false, selected: false });
-    this.activeSource = editor;
-    this.popupSelected = isSelected;
-    this.popupVisible = true;
-    editor.setCommentButtonStates?.({ hasPopup: true, selected: isSelected });
-  }
-
-  private colorActions(
-    editor: PdfCommentEditor,
-    data: PdfCommentData,
-    manager: PdfCommentUiManager,
-  ): { readonly color: string; readonly onColor: (color: string) => void } {
-    return {
-      color: rgbToHex(data.color),
-      onColor: (color) => {
-        const parameter = annotationColorParameter(editor);
-        if (parameter === null) return;
-        const changed = this.mutate('change-color', () => {
-          manager.setSelected(editor);
-          manager.updateParams(parameter, color);
-        });
-        if (changed) this.options.onColorChange?.(color);
-      },
-    };
-  }
-
-  private deleteAnnotation(manager: PdfCommentUiManager | null, editor: PdfCommentEditor): void {
-    if (manager === null) return;
-    manager.setSelected(editor);
-    manager.delete();
-  }
-
-  private deleteComment(manager: PdfCommentUiManager | null, editor: PdfCommentEditor): void {
-    const savedData = editor.comment;
-    if (manager?.deleteComment !== undefined) {
-      manager.deleteComment(editor, savedData);
-    } else editor.comment = null;
-    editor.focusCommentButton?.();
-  }
-
-  private resolvePopupVisibility(
-    editor: PdfCommentEditor,
-    isSelected: boolean,
-    visibility: boolean | undefined,
-  ): boolean {
-    if (visibility !== undefined) return visibility;
-    if (isSelected) {
-      return this.activeSource !== editor || !this.popupSelected || !this.popupVisible;
-    }
-    return !this.popupSelected && !this.popupVisible;
-  }
-
-  private openPassivePopup(
-    editor: PdfCommentEditor,
-    options: {
-      readonly isEditable: boolean;
-      readonly isSelected: boolean;
-      readonly x: number;
-      readonly y: number;
-    },
-  ): void {
-    try {
-      if (this.disposed)
-        throw new DOMException('PDF comment bridge disposed.', 'InvalidStateError');
-      const reason = annotationReadOnlyReason(editor, this.sidebarUiManager);
-      const { isEditable, isSelected, x, y } = options;
-      const canEdit =
-        isSelected &&
-        isEditable &&
-        reason === undefined &&
-        typeof editor.editComment === 'function';
-      this.popover.openPassive({
-        comment: editor.getData().contentsObj?.str ?? '',
-        ...(canEdit
-          ? {
-              onEdit: () => {
-                this.releasePopupState();
-                Promise.resolve(editor.editComment?.()).catch((cause: unknown) => {
-                  console.error('[abyss-documents] Failed to edit PDF annotation comment', {
-                    cause,
-                  });
-                });
-              },
-            }
-          : {}),
-        ...(reason === undefined ? {} : { readOnlyReason: reason }),
-        selected: isSelected,
-        x,
-        y,
-      });
-    } catch (cause) {
-      console.error('[abyss-documents] Failed to open PDF annotation comment', { cause });
-    }
   }
 
   private mutate(action: PdfCommentMutationFailure['action'], mutation: () => void): boolean {
@@ -507,39 +612,158 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     }
   }
 
-  private commitAcceptedSeed(
-    reservation: PendingCommentDialogReservation | null,
-    state: {
-      readonly changed: boolean;
-      readonly comment: string;
-      readonly reason: AnnotationCommentCloseReason;
-    },
+  private annotationFromEditor(
     editor: PdfCommentEditor,
-  ): void {
-    const { changed, comment, reason } = state;
-    if (
-      reservation === null ||
-      changed ||
-      comment.length === 0 ||
-      (reason !== 'blur' && reason !== 'escape')
-    )
-      return;
-    this.mutate('save-comment', () => {
-      editor.comment = comment;
-    });
+    comment: string,
+    writable: boolean,
+    manager: PdfCommentUiManager | null,
+  ): DocumentAnnotation {
+    const data = editor.getData();
+    const id = firstNonEmpty(editor.uid, data.id) ?? this.fallbackId(editor);
+    const capability = writable
+      ? ({ available: true } as const)
+      : ({
+          available: false,
+          reason: {
+            code: 'unsupported-annotation',
+            message: annotationReadOnlyReason(editor),
+          },
+        } as const);
+    const annotation: DocumentAnnotation = {
+      anchor: {
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 0, y: 0 } },
+        kind: 'fixed-page',
+        pageIndex: annotationPageIndex(editor),
+      },
+      author: '',
+      capabilities: {
+        color: capability,
+        comment: capability,
+        conversions: { highlight: capability, underline: capability },
+        deletion: capability,
+        geometry: capability,
+        metadata: capability,
+      },
+      color: rgbToHex(data.color),
+      comment,
+      createdAt: null,
+      identity: { id: asAnnotationId(id), kind: 'stable' },
+      links: [],
+      modifiedAt: null,
+      selectedText: null,
+      tags: [],
+      type: annotationType(editor),
+    };
+    if (writable && manager !== null) this.bindings.set(id, { editor, manager });
+    return annotation;
+  }
+
+  private fallbackId(editor: PdfCommentEditor): string {
+    const existing = this.fallbackIds.get(editor);
+    if (existing !== undefined) return existing;
+    const id = `pdf-comment-${String(++this.fallbackIdSequence)}`;
+    this.fallbackIds.set(editor, id);
+    return id;
   }
 }
 
-function annotationReadOnlyReason(
-  editor: PdfCommentEditor,
+function nativeEditorNode(
+  target: EventTarget | null,
+  owner: { readonly Element: typeof Element },
+): HTMLElement | null {
+  if (!(target instanceof owner.Element)) return null;
+  if (target.closest('a, button, input, select, textarea') !== null) return null;
+  const node = target.closest<HTMLElement>(ANNOTATION_FOCUS_SELECTOR);
+  if (node === null) return null;
+  if (node.matches(NATIVE_EDITOR_SELECTOR) && node.closest('.annotationEditorLayer') === null)
+    return null;
+  return node;
+}
+
+function readOnlyAnnotationFromNode(node: HTMLElement, id: string): DocumentAnnotation {
+  const reason = {
+    code: 'unsupported-annotation' as const,
+    message: 'This imported annotation is read-only.',
+  };
+  const unavailable = { available: false as const, reason };
+  const pageNumber = Number(node.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber']);
+  const selectedText = node.textContent.trim();
+  const type = annotationTypeFromNode(node);
+  return {
+    anchor: {
+      coordinateSpace: 'page-points-top-left',
+      geometry: { kind: 'point', point: { x: 0, y: 0 } },
+      kind: 'fixed-page',
+      pageIndex: Number.isInteger(pageNumber) && pageNumber > 0 ? pageNumber - 1 : 0,
+    },
+    author: '',
+    capabilities: {
+      color: unavailable,
+      comment: unavailable,
+      conversions: { highlight: unavailable, underline: unavailable },
+      deletion: unavailable,
+      geometry: unavailable,
+      metadata: unavailable,
+    },
+    color: null,
+    comment: node.dataset['comment'] ?? '',
+    createdAt: null,
+    identity: { id: asAnnotationId(id), kind: 'stable' },
+    links: [],
+    modifiedAt: null,
+    selectedText: selectedText.length === 0 ? null : selectedText,
+    tags: [],
+    type,
+    ...(type === 'unsupported' ? { externalType: node.className } : {}),
+  };
+}
+
+function annotationTypeFromNode(node: HTMLElement): DocumentAnnotation['type'] {
+  if (node.matches('.underlineAnnotation')) return 'underline';
+  if (node.matches('.textAnnotation')) return 'text-note';
+  if (node.matches('.highlightAnnotation')) return 'highlight';
+  if (node.matches('.inkAnnotation')) return 'ink';
+  if (node.matches('.freeTextAnnotation')) return 'free-text';
+  return 'unsupported';
+}
+
+function isWritableFocus(
+  selected: readonly PdfCommentEditor[],
   manager: PdfCommentUiManager | null,
-): string | undefined {
+  isSelected: boolean,
+  isEditable: boolean,
+): boolean {
+  return (
+    isSelected &&
+    isEditable &&
+    manager !== null &&
+    selected.length > 0 &&
+    selected.every(isSupportedNativeEditor)
+  );
+}
+
+function annotationReadOnlyReason(editor: PdfCommentEditor): string {
   const subtype = annotationDomSubtype(editor);
   if (subtype === 'underlineAnnotation') return 'Underline annotations are read-only.';
   if (subtype === 'textAnnotation') return 'Text Note annotations are read-only.';
-  if (!isSupportedNativeEditor(editor) || manager?.firstSelectedEditor !== editor)
-    return 'This annotation is read-only.';
-  return undefined;
+  return isSupportedNativeEditor(editor)
+    ? 'This annotation is read-only.'
+    : 'Unsupported annotation.';
+}
+
+function selectedEditorId(node: HTMLElement): string {
+  const elementId = node.id.trim();
+  if (elementId.length > 0) return elementId;
+  return node.dataset['annotationId']?.trim() ?? '';
+}
+
+function stableAnnotationId(annotation: DocumentAnnotation): string | null {
+  return annotation.identity.kind === 'stable' ? String(annotation.identity.id) : null;
+}
+
+function firstNonEmpty(...values: ReadonlyArray<string | undefined>): string | undefined {
+  return values.map((value) => value?.trim() ?? '').find((value) => value.length > 0);
 }
 
 function annotationDomSubtype(editor: PdfCommentEditor): string | undefined {
@@ -591,23 +815,28 @@ function isSupportedNativeEditor(editor: PdfCommentEditor): boolean {
   );
 }
 
-function sameCommentEditor(active: PdfCommentEditor | null, candidate: PdfCommentEditor): boolean {
-  if (active === candidate) return true;
-  const activeId = active?.uid?.trim();
-  const candidateId = candidate.uid?.trim();
-  return (
-    activeId !== undefined &&
-    activeId.length > 0 &&
-    candidateId !== undefined &&
-    candidateId === activeId
-  );
-}
-
 function rgbToHex(color: readonly number[] | undefined): string {
   const [red = 0, green = 0, blue = 0] = color ?? [];
   return `#${[red, green, blue]
     .map((value) => clampByte(value).toString(16).padStart(2, '0'))
     .join('')}`;
+}
+
+function annotationPageIndex(editor: PdfCommentEditor): number {
+  const value = Number(
+    popupAnchor(editor)?.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber'],
+  );
+  return Number.isInteger(value) && value > 0 ? value - 1 : 0;
+}
+
+function annotationType(editor: PdfCommentEditor): DocumentAnnotation['type'] {
+  const subtype = annotationDomSubtype(editor);
+  if (subtype === 'underlineAnnotation') return 'underline';
+  if (subtype === 'textAnnotation') return 'text-note';
+  if (editor.mode === 9 || editor.editorType === 'highlight') return 'highlight';
+  if (editor.mode === 15 || editor.editorType === 'ink') return 'ink';
+  if (editor.mode === 3 || editor.editorType === 'freetext') return 'free-text';
+  return 'unsupported';
 }
 
 function isPdfCommentUiManager(value: unknown): value is PdfCommentUiManager {
@@ -655,15 +884,9 @@ function abortReason(signal: AbortSignal | undefined): Error {
   if (typeof reason === 'object' && reason !== null && 'name' in reason && 'message' in reason) {
     return reason as Error;
   }
-  return new DOMException('The PDF comment reservation was cancelled.', 'AbortError');
+  return new DOMException('The PDF annotation interaction was cancelled.', 'AbortError');
 }
 
 function asError(cause: unknown): Error {
-  if (
-    cause instanceof Error ||
-    (typeof cause === 'object' && cause !== null && 'name' in cause && 'message' in cause)
-  ) {
-    return cause as Error;
-  }
-  return new Error(String(cause));
+  return cause instanceof Error ? cause : new Error(String(cause));
 }

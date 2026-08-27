@@ -38,7 +38,13 @@ export interface AnnotationEditorPopoverRequest {
   readonly position?: { readonly x: number; readonly y: number } | undefined;
   readonly onCreate: (
     creation: AnnotationEditorCreation,
-  ) => DocumentAnnotation | null | void | Promise<DocumentAnnotation | null | void>;
+  ) =>
+    | DocumentAnnotation
+    | 'created'
+    | 'dismissed'
+    | null
+    | void
+    | Promise<DocumentAnnotation | 'created' | 'dismissed' | null | void>;
   readonly onUpdate: (update: AnnotationEditorUpdate) => boolean | void;
   readonly onDelete: (annotations: readonly DocumentAnnotation[]) => boolean | void;
   readonly onClose: (reason: AnnotationEditorCloseReason) => void;
@@ -248,6 +254,11 @@ export class AnnotationEditorPopover {
     return this.dirtyMetadata.size > 0 || this.pendingCreationUpdates.size > 0;
   }
 
+  flushPendingChanges(): boolean {
+    if (!this.flushPendingMetadata()) return false;
+    return this.retryPendingUpdates();
+  }
+
   retryPendingUpdates(): boolean {
     for (const job of this.pendingCreationUpdates) {
       const update = job.pendingUpdate;
@@ -420,7 +431,12 @@ export class AnnotationEditorPopover {
       });
       void Promise.resolve(result).then(
         (annotation) => {
-          if (annotation !== null && annotation !== undefined)
+          if (annotation === 'dismissed') {
+            if (generation === this.openGeneration && this.active === request) {
+              this.selectionCommitted = false;
+              this.selectionCreation = null;
+            }
+          } else if (annotation !== 'created' && annotation !== null && annotation !== undefined)
             this.finishSelectionCreation(job, annotation);
         },
         (cause: unknown) => {

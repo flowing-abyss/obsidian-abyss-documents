@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
+import type { AnnotationEditorPopoverRequest } from './annotation-editor-popover.js';
 import { ReaderShell } from './reader-shell.js';
 
 function selection(): PdfTextSelection {
@@ -14,6 +15,54 @@ function selection(): PdfTextSelection {
 }
 
 describe('ReaderShell', () => {
+  it('keeps a dismissed selection draft visible and retryable in the unified editor', async () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const onCreate = vi
+      .fn<AnnotationEditorPopoverRequest['onCreate']>()
+      .mockResolvedValueOnce('dismissed')
+      .mockResolvedValueOnce('created');
+    const request: AnnotationEditorPopoverRequest = {
+      onClose: vi.fn(),
+      onCreate,
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(),
+      palette: [
+        { color: '#ffd400', meaning: 'Key idea', name: 'Yellow' },
+        { color: '#5fb236', meaning: 'Definition', name: 'Green' },
+      ],
+      target: { kind: 'selection', selection: selection() },
+    };
+    const opened = shell.openAnnotationEditor(request);
+
+    expect(opened).toBe(true);
+    const comment = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected the unified comment field.');
+    comment.value = 'Keep this draft';
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.waitFor(() => {
+      expect(onCreate).toHaveBeenCalledOnce();
+    });
+    expect(comment.value).toBe('Keep this draft');
+    const editor = host.querySelector<HTMLElement>('[data-annotation-editor-popover]');
+    expect(editor).not.toBeNull();
+
+    host.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+    await vi.waitFor(() => {
+      expect(onCreate).toHaveBeenCalledTimes(2);
+    });
+    expect(onCreate.mock.calls[1]?.[0]).toMatchObject({
+      color: '#5fb236',
+      comment: 'Keep this draft',
+    });
+    expect(host.querySelector<HTMLElement>('[data-annotation-editor-popover]')).toBe(editor);
+    expect(editor?.isConnected).toBe(true);
+    expect(editor?.hidden).toBe(false);
+
+    shell.destroy();
+    host.remove();
+  });
+
   it('adds a minimal annotation toolbar only after document capabilities are known', () => {
     const host = document.body.createDiv();
     const intents: unknown[] = [];
@@ -52,26 +101,29 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
-  it('hosts selection actions and gives their Escape handling precedence', () => {
+  it('hosts the unified selection editor and gives its Escape handling precedence', () => {
     const host = document.body.createDiv();
     const intents: unknown[] = [];
-    const selectionIntents: unknown[] = [];
+    const closeReasons: unknown[] = [];
     const shell = new ReaderShell(host, (intent) => intents.push(intent));
     shell.configureAnnotationToolbar(
       [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
       null,
     );
-    shell.openSelectionPopover({
-      onIntent: (intent) => selectionIntents.push(intent),
+    shell.openAnnotationEditor({
+      onClose: (reason) => closeReasons.push(reason),
+      onCreate: vi.fn(),
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(),
       palette: [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
-      selection: selection(),
+      target: { kind: 'selection', selection: selection() },
     });
 
     shell.documentHost.dispatchEvent(
       new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
     );
 
-    expect(selectionIntents).toEqual([{ type: 'dismiss' }]);
+    expect(closeReasons).toEqual(['escape']);
     expect(intents).toEqual([]);
     shell.destroy();
     host.remove();
@@ -107,7 +159,7 @@ describe('ReaderShell', () => {
     const shell = new ReaderShell(host, (intent) => intents.push(intent));
     shell.configureAnnotationToolbar([], null);
     shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
-    const comment = shell.root.createDiv({ cls: 'abyss-annotation-popover' });
+    const comment = shell.root.createDiv({ cls: 'abyss-annotation-editor-popover' });
     const textarea = comment.createEl('textarea');
     textarea.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return;

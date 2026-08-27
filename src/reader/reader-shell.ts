@@ -1,15 +1,16 @@
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { FocusReturn, PoliteAnnouncer } from './a11y.js';
+import {
+  AnnotationEditorPopover,
+  type AnnotationEditorPopoverRequest,
+  type AnnotationEditorTarget,
+} from './annotation-editor-popover.js';
 import type {
   AnnotationInteractionHost,
   QuickHighlightState,
 } from './annotation-interaction-controller.js';
 import { AnnotationToolbar, type AnnotationToolbarIntent } from './annotation-toolbar.js';
 import type { ObsidianTheme } from './reading-profiles.js';
-import {
-  SelectionAnnotationPopover,
-  type SelectionAnnotationPopoverRequest,
-} from './selection-annotation-popover.js';
 import { ReaderSidebar, type ReaderSidebarCallbacks, type ReaderSidebarTab } from './sidebar.js';
 import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
 
@@ -34,11 +35,11 @@ export class ReaderShell implements AnnotationInteractionHost {
   private annotationToolbarValue: AnnotationToolbar | null = null;
 
   private readonly cleanups: Array<() => void> = [];
+  private readonly annotationEditor: AnnotationEditorPopover;
   private readonly announcer: PoliteAnnouncer;
   private readonly body: HTMLElement;
   private readonly focusReturn = new FocusReturn();
   private readonly intentHandler: (intent: ReaderShellIntent) => void;
-  private readonly selectionPopover: SelectionAnnotationPopover;
   private quickHighlightState: QuickHighlightState = { armed: false, color: '#ffd400' };
   private sidebarValue: ReaderSidebar | null = null;
   private destroyed = false;
@@ -70,7 +71,7 @@ export class ReaderShell implements AnnotationInteractionHost {
     this.body = this.root.createDiv({ cls: 'abyss-reader-body' });
     this.documentHost = this.body.createDiv({ attr: { 'data-region': 'document' } });
     this.documentHost.tabIndex = -1;
-    this.selectionPopover = new SelectionAnnotationPopover(this.root);
+    this.annotationEditor = new AnnotationEditorPopover(this.root);
     const onKeyDown = (event: KeyboardEvent): void => {
       this.handleReaderShortcut(event);
     };
@@ -115,12 +116,24 @@ export class ReaderShell implements AnnotationInteractionHost {
     this.applyQuickHighlightState();
   }
 
-  openSelectionPopover(request: SelectionAnnotationPopoverRequest): void {
-    this.selectionPopover.open(request);
+  openAnnotationEditor(request: AnnotationEditorPopoverRequest): boolean {
+    return this.annotationEditor.open(request);
   }
 
-  closeSelectionPopover(): void {
-    this.selectionPopover.close();
+  closeAnnotationEditor(): boolean {
+    return this.annotationEditor.close();
+  }
+
+  flushAnnotationEditor(): boolean {
+    return this.annotationEditor.flushPendingChanges();
+  }
+
+  updateAnnotationEditorTarget(target: AnnotationEditorTarget): boolean {
+    return this.annotationEditor.updateTarget(target);
+  }
+
+  retryAnnotationEditorUpdates(): boolean {
+    return this.annotationEditor.retryPendingUpdates();
   }
 
   get obsidianTheme(): ObsidianTheme {
@@ -178,19 +191,20 @@ export class ReaderShell implements AnnotationInteractionHost {
     this.announcer.announce(message);
   }
 
-  destroy(): void {
-    if (this.destroyed) return;
+  destroy(): boolean {
+    if (this.destroyed) return true;
+    if (!this.annotationEditor.destroy()) return false;
     this.destroyed = true;
     for (const cleanup of [...this.cleanups]) cleanup();
     this.sidebarValue?.destroy();
     this.sidebarValue = null;
     this.focusReturn.clear();
     this.announcer.destroy();
-    this.selectionPopover.destroy();
     this.annotationToolbarValue?.destroy();
     this.annotationToolbarValue = null;
     this.toolbar.destroy();
     this.root.remove();
+    return true;
   }
 
   private setSidebarPressed(pressed: boolean): void {
@@ -211,7 +225,7 @@ export class ReaderShell implements AnnotationInteractionHost {
     if (
       event.key !== 'Escape' ||
       !this.quickHighlightState.armed ||
-      this.selectionPopover.isOpen ||
+      this.annotationEditor.isOpen ||
       hasOpenReaderMenu(this.root)
     )
       return false;
