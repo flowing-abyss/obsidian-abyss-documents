@@ -209,6 +209,140 @@
   display: none;
 }
 
+.abyss-documents .abyss-annotation-editor-popover {
+  position: fixed;
+  z-index: var(--layer-popover);
+  box-sizing: border-box;
+  display: flex;
+  width: min(22rem, calc(100vw - var(--size-4-6)));
+  max-width: 100%;
+  flex-direction: column;
+  gap: var(--size-2-2);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--size-4-2);
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+
+.abyss-documents .abyss-annotation-editor-popover[hidden],
+.abyss-documents .abyss-annotation-editor-status[hidden],
+.abyss-documents .abyss-annotation-editor-metadata[hidden],
+.abyss-documents .abyss-annotation-editor-palette[hidden],
+.abyss-documents .abyss-annotation-editor-readonly-metadata[hidden] {
+  display: none;
+}
+
+.abyss-documents .abyss-annotation-editor-palette,
+.abyss-documents .abyss-annotation-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-1);
+}
+
+.abyss-documents .abyss-annotation-editor-palette {
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
+.abyss-documents .abyss-annotation-editor-palette::-webkit-scrollbar {
+  display: none;
+}
+
+.abyss-documents .abyss-annotation-editor-swatch {
+  width: 1.5rem;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-xs);
+  background: var(--abyss-annotation-swatch-color);
+}
+
+.abyss-documents .abyss-annotation-editor-swatch[aria-pressed='true'] {
+  outline: 2px solid var(--text-normal);
+  outline-offset: 2px;
+}
+
+.abyss-documents .abyss-annotation-editor-swatch:focus-visible,
+.abyss-documents
+  .abyss-annotation-editor-metadata
+  :is(
+    .abyss-annotation-editor-comment,
+    .abyss-annotation-editor-tags,
+    .abyss-annotation-editor-links
+  ):focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.abyss-documents .abyss-annotation-editor-metadata {
+  display: grid;
+  min-width: 0;
+  gap: var(--size-2-1);
+}
+
+.abyss-documents
+  .abyss-annotation-editor-metadata
+  :is(
+    .abyss-annotation-editor-comment,
+    .abyss-annotation-editor-tags,
+    .abyss-annotation-editor-links
+  ) {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+}
+
+.abyss-documents .abyss-annotation-editor-comment {
+  min-height: 3.5rem;
+  resize: vertical;
+}
+
+.abyss-documents .abyss-annotation-editor-actions {
+  justify-content: flex-end;
+}
+
+.abyss-documents .abyss-annotation-editor-delete {
+  width: var(--input-height);
+  min-width: var(--input-height);
+  min-height: var(--input-height);
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.abyss-documents .abyss-annotation-editor-delete:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.abyss-documents .abyss-annotation-editor-delete:is(:hover, :focus-visible) {
+  color: var(--text-error);
+}
+
+.abyss-documents .abyss-annotation-editor-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.abyss-documents .abyss-annotation-editor-readonly-metadata {
+  display: grid;
+  min-width: 0;
+  gap: var(--size-2-1);
+  color: var(--text-normal);
+  overflow-wrap: anywhere;
+}
+
+.abyss-documents .abyss-annotation-editor-readonly-metadata [data-field='tags'],
+.abyss-documents .abyss-annotation-editor-readonly-metadata [data-field='links'] {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
 .abyss-documents .abyss-annotation-popover {
   position: fixed;
   z-index: var(--layer-popover);
@@ -1215,12 +1349,18 @@
   .abyss-documents .abyss-annotation-color,
   .abyss-documents .abyss-annotation-popover-button,
   .abyss-documents .abyss-annotation-popover-color,
+  .abyss-documents .abyss-annotation-editor-delete,
+  .abyss-documents .abyss-annotation-editor-swatch,
   .abyss-documents .abyss-selection-annotation-popover-button,
   .abyss-documents .abyss-reader-sidebar-close,
   .abyss-documents .abyss-reader-search-button {
     width: 2.75rem;
     min-width: 2.75rem;
     min-height: 2.75rem;
+  }
+
+  .abyss-documents .abyss-annotation-editor-swatch {
+    height: 2.75rem;
   }
 
   .abyss-documents .abyss-annotation-tag-chip {

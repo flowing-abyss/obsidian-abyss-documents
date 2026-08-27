@@ -1,7 +1,12 @@
 import type { TFile } from 'obsidian';
 import { App, TFile as MockTFile } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
-import { LinkSuggestionService, parseAnnotationTokens } from './link-suggestions.js';
+import {
+  annotationLinkTokenAtCursor,
+  LinkSuggestionService,
+  parseAnnotationTokens,
+  replaceAnnotationLinkSuggestion,
+} from './link-suggestions.js';
 
 function md(path: string): TFile {
   const app = App.createConfigured__({ files: { [path]: '' } });
@@ -11,6 +16,17 @@ function md(path: string): TFile {
 }
 
 describe('annotation link suggestions', () => {
+  it('locates the active wiki-link target and preserves a closed token alias on replacement', () => {
+    const value = 'See [[con|Existing alias]] later';
+    expect({
+      replacement: replaceAnnotationLinkSuggestion(value, 9, '[[Concept]]'),
+      token: annotationLinkTokenAtCursor(value, 9),
+    }).toEqual({
+      replacement: { cursor: 13, value: 'See [[Concept|Existing alias]] later' },
+      token: { close: 24, open: 4, query: 'con', targetEnd: 9 },
+    });
+  });
+
   it('parses explicit Unicode tags and wiki-link targets without consuming ordinary prose', () => {
     expect(
       parseAnnotationTokens('prose#x #Tag #ＴＡＧ [[Concept|alias]] [[Other#H]] [brackets]'),
