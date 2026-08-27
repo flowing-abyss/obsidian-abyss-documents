@@ -7591,14 +7591,68 @@
 
 .abyss-documents-settings .abyss-documents-settings-group {
   border-bottom: var(--border-width) solid var(--background-modifier-border);
+  padding-block: var(--size-2-1);
 }
 
-.abyss-documents-settings .abyss-documents-settings-heading {
-  margin: 0;
+.abyss-documents-settings .abyss-documents-settings-header {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: var(--size-4-2);
+  padding: var(--size-4-3) var(--size-4-2);
+  border: 0;
+  border-radius: var(--radius-s);
+  appearance: none;
+  background: transparent;
+  color: var(--text-normal);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold);
+  line-height: var(--line-height-tight);
+  text-align: start;
 }
 
-.abyss-documents-settings .abyss-documents-settings-heading .setting-item-control {
-  min-width: var(--input-height);
+.abyss-documents-settings .abyss-documents-settings-header:hover {
+  background: var(--background-modifier-hover);
+}
+
+.abyss-documents-settings .abyss-documents-settings-header:focus-visible {
+  outline: 2px solid var(--background-modifier-border-focus);
+  outline-offset: -2px;
+}
+
+.abyss-documents-settings .abyss-documents-settings-header-icon,
+.abyss-documents-settings .abyss-documents-settings-header-chevron {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: var(--text-muted);
+  place-items: center;
+}
+
+.abyss-documents-settings .abyss-documents-settings-header-icon .svg-icon,
+.abyss-documents-settings .abyss-documents-settings-header-chevron .svg-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.abyss-documents-settings .abyss-documents-settings-header-label {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.abyss-documents-settings .abyss-documents-settings-header-chevron {
+  transition: transform 120ms ease;
+}
+
+.abyss-documents-settings
+  .abyss-documents-settings-group.is-expanded
+  .abyss-documents-settings-header-chevron {
+  transform: rotate(90deg);
 }
 
 .abyss-documents-settings .abyss-documents-settings-section[hidden] {
@@ -7606,11 +7660,120 @@
 }
 
 .abyss-documents-settings .abyss-documents-settings-section {
-  padding-inline-start: var(--size-4-4);
+  padding: 0 var(--size-4-4) var(--size-4-4);
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette {
+  margin-block: var(--size-4-3);
+  overflow: hidden;
+  border: var(--border-width) solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-primary);
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-entry {
+  display: grid;
+  align-items: start;
+  gap: var(--size-4-3);
+  grid-template-columns: minmax(96px, 0.65fr) minmax(120px, 1fr) minmax(160px, 1.35fr);
+  padding: var(--size-4-3);
+}
+
+.abyss-documents-settings
+  .abyss-documents-settings-palette-entry
+  + .abyss-documents-settings-palette-entry {
+  border-top: var(--border-width) solid var(--background-modifier-border);
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-field.setting-item {
+  min-width: 0;
+  align-items: stretch;
+  gap: var(--size-4-2);
+  padding: 0;
+  border: 0;
+  flex-direction: column;
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-field .setting-item-info,
+.abyss-documents-settings .abyss-documents-settings-palette-field .setting-item-control,
+.abyss-documents-settings .abyss-documents-settings-palette-field .setting-item-name {
+  width: 100%;
+  min-width: 0;
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-field .setting-item-name {
+  overflow-wrap: anywhere;
+  unicode-bidi: plaintext;
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-field .setting-item-description {
+  display: none;
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-field .setting-item-control {
+  justify-content: flex-start;
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-input {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.abyss-documents-settings .abyss-documents-settings-palette-input:focus {
+  text-overflow: clip;
 }
 
 @container (width <= 500px) {
   .abyss-documents-settings .abyss-documents-settings-section {
-    padding-inline-start: 0;
+    padding-inline: var(--size-4-3);
+  }
+
+  .abyss-documents-settings .abyss-documents-settings-palette-entry {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .abyss-documents-settings .abyss-documents-settings-palette-field.is-color {
+    grid-column: 1;
+  }
+
+  .abyss-documents-settings .abyss-documents-settings-palette-field.is-name {
+    grid-column: 2;
+  }
+
+  .abyss-documents-settings .abyss-documents-settings-palette-field.is-meaning {
+    grid-column: 1 / -1;
+  }
+}
+
+@container (width <= 320px) {
+  .abyss-documents-settings .abyss-documents-settings-palette-entry {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .abyss-documents-settings .abyss-documents-settings-palette-field.is-color,
+  .abyss-documents-settings .abyss-documents-settings-palette-field.is-name,
+  .abyss-documents-settings .abyss-documents-settings-palette-field.is-meaning {
+    grid-column: 1;
+  }
+}
+
+@media (pointer: coarse) {
+  .abyss-documents-settings .abyss-documents-settings-palette-field .setting-item-control,
+  .abyss-documents-settings .abyss-documents-settings-palette-input,
+  .abyss-documents-settings .abyss-documents-settings-palette-color {
+    min-height: 44px;
+  }
+
+  .abyss-documents-settings .abyss-documents-settings-palette-color {
+    width: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .abyss-documents-settings .abyss-documents-settings-header-chevron {
+    transition: none;
   }
 }

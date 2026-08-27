@@ -1,4 +1,4 @@
-import { Notice, PluginSettingTab, Setting, type App, type Plugin } from 'obsidian';
+import { Notice, PluginSettingTab, Setting, setIcon, type App, type Plugin } from 'obsidian';
 import type {
   ReaderPages,
   ReaderScrolling,
@@ -62,12 +62,16 @@ const PROFILE_OPTIONS: Readonly<Record<ReadingProfileId, string>> = {
   custom: 'Custom',
 };
 
+let settingsTabInstanceSequence = 0;
+
 export class AbyssDocumentsSettingTab extends PluginSettingTab {
   private readonly failedFields = new Map<SettingFieldId, FailedFieldSynchronization>();
   private readonly latestFieldGenerations = new Map<SettingFieldId, number>();
   private readonly synchronizingFields = new Set<SettingFieldId>();
   private latestSettledGeneration = 0;
   private pendingUpdates = 0;
+  private readonly regionIdPrefix = `abyss-documents-settings-${String(++settingsTabInstanceSequence)}`;
+  private sectionEvents: AbortController | null = null;
   private updateGeneration = 0;
 
   constructor(
@@ -89,44 +93,86 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     this.render();
   }
 
+  override hide(): void {
+    this.sectionEvents?.abort();
+    this.sectionEvents = null;
+  }
+
   render(): void {
+    this.sectionEvents?.abort();
+    const AbortControllerConstructor =
+      this.containerEl.doc.defaultView?.AbortController ?? AbortController;
+    this.sectionEvents = new AbortControllerConstructor();
     this.containerEl.empty();
     this.containerEl.addClass('abyss-documents-settings');
-    const reading = this.collapsibleSection('Reading appearance', 'reading-appearance');
+    const reading = this.collapsibleSection('Reading appearance', 'reading-appearance', 'palette');
     this.renderReadingAppearance(reading.body);
-    const layout = this.collapsibleSection('Page layout', 'page-layout');
+    const layout = this.collapsibleSection('Page layout', 'page-layout', 'layout-template');
     this.renderPageLayout(layout.body);
-    const annotations = this.collapsibleSection('Annotations', 'annotations');
+    const annotations = this.collapsibleSection('Annotations', 'annotations', 'highlighter');
     this.renderAnnotations(annotations.body);
-    const advanced = this.collapsibleSection('Advanced', 'advanced');
+    const advanced = this.collapsibleSection('Advanced', 'advanced', 'settings-2');
     this.renderAdvanced(advanced.body);
   }
 
-  private collapsibleSection(title: string, id: string): CollapsibleSection {
-    const bodyId = `abyss-documents-settings-${id}`;
+  private collapsibleSection(title: string, id: string, icon: string): CollapsibleSection {
+    if (this.sectionEvents === null) {
+      throw new Error('Settings section events are not active.');
+    }
+    const { signal } = this.sectionEvents;
+    const bodyId = `${this.regionIdPrefix}-${id}`;
+    const headerId = `${bodyId}-header`;
     const section = this.containerEl.createDiv({ cls: 'abyss-documents-settings-group' });
-    const body = section.createDiv({ cls: 'abyss-documents-settings-section' });
-    const heading = new Setting(section)
-      .setName(title)
-      .setHeading()
-      .setClass('abyss-documents-settings-heading')
-      .addExtraButton((button) => {
-        button
-          .setIcon('chevron-right')
-          .setTooltip(`Show ${title.toLowerCase()}`)
-          .onClick(() => {
-            const expanded = body.hidden;
-            body.hidden = !expanded;
-            button.extraSettingsEl.setAttribute('aria-expanded', String(expanded));
-            button.setIcon(expanded ? 'chevron-down' : 'chevron-right');
-            button.setTooltip(`${expanded ? 'Hide' : 'Show'} ${title.toLowerCase()}`);
-          });
-        button.extraSettingsEl.setAttribute('aria-controls', bodyId);
-        button.extraSettingsEl.setAttribute('aria-expanded', 'false');
-      });
-    section.prepend(heading.settingEl);
+    const header = section.createEl('button', {
+      attr: {
+        'aria-controls': bodyId,
+        'aria-expanded': 'false',
+        type: 'button',
+      },
+      cls: 'abyss-documents-settings-header',
+    });
+    header.id = headerId;
+    const iconEl = header.createSpan({
+      attr: { 'aria-hidden': 'true', 'data-icon-name': icon },
+      cls: 'abyss-documents-settings-header-icon',
+    });
+    setIcon(iconEl, icon);
+    header.createSpan({ cls: 'abyss-documents-settings-header-label', text: title });
+    const chevron = header.createSpan({
+      attr: { 'aria-hidden': 'true', 'data-icon-name': 'chevron-right' },
+      cls: 'abyss-documents-settings-header-chevron',
+    });
+    setIcon(chevron, 'chevron-right');
+    const body = section.createDiv({
+      attr: { 'aria-labelledby': headerId, role: 'region' },
+      cls: 'abyss-documents-settings-section',
+    });
     body.id = bodyId;
     body.hidden = true;
+
+    const setExpanded = (expanded: boolean): void => {
+      if (!expanded && body.contains(this.containerEl.doc.activeElement)) header.focus();
+      body.hidden = !expanded;
+      section.toggleClass('is-expanded', expanded);
+      header.setAttribute('aria-expanded', String(expanded));
+    };
+    header.addEventListener(
+      'click',
+      () => {
+        setExpanded(body.hidden);
+      },
+      { signal },
+    );
+    header.addEventListener(
+      'keydown',
+      (event) => {
+        if ((event.key === 'Enter' || event.key === ' ') && !event.repeat) {
+          event.preventDefault();
+          setExpanded(body.hidden);
+        }
+      },
+      { signal },
+    );
     return { body };
   }
 
@@ -300,7 +346,6 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
 
   private renderAnnotations(container: HTMLElement): void {
     const { annotations } = this.store.snapshot.settings;
-    const palette: readonly AnnotationPaletteEntry[] = annotations.palette;
     new Setting(container)
       .setName('Annotation author')
       .setDesc('Used when a document format supports annotation authors.')
@@ -317,47 +362,7 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
           );
         });
       });
-    for (const [index, entry] of palette.entries()) {
-      new Setting(container)
-        .setName(`${entry.name} color`)
-        .setDesc('Color used by this annotation palette entry.')
-        .addColorPicker((picker) => {
-          picker.setValue(entry.color).onChange((color) => {
-            this.updateSettings((settings) => this.withPaletteEntry(settings, index, { color }), {
-              field: `annotations.palette.${index}.color`,
-              synchronize: (settings) => {
-                picker.setValue(settings.annotations.palette[index]?.color ?? entry.color);
-              },
-            });
-          });
-        });
-      new Setting(container)
-        .setName(`${entry.name} name`)
-        .setDesc('Short label shown in annotation color tooltips.')
-        .addText((text) => {
-          text.setValue(entry.name).onChange((name) => {
-            this.updateSettings((settings) => this.withPaletteEntry(settings, index, { name }), {
-              field: `annotations.palette.${index}.name`,
-              synchronize: (settings) => {
-                text.setValue(settings.annotations.palette[index]?.name ?? entry.name);
-              },
-            });
-          });
-        });
-      new Setting(container)
-        .setName(`${entry.name} meaning`)
-        .setDesc(`${entry.color} annotation palette color.`)
-        .addText((text) => {
-          text.setValue(entry.meaning).onChange((meaning) => {
-            this.updateSettings((settings) => this.withPaletteEntry(settings, index, { meaning }), {
-              field: `annotations.palette.${index}.meaning`,
-              synchronize: (settings) => {
-                text.setValue(settings.annotations.palette[index]?.meaning ?? '');
-              },
-            });
-          });
-        });
-    }
+    this.renderAnnotationPalette(container, annotations.palette);
     new Setting(container)
       .setName('Annotation transfer template')
       .setDesc('Used when exporting annotation text.')
@@ -375,6 +380,89 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
               },
             },
           );
+        });
+      });
+  }
+
+  private renderAnnotationPalette(
+    container: HTMLElement,
+    palette: readonly AnnotationPaletteEntry[],
+  ): void {
+    const paletteContainer = container.createDiv({
+      attr: { 'aria-label': 'Annotation palette' },
+      cls: 'abyss-documents-settings-palette',
+    });
+    for (const [index, entry] of palette.entries()) {
+      this.renderPaletteEntry(paletteContainer, entry, index);
+    }
+  }
+
+  private renderPaletteEntry(
+    container: HTMLElement,
+    entry: AnnotationPaletteEntry,
+    index: number,
+  ): void {
+    const paletteEntry = container.createDiv({
+      attr: {
+        'aria-label': `${entry.name} annotation palette entry`,
+        'data-palette-index': String(index),
+        role: 'group',
+      },
+      cls: 'abyss-documents-settings-palette-entry',
+    });
+    const colorSetting = new Setting(paletteEntry)
+      .setName(`${entry.name} color`)
+      .setDesc('Color used by this annotation palette entry.')
+      .setClass('abyss-documents-settings-palette-field')
+      .setClass('is-color')
+      .addColorPicker((picker) => {
+        picker.setValue(entry.color).onChange((color) => {
+          this.updateSettings((settings) => this.withPaletteEntry(settings, index, { color }), {
+            field: `annotations.palette.${index}.color`,
+            synchronize: (settings) => {
+              picker.setValue(settings.annotations.palette[index]?.color ?? entry.color);
+            },
+          });
+        });
+      });
+    const colorInput =
+      colorSetting.controlEl.querySelector<HTMLInputElement>('input[type="color"]');
+    colorInput?.addClass('abyss-documents-settings-palette-color');
+    colorInput?.setAttribute('aria-label', `${entry.name} color`);
+    new Setting(paletteEntry)
+      .setName(`${entry.name} name`)
+      .setDesc('Short label shown in annotation color tooltips.')
+      .setClass('abyss-documents-settings-palette-field')
+      .setClass('is-name')
+      .addText((text) => {
+        text.inputEl.addClass('abyss-documents-settings-palette-input');
+        text.inputEl.setAttribute('aria-label', `${entry.name} name`);
+        text.inputEl.setAttribute('dir', 'auto');
+        text.setValue(entry.name).onChange((name) => {
+          this.updateSettings((settings) => this.withPaletteEntry(settings, index, { name }), {
+            field: `annotations.palette.${index}.name`,
+            synchronize: (settings) => {
+              text.setValue(settings.annotations.palette[index]?.name ?? entry.name);
+            },
+          });
+        });
+      });
+    new Setting(paletteEntry)
+      .setName(`${entry.name} meaning`)
+      .setDesc(`${entry.color} annotation palette color.`)
+      .setClass('abyss-documents-settings-palette-field')
+      .setClass('is-meaning')
+      .addText((text) => {
+        text.inputEl.addClass('abyss-documents-settings-palette-input');
+        text.inputEl.setAttribute('aria-label', `${entry.name} meaning`);
+        text.inputEl.setAttribute('dir', 'auto');
+        text.setValue(entry.meaning).onChange((meaning) => {
+          this.updateSettings((settings) => this.withPaletteEntry(settings, index, { meaning }), {
+            field: `annotations.palette.${index}.meaning`,
+            synchronize: (settings) => {
+              text.setValue(settings.annotations.palette[index]?.meaning ?? '');
+            },
+          });
         });
       });
   }

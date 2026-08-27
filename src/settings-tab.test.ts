@@ -1,7 +1,6 @@
 import type {
   ColorComponent,
   DropdownComponent,
-  ExtraButtonComponent,
   PluginManifest,
   SliderComponent,
   TextAreaComponent,
@@ -43,7 +42,6 @@ function fixture(useDefaultCallback = false) {
 interface CapturedControls {
   readonly colors: Map<string, ColorComponent>;
   readonly dropdowns: Map<string, DropdownComponent>;
-  readonly expanders: Map<string, ExtraButtonComponent & { simulateClick__(): void }>;
   readonly sliders: Map<string, SliderComponent>;
   readonly textAreas: Map<string, TextAreaComponent>;
   readonly texts: Map<string, TextComponent>;
@@ -53,29 +51,21 @@ interface CapturedControls {
 function captureControls(): CapturedControls {
   const colors = new Map<string, ColorComponent>();
   const dropdowns = new Map<string, DropdownComponent>();
-  const expanders = new Map<string, ExtraButtonComponent & { simulateClick__(): void }>();
   const sliders = new Map<string, SliderComponent>();
   const textAreas = new Map<string, TextAreaComponent>();
   const texts = new Map<string, TextComponent>();
   const toggles = new Map<string, ToggleComponent>();
   captureSettingComponent('addColorPicker', colors);
   captureSettingComponent('addDropdown', dropdowns);
-  captureSettingComponent('addExtraButton', expanders);
   captureSettingComponent('addSlider', sliders);
   captureSettingComponent('addText', texts);
   captureSettingComponent('addTextArea', textAreas);
   captureSettingComponent('addToggle', toggles);
-  return { colors, dropdowns, expanders, sliders, textAreas, texts, toggles };
+  return { colors, dropdowns, sliders, textAreas, texts, toggles };
 }
 
 type ComponentSettingMethod =
-  | 'addColorPicker'
-  | 'addDropdown'
-  | 'addExtraButton'
-  | 'addSlider'
-  | 'addText'
-  | 'addTextArea'
-  | 'addToggle';
+  'addColorPicker' | 'addDropdown' | 'addSlider' | 'addText' | 'addTextArea' | 'addToggle';
 
 function captureSettingComponent<Component>(
   method: ComponentSettingMethod,
@@ -114,29 +104,52 @@ function requiredControl<Component>(controls: Map<string, Component>, name: stri
 }
 
 function sectionControls(
-  controls: CapturedControls,
   tab: AbyssDocumentsSettingTab,
   title: string,
 ): {
   readonly body: HTMLElement;
-  readonly expander: ExtraButtonComponent & { simulateClick__(): void };
+  readonly button: HTMLButtonElement;
 } {
-  const expander = requiredControl(controls.expanders, title);
-  const bodyId = expander.extraSettingsEl.getAttribute('aria-controls');
-  if (bodyId === null) throw new Error(`Expected ${title} section body.`);
-  const body = tab.containerEl.querySelector<HTMLElement>(`#${bodyId}`);
-  if (body === null) throw new Error(`Expected ${title} section body.`);
-  return { body, expander };
+  const button = requiredSectionButton(tab, title);
+  return { body: controlledRegion(tab, button), button };
 }
 
 function expandSection(
-  controls: CapturedControls,
   tab: AbyssDocumentsSettingTab,
   title: string,
 ): ReturnType<typeof sectionControls> {
-  const section = sectionControls(controls, tab, title);
-  section.expander.simulateClick__();
+  const section = sectionControls(tab, title);
+  section.button.click();
   return section;
+}
+
+function sectionButtons(tab: AbyssDocumentsSettingTab): HTMLButtonElement[] {
+  return Array.from(
+    tab.containerEl.querySelectorAll<HTMLButtonElement>('button.abyss-documents-settings-header'),
+  );
+}
+
+function requiredSectionButton(tab: AbyssDocumentsSettingTab, title: string): HTMLButtonElement {
+  const button = sectionButtons(tab).find(
+    (candidate) =>
+      candidate.querySelector('.abyss-documents-settings-header-label')?.textContent === title,
+  );
+  if (button === undefined) throw new Error(`Expected ${title} section button.`);
+  return button;
+}
+
+function controlledRegion(tab: AbyssDocumentsSettingTab, button: HTMLButtonElement): HTMLElement {
+  const id = button.getAttribute('aria-controls');
+  if (id === null) throw new Error('Expected a controlled settings region.');
+  const region = tab.containerEl.querySelector<HTMLElement>(`#${id}`);
+  if (region === null) throw new Error(`Expected settings region ${id}.`);
+  return region;
+}
+
+function expectLabelsExactlyOnce(region: HTMLElement, labels: readonly string[]): void {
+  for (const label of labels) {
+    expect(region.textContent.split(label)).toHaveLength(2);
+  }
 }
 
 describe('AbyssDocumentsSettingTab', () => {
@@ -164,11 +177,212 @@ describe('AbyssDocumentsSettingTab', () => {
     (tab as unknown as { display(): void }).display();
   });
 
+  it('renders four ordered semantic section buttons with native icons and unique ARIA regions', () => {
+    const { tab } = fixture();
+
+    tab.render();
+
+    const buttons = sectionButtons(tab);
+    expect(
+      buttons.map(
+        (button) => button.querySelector('.abyss-documents-settings-header-label')?.textContent,
+      ),
+    ).toEqual(['Reading appearance', 'Page layout', 'Annotations', 'Advanced']);
+    const regionIds = buttons.map((button) => button.getAttribute('aria-controls'));
+    expect(new Set(regionIds).size).toBe(4);
+    for (const button of buttons) {
+      expect(button.type).toBe('button');
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(
+        button
+          .querySelector('.abyss-documents-settings-header-icon')
+          ?.getAttribute('data-icon-name'),
+      ).toBeTruthy();
+      expect(
+        button
+          .querySelector('.abyss-documents-settings-header-chevron')
+          ?.getAttribute('data-icon-name'),
+      ).toBe('chevron-right');
+      const region = controlledRegion(tab, button);
+      expect(region.hidden).toBe(true);
+      expect(region.getAttribute('role')).toBe('region');
+      expect(region.getAttribute('aria-labelledby')).toBe(button.id);
+    }
+  });
+
+  it('toggles a section once per click, Enter, or Space and returns focus on collapse', () => {
+    const { tab } = fixture();
+    tab.containerEl.doc.body.append(tab.containerEl);
+    tab.render();
+    const button = requiredSectionButton(tab, 'Reading appearance');
+    const region = controlledRegion(tab, button);
+
+    button.click();
+    expect(region.hidden).toBe(false);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+
+    button.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    expect(region.hidden).toBe(true);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+
+    button.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
+    expect(region.hidden).toBe(false);
+    const firstControl = region.querySelector<HTMLElement>('input, select, textarea, button');
+    expect(firstControl).not.toBeNull();
+    firstControl?.focus();
+    expect(tab.containerEl.doc.activeElement).toBe(firstControl);
+
+    button.click();
+    expect(region.hidden).toBe(true);
+    expect(tab.containerEl.doc.activeElement).toBe(button);
+  });
+
+  it('starts freshly collapsed without duplicate groups after every display', () => {
+    const { tab } = fixture();
+    tab.render();
+
+    const previousButton = requiredSectionButton(tab, 'Annotations');
+    previousButton.click();
+    expect(previousButton.getAttribute('aria-expanded')).toBe('true');
+
+    (tab as unknown as { display(): void }).display();
+
+    const buttons = sectionButtons(tab);
+    expect(buttons).toHaveLength(4);
+    expect(tab.containerEl.querySelectorAll('.abyss-documents-settings-group')).toHaveLength(4);
+    expect(buttons.every((button) => button.getAttribute('aria-expanded') === 'false')).toBe(true);
+    expect(buttons).not.toContain(previousButton);
+    expect(previousButton.isConnected).toBe(false);
+    previousButton.click();
+    expect(previousButton.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('maps every persisted setting exactly once and groups each fixed palette entry', () => {
+    const controls = captureControls();
+    const { tab } = fixture();
+    tab.render();
+
+    expectLabelsExactlyOnce(
+      controlledRegion(tab, requiredSectionButton(tab, 'Reading appearance')),
+      [
+        'Default profile',
+        'Remember profile per document',
+        'Foreground',
+        'Page tint',
+        'Brightness',
+        'Contrast',
+        'Image dim',
+      ],
+    );
+    expectLabelsExactlyOnce(controlledRegion(tab, requiredSectionButton(tab, 'Page layout')), [
+      'Default pages',
+      'Default scrolling',
+      'Remember layout per document',
+    ]);
+    expectLabelsExactlyOnce(controlledRegion(tab, requiredSectionButton(tab, 'Annotations')), [
+      'Annotation author',
+      'Yellow color',
+      'Yellow name',
+      'Yellow meaning',
+      'Red color',
+      'Red name',
+      'Red meaning',
+      'Green color',
+      'Green name',
+      'Green meaning',
+      'Blue color',
+      'Blue name',
+      'Blue meaning',
+      'Purple color',
+      'Purple name',
+      'Purple meaning',
+      'Magenta color',
+      'Magenta name',
+      'Magenta meaning',
+      'Orange color',
+      'Orange name',
+      'Orange meaning',
+      'Gray color',
+      'Gray name',
+      'Gray meaning',
+      'Annotation transfer template',
+    ]);
+    expectLabelsExactlyOnce(controlledRegion(tab, requiredSectionButton(tab, 'Advanced')), [
+      'Debug logging',
+    ]);
+
+    expect(Array.from(controls.dropdowns.keys())).toEqual([
+      'Default profile',
+      'Default pages',
+      'Default scrolling',
+    ]);
+    expect(Array.from(controls.sliders.keys())).toEqual(['Brightness', 'Contrast', 'Image dim']);
+    expect(Array.from(controls.toggles.keys())).toEqual([
+      'Remember profile per document',
+      'Remember layout per document',
+      'Debug logging',
+    ]);
+    expect(controls.colors).toHaveLength(10);
+    expect(controls.texts).toHaveLength(17);
+    expect(Array.from(controls.textAreas.keys())).toEqual(['Annotation transfer template']);
+
+    const paletteEntries = tab.containerEl.querySelectorAll<HTMLElement>(
+      '.abyss-documents-settings-palette-entry',
+    );
+    expect(paletteEntries).toHaveLength(8);
+    paletteEntries.forEach((entry, index) => {
+      expect(entry.getAttribute('role')).toBe('group');
+      expect(entry.getAttribute('data-palette-index')).toBe(String(index));
+      expect(entry.children).toHaveLength(3);
+    });
+  });
+
+  it('hydrates long Unicode and RTL palette text into accessible direction-safe controls', async () => {
+    const longName = 'ראיה מרכזית — Очень длинное пользовательское название цвета';
+    const longMeaning =
+      'משמעות משפטית מפורטת — Длинное семантическое описание, которое должно переноситься безопасно';
+    const { persistence, store, tab } = fixture();
+    await store.update((data) => ({
+      ...data,
+      settings: {
+        ...data.settings,
+        annotations: {
+          ...data.settings.annotations,
+          palette: data.settings.annotations.palette.map((entry, index) =>
+            index === 0 ? { ...entry, meaning: longMeaning, name: longName } : entry,
+          ),
+        },
+      },
+    }));
+    persistence.saveData.mockClear();
+    const controls = captureControls();
+
+    tab.render();
+
+    const entry = tab.containerEl.querySelector<HTMLElement>(
+      '.abyss-documents-settings-palette-entry[data-palette-index="0"]',
+    );
+    expect(entry).not.toBeNull();
+    expect(entry?.getAttribute('aria-label')).toBe(`${longName} annotation palette entry`);
+    expect(entry?.querySelector('input[type="color"]')?.getAttribute('aria-label')).toBe(
+      `${longName} color`,
+    );
+    const name = requiredControl(controls.texts, `${longName} name`);
+    const meaning = requiredControl(controls.texts, `${longName} meaning`);
+    expect(name.getValue()).toBe(longName);
+    expect(name.inputEl.getAttribute('aria-label')).toBe(`${longName} name`);
+    expect(name.inputEl.getAttribute('dir')).toBe('auto');
+    expect(meaning.getValue()).toBe(longMeaning);
+    expect(meaning.inputEl.getAttribute('aria-label')).toBe(`${longName} meaning`);
+    expect(meaning.inputEl.getAttribute('dir')).toBe('auto');
+    expect(persistence.saveData).not.toHaveBeenCalled();
+  });
+
   it('shows and persists functional default layout controls independently from profiles', async () => {
     const controls = captureControls();
     const { onSettingsChange, persistence, store, tab } = fixture();
     tab.render();
-    const { body } = expandSection(controls, tab, 'Page layout');
+    const { body } = expandSection(tab, 'Page layout');
 
     expect(body.textContent).toContain('Default pages');
     expect(body.textContent).toContain('Default scrolling');
@@ -192,33 +406,32 @@ describe('AbyssDocumentsSettingTab', () => {
   });
 
   it('does not claim that PDF.js applies the reserved annotation author preference', () => {
-    const controls = captureControls();
     const { tab } = fixture();
     tab.render();
-    const { body } = expandSection(controls, tab, 'Annotations');
+    const { body } = expandSection(tab, 'Annotations');
 
     expect(body.textContent).toContain('Used when a document format supports annotation authors.');
     expect(body.textContent).not.toContain('Stored as the author for new PDF annotations.');
   });
 
-  it('expands and collapses both native settings sections', () => {
-    const controls = captureControls();
+  it('expands and collapses every native settings section', () => {
     const { tab } = fixture();
     tab.render();
 
-    for (const [title, expander] of controls.expanders) {
-      const bodyId = expander.extraSettingsEl.getAttribute('aria-controls');
-      if (bodyId === null) throw new Error(`Expected ${title} section controls.`);
-      const body = tab.containerEl.querySelector<HTMLElement>(`#${bodyId}`);
-      expander.simulateClick__();
-      expect(body?.hidden).toBe(false);
-      expect(expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
-      expect(expander.extraSettingsEl.getAttribute('aria-label')).toBe(
-        `Hide ${title.toLowerCase()}`,
+    for (const button of sectionButtons(tab)) {
+      const title = button.querySelector('.abyss-documents-settings-header-label')?.textContent;
+      if (title === undefined) throw new Error('Expected a section title.');
+      const body = controlledRegion(tab, button);
+      button.click();
+      expect(body.hidden).toBe(false);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      expect(button.hasAttribute('aria-label')).toBe(false);
+      expect(button.querySelector('.abyss-documents-settings-header-label')?.textContent).toBe(
+        title,
       );
-      expander.simulateClick__();
-      expect(body?.hidden).toBe(true);
-      expect(expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('false');
+      button.click();
+      expect(body.hidden).toBe(true);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
     }
   });
 
@@ -264,7 +477,7 @@ describe('AbyssDocumentsSettingTab', () => {
     const controls = captureControls();
     const { persistence, store, tab } = fixture();
     tab.render();
-    expandSection(controls, tab, 'Annotations');
+    expandSection(tab, 'Annotations');
 
     requiredControl(controls.colors, 'Yellow color').setValue('#123456');
     requiredControl(controls.texts, 'Yellow name').setValue('Thesis');
@@ -328,7 +541,7 @@ describe('AbyssDocumentsSettingTab', () => {
     const controls = captureControls();
     const { onSettingsChange, store, tab } = fixture();
     tab.render();
-    const { body, expander } = expandSection(controls, tab, 'Reading appearance');
+    const { body, button } = expandSection(tab, 'Reading appearance');
     const toggle = requiredControl(controls.toggles, 'Remember profile per document');
     const slider = requiredControl(controls.sliders, 'Brightness');
 
@@ -343,7 +556,7 @@ describe('AbyssDocumentsSettingTab', () => {
       custom: { brightness: 1.25 },
     });
     expect(body.hidden).toBe(false);
-    expect(expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
+    expect(button.getAttribute('aria-expanded')).toBe('true');
     expect(requiredControl(controls.toggles, 'Remember profile per document').toggleEl).toBe(
       toggle.toggleEl,
     );
@@ -454,7 +667,7 @@ describe('AbyssDocumentsSettingTab', () => {
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     tab.render();
-    const { expander } = expandSection(controls, tab, 'Reading appearance');
+    const { button } = expandSection(tab, 'Reading appearance');
     const originalBrightness = requiredControl(controls.sliders, 'Brightness');
     const originalContrast = requiredControl(controls.sliders, 'Contrast');
 
@@ -478,7 +691,7 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(requiredControl(controls.sliders, 'Contrast').sliderEl).toBe(originalContrast.sliderEl);
     expect(originalBrightness.getValue()).toBe(1);
     expect(originalContrast.getValue()).toBe(0.75);
-    expect(expander.extraSettingsEl.getAttribute('aria-expanded')).toBe('true');
+    expect(button.getAttribute('aria-expanded')).toBe('true');
     expect(notice).toHaveBeenCalledTimes(1);
   });
 
@@ -520,7 +733,7 @@ describe('AbyssDocumentsSettingTab', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     tab.containerEl.doc.body.append(tab.containerEl);
     tab.render();
-    const { body } = expandSection(controls, tab, 'Reading appearance');
+    const { body } = expandSection(tab, 'Reading appearance');
     const originalBrightness = requiredControl(controls.sliders, 'Brightness');
     const originalContrast = requiredControl(controls.sliders, 'Contrast');
 
