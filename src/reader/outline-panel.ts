@@ -24,6 +24,7 @@ interface SourceRange {
 export class OutlinePanel {
   readonly root: HTMLElement;
 
+  private readonly searchButton: HTMLButtonElement;
   private readonly searchInput: HTMLInputElement;
   private readonly status: HTMLElement;
   private readonly tree: HTMLUListElement;
@@ -43,19 +44,9 @@ export class OutlinePanel {
     this.root.dataset['sidebarPanel'] = 'outline';
     this.root.setAttribute('aria-label', 'Document outline');
 
-    const controls = owner.createDiv();
-    controls.className = 'abyss-reader-outline-controls';
-    this.searchInput = owner.createEl('input');
-    this.searchInput.type = 'search';
-    this.searchInput.className = 'abyss-reader-outline-search';
-    this.searchInput.dataset['outlineSearch'] = '';
-    this.searchInput.placeholder = 'Find a heading…';
-    this.searchInput.setAttribute('aria-label', 'Find a heading');
-    this.searchInput.addEventListener('input', () => {
-      this.query = this.foldText(this.searchInput.value.trim());
-      this.renderTree();
-    });
-    controls.append(this.searchInput);
+    const controls = this.createSearchControls();
+    this.searchButton = controls.button;
+    this.searchInput = controls.input;
 
     this.tree = owner.createEl('ul');
     this.tree.className = 'abyss-reader-outline-tree';
@@ -66,7 +57,7 @@ export class OutlinePanel {
     this.status.dataset['outlineStatus'] = '';
     this.status.setAttribute('role', 'status');
     this.status.hidden = true;
-    this.root.append(controls, this.tree, this.status);
+    this.root.append(controls.root, this.tree, this.status);
     host.append(this.root);
   }
 
@@ -74,6 +65,7 @@ export class OutlinePanel {
     this.items = items;
     this.query = '';
     this.searchInput.value = '';
+    this.setSearchVisible(false);
     this.expanded.clear();
     this.initializeExpansion(items);
     this.renderTree();
@@ -89,6 +81,69 @@ export class OutlinePanel {
       if (item.children.length > 0) this.expanded.set(item.id, true);
       this.initializeExpansion(item.children);
     }
+  }
+
+  private createSearchControls(): {
+    readonly button: HTMLButtonElement;
+    readonly input: HTMLInputElement;
+    readonly root: HTMLElement;
+  } {
+    const owner = ownerWindow(this.root);
+    const root = owner.createDiv();
+    root.className = 'abyss-reader-outline-controls';
+    const button = owner.createEl('button');
+    button.type = 'button';
+    button.className = 'clickable-icon abyss-reader-outline-search-toggle';
+    button.dataset['action'] = 'toggle-outline-search';
+    button.setAttribute('aria-label', 'Find headings');
+    button.setAttribute('aria-expanded', 'false');
+    button.title = 'Find headings';
+    setIcon(button, 'search');
+    const input = owner.createEl('input');
+    input.type = 'search';
+    input.className = 'abyss-reader-outline-search';
+    input.dataset['outlineSearch'] = '';
+    input.placeholder = 'Find a heading…';
+    input.setAttribute('aria-label', 'Find a heading');
+    input.hidden = true;
+    input.addEventListener('input', () => {
+      this.query = this.foldText(input.value.trim());
+      this.renderTree();
+    });
+    input.addEventListener('keydown', (event) => {
+      this.onSearchKeyDown(event);
+    });
+    button.addEventListener('click', () => {
+      this.toggleSearch();
+    });
+    root.append(input, button);
+    return { button, input, root };
+  }
+
+  private onSearchKeyDown(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (this.searchInput.value.length > 0) {
+      this.searchInput.value = '';
+      this.query = '';
+      this.renderTree();
+      this.searchInput.focus();
+      return;
+    }
+    this.setSearchVisible(false);
+    this.searchButton.focus();
+  }
+
+  private toggleSearch(): void {
+    if (this.searchInput.hidden) {
+      this.setSearchVisible(true);
+      return;
+    }
+    this.searchInput.value = '';
+    this.query = '';
+    this.renderTree();
+    this.setSearchVisible(false);
   }
 
   private renderTree(): void {
@@ -149,7 +204,7 @@ export class OutlinePanel {
     level: number,
   ): HTMLLIElement {
     const listItem = ownerWindow(this.root).createEl('li');
-    listItem.className = 'abyss-reader-outline-treeitem';
+    listItem.className = 'tree-item abyss-reader-outline-treeitem';
     listItem.setAttribute('role', 'treeitem');
     listItem.setAttribute('aria-level', String(level));
     listItem.dataset['outlineItem'] = item.id;
@@ -164,7 +219,7 @@ export class OutlinePanel {
 
   private createRowShell(listItem: HTMLLIElement, level: number): HTMLElement {
     const rowShell = ownerWindow(this.root).createDiv();
-    rowShell.className = 'abyss-reader-outline-row-shell';
+    rowShell.className = 'tree-item-self abyss-reader-outline-row-shell';
     rowShell.dataset['outlineRow'] = '';
     rowShell.style.setProperty('--outline-depth', String(level - 1));
     listItem.append(rowShell);
@@ -238,12 +293,13 @@ export class OutlinePanel {
   }
 
   private foldSymbol(symbol: string): string {
-    return symbol.toLocaleUpperCase().toLocaleLowerCase();
+    return symbol.normalize('NFD').toUpperCase().toLowerCase();
   }
 
   private createGroup(listItem: HTMLLIElement, hasChildren: boolean): HTMLUListElement | null {
     if (!hasChildren) return null;
     const group = ownerWindow(this.root).createEl('ul');
+    group.className = 'tree-item-children';
     group.setAttribute('role', 'group');
     listItem.append(group);
     return group;
@@ -432,5 +488,12 @@ export class OutlinePanel {
     };
     visit(this.items);
     return candidateId;
+  }
+
+  private setSearchVisible(visible: boolean): void {
+    this.searchInput.hidden = !visible;
+    this.searchButton.setAttribute('aria-expanded', String(visible));
+    this.root.classList.toggle('is-searching', visible);
+    if (visible) this.searchInput.focus();
   }
 }

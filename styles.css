@@ -6724,6 +6724,13 @@
   overflow: auto;
 }
 
+.abyss-documents .abyss-reader-search {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .abyss-documents .abyss-reader-annotations {
   --abyss-annotation-action-height: 28px;
   --abyss-annotation-action-width: 86px;
@@ -6742,12 +6749,29 @@
 }
 
 .abyss-documents .abyss-reader-outline-controls {
-  padding: var(--size-4-2) var(--size-4-2) var(--size-2-2);
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--size-2-1);
+  padding: var(--size-2-1) var(--size-4-1);
 }
 
 .abyss-documents .abyss-reader-outline-search {
-  width: 100%;
   min-width: 0;
+  flex: 1 1 auto;
+}
+
+.abyss-documents .abyss-reader-outline-search[hidden] {
+  display: none;
+}
+
+.abyss-documents .abyss-reader-outline-search-toggle {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  flex: 0 0 auto;
 }
 
 .abyss-documents .abyss-reader-outline-tree {
@@ -6755,13 +6779,15 @@
   flex: 1 1 auto;
   overflow: hidden auto;
   margin: 0;
-  padding: var(--size-2-1) var(--size-4-2) var(--size-4-2);
+  padding: var(--size-2-1) var(--size-4-1) var(--size-4-2);
   list-style: none;
 }
 
 .abyss-documents .abyss-reader-outline-tree [role='group'] {
-  margin: 0;
-  padding: 0;
+  margin: 0 0 0 9px;
+  padding: 0 0 0 7px;
+  border-inline-start: var(--nav-indentation-guide-width, var(--border-width)) solid
+    var(--nav-indentation-guide-color, var(--background-modifier-border));
   list-style: none;
 }
 
@@ -6769,9 +6795,10 @@
   display: flex;
   width: 100%;
   min-width: 0;
-  min-height: 30px;
+  height: 28px;
   align-items: center;
-  padding-inline: calc(var(--outline-depth) * 15px) var(--size-4-1);
+  gap: var(--size-2-1);
+  padding-inline: var(--size-2-1) var(--size-4-1);
   border-radius: var(--radius-s);
   background: transparent;
   color: var(--text-normal);
@@ -6780,10 +6807,10 @@
 
 .abyss-documents .abyss-reader-outline-chevron {
   display: inline-flex;
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
-  min-height: 32px;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -6803,6 +6830,7 @@
 }
 
 .abyss-documents .abyss-reader-outline-treeitem {
+  width: 100%;
   min-width: 0;
   list-style: none;
   outline: none;
@@ -6814,6 +6842,8 @@
   text-align: start;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--nav-item-size, var(--font-ui-small));
+  line-height: var(--line-height-tight);
 }
 
 .abyss-documents .abyss-reader-outline-match {
@@ -6846,6 +6876,7 @@
 }
 
 .abyss-documents .abyss-reader-search-controls {
+  flex: 0 0 auto;
   gap: var(--size-2-1);
   padding: var(--size-4-2);
 }
@@ -6857,6 +6888,7 @@
 
 .abyss-documents .abyss-reader-search-count {
   min-height: var(--line-height-normal);
+  flex: 0 0 auto;
   padding-inline: var(--size-4-2);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
@@ -6864,9 +6896,21 @@
 
 .abyss-documents .abyss-reader-search-results {
   display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: var(--size-2-1);
-  padding: var(--size-4-2);
+  gap: 0;
+  overflow: hidden auto;
+  margin: 0;
+  padding: var(--size-2-1) var(--size-4-1) var(--size-4-2);
+  list-style: none;
+}
+
+.abyss-documents .abyss-reader-search-result-item {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .abyss-documents .abyss-annotations-status,
@@ -7309,9 +7353,10 @@
   width: 100%;
   height: auto;
   flex-direction: column;
-  gap: var(--size-2-1);
-  padding: var(--size-4-2);
-  border: var(--border-width) solid transparent;
+  align-items: stretch;
+  gap: 2px;
+  padding: var(--size-2-2) var(--size-4-1);
+  border: 0;
   border-radius: var(--radius-s);
   background: transparent;
   color: var(--text-normal);
@@ -7321,8 +7366,11 @@
 
 .abyss-documents .abyss-reader-search-result:hover,
 .abyss-documents .abyss-reader-search-result[aria-current='true'] {
-  border-color: var(--background-modifier-border);
   background: var(--background-modifier-hover);
+}
+
+.abyss-documents .abyss-reader-search-result[aria-current='true'] {
+  box-shadow: inset 2px 0 0 var(--interactive-accent);
 }
 
 .abyss-documents .abyss-reader-toolbar-page-field:focus,
@@ -7348,8 +7396,19 @@
 }
 
 .abyss-documents .abyss-reader-search-preview {
+  display: -webkit-box;
   overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-height: var(--line-height-tight);
   text-overflow: ellipsis;
+}
+
+.abyss-documents .abyss-reader-search-preview [data-search-match] {
+  padding: 0;
+  border-radius: 2px;
+  background: var(--text-highlight-bg, var(--background-modifier-hover));
+  color: inherit;
 }
 
 .abyss-documents .abyss-reader-sidebar-empty {

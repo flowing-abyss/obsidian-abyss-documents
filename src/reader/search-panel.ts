@@ -43,9 +43,8 @@ export class SearchPanel {
     this.count.className = 'abyss-reader-search-count';
     this.count.dataset['searchCount'] = '';
     this.count.setAttribute('aria-live', 'polite');
-    this.list = owner.createDiv();
+    this.list = owner.createEl('ul');
     this.list.className = 'abyss-reader-search-results';
-    this.list.setAttribute('role', 'list');
     this.root.append(controls.root, this.count, this.list);
     host.append(this.root);
     this.bindEvents();
@@ -121,7 +120,7 @@ export class SearchPanel {
       );
     const visible = this.results.hits.slice(this.windowStart, end);
     for (const [offset, hit] of visible.entries())
-      this.list.append(this.resultButton(hit, this.windowStart + offset));
+      this.list.append(this.resultItem(hit, this.windowStart + offset));
     if (end < hitCount)
       this.list.append(
         this.windowButton(
@@ -134,24 +133,68 @@ export class SearchPanel {
     this.next.disabled = hitCount === 0;
   }
 
-  private resultButton(hit: SearchHit, index: number): HTMLButtonElement {
-    const button = ownerWindow(this.root).createEl('button');
+  private resultItem(hit: SearchHit, index: number): HTMLLIElement {
+    const owner = ownerWindow(this.root);
+    const item = owner.createEl('li');
+    item.className = 'abyss-reader-search-result-item';
+    const button = owner.createEl('button');
     button.type = 'button';
     button.className = 'abyss-reader-search-result';
     button.dataset['searchResult'] = hit.id;
-    button.setAttribute('role', 'listitem');
+    button.setAttribute('aria-label', `Page ${hit.pageIndex + 1}: ${hit.preview}`);
     if (index === this.selectedIndex) button.setAttribute('aria-current', 'true');
     const page = ownerWindow(this.root).createSpan();
     page.className = 'abyss-reader-search-page';
     page.textContent = `Page ${hit.pageIndex + 1}`;
     const preview = ownerWindow(this.root).createSpan();
     preview.className = 'abyss-reader-search-preview';
-    preview.textContent = hit.preview;
+    this.renderPreview(preview, hit);
     button.append(page, preview);
     button.addEventListener('click', () => {
       this.select(index, 'direct');
     });
-    return button;
+    item.append(button);
+    return item;
+  }
+
+  private renderPreview(preview: HTMLElement, hit: SearchHit): void {
+    const owner = ownerWindow(this.root);
+    const matches = this.renderableMatches(hit);
+    if (matches.length === 0) {
+      preview.textContent = hit.preview;
+      return;
+    }
+    let cursor = 0;
+    for (const range of matches) {
+      preview.append(owner.document.createTextNode(hit.preview.slice(cursor, range.start)));
+      const match = owner.createEl('mark');
+      match.dataset['searchMatch'] = '';
+      match.textContent = hit.preview.slice(range.start, range.end);
+      preview.append(match);
+      cursor = range.end;
+    }
+    preview.append(owner.document.createTextNode(hit.preview.slice(cursor)));
+  }
+
+  private renderableMatches(hit: SearchHit): Array<{ end: number; start: number }> {
+    const normalized = hit.previewMatches
+      .map((range) => {
+        const start = Math.max(0, Math.min(hit.preview.length, range.start));
+        const end = Math.max(start, Math.min(hit.preview.length, range.end));
+        return { end, start };
+      })
+      .filter((range) => range.end > range.start)
+      .sort((left, right) =>
+        left.start === right.start ? left.end - right.end : left.start - right.start,
+      );
+    const merged: Array<{ end: number; start: number }> = [];
+    for (const range of normalized) {
+      const previous = merged[merged.length - 1];
+      if (previous !== undefined && range.start < previous.end)
+        previous.end = Math.max(previous.end, range.end);
+      else merged.push({ ...range });
+    }
+    return merged;
   }
 
   private moveSelection(direction: 'next' | 'previous'): void {
@@ -184,8 +227,11 @@ export class SearchPanel {
     );
   }
 
-  private windowButton(action: string, label: string, nextStart: number): HTMLButtonElement {
-    const button = ownerWindow(this.root).createEl('button');
+  private windowButton(action: string, label: string, nextStart: number): HTMLLIElement {
+    const owner = ownerWindow(this.root);
+    const item = owner.createEl('li');
+    item.className = 'abyss-reader-search-result-item';
+    const button = owner.createEl('button');
     button.type = 'button';
     button.className = 'abyss-reader-search-more';
     button.dataset['action'] = action;
@@ -194,7 +240,8 @@ export class SearchPanel {
       this.windowStart = nextStart;
       this.render();
     });
-    return button;
+    item.append(button);
+    return item;
   }
 
   private iconButton(label: string, icon: 'chevron-down' | 'chevron-up'): HTMLButtonElement {

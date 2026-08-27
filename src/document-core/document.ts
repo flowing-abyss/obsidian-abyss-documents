@@ -54,11 +54,17 @@ export type ViewportAnnotationChange =
       readonly provisionalId?: string;
     };
 
+export interface PreviewMatchRange {
+  readonly end: number;
+  readonly start: number;
+}
+
 export interface SearchHit {
   readonly id: string;
   readonly pageIndex: number;
   readonly matchIndex: number;
   readonly preview: string;
+  readonly previewMatches: readonly PreviewMatchRange[];
 }
 
 export interface SearchResultSet {

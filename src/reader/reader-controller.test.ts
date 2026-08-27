@@ -2527,8 +2527,20 @@ describe('ReaderController', () => {
         query: 'needle',
         complete: true,
         hits: [
-          { id: 'first', pageIndex: 0, matchIndex: 0, preview: 'First needle' },
-          { id: 'second', pageIndex: 2, matchIndex: 0, preview: 'Second needle' },
+          {
+            id: 'first',
+            pageIndex: 0,
+            matchIndex: 0,
+            preview: 'First needle',
+            previewMatches: [{ end: 12, start: 6 }],
+          },
+          {
+            id: 'second',
+            pageIndex: 2,
+            matchIndex: 0,
+            preview: 'Second needle',
+            previewMatches: [{ end: 13, start: 7 }],
+          },
         ],
       },
     });
@@ -2539,7 +2551,13 @@ describe('ReaderController', () => {
     expect(createdViewport.search).toHaveBeenCalledWith('needle');
     await vi.waitFor(() => {
       expect(createdViewport.selectSearchHit).toHaveBeenCalledWith(
-        { id: 'second', pageIndex: 2, matchIndex: 0, preview: 'Second needle' },
+        {
+          id: 'second',
+          pageIndex: 2,
+          matchIndex: 0,
+          preview: 'Second needle',
+          previewMatches: [{ end: 13, start: 7 }],
+        },
         'needle',
       );
     });
@@ -2550,7 +2568,13 @@ describe('ReaderController', () => {
       ?.click();
     await vi.waitFor(() => {
       expect(createdViewport.selectSearchHit).toHaveBeenLastCalledWith(
-        { id: 'first', pageIndex: 0, matchIndex: 0, preview: 'First needle' },
+        {
+          id: 'first',
+          pageIndex: 0,
+          matchIndex: 0,
+          preview: 'First needle',
+          previewMatches: [{ end: 12, start: 6 }],
+        },
         'needle',
       );
     });
@@ -2628,7 +2652,15 @@ describe('ReaderController', () => {
       results: {
         query: 'needle',
         complete: true,
-        hits: [{ id: 'hit', pageIndex: 1, matchIndex: 0, preview: 'Needle' }],
+        hits: [
+          {
+            id: 'hit',
+            pageIndex: 1,
+            matchIndex: 0,
+            preview: 'Needle',
+            previewMatches: [{ end: 6, start: 0 }],
+          },
+        ],
       },
     });
     shell.created.sidebar?.searchPanel.root

@@ -2049,7 +2049,7 @@ describe('PdfDocumentViewport', () => {
     const find = fixture.runtime.state.eventBus?.dispatched.find(
       ({ name, data }) => name === 'find' && data['query'] === 'needle',
     );
-    expect(find?.data['highlightAll']).toBe(false);
+    expect(find?.data['highlightAll']).toBe(true);
   });
 
   it('supports find-again directions and contains asynchronous search failures', async () => {
@@ -2082,7 +2082,13 @@ describe('PdfDocumentViewport', () => {
     const fixture = await mountedViewport(6, { findDelay: 25 });
 
     const selecting = fixture.viewport.selectSearchHit(
-      { id: 'page-4-match-2', pageIndex: 4, matchIndex: 2, preview: 'Needle' },
+      {
+        id: 'page-4-match-2',
+        pageIndex: 4,
+        matchIndex: 2,
+        preview: 'Needle',
+        previewMatches: [{ end: 6, start: 0 }],
+      },
       '  needle  ',
     );
     await vi.runAllTimersAsync();
@@ -2102,7 +2108,7 @@ describe('PdfDocumentViewport', () => {
       ['again', 'needle'],
       ['again', 'needle'],
     ]);
-    expect(commands?.every(({ data }) => data['highlightAll'] === false)).toBe(true);
+    expect(commands?.every(({ data }) => data['highlightAll'] === true)).toBe(true);
     vi.useRealTimers();
   });
 
@@ -2111,13 +2117,25 @@ describe('PdfDocumentViewport', () => {
     const fixture = await mountedViewport(6, { findDelay: 25 });
     const first = fixture.viewport
       .selectSearchHit(
-        { id: 'page-0-match-3', pageIndex: 0, matchIndex: 3, preview: 'First' },
+        {
+          id: 'page-0-match-3',
+          pageIndex: 0,
+          matchIndex: 3,
+          preview: 'First',
+          previewMatches: [{ end: 5, start: 0 }],
+        },
         'needle',
       )
       .catch((cause: unknown) => cause);
 
     const second = fixture.viewport.selectSearchHit(
-      { id: 'page-5-match-1', pageIndex: 5, matchIndex: 1, preview: 'Second' },
+      {
+        id: 'page-5-match-1',
+        pageIndex: 5,
+        matchIndex: 1,
+        preview: 'Second',
+        previewMatches: [{ end: 6, start: 0 }],
+      },
       'needle',
     );
     await vi.runAllTimersAsync();
@@ -2137,7 +2155,13 @@ describe('PdfDocumentViewport', () => {
     const fixture = await mountedViewport(3, { suppressFindState: true });
     const selecting = fixture.viewport
       .selectSearchHit(
-        { id: 'page-1-match-0', pageIndex: 1, matchIndex: 0, preview: 'Missing' },
+        {
+          id: 'page-1-match-0',
+          pageIndex: 1,
+          matchIndex: 0,
+          preview: 'Missing',
+          previewMatches: [{ end: 7, start: 0 }],
+        },
         'needle',
       )
       .catch((cause: unknown) => cause);
@@ -2154,7 +2178,13 @@ describe('PdfDocumentViewport', () => {
 
     await expect(
       fixture.viewport.selectSearchHit(
-        { id: 'missing', pageIndex: 1, matchIndex: 0, preview: 'Missing' },
+        {
+          id: 'missing',
+          pageIndex: 1,
+          matchIndex: 0,
+          preview: 'Missing',
+          previewMatches: [{ end: 7, start: 0 }],
+        },
         'needle',
       ),
     ).rejects.toThrow('PDF search could not find “needle”.');
@@ -2166,7 +2196,13 @@ describe('PdfDocumentViewport', () => {
 
     await expect(
       fixture.viewport.selectSearchHit(
-        { id: 'wrapped', pageIndex: 2, matchIndex: 0, preview: 'Wrapped' },
+        {
+          id: 'wrapped',
+          pageIndex: 2,
+          matchIndex: 0,
+          preview: 'Wrapped',
+          previewMatches: [{ end: 7, start: 0 }],
+        },
         'needle',
       ),
     ).resolves.toBeUndefined();
@@ -2177,7 +2213,13 @@ describe('PdfDocumentViewport', () => {
 
     await expect(
       fixture.viewport.selectSearchHit(
-        { id: 'empty', pageIndex: 0, matchIndex: 0, preview: 'Empty' },
+        {
+          id: 'empty',
+          pageIndex: 0,
+          matchIndex: 0,
+          preview: 'Empty',
+          previewMatches: [{ end: 5, start: 0 }],
+        },
         '   ',
       ),
     ).rejects.toMatchObject({ name: 'InvalidStateError' });

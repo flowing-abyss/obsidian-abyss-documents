@@ -1323,7 +1323,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       query,
       caseSensitive: false,
       entireWord: false,
-      highlightAll: false,
+      highlightAll: true,
       findPrevious,
       matchDiacritics: true,
     });

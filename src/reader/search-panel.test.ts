@@ -8,6 +8,7 @@ function hit(index: number): SearchHit {
     matchIndex: index % 3,
     pageIndex: Math.floor(index / 3),
     preview: `Preview ${index}`,
+    previewMatches: [{ end: 7, start: 0 }],
   };
 }
 
@@ -30,6 +31,74 @@ function enterQuery(panel: SearchPanel, query: string): void {
 }
 
 describe('SearchPanel', () => {
+  it('uses a semantic result list without replacing button semantics', () => {
+    const panel = new SearchPanel(createDiv(), callbacks());
+    enterQuery(panel, 'needle');
+    panel.setResults(results('needle', 2, true));
+
+    const list = panel.root.querySelector<HTMLElement>('.abyss-reader-search-results');
+    const result = panel.root.querySelector<HTMLButtonElement>('[data-search-result]');
+    expect(list?.tagName).toBe('UL');
+    expect(Array.from(list?.children ?? []).every((child) => child.tagName === 'LI')).toBe(true);
+    expect(result?.tagName).toBe('BUTTON');
+    expect(result?.hasAttribute('role')).toBe(false);
+    expect(result?.parentElement?.tagName).toBe('LI');
+  });
+
+  it('renders the exact original-case match as safe compact marked text', () => {
+    const panel = new SearchPanel(createDiv(), callbacks());
+    enterQuery(panel, 'needle');
+    panel.setResults({
+      query: 'needle',
+      complete: true,
+      hits: [
+        {
+          id: 'unicode-hit',
+          matchIndex: 0,
+          pageIndex: 4,
+          preview: 'Before NeedLe and NEEDLE <script>alert(1)</script> after',
+          previewMatches: [
+            { end: 13, start: 7 },
+            { end: 24, start: 18 },
+          ],
+        },
+      ],
+    });
+
+    const row = panel.root.querySelector<HTMLElement>('[data-search-result="unicode-hit"]');
+    const preview = row?.querySelector<HTMLElement>('.abyss-reader-search-preview');
+    expect(
+      Array.from(preview?.querySelectorAll<HTMLElement>('mark[data-search-match]') ?? []).map(
+        (match) => match.textContent,
+      ),
+    ).toEqual(['NeedLe', 'NEEDLE']);
+    expect(preview?.textContent).toBe('Before NeedLe and NEEDLE <script>alert(1)</script> after');
+    expect(preview?.querySelector('script')).toBeNull();
+    expect(row?.getAttribute('aria-label')).toBe(
+      'Page 5: Before NeedLe and NEEDLE <script>alert(1)</script> after',
+    );
+  });
+
+  it('renders a clipped long-match range as a visible mark', () => {
+    const panel = new SearchPanel(createDiv(), callbacks());
+    enterQuery(panel, 'x'.repeat(130));
+    panel.setResults({
+      query: 'x'.repeat(130),
+      complete: true,
+      hits: [
+        {
+          id: 'long-hit',
+          matchIndex: 0,
+          pageIndex: 0,
+          preview: `${'x'.repeat(119)}…`,
+          previewMatches: [{ end: 119, start: 0 }],
+        },
+      ],
+    });
+
+    expect(panel.root.querySelector('mark[data-search-match]')?.textContent).toBe('x'.repeat(119));
+  });
+
   it('accepts ordered partial results, rejects stale updates, and limits long result DOM', () => {
     const handlers = callbacks();
     const panel = new SearchPanel(createDiv(), handlers);

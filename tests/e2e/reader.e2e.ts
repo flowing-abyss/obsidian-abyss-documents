@@ -472,6 +472,15 @@ describe('PDF reader foundation', () => {
     await openPdf('Documents/text-12-pages.pdf');
     await waitForFirstPage();
 
+    await browser.execute(() => {
+      document
+        .querySelector<HTMLElement>('.pdfViewerContainer')
+        ?.setAttribute('data-e2e-search-viewport-identity', 'preserved');
+      document
+        .querySelector<HTMLElement>('[data-page-number="1"] canvas')
+        ?.setAttribute('data-e2e-search-canvas-identity', 'preserved');
+    });
+
     const documentSurface = $('[data-region="document"]');
     await documentSurface.click();
     await browser.execute(() =>
@@ -497,21 +506,140 @@ describe('PDF reader foundation', () => {
       await browser.keys([Key.Control, 'f']);
     }
     await expect($('[data-tab="search"][aria-selected="true"]')).toExist();
-    await $('[data-document-search]').setValue('gradient');
+    await $('[data-document-search]').setValue('fixture');
     await expect($('[data-search-count]')).toHaveText(/^[1-9]/);
     await expect($('[data-sidebar-panel="annotations"]')).not.toBeDisplayed();
     await expect($('[data-document-search]')).toBeFocused();
+
+    const firstResult = $('[data-search-result]');
+    await firstResult.click();
+    await expect(firstResult).toHaveAttribute('aria-current', 'true');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelectorAll('[data-page-number="1"] .textLayer .highlight').length >= 2 &&
+            document.querySelectorAll('[data-page-number="1"] .textLayer .highlight.selected')
+              .length === 1,
+        ),
+      {
+        timeout: 5_000,
+        timeoutMsg: 'PDF.js did not expose two visible matches and one active match.',
+      },
+    );
+
+    const searchLayout = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>('.abyss-reader-search');
+      const controls = document.querySelector<HTMLElement>('.abyss-reader-search-controls');
+      const count = document.querySelector<HTMLElement>('[data-search-count]');
+      const results = document.querySelector<HTMLElement>('.abyss-reader-search-results');
+      if (panel === null || controls === null || count === null || results === null)
+        throw new Error('Search layout unavailable.');
+      const panelStyle = getComputedStyle(panel);
+      const resultsStyle = getComputedStyle(results);
+      const controlsTop = controls.getBoundingClientRect().top;
+      const countTop = count.getBoundingClientRect().top;
+      results.scrollTop = results.scrollHeight;
+      return {
+        controlsFixed: controls.getBoundingClientRect().top === controlsTop,
+        countFixed: count.getBoundingClientRect().top === countTop,
+        direction: panelStyle.flexDirection,
+        display: panelStyle.display,
+        overflow: panelStyle.overflow,
+        resultsBounded:
+          results.getBoundingClientRect().bottom <= panel.getBoundingClientRect().bottom + 1,
+        resultsOverflowY: resultsStyle.overflowY,
+      };
+    });
+    expect(searchLayout).toMatchObject({
+      controlsFixed: true,
+      countFixed: true,
+      direction: 'column',
+      display: 'flex',
+      overflow: 'hidden',
+      resultsBounded: true,
+      resultsOverflowY: 'auto',
+    });
+
+    await $('[data-document-search]').setValue('ordinary');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => {
+          const matches = Array.from(
+            document.querySelectorAll<HTMLElement>('.textLayer .highlight'),
+          );
+          return (
+            matches.length > 0 &&
+            matches.every((match) => match.textContent.toLocaleLowerCase().includes('ordinary')) &&
+            document.querySelectorAll('.textLayer .highlight.selected').length === 1
+          );
+        }),
+      { timeout: 5_000, timeoutMsg: 'Replacement query retained stale PDF.js highlights.' },
+    );
+
+    await $('[data-document-search]').setValue('');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelectorAll('.textLayer .highlight').length === 0 &&
+            document.querySelectorAll('[data-search-result][aria-current]').length === 0,
+        ),
+      { timeout: 5_000, timeoutMsg: 'Cleared query retained stale search state.' },
+    );
+    await expect($('[data-e2e-search-viewport-identity="preserved"]')).toExist();
+    await expect($('[data-e2e-search-canvas-identity="preserved"]')).toExist();
   });
 
   it('opens a two-level outline and navigates to its destination', async () => {
     await openPdf('Documents/outline-20-pages.pdf');
     await waitForFirstPage();
 
+    await browser.execute(() => {
+      document
+        .querySelector<HTMLElement>('.pdfViewerContainer')
+        ?.setAttribute('data-e2e-viewport-identity', 'preserved');
+      document
+        .querySelector<HTMLElement>('[data-page-number="1"] canvas')
+        ?.setAttribute('data-e2e-canvas-identity', 'preserved');
+    });
+
     await $('[data-control="sidebar"]').click();
     await expect($('[data-tab="outline"][aria-selected="true"]')).toExist();
     await expect($$('[data-outline-item]')).toBeElementsArrayOfSize({ gte: 6 });
+    await expect($('[data-outline-search]')).not.toBeDisplayed();
+    await $('[data-action="toggle-outline-search"]').click();
+    await expect($('[data-outline-search]')).toBeFocused();
+    await browser.keys(Key.Escape);
+    await expect($('[data-outline-search]')).not.toBeDisplayed();
+
+    const treeLayout = await browser.execute(() => {
+      const tree = document.querySelector<HTMLElement>('.abyss-reader-outline-tree');
+      const row = document.querySelector<HTMLElement>('[data-outline-row]');
+      const label = document.querySelector<HTMLElement>('[data-outline-label]');
+      const group = document.querySelector<HTMLElement>('.tree-item-children');
+      if (tree === null || row === null || label === null || group === null)
+        throw new Error('Outline layout unavailable.');
+      const labelStyle = getComputedStyle(label);
+      const groupStyle = getComputedStyle(group);
+      return {
+        guide: groupStyle.borderInlineStartStyle,
+        labelOverflow: labelStyle.textOverflow,
+        labelWhiteSpace: labelStyle.whiteSpace,
+        noHorizontalOverflow: tree.scrollWidth <= tree.clientWidth + 1,
+        rowHeight: row.getBoundingClientRect().height,
+      };
+    });
+    expect(treeLayout.rowHeight).toBeGreaterThanOrEqual(26);
+    expect(treeLayout.rowHeight).toBeLessThanOrEqual(30);
+    expect(treeLayout.noHorizontalOverflow).toBe(true);
+    expect(treeLayout.labelOverflow).toBe('ellipsis');
+    expect(treeLayout.labelWhiteSpace).toBe('nowrap');
+    expect(treeLayout.guide).not.toBe('none');
     await $('[data-outline-id="outline-1-0"]').click();
     await expect($('[data-control="page-field"]')).toHaveValue('12');
+    await expect($('[data-e2e-viewport-identity="preserved"]')).toExist();
+    await expect($('[data-e2e-canvas-identity="preserved"]')).toExist();
   });
 
   it('accepts bounded direct page entry', async () => {

@@ -77,6 +77,83 @@ function press(panel: OutlinePanel, row: HTMLElement | undefined, key: string): 
 }
 
 describe('OutlinePanel', () => {
+  it('starts with a native tree surface and reveals heading search on demand', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const panel = new OutlinePanel(host, vi.fn());
+    panel.render(searchableOutline);
+
+    const searchInput = panel.root.querySelector<HTMLInputElement>('[data-outline-search]');
+    const searchButton = panel.root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-outline-search"]',
+    );
+    const branch = panel.root.querySelector<HTMLElement>('[data-outline-id="knowledge"]');
+
+    expect(searchInput?.hidden).toBe(true);
+    expect(searchButton?.getAttribute('aria-expanded')).toBe('false');
+    expect(branch?.classList.contains('tree-item')).toBe(true);
+    expect(branch?.querySelector('[data-outline-row]')?.classList.contains('tree-item-self')).toBe(
+      true,
+    );
+    expect(branch?.querySelector('[role="group"]')?.classList.contains('tree-item-children')).toBe(
+      true,
+    );
+
+    searchButton?.click();
+    expect(searchInput?.hidden).toBe(false);
+    expect(searchButton?.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.root.doc.activeElement).toBe(searchInput);
+    expect(mocks.setIcon).toHaveBeenCalledWith(searchButton, 'search');
+    host.remove();
+  });
+
+  it('clears heading search before Escape hides its empty field', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const panel = new OutlinePanel(host, vi.fn());
+    panel.render(searchableOutline);
+    panel.root.querySelector<HTMLButtonElement>('[data-action="toggle-outline-search"]')?.click();
+    const input = panel.root.querySelector<HTMLInputElement>('[data-outline-search]');
+    if (input === null) throw new Error('Expected an outline search field.');
+    search(panel, 'internal');
+    const OwnerKeyboardEvent = (panel.root.win as Window & { KeyboardEvent: typeof KeyboardEvent })
+      .KeyboardEvent;
+
+    input.dispatchEvent(
+      new OwnerKeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+    expect(input.value).toBe('');
+    expect(input.hidden).toBe(false);
+    expect(panel.root.querySelectorAll('[data-outline-row]')).toHaveLength(5);
+
+    input.dispatchEvent(
+      new OwnerKeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+    expect(input.hidden).toBe(true);
+    expect(
+      panel.root
+        .querySelector('[data-action="toggle-outline-search"]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+    host.remove();
+  });
+
+  it('restores the complete tree when the heading-search action closes a filtered view', () => {
+    const panel = new OutlinePanel(createDiv(), vi.fn());
+    panel.render(searchableOutline);
+    const action = panel.root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-outline-search"]',
+    );
+    action?.click();
+    search(panel, 'internal');
+    expect(panel.root.querySelectorAll('[data-outline-row]')).toHaveLength(3);
+
+    action?.click();
+
+    expect(panel.root.querySelector<HTMLInputElement>('[data-outline-search]')?.value).toBe('');
+    expect(panel.root.querySelectorAll('[data-outline-row]')).toHaveLength(5);
+  });
+
   it('filters headings and retains ancestors', () => {
     const panel = new OutlinePanel(createDiv(), vi.fn());
     panel.render(searchableOutline);
@@ -165,6 +242,25 @@ describe('OutlinePanel', () => {
     panel.render([{ id: 'casefold', label: 'Straße', target: { pageIndex: 0 }, children: [] }]);
     search(panel, 'STRASSE');
     expect(panel.root.querySelector('[data-outline-match]')?.textContent).toBe('Straße');
+  });
+
+  it('matches canonical Unicode forms in both directions without changing source labels', () => {
+    const panel = new OutlinePanel(createDiv(), vi.fn());
+
+    panel.render([{ id: 'composed', label: 'Café', target: { pageIndex: 0 }, children: [] }]);
+    search(panel, 'Cafe\u0301');
+    expect(
+      panel.root.querySelector('[data-outline-id="composed"] [data-outline-match]')?.textContent,
+    ).toBe('Café');
+
+    panel.render([
+      { id: 'decomposed', label: 'Cafe\u0301', target: { pageIndex: 0 }, children: [] },
+    ]);
+    search(panel, 'Café');
+    expect(
+      panel.root.querySelector('[data-outline-id="decomposed"] [data-outline-match]')?.textContent,
+    ).toBe('Cafe\u0301');
+    expect(panel.root.querySelector('[data-outline-label]')?.textContent).toBe('Cafe\u0301');
   });
 
   it('restores expansion after clearing search', () => {
