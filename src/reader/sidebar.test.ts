@@ -66,6 +66,44 @@ describe('ReaderSidebar', () => {
         ?.getAttribute('aria-label'),
     ).toBe('Important, 1 annotation');
   });
+  it('forwards exact annotation activation identity from the panel', () => {
+    const onAnnotationActivate = vi.fn();
+    const handlers = { ...callbacks(), onAnnotationActivate };
+    const sidebar = new ReaderSidebar(createDiv(), handlers);
+    const item = {
+      ...({} as DocumentAnnotation),
+      identity: { kind: 'stable' as const, id: 'overlap-second' as never },
+      type: 'highlight' as const,
+      anchor: {
+        kind: 'fixed-page' as const,
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: { kind: 'point' as const, point: { x: 4, y: 8 } },
+      },
+      color: '#ffd400',
+      selectedText: 'Exact overlap',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: '',
+      tags: [],
+      links: [],
+    };
+    sidebar.annotationsPanel.setProjectedAnnotations([
+      { annotation: item, key: 'stable-row', nativeId: 'native-overlap-second', writable: true },
+    ]);
+
+    sidebar.annotationsPanel.root
+      .querySelector<HTMLButtonElement>('.abyss-annotation-card')
+      ?.click();
+
+    expect(onAnnotationActivate).toHaveBeenCalledWith({
+      annotation: item,
+      location: { pageIndex: 0, x: 4, y: 8 },
+      nativeId: 'native-overlap-second',
+      rowId: 'stable-row',
+    });
+  });
   it('forwards optional drag, copy, and insert callbacks into annotation cards', () => {
     const onAnnotationCopy = vi.fn();
     const onAnnotationInsert = vi.fn();

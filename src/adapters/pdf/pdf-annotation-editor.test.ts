@@ -166,6 +166,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     beginPersistence: vi.fn(),
     deleteAnnotations: vi.fn(() => true),
     endPersistence: vi.fn(),
+    focusAnnotation: vi.fn(async () => true),
     normalizeCreatedAnnotation: vi.fn(() => createdAnnotation()),
     onAnnotationFocus: vi.fn(() => () => undefined),
     reserveNextDialog: vi.fn<(seed: string, signal?: AbortSignal) => PdfCommentDialogReservation>(
@@ -220,6 +221,15 @@ function deferred<T>() {
 }
 
 describe('PdfAnnotationEditor lifecycle', () => {
+  it('delegates exact annotation focus to the public comment-manager bridge', async () => {
+    const current = fixture();
+
+    await expect(current.editor.focusAnnotation('native-overlap-second')).resolves.toBe(true);
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      'native-overlap-second',
+      undefined,
+    );
+  });
   it('dismisses a stale token before requiring a live manager', async () => {
     const fixtureValue = fixture();
     fixtureValue.selectionObserver.validate.mockReturnValue('stale');

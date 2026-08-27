@@ -217,9 +217,11 @@ function interactiveViewport(pageCount = 3) {
     },
   );
   const updateAnnotations = vi.fn(() => true);
+  const focusAnnotation = vi.fn(async (_nativeId: string, _signal?: AbortSignal) => true);
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
     deleteAnnotations: () => true,
+    focusAnnotation,
     onAnnotationFocus(listener) {
       annotationFocusListeners.add(listener);
       return () => annotationFocusListeners.delete(listener);
@@ -250,6 +252,7 @@ function interactiveViewport(pageCount = 3) {
   return {
     ...created,
     commitSelection,
+    focusAnnotation,
     emitMode(next: PdfAnnotationLogicalMode) {
       mode = next;
       for (const listener of modeListeners) listener(next);
@@ -381,6 +384,189 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('activates the exact overlapping annotation through navigation and the unified editor', async () => {
+    const [pdf] = files('Books/Overlapping-annotations.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const extraction = deferred<void>();
+    Object.assign(createdSession.value, { listAnnotations: async () => extraction.promise });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    for (const [nativeId, comment] of [
+      ['overlap-first', 'First editor'],
+      ['overlap-second', 'Second editor'],
+    ] as const) {
+      createdViewport.emit({
+        type: 'annotation-change',
+        change: {
+          operation: 'upsert',
+          annotation: {
+            nativeId,
+            pageIndex: 0,
+            type: 'highlight',
+            rects: [{ x: 10, y: 20, width: 100, height: 12 }],
+            selectedText: 'Same geometry',
+            color: '#ffd400',
+            comment,
+            tags: [],
+            links: [],
+            writable: true,
+          },
+        },
+      });
+    }
+    createdViewport.focusAnnotation.mockImplementation(async (nativeId) => {
+      const target = annotationRecord(nativeId, 0, {
+        kind: 'rectangle',
+        rectangle: { x: 10, y: 20, width: 100, height: 12 },
+      });
+      createdViewport.emitAnnotationFocus({
+        annotations: [{ ...target, comment: `${nativeId} editor` }],
+        editable: true,
+        position: { x: 20, y: 32 },
+      });
+      return true;
+    });
+
+    const openEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
+    const secondCard =
+      shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+        '[data-annotation-id="overlap-second"]',
+      );
+    secondCard?.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    secondCard?.focus();
+    secondCard?.click();
+
+    await vi.waitFor(() => {
+      expect(createdViewport.focusAnnotation).toHaveBeenCalledWith(
+        'overlap-second',
+        expect.any(AbortSignal),
+      );
+    });
+    expect(createdViewport.goTo).toHaveBeenCalledWith({ pageIndex: 0, x: 10, y: 20 });
+    expect(
+      shell.created.root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]')
+        ?.value,
+    ).toBe('overlap-second editor');
+    const selected = shell.created.sidebar?.annotationsPanel.root.querySelectorAll(
+      '.abyss-annotation-card[aria-current="true"]',
+    );
+    expect(selected).toHaveLength(1);
+    expect(selected?.[0]?.getAttribute('data-annotation-id')).toBe('overlap-second');
+    expect(createdViewport.goTo).toHaveBeenCalledOnce();
+    expect(createdViewport.focusAnnotation).toHaveBeenCalledOnce();
+    expect(openEditor).toHaveBeenCalledOnce();
+    extraction.resolve();
+  });
+
+  it('cancels stale far-page annotation readiness and opens only the latest exact target', async () => {
+    const [pdf] = files('Books/Far-page-annotations.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport(100);
+    const createdSession = session(pdf.path, createdViewport);
+    const extraction = deferred<void>();
+    Object.assign(createdSession.value, { listAnnotations: async () => extraction.promise });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    const firstNavigation = deferred<void>();
+    const secondNavigation = deferred<void>();
+    createdViewport.goTo
+      .mockImplementationOnce(async () => {
+        await firstNavigation.promise;
+        return undefined;
+      })
+      .mockImplementationOnce(async () => {
+        await secondNavigation.promise;
+        return undefined;
+      });
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    for (const [nativeId, pageIndex] of [
+      ['far-first', 70],
+      ['far-second', 80],
+    ] as const) {
+      createdViewport.emit({
+        type: 'annotation-change',
+        change: {
+          operation: 'upsert',
+          annotation: {
+            nativeId,
+            pageIndex,
+            type: 'highlight',
+            rects: [{ x: 10, y: 20, width: 40, height: 8 }],
+            selectedText: nativeId,
+            color: '#ffd400',
+            comment: nativeId,
+            tags: [],
+            links: [],
+            writable: nativeId === 'far-first',
+          },
+        },
+      });
+    }
+    let firstSignal: AbortSignal | undefined;
+    createdViewport.focusAnnotation.mockImplementation(async (nativeId, signal) => {
+      if (nativeId === 'far-first') {
+        firstSignal = signal;
+        return new Promise<boolean>((resolve) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              resolve(false);
+            },
+            { once: true },
+          );
+        });
+      }
+      createdViewport.emitAnnotationFocus({
+        annotations: [
+          {
+            ...annotationRecord('far-second', 80, { kind: 'point', point: { x: 10, y: 20 } }),
+            comment: 'Latest exact target',
+          },
+        ],
+        editable: false,
+        position: { x: 10, y: 28 },
+      });
+      return true;
+    });
+    const cards = shell.created.sidebar?.annotationsPanel.root;
+    cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-first"]')?.click();
+    firstNavigation.resolve();
+    await vi.waitFor(() => {
+      expect(createdViewport.focusAnnotation).toHaveBeenCalledWith(
+        'far-first',
+        expect.any(AbortSignal),
+      );
+    });
+
+    cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-second"]')?.click();
+    expect(firstSignal?.aborted).toBe(true);
+    secondNavigation.resolve();
+
+    await vi.waitFor(() => {
+      expect(createdViewport.focusAnnotation).toHaveBeenLastCalledWith(
+        'far-second',
+        expect.any(AbortSignal),
+      );
+      expect(
+        shell.created.root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]')
+          ?.value,
+      ).toBe('Latest exact target');
+    });
+    expect(createdViewport.focusAnnotation).toHaveBeenCalledTimes(2);
+    extraction.resolve();
+  });
+
   it('projects a native annotation event immediately without remounting the viewport', async () => {
     const [pdf] = files('Books/Immediate-annotation.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');

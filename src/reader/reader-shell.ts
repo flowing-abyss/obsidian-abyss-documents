@@ -1,3 +1,4 @@
+import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { FocusReturn, PoliteAnnouncer } from './a11y.js';
 import {
@@ -117,6 +118,14 @@ export class ReaderShell implements AnnotationInteractionHost {
   }
 
   openAnnotationEditor(request: AnnotationEditorPopoverRequest): boolean {
+    const annotation = editorTargetAnnotation(request.target);
+    if (annotation !== undefined) {
+      const id =
+        annotation.identity.kind === 'stable'
+          ? annotation.identity.id
+          : annotation.identity.fingerprint;
+      this.sidebarValue?.annotationsPanel.selectAnnotation(id, false);
+    }
     return this.annotationEditor.open(request);
   }
 
@@ -258,6 +267,14 @@ export class ReaderShell implements AnnotationInteractionHost {
         : this.toolbar.sidebarButton;
     this.focusReturn.capture(invoker);
   }
+}
+
+function editorTargetAnnotation(
+  target: AnnotationEditorPopoverRequest['target'],
+): DocumentAnnotation | undefined {
+  if (target.kind === 'selection') return undefined;
+  if (target.kind === 'multiple') return target.annotations[0];
+  return target.annotation;
 }
 
 function hasOpenReaderMenu(root: HTMLElement): boolean {

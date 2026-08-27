@@ -436,6 +436,7 @@
 .abyss-documents .abyss-reader-annotations {
   --abyss-annotation-action-height: 28px;
   --abyss-annotation-action-width: 86px;
+  --abyss-annotation-color-chip-height: 24px;
 
   display: flex;
   min-width: 0;
@@ -623,12 +624,20 @@
 
 .abyss-documents .abyss-annotation-tags {
   box-sizing: border-box;
-  max-height: 40%;
+  max-height: min(40%, 280px);
   min-height: 0;
   flex: 0 0 auto;
   border-top: var(--border-width) solid var(--background-modifier-border);
   background: var(--background-primary);
   color: var(--text-muted);
+}
+
+.abyss-documents .abyss-annotation-footer {
+  display: contents;
+}
+
+.abyss-documents .abyss-annotation-footer[hidden] {
+  display: none;
 }
 
 .abyss-documents .abyss-annotation-tags[data-expanded='true'] {
@@ -774,8 +783,41 @@
 }
 
 .abyss-documents .abyss-annotation-colors {
+  display: flex;
   min-width: 0;
-  margin-block-start: var(--size-2-1);
+  min-height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--size-2-2);
+  padding: var(--size-2-1) var(--size-4-2);
+  border-top: var(--border-width) solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+
+.abyss-documents .abyss-annotation-colors-label {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+}
+
+.abyss-documents .abyss-annotation-colors > [data-annotation-color-search] {
+  width: 7rem;
+  min-width: 5rem;
+  flex: 0 1 7rem;
+}
+
+.abyss-documents .abyss-annotation-colors > .abyss-annotation-color-rows {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: auto hidden;
+  padding: 0;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
+.abyss-documents .abyss-annotation-colors > .abyss-annotation-color-rows::-webkit-scrollbar {
+  display: none;
 }
 
 .abyss-documents .abyss-annotation-color-chip {
@@ -783,8 +825,10 @@
 
   display: inline-flex;
   width: auto;
-  min-width: max-content;
-  min-height: 28px;
+  max-width: min(11rem, 75vw);
+  min-width: 0;
+  flex: 0 0 auto;
+  min-height: var(--abyss-annotation-color-chip-height);
   align-items: center;
   gap: var(--size-2-1);
   padding: 2px var(--size-2-2);
@@ -796,6 +840,12 @@
   font-weight: var(--font-medium);
   line-height: var(--line-height-tight);
   white-space: nowrap;
+}
+
+.abyss-documents .abyss-annotation-color-chip-meaning {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .abyss-documents .abyss-annotation-color-chip:hover,
@@ -879,6 +929,7 @@
 .abyss-documents .abyss-annotation-card {
   display: flex;
   width: 100%;
+  min-width: 0;
   height: auto;
   flex-direction: column;
   gap: var(--size-2-2);
@@ -886,7 +937,6 @@
   border: var(--border-width) solid transparent;
   border-radius: var(--radius-s);
   background: transparent;
-  box-shadow: inset 2px 0 0 var(--abyss-annotation-color, transparent);
   color: var(--text-normal);
   text-align: start;
   white-space: normal;
@@ -895,7 +945,8 @@
 .abyss-documents .abyss-annotation-card-row {
   position: relative;
   display: block;
-  margin-block-end: var(--size-2-1);
+  margin: 0;
+  border-bottom: var(--border-width) solid var(--background-modifier-border);
 }
 
 .abyss-documents .abyss-annotation-card-actions {
@@ -960,7 +1011,7 @@
 
 .abyss-documents .abyss-annotation-card:hover,
 .abyss-documents .abyss-annotation-card:focus-visible,
-.abyss-documents .abyss-annotation-card[aria-current='location'] {
+.abyss-documents .abyss-annotation-card[aria-current='true'] {
   background: var(--background-modifier-hover);
 }
 
@@ -977,25 +1028,21 @@
 }
 
 .abyss-documents .abyss-annotation-card-meaning {
-  --abyss-annotation-color: transparent;
-
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: var(--size-2-1);
   overflow: hidden;
   color: var(--text-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.abyss-documents .abyss-annotation-card-meaning::before {
+.abyss-documents .abyss-annotation-card-swatch {
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--abyss-annotation-color);
-  content: '';
 }
 
 .abyss-documents .abyss-annotation-card-text {
@@ -1006,7 +1053,9 @@
 }
 
 .abyss-documents .abyss-annotation-card-quote {
-  color: var(--text-normal);
+  padding-inline-start: var(--size-2-2);
+  border-inline-start: 2px solid var(--abyss-annotation-color, var(--background-modifier-border));
+  color: var(--text-muted);
   font-size: var(--font-ui-small);
   line-height: var(--line-height-normal);
 }
@@ -1014,10 +1063,9 @@
 .abyss-documents .abyss-annotation-card-comment {
   display: -webkit-box;
   overflow: hidden;
-  padding-inline-start: var(--size-2-2);
-  border-inline-start: 2px solid var(--background-modifier-border);
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: var(--line-height-normal);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
@@ -1032,10 +1080,12 @@
 
 .abyss-documents .abyss-annotation-card-link,
 .abyss-documents .abyss-annotation-card-tag {
+  max-width: 100%;
   overflow: hidden;
   font-size: var(--font-ui-smaller);
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
+  unicode-bidi: plaintext;
   white-space: nowrap;
 }
 
@@ -1203,6 +1253,7 @@
   .abyss-documents .abyss-reader-annotations {
     --abyss-annotation-action-height: 44px;
     --abyss-annotation-action-width: 104px;
+    --abyss-annotation-color-chip-height: 44px;
   }
 
   .abyss-documents .abyss-reader-outline-row-shell {
@@ -1232,6 +1283,7 @@
     height: 2.75rem;
   }
 
+  .abyss-documents .abyss-annotation-color-chip,
   .abyss-documents .abyss-annotation-tag-chip {
     min-width: 2.75rem;
     min-height: 2.75rem;

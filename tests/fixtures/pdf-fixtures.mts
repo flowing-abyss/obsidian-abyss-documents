@@ -422,6 +422,22 @@ async function longTextFixture(): Promise<Uint8Array> {
 
 async function highAnnotationFixture(): Promise<Uint8Array> {
   const { document, font } = await createDocument('Deterministic high annotation fixture');
+  const colors = [
+    [1, 0.831, 0],
+    [1, 0.4, 0.4],
+    [0.373, 0.698, 0.212],
+    [0.18, 0.659, 0.898],
+    [0.635, 0.541, 0.898],
+    [0.898, 0.431, 0.933],
+    [0.945, 0.596, 0.216],
+    [0.667, 0.667, 0.667],
+    [0.118, 0.565, 1],
+    [0.196, 0.804, 0.196],
+    [0.863, 0.078, 0.235],
+    [0, 0.808, 0.82],
+  ] as const;
+  const longUnicodeTag = `قضية-重要事項-${'длинная-метка-'.repeat(10)}финал`;
+  const longUnicodeLink = `Long multilingual reference ${'— section '.repeat(12)}قضية 重要事項`;
   for (let pageNumber = 1; pageNumber <= 100; pageNumber += 1) {
     const page = document.addPage(PAGE_SIZE);
     drawPage(
@@ -433,13 +449,18 @@ async function highAnnotationFixture(): Promise<Uint8Array> {
     const annotations: PDFRef[] = [];
     for (let localIndex = 0; localIndex < 100; localIndex += 1) {
       const annotationNumber = (pageNumber - 1) * 100 + localIndex;
-      const column = localIndex % 10;
-      const row = Math.floor(localIndex / 10);
+      const geometryIndex = annotationNumber === 1 ? 0 : localIndex;
+      const column = geometryIndex % 10;
+      const row = Math.floor(geometryIndex / 10);
       const left = 54 + column * 50;
       const bottom = 560 - row * 28;
       const right = left + 42;
       const top = bottom + 14;
-      const color = annotationNumber % 2 === 0 ? [1, 0.831, 0] : [0.18, 0.659, 0.898];
+      const color = colors[annotationNumber % colors.length] ?? colors[0];
+      const contents =
+        annotationNumber === 0
+          ? `Annotation 00000 #${longUnicodeTag} [[${longUnicodeLink}]]`
+          : `Annotation ${annotationNumber.toString().padStart(5, '0')} #topic-${annotationNumber % 25} [[Topic ${annotationNumber % 100}]]`;
       annotations.push(
         document.context.register(
           document.context.obj({
@@ -449,9 +470,7 @@ async function highAnnotationFixture(): Promise<Uint8Array> {
             QuadPoints: [left, top, right, top, left, bottom, right, bottom],
             C: color,
             CA: 0.75,
-            Contents: PDFHexString.fromText(
-              `Annotation ${annotationNumber.toString().padStart(5, '0')} #topic-${annotationNumber % 25} [[Topic ${annotationNumber % 100}]]`,
-            ),
+            Contents: PDFHexString.fromText(contents),
             T: PDFHexString.fromText('Abyss Documents'),
             NM: PDFHexString.fromText(`high-annotation-${annotationNumber}`),
             M: 'D:20260101000000Z',

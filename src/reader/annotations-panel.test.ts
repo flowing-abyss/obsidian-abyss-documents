@@ -52,6 +52,12 @@ function annotationScrollHost(root: HTMLElement): HTMLElement {
   return scrollHost;
 }
 
+function annotationFooter(root: HTMLElement): HTMLElement {
+  const footer = root.querySelector<HTMLElement>('[data-annotation-footer]');
+  if (footer === null) throw new Error('Expected annotation footer.');
+  return footer;
+}
+
 function documentTagsFooter(root: HTMLElement): HTMLElement {
   const footer = root.querySelector<HTMLElement>('[data-section="tags"]');
   if (footer === null) throw new Error('Expected Document tags footer.');
@@ -123,6 +129,36 @@ describe('AnnotationsPanel', () => {
     expect(root.querySelector('.abyss-annotation-card')).toBe(card);
   });
 
+  it('moves roving focus to the nearest projected row when the focused annotation is deleted', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const rows = [0, 1, 2].map((index) => ({
+      key: `row-${String(index)}`,
+      annotation: annotation(index),
+      nativeId: `annotation-${String(index)}`,
+      writable: true,
+    })) satisfies AnnotationProjectionRow[];
+    panel.setProjectedAnnotations(rows);
+    const scrollHost = annotationScrollHost(root);
+    scrollHost.scrollTop = 37;
+    root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-1"]')?.focus();
+
+    panel.setProjectedAnnotations([
+      rows[0] as AnnotationProjectionRow,
+      rows[2] as AnnotationProjectionRow,
+    ]);
+
+    const cards = Array.from(root.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'));
+    expect(cards.map((card) => [card.dataset['annotationId'], card.tabIndex])).toEqual([
+      ['annotation-0', -1],
+      ['annotation-2', 0],
+    ]);
+    expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-2');
+    expect(scrollHost.scrollTop).toBe(37);
+    root.remove();
+  });
+
   it('renders exactly No annotations when empty', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
@@ -186,22 +222,46 @@ describe('AnnotationsPanel', () => {
     expect(root.querySelector<HTMLElement>('.abyss-annotation-tags')?.hidden).toBe(true);
   });
 
-  it('places Document tags last and collapsed', () => {
+  it('keeps only search above the list and orders fixed Colors then collapsed Document tags', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
 
     panel.setAnnotations([annotation(0), annotation(1)]);
 
-    const footer = documentTagsFooter(root);
-    const toggle = footer.querySelector<HTMLButtonElement>('[data-action="toggle-document-tags"]');
-    const body = footer.querySelector<HTMLElement>('.abyss-annotation-tags-body');
+    const footer = annotationFooter(root);
+    const colors = footer.querySelector<HTMLElement>('[data-section="colors"]');
+    const tags = documentTagsFooter(root);
+    const toggle = tags.querySelector<HTMLButtonElement>('[data-action="toggle-document-tags"]');
+    const body = tags.querySelector<HTMLElement>('.abyss-annotation-tags-body');
+    const controls = root.querySelector<HTMLElement>('.abyss-annotation-controls');
     expect(panel.root.lastElementChild).toBe(footer);
+    expect(Array.from(footer.children)).toEqual([colors, tags]);
+    expect(colors?.querySelector('[data-annotation-colors-label]')?.textContent).toBe('Colors');
+    expect(controls?.children).toHaveLength(1);
+    expect(controls?.firstElementChild).toBe(
+      root.querySelector<HTMLInputElement>('[data-annotation-search]'),
+    );
+    expect(annotationScrollHost(root).contains(colors)).toBe(false);
+    expect(annotationScrollHost(root).contains(tags)).toBe(false);
     expect(toggle?.getAttribute('aria-expanded')).toBe('false');
     expect(toggle?.getAttribute('aria-controls')).toBe(body?.id);
     expect(body?.id).not.toBe('');
     expect(body?.hidden).toBe(true);
-    expect(footer.querySelector('[data-annotation-tags-label]')?.textContent).toBe('Document tags');
-    expect(footer.querySelector('[data-annotation-tags-count]')?.textContent).toBe('2');
+    expect(tags.querySelector('[data-annotation-tags-label]')?.textContent).toBe('Document tags');
+    expect(tags.querySelector('[data-annotation-tags-count]')?.textContent).toBe('2');
+  });
+
+  it('hides the whole filter footer only when the document has no annotations', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const footer = annotationFooter(root);
+
+    panel.setAnnotations([]);
+    expect(footer.hidden).toBe(true);
+
+    panel.setAnnotations([annotation(0)]);
+    panel.setFilter({ query: 'absent', colors: new Set(), tags: new Set() });
+    expect(footer.hidden).toBe(false);
   });
 
   it('hides tags for empty documents', () => {
@@ -799,6 +859,50 @@ describe('AnnotationsPanel', () => {
     ).toBe('true');
   });
 
+  it('keeps selected zero-count facets available after live projection deletion', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      colorMeanings: { '#0000ff': 'Review', '#ffd400': 'Important' },
+      onNavigate: vi.fn(),
+    });
+    const blue = {
+      key: 'blue-row',
+      annotation: annotation(0, { color: '#0000ff', tags: ['Question'] }),
+      nativeId: 'annotation-0',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    const yellow = {
+      key: 'yellow-row',
+      annotation: annotation(1, { color: '#ffd400', tags: ['Theory'] }),
+      nativeId: 'annotation-1',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([blue, yellow]);
+    root.querySelector<HTMLButtonElement>('[data-annotation-color="#0000ff"]')?.click();
+    toggleDocumentTags(root);
+    root.querySelector<HTMLButtonElement>('[data-annotation-tag="question"]')?.click();
+
+    panel.setProjectedAnnotations([yellow]);
+
+    const color = root.querySelector<HTMLButtonElement>('[data-annotation-color="#0000ff"]');
+    const tag = root.querySelector<HTMLButtonElement>('[data-annotation-tag="question"]');
+    expect(color?.getAttribute('aria-pressed')).toBe('true');
+    expect(color?.querySelector('[class$="-count"]')?.textContent).toBe('0');
+    expect(tag?.getAttribute('aria-pressed')).toBe('true');
+    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
+      'No matching annotations',
+    );
+
+    color?.click();
+    tag?.click();
+    expect(panel.visibleIds()).toEqual(['annotation-1']);
+    expect(root.querySelector('[data-annotation-color="#0000ff"]')).toBeNull();
+    expect(root.querySelector('[data-annotation-tag="question"]')).toBeNull();
+    expect(
+      documentTagsFooter(root).querySelector('[data-annotation-tags-count]')?.textContent,
+    ).toBe('1');
+  });
+
   it('renders structured quote comment links and tags', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, {
@@ -836,12 +940,57 @@ describe('AnnotationsPanel', () => {
         (tag) => tag.textContent,
       ),
     ).toEqual(['#Evidence', '#Review']);
+    expect(card?.querySelector('div')).toBeNull();
+    expect(Array.from(card?.children ?? [], (element) => element.tagName)).toEqual([
+      'SPAN',
+      'SPAN',
+      'SPAN',
+      'SPAN',
+      'SPAN',
+    ]);
     expect(card?.querySelector('.internal-link')).toBeNull();
     const empty = root.querySelector<HTMLElement>('[data-annotation-id="annotation-1"]');
     expect(empty?.querySelector('[data-annotation-quote]')).toBeNull();
     expect(empty?.querySelector('[data-annotation-comment]')).toBeNull();
     expect(empty?.querySelector('[data-annotation-links]')).toBeNull();
     expect(empty?.querySelector('[data-annotation-card-tags]')).toBeNull();
+  });
+
+  it('uses one neutral navigation target with a colored quote rail and true roving focus', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onNavigate = vi.fn();
+    const panel = new AnnotationsPanel(root, {
+      colorMeanings: { '#ffd400': 'Important' },
+      onNavigate,
+    });
+    panel.setAnnotations([annotation(0), annotation(1)]);
+    const firstRow = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
+    const firstCard = firstRow?.querySelector<HTMLButtonElement>('.abyss-annotation-card');
+    const quote = firstCard?.querySelector<HTMLElement>('[data-annotation-quote]');
+    const comment = firstCard?.querySelector<HTMLElement>('[data-annotation-comment]');
+
+    expect(firstRow?.tagName).toBe('ARTICLE');
+    expect(firstRow?.getAttribute('role')).toBe('listitem');
+    expect(firstRow?.querySelectorAll(':scope > .abyss-annotation-card')).toHaveLength(1);
+    expect(firstCard?.querySelector('button, a, input, textarea, select')).toBeNull();
+    expect(firstCard?.style.getPropertyValue('--abyss-annotation-color')).toBe('');
+    expect(quote?.style.getPropertyValue('--abyss-annotation-color')).toBe('#ffd400');
+    expect(comment?.style.getPropertyValue('--abyss-annotation-color')).toBe('');
+    expect(
+      firstCard
+        ?.querySelector<HTMLElement>('[data-annotation-color-swatch]')
+        ?.style.getPropertyValue('--abyss-annotation-color'),
+    ).toBe('#ffd400');
+
+    firstCard?.focus();
+    firstCard?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown' }));
+    const cards = Array.from(root.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'));
+    expect(cards.map((card) => card.tabIndex)).toEqual([-1, 0]);
+    expect(root.doc.activeElement).toBe(cards[1]);
+    cards[1]?.click();
+    expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 1 }));
+    root.remove();
   });
 
   it('keeps Copy and Insert contextual', () => {
@@ -1085,6 +1234,20 @@ describe('AnnotationsPanel', () => {
     expect(readerPerformanceSnapshot().counters.maxAnnotationPanelNodes).toBeLessThanOrEqual(1_024);
   });
 
+  it('gives long Unicode and RTL tag tokens bounded text with useful names', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const longTag = 'قضية-重要事項-'.repeat(24);
+    panel.setAnnotations([annotation(0, { tags: [longTag] })]);
+    toggleDocumentTags(root);
+
+    const facet = root.querySelector<HTMLButtonElement>('[data-annotation-tag-row]');
+    const cardTag = root.querySelector<HTMLElement>('[data-annotation-card-tag]');
+    expect(facet?.getAttribute('aria-label')).toBe(`${longTag} tag`);
+    expect(facet?.title).toBe(`#${longTag}`);
+    expect(cardTag?.title).toBe(`#${longTag}`);
+  });
+
   it('keeps imported color facets bounded and finds a late color on demand', () => {
     beginPluginActivation();
     endPluginActivation();
@@ -1124,12 +1287,82 @@ describe('AnnotationsPanel', () => {
     ).toBe('false');
     expect(root.textContent).toContain('Important');
     panel.setCurrentPage(1);
-    const current = root.querySelector<HTMLElement>('[aria-current="location"]');
-    expect(current?.dataset['annotationId']).toBe('annotation-1');
+    const current = root.querySelector<HTMLElement>('[data-annotation-id="annotation-1"]');
     current?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
     expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-0');
     current?.click();
     expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 1 }));
+    root.remove();
+  });
+
+  it('activates the exact projected annotation from focus, click, Enter, and Space', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onActivate = vi.fn();
+    const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn() });
+    const overlapping = [
+      {
+        key: 'overlap-first-row',
+        annotation: annotation(0, { selectedText: 'First overlap' }),
+        nativeId: 'native-first',
+        writable: true,
+      },
+      {
+        key: 'overlap-second-row',
+        annotation: annotation(1, {
+          anchor: annotation(0).anchor,
+          selectedText: 'Second overlap',
+        }),
+        nativeId: 'native-second',
+        writable: true,
+      },
+    ] satisfies readonly AnnotationProjectionRow[];
+    panel.setProjectedAnnotations(overlapping);
+    const second = root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="overlap-second-row"]',
+    );
+    if (second === null) throw new Error('Expected the second overlapping annotation card.');
+
+    second.focus();
+    second.click();
+    second.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    second.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
+
+    expect(onActivate).toHaveBeenCalledTimes(4);
+    expect(onActivate).toHaveBeenLastCalledWith({
+      annotation: overlapping[1]?.annotation,
+      location: { pageIndex: 0, x: 0, y: 0 },
+      nativeId: 'native-second',
+      rowId: 'overlap-second-row',
+    });
+    const selected = root.querySelectorAll('.abyss-annotation-card[aria-current="true"]');
+    expect(selected).toHaveLength(1);
+    expect(selected[0]?.getAttribute('data-annotation-row-id')).toBe('overlap-second-row');
+    root.remove();
+  });
+
+  it('deduplicates one pointer focus-and-click gesture and ignores internal focus restoration', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onActivate = vi.fn();
+    const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0), annotation(1)]);
+    const first = root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-0"]');
+    if (first === null) throw new Error('Expected first annotation card.');
+
+    first.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    first.focus();
+    first.click();
+    expect(onActivate).toHaveBeenCalledOnce();
+
+    panel.setFilter({ query: '', colors: new Set(), tags: new Set() });
+    expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-0');
+    expect(onActivate).toHaveBeenCalledOnce();
+
+    root.doc.activeElement?.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }),
+    );
+    expect(onActivate).toHaveBeenCalledTimes(2);
     root.remove();
   });
 
@@ -1318,6 +1551,41 @@ describe('AnnotationsPanel', () => {
     expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-1');
     panel.setCurrentPage(150);
     expect(root.querySelector('[data-annotation-id="annotation-150"]')).not.toBeNull();
+    root.remove();
+  });
+
+  it('keeps exactly one mounted roving tab stop after every virtual-window transition', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const rows = Array.from({ length: 200 }, (_, index) => ({
+      annotation: annotation(index),
+      key: `row-${String(index)}`,
+      nativeId: `native-${String(index)}`,
+      writable: true,
+    }));
+    const expectOneMountedTabStop = (): void => {
+      const cards = Array.from(root.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'));
+      expect(cards.filter((card) => card.tabIndex === 0)).toHaveLength(1);
+    };
+    panel.setProjectedAnnotations(rows);
+    expectOneMountedTabStop();
+
+    const scrollHost = annotationScrollHost(root);
+    scrollHost.scrollTop = 120 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    expectOneMountedTabStop();
+
+    panel.setCurrentPage(175);
+    expectOneMountedTabStop();
+
+    panel.setFilter({ query: 'Concept 190', colors: new Set(), tags: new Set() });
+    expectOneMountedTabStop();
+
+    panel.setFilter({ query: '', colors: new Set(), tags: new Set() });
+    panel.selectAnnotation('annotation-190');
+    panel.setProjectedAnnotations(rows.filter((row) => row.nativeId !== 'native-190'));
+    expectOneMountedTabStop();
     root.remove();
   });
 });

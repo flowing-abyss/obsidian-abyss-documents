@@ -221,6 +221,7 @@ export class ReaderController {
   private lastAnnotationExportPreparationFailureKey: string | null = null;
   private annotationToolRequestRevision = 0;
   private annotationInteractionController: AnnotationInteractionController | null = null;
+  private annotationActivationAbort: AbortController | null = null;
   private currentAnnotationTool: PdfAnnotationTool = 'select';
   private currentAnnotationColor = DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400';
   private readonly saveFailureOwner = {};
@@ -1151,6 +1152,7 @@ export class ReaderController {
   }
 
   private resetReaderState(): void {
+    this.cancelAnnotationActivation();
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
     this.resetAnnotationProjectionState();
@@ -1552,6 +1554,9 @@ export class ReaderController {
       onAnnotationNavigate: (location) => {
         this.navigateToLocation(location);
       },
+      onAnnotationActivate: (activation) => {
+        this.activateAnnotation(viewport, activation.location, activation.nativeId);
+      },
       ...transferCallbacks,
       onTabChange: (nextTab) => {
         if (nextTab === 'outline' && this.session === session && this.shell === shell)
@@ -1801,7 +1806,48 @@ export class ReaderController {
     this.navigateTo(spreadStart + direction * 2);
   }
 
-  private navigateToLocation(location: DocumentLocation): void {
+  private activateAnnotation(
+    viewport: DocumentViewport,
+    location: DocumentLocation,
+    nativeId: string,
+  ): void {
+    this.cancelAnnotationActivation();
+    const abort = new AbortController();
+    this.annotationActivationAbort = abort;
+    this.navigateToLocation(
+      location,
+      () => {
+        const interaction = this.viewport === viewport ? annotationInteractionOf(viewport) : null;
+        if (abort.signal.aborted || interaction === null) {
+          this.finishAnnotationActivation(abort);
+          return;
+        }
+        void interaction
+          .focusAnnotation(nativeId, abort.signal)
+          .catch(() => false)
+          .finally(() => {
+            this.finishAnnotationActivation(abort);
+          });
+      },
+      true,
+    );
+  }
+
+  private cancelAnnotationActivation(): void {
+    this.annotationActivationAbort?.abort();
+    this.annotationActivationAbort = null;
+  }
+
+  private finishAnnotationActivation(abort: AbortController): void {
+    if (this.annotationActivationAbort === abort) this.annotationActivationAbort = null;
+  }
+
+  private navigateToLocation(
+    location: DocumentLocation,
+    onArrive?: () => void,
+    retainAnnotationActivation = false,
+  ): void {
+    if (!retainAnnotationActivation) this.cancelAnnotationActivation();
     const viewport = this.viewport;
     const shell = this.shell;
     if (viewport === null || shell === null || viewport.pageCount === 0) return;
@@ -1811,23 +1857,28 @@ export class ReaderController {
     this.navigationPageIndex = target;
     this.pendingNavigationPageIndex = target;
     const revision = ++this.navigationRequestRevision;
-    void viewport.goTo(destination).catch((cause: unknown) => {
-      if (this.viewport !== viewport) return;
-      if (
-        revision === this.navigationRequestRevision &&
-        this.pendingNavigationPageIndex === target
-      ) {
-        this.navigationPageIndex = this.currentPageIndex;
-        this.pendingNavigationPageIndex = null;
-      }
-      shell.toolbar.setCurrentPage(this.currentPageIndex);
-      const reason = this.reason(cause);
-      new Notice(`Could not go to page ${target + 1}: ${reason}`);
-      console.error('[abyss-documents] Failed to navigate PDF page', {
-        pageIndex: target,
-        cause,
+    void viewport
+      .goTo(destination)
+      .then(() => {
+        if (this.viewport === viewport && revision === this.navigationRequestRevision) onArrive?.();
+      })
+      .catch((cause: unknown) => {
+        if (this.viewport !== viewport) return;
+        if (
+          revision === this.navigationRequestRevision &&
+          this.pendingNavigationPageIndex === target
+        ) {
+          this.navigationPageIndex = this.currentPageIndex;
+          this.pendingNavigationPageIndex = null;
+        }
+        shell.toolbar.setCurrentPage(this.currentPageIndex);
+        const reason = this.reason(cause);
+        new Notice(`Could not go to page ${target + 1}: ${reason}`);
+        console.error('[abyss-documents] Failed to navigate PDF page', {
+          pageIndex: target,
+          cause,
+        });
       });
-    });
   }
 
   private setScale(scale: ReaderScale): void {

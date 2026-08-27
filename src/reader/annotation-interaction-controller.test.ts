@@ -145,6 +145,7 @@ function realInteractionFixture() {
       beginPersistence: () => undefined,
       deleteAnnotations: () => true,
       endPersistence: () => undefined,
+      focusAnnotation: async () => true,
       normalizeCreatedAnnotation: () => nativeAnnotation(''),
       onAnnotationFocus: () => () => undefined,
       reserveNextDialog: () => ({
@@ -212,6 +213,7 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
     deleteAnnotations: () => true,
+    focusAnnotation: vi.fn(async () => true),
     onAnnotationFocus(listener) {
       annotationFocusListeners.add(listener);
       return () => annotationFocusListeners.delete(listener);

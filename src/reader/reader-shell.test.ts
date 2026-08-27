@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
+import { asAnnotationId, type DocumentAnnotation } from '../document-core/annotations.js';
 import type { AnnotationEditorPopoverRequest } from './annotation-editor-popover.js';
 import { ReaderShell } from './reader-shell.js';
 
@@ -15,6 +16,53 @@ function selection(): PdfTextSelection {
 }
 
 describe('ReaderShell', () => {
+  it('synchronizes one sidebar row when PDF focus opens the unified editor', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const annotation: DocumentAnnotation = {
+      identity: { id: asAnnotationId('native-focused'), kind: 'stable' },
+      type: 'highlight',
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      },
+      color: '#ffd400',
+      selectedText: 'Focused',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: 'Edit me',
+      tags: [],
+      links: [],
+      capabilities: {} as DocumentAnnotation['capabilities'],
+    };
+    const sidebar = shell.openSidebar('annotations', {
+      onClose: vi.fn(),
+      onOutlineNavigate: vi.fn(),
+      onSearchNavigate: vi.fn(),
+      onSearchQuery: vi.fn(),
+      onTabChange: vi.fn(),
+    });
+    sidebar.annotationsPanel.setAnnotations([annotation]);
+
+    shell.openAnnotationEditor({
+      onClose: vi.fn(),
+      onCreate: vi.fn(),
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(),
+      palette: [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      target: { annotation, kind: 'annotation' },
+    });
+
+    expect(
+      sidebar.annotationsPanel.root.querySelectorAll('.abyss-annotation-card[aria-current="true"]'),
+    ).toHaveLength(1);
+    shell.destroy();
+    host.remove();
+  });
+
   it('keeps a dismissed selection draft visible and retryable in the unified editor', async () => {
     const host = document.body.createDiv();
     const shell = new ReaderShell(host);

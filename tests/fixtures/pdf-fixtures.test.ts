@@ -464,6 +464,38 @@ afterEach(async () => {
 
 describe('generatePdfFixtures', () => {
   it(
+    'renders real high-cardinality colors and long Unicode metadata in the annotation fixture',
+    { timeout: 20_000 },
+    async () => {
+      const directory = await temporaryDirectory();
+      await generatePdfFixtures(directory);
+      const loadingTask = getDocument({
+        data: new Uint8Array(await readFile(path.join(directory, 'annotations-10000.pdf'))),
+        standardFontDataUrl,
+      });
+      const pdf = await loadingTask.promise;
+      const annotations = (await (await pdf.getPage(1)).getAnnotations()) as Array<
+        Record<string, unknown>
+      >;
+      const colors = new Set(annotations.map((annotation) => JSON.stringify(annotation['color'])));
+      const contents = annotations.map((annotation) => {
+        const contentsObj = annotation['contentsObj'];
+        if (typeof contentsObj !== 'object' || contentsObj === null || !('str' in contentsObj))
+          return '';
+        const value = (contentsObj as { readonly str?: unknown }).str;
+        return typeof value === 'string' ? value : '';
+      });
+
+      expect(colors.size).toBeGreaterThanOrEqual(12);
+      expect(contents.some((content) => content.includes('قضية-重要事項'))).toBe(true);
+      expect(contents.some((content) => content.includes('[[Long multilingual reference'))).toBe(
+        true,
+      );
+      await loadingTask.destroy();
+    },
+  );
+
+  it(
     'produces byte-identical PDFs and versioned metadata on repeated runs',
     { timeout: 20_000 },
     async () => {
@@ -485,10 +517,10 @@ describe('generatePdfFixtures', () => {
           { name: 'invalid.pdf', pages: null },
           {
             annotations: 10_000,
-            bytes: 5_610_695,
+            bytes: 5_635_206,
             name: 'annotations-10000.pdf',
             pages: 100,
-            sha256: '9cf3103bf1dd962e91d37084eb5434653ec54d2c0fa6f8983334224f6cbe70c4',
+            sha256: 'def2dd7c017ce53ebd08667ed388d1454f235d46e4d498e751c29749f0c7cd07',
           },
           {
             annotations: 2,

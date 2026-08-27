@@ -1,7 +1,11 @@
 import { Platform, setIcon } from 'obsidian';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { DocumentLocation, SearchHit } from '../document-core/document.js';
-import { AnnotationsPanel, type AnnotationsPanelOptions } from './annotations-panel.js';
+import {
+  AnnotationsPanel,
+  type AnnotationPanelActivation,
+  type AnnotationsPanelOptions,
+} from './annotations-panel.js';
 import { OutlinePanel } from './outline-panel.js';
 import { ownerWindow } from './owner-dom.js';
 import {
@@ -25,6 +29,7 @@ export interface ReaderSidebarCallbacks {
   readonly annotationColorNames?: Readonly<Record<string, string>>;
   readonly onClose: () => void;
   readonly onAnnotationNavigate?: (location: DocumentLocation) => void;
+  readonly onAnnotationActivate?: (activation: AnnotationPanelActivation) => void;
   readonly onAnnotationCopy?: (annotation: DocumentAnnotation) => void;
   readonly onAnnotationInsert?: (annotation: DocumentAnnotation) => void;
   readonly onAnnotationTransfer?: (annotation: DocumentAnnotation, transfer: DataTransfer) => void;
@@ -211,6 +216,8 @@ function annotationPanelOptions(callbacks: ReaderSidebarCallbacks): AnnotationsP
   const options: AnnotationsPanelOptions = {
     onNavigate: callbacks.onAnnotationNavigate ?? (() => undefined),
   };
+  if (callbacks.onAnnotationActivate !== undefined)
+    Object.assign(options, { onActivate: callbacks.onAnnotationActivate });
   if (callbacks.annotationColorMeanings !== undefined)
     Object.assign(options, { colorMeanings: callbacks.annotationColorMeanings });
   if (callbacks.annotationColorNames !== undefined)

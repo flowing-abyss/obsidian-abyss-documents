@@ -150,6 +150,118 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('focuses one exact native editor even when overlapping editors are already selected', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'overlap-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    secondNode.id = 'overlap-second';
+    const first = editor('First', { anchor: firstNode, uid: 'overlap-first' });
+    const second = editor('Second', { anchor: secondNode, uid: 'overlap-second' });
+    const manager = uiManager(first);
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'overlap-first') return first;
+      return id === 'overlap-second' ? second : undefined;
+    });
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    await expect(bridge.focusAnnotation('overlap-second')).resolves.toBe(true);
+
+    expect(manager.setSelected).toHaveBeenCalledOnce();
+    expect(manager.setSelected).toHaveBeenCalledWith(second);
+    expect(focused).toHaveLength(1);
+    expect(focused[0]?.annotations).toHaveLength(1);
+    expect(focused[0]?.annotations[0]?.identity).toEqual({
+      id: 'overlap-second',
+      kind: 'stable',
+    });
+    const missing = new AbortController();
+    const missingFocus = bridge.focusAnnotation('missing', missing.signal);
+    missing.abort();
+    await expect(missingFocus).resolves.toBe(false);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('focuses one exact imported annotation through its public annotation-layer id', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationLayer' });
+    const first = layer.createDiv({ cls: 'highlightAnnotation' });
+    first.dataset['annotationId'] = 'imported-first';
+    const second = layer.createDiv({ cls: 'highlightAnnotation' });
+    second.dataset['annotationId'] = 'imported-second';
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    await expect(bridge.focusAnnotation('imported-second')).resolves.toBe(true);
+
+    expect(focused).toHaveLength(1);
+    expect(focused[0]).toMatchObject({
+      annotations: [{ identity: { id: 'imported-second', kind: 'stable' } }],
+      editable: false,
+    });
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('waits for far-page writable and imported layers and cancels stale focus', async () => {
+    const host = document.body.createDiv();
+    const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const annotationLayer = host.createDiv({ cls: 'annotationLayer' });
+    const writableNode = createDiv();
+    writableNode.className = 'highlightEditor';
+    writableNode.id = 'far-writable';
+    const writable = editor('Far writable', { anchor: writableNode, uid: 'far-writable' });
+    const manager = uiManager(writable);
+    manager.getEditor.mockImplementation((id) => (id === 'far-writable' ? writable : undefined));
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    const writableFocus = bridge.focusAnnotation('far-writable');
+    editorLayer.append(writableNode);
+    await Promise.resolve();
+    bridge.setSidebarUiManager(manager);
+    await expect(writableFocus).resolves.toBe(true);
+    expect(focused[focused.length - 1]?.annotations[0]?.identity).toEqual({
+      id: 'far-writable',
+      kind: 'stable',
+    });
+
+    const importedFocus = bridge.focusAnnotation('far-imported');
+    const imported = annotationLayer.createDiv({ cls: 'highlightAnnotation' });
+    imported.dataset['annotationId'] = 'far-imported';
+    await expect(importedFocus).resolves.toBe(true);
+    expect(focused[focused.length - 1]?.annotations[0]?.identity).toEqual({
+      id: 'far-imported',
+      kind: 'stable',
+    });
+
+    const stale = new AbortController();
+    const staleFocus = bridge.focusAnnotation('stale-imported', stale.signal);
+    stale.abort();
+    const staleImported = annotationLayer.createDiv({ cls: 'highlightAnnotation' });
+    staleImported.dataset['annotationId'] = 'stale-imported';
+    await expect(staleFocus).resolves.toBe(false);
+    expect(focused[focused.length - 1]?.annotations[0]?.identity).not.toEqual({
+      id: 'stale-imported',
+      kind: 'stable',
+    });
+    bridge.dispose();
+    host.remove();
+  });
+
   it('degrades mixed or unsupported selections to read-only operations', () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });

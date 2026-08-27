@@ -31,6 +31,7 @@ export interface PdfAnnotationInteraction {
     signal?: AbortSignal,
   ): Promise<DocumentAnnotation | 'dismissed'>;
   deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean;
+  focusAnnotation(nativeId: string, signal?: AbortSignal): Promise<boolean>;
   setPalette?(palette: readonly AnnotationPaletteEntry[]): void;
   setQuickHighlight(state: { readonly enabled: boolean; readonly color: string }): Promise<void>;
   updateAnnotations(update: PdfAnnotationUpdate): boolean;
@@ -138,6 +139,7 @@ interface PdfAnnotationEditorDependencies {
     | 'beginPersistence'
     | 'deleteAnnotations'
     | 'endPersistence'
+    | 'focusAnnotation'
     | 'normalizeCreatedAnnotation'
     | 'onAnnotationFocus'
     | 'reserveNextDialog'
@@ -288,6 +290,10 @@ export class PdfAnnotationEditor {
 
   onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void {
     return this.dependencies.commentBridge.onAnnotationFocus(listener);
+  }
+
+  focusAnnotation(nativeId: string, signal?: AbortSignal): Promise<boolean> {
+    return this.dependencies.commentBridge.focusAnnotation(nativeId, signal);
   }
 
   deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean {
