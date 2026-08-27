@@ -29,12 +29,6 @@ interface FitChoice {
   readonly value: ReaderScale;
 }
 
-interface LayoutChoice {
-  readonly icon: IconName;
-  readonly label: string;
-  readonly value: ReaderLayout;
-}
-
 const PROFILE_CHOICES: readonly ProfileChoice[] = [
   { id: 'default', label: 'Default' },
   { id: 'follow-obsidian', label: 'Follow Obsidian' },
@@ -50,30 +44,137 @@ const FIT_CHOICES: readonly FitChoice[] = [
   { label: 'Fit height', value: 'page-height' },
 ];
 
-const LAYOUT_CHOICES: readonly LayoutChoice[] = [
-  {
-    icon: 'rows-3',
-    label: 'Single page · Continuous',
-    value: { pages: 'single', scrolling: 'continuous' },
-  },
-  {
-    icon: 'rectangle-horizontal',
-    label: 'Single page · Paged',
-    value: { pages: 'single', scrolling: 'page-by-page' },
-  },
-  {
-    icon: 'layout-grid',
-    label: 'Two pages · Continuous',
-    value: { pages: 'facing', scrolling: 'continuous' },
-  },
-  {
-    icon: 'columns-2',
-    label: 'Two pages · Paged',
-    value: { pages: 'facing', scrolling: 'page-by-page' },
-  },
-];
-
 const COMPACT_TOOLBAR_WIDTH = 760;
+const NARROW_NAVIGATION_WIDTH = 600;
+const LONG_PRESS_DELAY_MS = 500;
+const LONG_PRESS_MOVE_TOLERANCE = 10;
+
+function isLongPressPointer(event: PointerEvent): boolean {
+  return event.pointerType !== 'mouse' && event.isPrimary && event.button === 0;
+}
+
+/** @internal Shared gesture state for the reader toolbar's split controls. */
+export class LongPressMenuGesture {
+  private clickSuppressionTimer: number | null = null;
+  private pointerId: number | null = null;
+  private startX = 0;
+  private startY = 0;
+  private suppressClick = false;
+  private timer: number | null = null;
+
+  constructor(
+    private readonly trigger: HTMLElement,
+    private readonly ownerWindow: Window,
+    private readonly show: () => void,
+  ) {}
+
+  readonly onPointerDown = (event: PointerEvent): void => {
+    if (!isLongPressPointer(event)) return;
+    this.clearTimer();
+    this.pointerId = event.pointerId;
+    this.startX = event.clientX;
+    this.startY = event.clientY;
+    this.clearClickSuppression();
+    if (typeof this.trigger.setPointerCapture === 'function')
+      this.trigger.setPointerCapture(this.pointerId);
+    this.timer = this.ownerWindow.setTimeout(() => {
+      this.timer = null;
+      if (this.pointerId === null) return;
+      this.suppressClick = true;
+      this.show();
+    }, LONG_PRESS_DELAY_MS);
+  };
+
+  readonly onPointerMove = (event: PointerEvent): void => {
+    if (
+      event.pointerId !== this.pointerId ||
+      Math.hypot(event.clientX - this.startX, event.clientY - this.startY) <=
+        LONG_PRESS_MOVE_TOLERANCE
+    )
+      return;
+    this.clearTimer();
+  };
+
+  readonly onPointerUp = (event: PointerEvent): void => {
+    if (event.pointerId !== this.pointerId) return;
+    this.clearTimer();
+    this.releasePointer();
+    if (!this.suppressClick) return;
+    event.preventDefault();
+    this.scheduleClickSuppressionCleanup();
+  };
+
+  readonly onPointerCancel = (event: PointerEvent): void => {
+    if (event.pointerId !== this.pointerId) return;
+    this.clearTimer();
+    this.releasePointer();
+    if (this.suppressClick) this.scheduleClickSuppressionCleanup();
+    else this.clearClickSuppression();
+  };
+
+  consumeClick(): boolean {
+    if (!this.suppressClick) return false;
+    this.clearClickSuppression();
+    return true;
+  }
+
+  handleContextMenu(event: MouseEvent, showContextMenu: () => void): boolean {
+    if (this.pointerId === null && !this.suppressClick) return false;
+    event.preventDefault();
+    this.clearTimer();
+    if (!this.suppressClick) {
+      this.suppressClick = true;
+      showContextMenu();
+    }
+    return true;
+  }
+
+  destroy(): void {
+    this.clearTimer();
+    this.clearClickSuppression();
+    this.releasePointer();
+  }
+
+  private clearTimer(): void {
+    if (this.timer === null) return;
+    this.ownerWindow.clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  private clearClickSuppression(): void {
+    if (this.clickSuppressionTimer !== null) {
+      this.ownerWindow.clearTimeout(this.clickSuppressionTimer);
+      this.clickSuppressionTimer = null;
+    }
+    this.suppressClick = false;
+  }
+
+  private scheduleClickSuppressionCleanup(): void {
+    if (!this.suppressClick) return;
+    if (this.clickSuppressionTimer !== null)
+      this.ownerWindow.clearTimeout(this.clickSuppressionTimer);
+    this.clickSuppressionTimer = this.ownerWindow.setTimeout(() => {
+      this.clickSuppressionTimer = null;
+      this.suppressClick = false;
+    }, 1_000);
+  }
+
+  private releasePointer(): void {
+    const releasedPointerId = this.pointerId;
+    this.pointerId = null;
+    releaseCapturedPointer(this.trigger, releasedPointerId);
+  }
+}
+
+function releaseCapturedPointer(trigger: HTMLElement, pointerId: number | null): void {
+  if (
+    pointerId !== null &&
+    typeof trigger.hasPointerCapture === 'function' &&
+    trigger.hasPointerCapture(pointerId)
+  ) {
+    trigger.releasePointerCapture(pointerId);
+  }
+}
 
 export class ReaderToolbar {
   readonly annotationHost: HTMLElement;
@@ -87,7 +188,6 @@ export class ReaderToolbar {
   private readonly pageInput: HTMLInputElement;
   private readonly pageTotal: HTMLElement;
   private readonly previousButton: HTMLButtonElement;
-  private readonly zoomLevel: HTMLOutputElement;
   private currentLayout: ReaderLayout = DEFAULT_READER_LAYOUT;
   private currentPageIndex = 0;
   private currentProfile: ReadingProfileId = 'default';
@@ -133,6 +233,9 @@ export class ReaderToolbar {
     this.listen(this.pageInput, 'keydown', (event) => {
       this.onPageKeyDown(event);
     });
+    this.listen(this.pageInput, 'blur', () => {
+      this.restorePageField();
+    });
 
     this.pageTotal = navigation.createSpan({
       cls: 'abyss-reader-toolbar-page-total',
@@ -149,16 +252,11 @@ export class ReaderToolbar {
     this.listen(zoomOut, 'click', () => {
       this.onIntent({ type: 'zoom-step', direction: -1 });
     });
-    this.zoomLevel = zoom.createEl('output', {
-      cls: 'abyss-reader-toolbar-zoom-level',
-      attr: { 'aria-label': 'Zoom: Fit width', 'data-control': 'zoom-level' },
-      text: 'Width',
-    });
+    this.createFitControl(zoom);
     const zoomIn = this.iconButton('zoom-in', 'Zoom in', 'plus', zoom);
     this.listen(zoomIn, 'click', () => {
       this.onIntent({ type: 'zoom-step', direction: 1 });
     });
-    this.createFitControl();
 
     this.annotationHost = this.root.createDiv({ cls: 'abyss-reader-toolbar-annotations' });
 
@@ -190,9 +288,6 @@ export class ReaderToolbar {
 
   setScale(scale: ReaderScale): void {
     this.currentScale = scale;
-    const state = scaleLabel(scale);
-    this.zoomLevel.textContent = state.short;
-    this.zoomLevel.setAttribute('aria-label', `Zoom: ${state.long}`);
   }
 
   setLayout(layout: ReaderLayout): void {
@@ -209,24 +304,47 @@ export class ReaderToolbar {
     this.focusFrames.clear();
   }
 
-  private createFitControl(): void {
-    const split = this.root.createDiv({
+  private createFitControl(parent: HTMLElement): void {
+    const split = parent.createDiv({
       cls: ['abyss-reader-split-control', 'abyss-reader-fit-control'],
-      attr: { 'aria-label': 'Fit document', 'data-control-group': 'fit', role: 'group' },
+      attr: {
+        'aria-label': 'Fit width — more fit options',
+        'data-control-group': 'fit',
+        role: 'group',
+      },
     });
-    const fit = this.iconButton('fit', 'Fit width', 'scan-line', split);
+    const fit = this.iconButton('fit', 'Fit width — more fit options', 'scan-line', split);
     fit.addClass('abyss-reader-split-main');
-    this.listen(fit, 'click', () => {
-      this.onIntent({ type: 'set-scale', scale: 'page-width' });
-    });
-    this.listen(fit, 'keydown', (event) => {
-      if (event.key !== 'F10' || !event.shiftKey) return;
-      event.preventDefault();
+    fit.setAttribute('aria-haspopup', 'menu');
+    fit.setAttribute('aria-expanded', 'false');
+    const showFitMenu = (): void => {
       this.showMenuAtButton(fit, (menu) => {
         this.addFitChoices(menu);
       });
+    };
+    const longPress = this.bindLongPressMenuTrigger(fit, showFitMenu);
+    this.listen(fit, 'click', (event) => {
+      if (longPress.consumeClick()) {
+        event.preventDefault();
+        return;
+      }
+      this.onIntent({ type: 'set-scale', scale: 'page-width' });
+    });
+    this.listen(fit, 'keydown', (event) => {
+      const opensFitMenu = event.key === 'ArrowDown' || (event.key === 'F10' && event.shiftKey);
+      if (!opensFitMenu) return;
+      event.preventDefault();
+      showFitMenu();
     });
     this.listen(fit, 'contextmenu', (event) => {
+      if (
+        longPress.handleContextMenu(event, () => {
+          this.showMenuAtEvent(fit, event, (menu) => {
+            this.addFitChoices(menu);
+          });
+        })
+      )
+        return;
       event.preventDefault();
       this.showMenuAtEvent(fit, event, (menu) => {
         this.addFitChoices(menu);
@@ -324,71 +442,141 @@ export class ReaderToolbar {
   }
 
   private addOverflowChoices(menu: Menu): void {
-    if (this.isCompact()) {
-      menu.addItem((item) =>
-        item.setTitle(`Zoom · ${scaleLabel(this.currentScale).long}`).setIsLabel(true),
-      );
-      menu.addItem((item) => {
-        item
-          .setTitle('Zoom out')
-          .setIcon('minus')
-          .onClick(() => {
-            this.onIntent({ type: 'zoom-step', direction: -1 });
-          });
-      });
-      menu.addItem((item) => {
-        item
-          .setTitle('Reset zoom')
-          .setIcon('rotate-ccw')
-          .setChecked(this.currentScale === 1)
-          .onClick(() => {
-            this.onIntent({ type: 'set-scale', scale: 1 });
-          });
-      });
-      menu.addItem((item) => {
-        item
-          .setTitle('Zoom in')
-          .setIcon('plus')
-          .onClick(() => {
-            this.onIntent({ type: 'zoom-step', direction: 1 });
-          });
-      });
-      menu.addItem((item) => item.setTitle('Fit').setIsLabel(true));
-      this.addFitChoices(menu);
-      menu.addSeparator();
-    }
+    if (this.isNarrowNavigation()) this.addCompactNavigationChoices(menu);
+    if (this.isCompact()) this.addCompactZoomChoices(menu);
+    this.addLayoutChoices(menu);
+    menu.addSeparator();
+    this.addAppearanceChoices(menu);
+    menu.addSeparator();
+    this.addExportChoice(menu);
+  }
+
+  private addCompactNavigationChoices(menu: Menu): void {
+    menu.addItem((item) => item.setTitle('Page').setIsLabel(true));
+    menu.addItem((item) => {
+      item
+        .setTitle('Previous page')
+        .setIcon('chevron-left')
+        .setDisabled(this.pageCount === 0 || this.currentPageIndex === 0)
+        .onClick(() => {
+          this.onIntent({ type: 'previous-page' });
+        });
+    });
+    menu.addItem((item) => {
+      item
+        .setTitle('Next page')
+        .setIcon('chevron-right')
+        .setDisabled(this.pageCount === 0 || this.currentPageIndex >= this.pageCount - 1)
+        .onClick(() => {
+          this.onIntent({ type: 'next-page' });
+        });
+    });
+    menu.addSeparator();
+  }
+
+  private addCompactZoomChoices(menu: Menu): void {
+    menu.addItem((item) =>
+      item.setTitle(`Zoom · ${scaleLabel(this.currentScale)}`).setIsLabel(true),
+    );
+    menu.addItem((item) => {
+      item
+        .setTitle('Zoom out')
+        .setIcon('minus')
+        .onClick(() => {
+          this.onIntent({ type: 'zoom-step', direction: -1 });
+        });
+    });
+    menu.addItem((item) => {
+      item
+        .setTitle('Reset zoom')
+        .setIcon('rotate-ccw')
+        .setChecked(this.currentScale === 1)
+        .onClick(() => {
+          this.onIntent({ type: 'set-scale', scale: 1 });
+        });
+    });
+    menu.addItem((item) => {
+      item
+        .setTitle('Zoom in')
+        .setIcon('plus')
+        .onClick(() => {
+          this.onIntent({ type: 'zoom-step', direction: 1 });
+        });
+    });
+    menu.addItem((item) => item.setTitle('Fit').setIsLabel(true));
+    this.addFitChoices(menu);
+    menu.addSeparator();
+  }
+
+  private addLayoutChoices(menu: Menu): void {
     menu.addItem((item) =>
       item.setTitle('Layout').setIsLabel(true).setSection('abyss-documents-layout'),
     );
-    for (const choice of LAYOUT_CHOICES) {
-      menu.addItem((item) => {
-        item
-          .setTitle(choice.label)
-          .setIcon(choice.icon)
-          .setSection('abyss-documents-layout')
-          .setChecked(sameLayout(choice.value, this.currentLayout))
-          .onClick(() => {
-            this.onIntent({ type: 'set-layout', layout: choice.value });
+    menu.addItem((item) => {
+      item
+        .setTitle('Single page')
+        .setSection('abyss-documents-layout')
+        .setChecked(this.currentLayout.pages === 'single')
+        .onClick(() => {
+          this.onIntent({
+            type: 'set-layout',
+            layout: { ...this.currentLayout, pages: 'single' },
           });
-      });
-    }
-    menu.addSeparator();
-    menu.addItem((item) => item.setTitle('Appearance').setIsLabel(true));
+        });
+    });
+    menu.addItem((item) => {
+      item
+        .setTitle('Two pages')
+        .setSection('abyss-documents-layout')
+        .setChecked(this.currentLayout.pages === 'facing')
+        .onClick(() => {
+          this.onIntent({
+            type: 'set-layout',
+            layout: { ...this.currentLayout, pages: 'facing' },
+          });
+        });
+    });
+    menu.addItem((item) => {
+      item
+        .setTitle('Continuous scrolling')
+        .setSection('abyss-documents-layout')
+        .setChecked(this.currentLayout.scrolling === 'continuous')
+        .onClick(() => {
+          this.onIntent({
+            type: 'set-layout',
+            layout: {
+              ...this.currentLayout,
+              scrolling:
+                this.currentLayout.scrolling === 'continuous' ? 'page-by-page' : 'continuous',
+            },
+          });
+        });
+    });
+  }
+
+  private addAppearanceChoices(menu: Menu): void {
+    menu.addItem((item) =>
+      item.setTitle('Appearance').setIsLabel(true).setSection('abyss-documents-appearance'),
+    );
     for (const choice of PROFILE_CHOICES) {
       menu.addItem((item) => {
         item
           .setTitle(choice.label)
+          .setSection('abyss-documents-appearance')
           .setChecked(choice.id === this.currentProfile)
           .onClick(() => {
             this.onIntent({ type: 'set-profile', profile: choice.id });
           });
       });
     }
-    menu.addSeparator();
+  }
+
+  private addExportChoice(menu: Menu): void {
     menu.addItem((item) => {
       item
         .setTitle('Export annotations…')
         .setIcon('download')
+        .setSection('abyss-documents-actions')
         .onClick(() => {
           this.onIntent({ type: 'export-annotations' });
         });
@@ -417,13 +605,10 @@ export class ReaderToolbar {
     const menu = new Menu();
     menu.setUseNativeMenu(false);
     this.menus.add(menu);
-    this.root.doc.body.addClass('abyss-documents-menu-open');
     trigger.setAttribute('aria-expanded', 'true');
     menu.onHide(() => {
       this.menus.delete(menu);
       trigger.setAttribute('aria-expanded', 'false');
-      if (this.root.doc.querySelector('.abyss-reader-toolbar [aria-expanded="true"]') === null)
-        this.root.doc.body.removeClass('abyss-documents-menu-open');
       this.restoreMenuTriggerFocus(trigger);
     });
     return menu;
@@ -464,22 +649,38 @@ export class ReaderToolbar {
     });
   }
 
+  private bindLongPressMenuTrigger(
+    trigger: HTMLButtonElement,
+    show: () => void,
+  ): LongPressMenuGesture {
+    const gesture = new LongPressMenuGesture(trigger, this.root.win, show);
+    this.listen(trigger, 'pointerdown', gesture.onPointerDown);
+    this.listen(trigger, 'pointermove', gesture.onPointerMove);
+    this.listen(trigger, 'pointerup', gesture.onPointerUp);
+    this.listen(trigger, 'pointercancel', gesture.onPointerCancel);
+    this.listen(trigger, 'lostpointercapture', gesture.onPointerCancel);
+    this.cleanups.push(() => {
+      gesture.destroy();
+    });
+    return gesture;
+  }
+
   private isCompact(): boolean {
     const width = this.root.getBoundingClientRect().width;
     return width > 0 && width <= COMPACT_TOOLBAR_WIDTH;
   }
-}
 
-function scaleLabel(scale: ReaderScale): { readonly long: string; readonly short: string } {
-  if (typeof scale === 'number') {
-    const percentage = `${Math.round(scale * 100)}%`;
-    return { long: percentage, short: percentage };
+  private isNarrowNavigation(): boolean {
+    const width = this.root.getBoundingClientRect().width;
+    return width > 0 && width <= NARROW_NAVIGATION_WIDTH;
   }
-  if (scale === 'page-fit') return { long: 'Fit page', short: 'Page' };
-  if (scale === 'page-height') return { long: 'Fit height', short: 'Height' };
-  return { long: 'Fit width', short: 'Width' };
 }
 
-function sameLayout(left: ReaderLayout, right: ReaderLayout): boolean {
-  return left.pages === right.pages && left.scrolling === right.scrolling;
+function scaleLabel(scale: ReaderScale): string {
+  if (typeof scale === 'number') {
+    return `${Math.round(scale * 100)}%`;
+  }
+  if (scale === 'page-fit') return 'Fit page';
+  if (scale === 'page-height') return 'Fit height';
+  return 'Fit width';
 }

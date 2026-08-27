@@ -147,6 +147,20 @@ describe('ReaderToolbar', () => {
     expect(pageInput.value).toBe('20');
   });
 
+  it('restores the current page when an invalid edit loses focus', () => {
+    const { host, onIntent, toolbar } = fixture();
+    toolbar.setPageCount(12);
+    toolbar.setCurrentPage(4);
+    const pageInput = host.querySelector<HTMLInputElement>('[data-control="page-field"]');
+    if (pageInput === null) throw new Error('Expected the page field.');
+
+    pageInput.value = 'not a page';
+    pageInput.dispatchEvent(new FocusEvent('blur'));
+
+    expect(onIntent).not.toHaveBeenCalled();
+    expect(pageInput.value).toBe('5');
+  });
+
   it('emits the Task 7 sidebar placeholder intent without creating a sidebar', () => {
     const { host, intents } = fixture();
     const sidebar = host.querySelector<HTMLButtonElement>('[data-control="sidebar"]');
@@ -180,7 +194,7 @@ describe('ReaderToolbar', () => {
         'Previous page',
         'Next page',
         'Zoom out',
-        'Fit width',
+        'Fit width — more fit options',
         'Zoom in',
         'More options',
       ]),
@@ -189,12 +203,32 @@ describe('ReaderToolbar', () => {
     expect(host.querySelector('[data-control="selection"]')).toBeNull();
     expect(host.querySelector('[data-control="layout"]')).toBeNull();
     expect(host.querySelector('[data-control="profile"]')).toBeNull();
-    expect(host.querySelector('[data-control="zoom-level"]')?.textContent).toBe('Width');
+    expect(host.querySelector('[data-control="zoom-level"]')).toBeNull();
     expect(host.querySelector('[data-control="overflow"]')).not.toBeNull();
     expect(host.querySelector('[data-control="sidebar"]')?.getAttribute('aria-pressed')).toBe(
       'false',
     );
     expect(host.querySelector('[data-control="page-total"]')?.textContent).toBe('/ 702');
+  });
+
+  it('orders zoom as minus Fit plus without a visible scale label', () => {
+    const { host } = fixture();
+    const controls = Array.from(host.querySelectorAll<HTMLElement>('[data-control]')).map(
+      ({ dataset }) => dataset['control'],
+    );
+
+    expect(controls).toEqual([
+      'sidebar',
+      'previous-page',
+      'page-field',
+      'page-total',
+      'next-page',
+      'zoom-out',
+      'fit',
+      'fit-menu',
+      'zoom-in',
+      'overflow',
+    ]);
   });
 
   it('renders Fit as one accessible split control', () => {
@@ -204,8 +238,10 @@ describe('ReaderToolbar', () => {
     const menu = split?.querySelector('[data-control="fit-menu"]');
 
     expect(split?.getAttribute('role')).toBe('group');
-    expect(split?.getAttribute('aria-label')).toBe('Fit document');
-    expect(main?.getAttribute('aria-label')).toBe('Fit width');
+    expect(split?.getAttribute('aria-label')).toBe('Fit width — more fit options');
+    expect(main?.getAttribute('aria-label')).toBe('Fit width — more fit options');
+    expect(main?.getAttribute('aria-haspopup')).toBe('menu');
+    expect(main?.getAttribute('aria-expanded')).toBe('false');
     expect(menu?.getAttribute('aria-haspopup')).toBe('menu');
     expect(menu?.getAttribute('aria-expanded')).toBe('false');
   });
@@ -225,12 +261,13 @@ describe('ReaderToolbar', () => {
     const OwnerMouseEvent = (fit.win as Window & { MouseEvent: typeof MouseEvent }).MouseEvent;
 
     expect(controls.indexOf(minus)).toBeLessThan(controls.indexOf(fit));
-    expect(controls.indexOf(plus)).toBeLessThan(controls.indexOf(fit));
-    expect(fit.getAttribute('aria-haspopup')).toBeNull();
+    expect(controls.indexOf(fit)).toBeLessThan(controls.indexOf(plus));
+    expect(fit.getAttribute('aria-haspopup')).toBe('menu');
     expect(fitMenu.getAttribute('aria-haspopup')).toBe('menu');
     minus.click();
     fit.click();
     plus.click();
+    fit.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
     fit.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'F10', shiftKey: true }));
     fit.dispatchEvent(new OwnerMouseEvent('contextmenu', { bubbles: true, cancelable: true }));
     fitMenu.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
@@ -254,11 +291,124 @@ describe('ReaderToolbar', () => {
       'Fit width',
       'Fit page',
       'Fit height',
+      'Fit width',
+      'Fit page',
+      'Fit height',
     ]);
     expect(entries.every((entry) => entry.checked !== null)).toBe(true);
   });
 
-  it('implements the Layout icon matrix keyboard model', () => {
+  it('opens Fit on a cancellable long press without firing its primary action', () => {
+    vi.useFakeTimers();
+    try {
+      const entries = captureMenuItems();
+      const { host, intents, toolbar } = fixture();
+      const fit = host.querySelector<HTMLButtonElement>('[data-control="fit"]');
+      if (fit === null) throw new Error('Expected Fit.');
+      const capturedPointers = new Set<number>();
+      Object.assign(fit, {
+        hasPointerCapture: (pointerId: number) => capturedPointers.has(pointerId),
+        releasePointerCapture: (pointerId: number) => capturedPointers.delete(pointerId),
+        setPointerCapture: (pointerId: number) => capturedPointers.add(pointerId),
+      });
+      const OwnerPointerEvent = (fit.win as Window & { PointerEvent: typeof PointerEvent })
+        .PointerEvent;
+      const OwnerMouseEvent = (fit.win as Window & { MouseEvent: typeof MouseEvent }).MouseEvent;
+      const pointer = (type: string, x: number) =>
+        new OwnerPointerEvent(type, {
+          bubbles: true,
+          button: 0,
+          clientX: x,
+          clientY: 10,
+          isPrimary: true,
+          pointerId: 7,
+          pointerType: 'touch',
+        });
+
+      fit.dispatchEvent(pointer('pointerdown', 10));
+      fit.dispatchEvent(pointer('pointermove', 30));
+      vi.advanceTimersByTime(600);
+      expect(entries).toHaveLength(0);
+
+      fit.dispatchEvent(pointer('pointerdown', 10));
+      vi.advanceTimersByTime(1_600);
+      expect(entries.map(({ title }) => title)).toEqual(['Fit width', 'Fit page', 'Fit height']);
+      fit.dispatchEvent(pointer('pointerup', 10));
+      fit.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
+      expect(intents).toEqual([]);
+
+      fit.dispatchEvent(pointer('pointerdown', 10));
+      vi.advanceTimersByTime(500);
+      fit.dispatchEvent(pointer('pointerup', 10));
+      vi.advanceTimersByTime(1_001);
+      fit.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
+      expect(intents).toEqual([{ type: 'set-scale', scale: 'page-width' }]);
+
+      fit.dispatchEvent(pointer('pointerdown', 10));
+      fit.dispatchEvent(pointer('pointercancel', 10));
+      vi.advanceTimersByTime(600);
+      expect(entries).toHaveLength(6);
+
+      fit.dispatchEvent(pointer('pointerdown', 10));
+      toolbar.destroy();
+      vi.advanceTimersByTime(600);
+      expect(entries).toHaveLength(6);
+      expect(capturedPointers.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces touch contextmenu before and after the Fit long-press threshold', () => {
+    vi.useFakeTimers();
+    try {
+      const entries = captureMenuItems();
+      const { host, intents, toolbar } = fixture();
+      const fit = host.querySelector<HTMLButtonElement>('[data-control="fit"]');
+      if (fit === null) throw new Error('Expected Fit.');
+      const OwnerPointerEvent = (fit.win as Window & { PointerEvent: typeof PointerEvent })
+        .PointerEvent;
+      const OwnerMouseEvent = (fit.win as Window & { MouseEvent: typeof MouseEvent }).MouseEvent;
+      const pointer = (type: string, pointerId: number) =>
+        new OwnerPointerEvent(type, {
+          bubbles: true,
+          button: 0,
+          clientX: 10,
+          clientY: 10,
+          isPrimary: true,
+          pointerId,
+          pointerType: 'touch',
+        });
+      const contextmenu = () =>
+        new OwnerMouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      const click = () => new OwnerMouseEvent('click', { bubbles: true, detail: 1 });
+
+      fit.dispatchEvent(pointer('pointerdown', 21));
+      vi.advanceTimersByTime(200);
+      fit.dispatchEvent(contextmenu());
+      expect(entries).toHaveLength(3);
+      vi.advanceTimersByTime(600);
+      expect(entries).toHaveLength(3);
+      fit.dispatchEvent(pointer('pointerup', 21));
+      fit.dispatchEvent(click());
+      expect(intents).toEqual([]);
+
+      fit.dispatchEvent(pointer('pointerdown', 22));
+      vi.advanceTimersByTime(500);
+      expect(entries).toHaveLength(6);
+      fit.dispatchEvent(contextmenu());
+      expect(entries).toHaveLength(6);
+      fit.dispatchEvent(pointer('pointerup', 22));
+      fit.dispatchEvent(click());
+      expect(intents).toEqual([]);
+
+      toolbar.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('offers independent page-count and continuous-scrolling layout choices', () => {
     const entries = captureMenuItems();
     const { host, intents, toolbar } = fixture();
     const layout: ReaderLayout = { pages: 'facing', scrolling: 'page-by-page' };
@@ -268,24 +418,71 @@ describe('ReaderToolbar', () => {
 
     button.click();
 
-    const layouts = entries.filter((entry) => entry.title.includes('·'));
+    const layouts = entries.filter(
+      (entry) => entry.section === 'abyss-documents-layout' && !entry.disabled,
+    );
     expect(layouts.map((entry) => entry.title)).toEqual([
-      'Single page · Continuous',
-      'Single page · Paged',
-      'Two pages · Continuous',
-      'Two pages · Paged',
+      'Single page',
+      'Two pages',
+      'Continuous scrolling',
     ]);
-    expect(layouts.every((entry) => entry.icon !== null)).toBe(true);
+    expect(layouts.every((entry) => entry.icon === null)).toBe(true);
     expect(layouts.every((entry) => entry.section === 'abyss-documents-layout')).toBe(true);
     expect(entries.find((entry) => entry.title === 'Layout')?.section).toBe(
       'abyss-documents-layout',
     );
-    expect(layouts.find((entry) => entry.title === 'Two pages · Paged')?.checked).toBe(true);
-    layouts.find((entry) => entry.title === 'Single page · Continuous')?.click();
-    expect(intents).toContainEqual({
-      type: 'set-layout',
-      layout: { pages: 'single', scrolling: 'continuous' },
-    });
+    expect(layouts.map(({ checked }) => checked)).toEqual([false, true, false]);
+
+    layouts.find((entry) => entry.title === 'Single page')?.click();
+    layouts.find((entry) => entry.title === 'Two pages')?.click();
+    layouts.find((entry) => entry.title === 'Continuous scrolling')?.click();
+    expect(intents).toEqual([
+      {
+        type: 'set-layout',
+        layout: { pages: 'single', scrolling: 'page-by-page' },
+      },
+      {
+        type: 'set-layout',
+        layout: { pages: 'facing', scrolling: 'page-by-page' },
+      },
+      {
+        type: 'set-layout',
+        layout: { pages: 'facing', scrolling: 'continuous' },
+      },
+    ]);
+  });
+
+  it('defaults Layout to Single page with Continuous scrolling', () => {
+    const entries = captureMenuItems();
+    const { host } = fixture();
+
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+
+    expect(
+      entries
+        .filter((entry) => entry.section === 'abyss-documents-layout' && !entry.disabled)
+        .map(({ checked, title }) => ({ checked, title })),
+    ).toEqual([
+      { checked: true, title: 'Single page' },
+      { checked: false, title: 'Two pages' },
+      { checked: true, title: 'Continuous scrolling' },
+    ]);
+  });
+
+  it('preserves scrolling when choosing a page count', () => {
+    const entries = captureMenuItems();
+    const { host, intents, toolbar } = fixture();
+    toolbar.setLayout({ pages: 'facing', scrolling: 'continuous' });
+
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+    entries.find(({ title }) => title === 'Single page')?.click();
+
+    expect(intents).toEqual([
+      {
+        type: 'set-layout',
+        layout: { pages: 'single', scrolling: 'continuous' },
+      },
+    ]);
   });
 
   it('emits navigation intents and disables unavailable page steps', () => {
@@ -317,6 +514,24 @@ describe('ReaderToolbar', () => {
     expect(entries.map((entry) => entry.title)).toContain('Export annotations…');
     expect(entries.map((entry) => entry.title)).toContain('Follow Obsidian');
     expect(entries.map((entry) => entry.title)).not.toContain('Auto');
+    expect(entries.find(({ title }) => title === 'Appearance')?.section).toBe(
+      'abyss-documents-appearance',
+    );
+    expect(
+      entries
+        .filter(({ title }) =>
+          ['Default', 'Follow Obsidian', 'Light', 'Sepia', 'Dark', 'Custom'].includes(title),
+        )
+        .map(({ section, title }) => ({ section, title })),
+    ).toEqual(
+      ['Default', 'Follow Obsidian', 'Light', 'Sepia', 'Dark', 'Custom'].map((title) => ({
+        section: 'abyss-documents-appearance',
+        title,
+      })),
+    );
+    expect(entries.find(({ title }) => title === 'Export annotations…')?.section).toBe(
+      'abyss-documents-actions',
+    );
     entries.find((entry) => entry.title === 'Dark')?.click();
     expect(entries.find((entry) => entry.title === 'Default')?.checked).toBe(true);
     expect(entries.find((entry) => entry.title === 'Follow Obsidian')?.checked).toBe(false);
@@ -358,6 +573,20 @@ describe('ReaderToolbar', () => {
       { type: 'zoom-step', direction: 1 },
       { type: 'set-scale', scale: 'page-height' },
     ]);
+  });
+
+  it('moves hidden previous and next page actions into More at phone width', () => {
+    const entries = captureMenuItems();
+    const { host, intents, toolbar } = fixture();
+    setToolbarWidth(host, 390);
+    toolbar.setPageCount(3);
+    toolbar.setCurrentPage(1);
+
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+    entries.find(({ title }) => title === 'Previous page')?.click();
+    entries.find(({ title }) => title === 'Next page')?.click();
+
+    expect(intents).toEqual([{ type: 'previous-page' }, { type: 'next-page' }]);
   });
 
   it('does not duplicate zoom and Fit actions in More for a wide reader leaf', () => {
@@ -461,13 +690,13 @@ describe('ReaderToolbar', () => {
     host.remove();
   });
 
-  it('contains visual menu styling to the owner document while a reader menu is open', () => {
+  it('leaves native menu layout untouched while a reader menu is open', () => {
     const menu = captureMenuHide();
     const { host, toolbar } = fixture();
     document.body.append(host);
 
     host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
-    expect(host.doc.body.classList.contains('abyss-documents-menu-open')).toBe(true);
+    expect(host.doc.body.classList.contains('abyss-documents-menu-open')).toBe(false);
     menu.hide();
     expect(host.doc.body.classList.contains('abyss-documents-menu-open')).toBe(false);
 

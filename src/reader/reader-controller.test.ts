@@ -1185,7 +1185,7 @@ describe('ReaderController', () => {
       ?.click();
     shell.send({ type: 'undo-annotation' });
     shell.send({ type: 'redo-annotation' });
-    shell.send({ type: 'delete-annotation' });
+    shell.send({ type: 'delete-annotation' } as never);
 
     await vi.waitFor(() => {
       expect(createdViewport.setTool).toHaveBeenCalled();
@@ -1194,7 +1194,7 @@ describe('ReaderController', () => {
     expect(createdViewport.setParameter).toHaveBeenCalledWith('highlight-color', '#ffd400');
     expect(createdViewport.undo).toHaveBeenCalledOnce();
     expect(createdViewport.redo).toHaveBeenCalledOnce();
-    expect(createdViewport.deleteSelection).toHaveBeenCalledOnce();
+    expect(createdViewport.deleteSelection).not.toHaveBeenCalled();
   });
 
   it('refreshes the annotation palette and meanings in an already open reader', async () => {
@@ -1310,9 +1310,6 @@ describe('ReaderController', () => {
     createdViewport.undo.mockImplementationOnce(() => {
       throw new Error('undo failed');
     });
-    createdViewport.deleteSelection.mockImplementationOnce(() => {
-      throw new Error('delete failed');
-    });
     shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
     await vi.waitFor(() => {
       expect(log).toHaveBeenCalledTimes(1);
@@ -1323,11 +1320,10 @@ describe('ReaderController', () => {
     });
     shell.send({ type: 'set-annotation-color', color: '#333333' });
     shell.send({ type: 'undo-annotation' });
-    shell.send({ type: 'delete-annotation' });
     await vi.waitFor(() => {
-      expect(log).toHaveBeenCalledTimes(5);
+      expect(log).toHaveBeenCalledTimes(4);
     });
-    expect(notices).toHaveBeenCalledTimes(4);
+    expect(notices).toHaveBeenCalledTimes(3);
   });
 
   it('commits tool UI only after native mode success and reapplies the selected palette color', async () => {
@@ -1987,7 +1983,10 @@ describe('ReaderController', () => {
 
     expect(createdSession.createViewport).toHaveBeenCalledOnce();
     shell.created.root.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
-    expect(menuChoices.find((choice) => choice.title === 'Two pages · Paged')?.checked).toBe(true);
+    expect(menuChoices.find((choice) => choice.title === 'Two pages')?.checked).toBe(true);
+    expect(menuChoices.find((choice) => choice.title === 'Continuous scrolling')?.checked).toBe(
+      false,
+    );
   });
 
   it('applies the global layout and remembers later choices by fingerprint when enabled', async () => {

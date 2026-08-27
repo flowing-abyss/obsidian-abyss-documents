@@ -41,56 +41,119 @@ async function openPdf(): Promise<void> {
   await $('[data-control="quick-highlight-menu"]').waitForExist({ timeout: 15_000 });
 }
 
-async function touchMenu(control: string): Promise<void> {
-  await $(`[data-control="${control}"]`).waitForExist({ timeout: 15_000 });
-  const openings = await browser.execute(async (targetControl) => {
-    const target = document.querySelector<HTMLElement>(`[data-control="${targetControl}"]`);
-    if (target === null) throw new Error(`Touch menu trigger unavailable: ${targetControl}`);
+async function targetCenter(selector: string): Promise<{ x: number; y: number }> {
+  return browser.execute((targetSelector) => {
+    const target = document.querySelector<HTMLElement>(targetSelector);
+    if (target === null) throw new Error(`Pointer target unavailable: ${targetSelector}`);
     const bounds = target.getBoundingClientRect();
-    let menuAdditions = 0;
-    const observer = new MutationObserver((records) => {
-      for (const record of records) {
-        for (const added of Array.from(record.addedNodes)) {
-          if (!added.instanceOf(Element)) continue;
-          if (added.matches('.menu')) menuAdditions += 1;
-          menuAdditions += added.querySelectorAll('.menu').length;
-        }
-      }
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-    const eventData = {
-      bubbles: true,
-      cancelable: true,
-      clientX: bounds.left + bounds.width / 2,
-      clientY: bounds.top + bounds.height / 2,
+    return {
+      x: Math.round(bounds.left + bounds.width / 2),
+      y: Math.round(bounds.top + bounds.height / 2),
     };
-    target.dispatchEvent(
-      new PointerEvent('pointerdown', {
-        ...eventData,
-        isPrimary: true,
-        pointerId: 41,
-        pointerType: 'touch',
+  }, selector);
+}
+
+async function startMenuMutationMonitor(): Promise<void> {
+  await browser.execute(() => {
+    const taskWindow = window as Window & {
+      __abyssTask6MenuMonitor?: { additions: number; observer: MutationObserver };
+    };
+    taskWindow.__abyssTask6MenuMonitor?.observer.disconnect();
+    const monitor = {
+      additions: 0,
+      observer: new MutationObserver((records) => {
+        for (const record of records) {
+          for (const added of Array.from(record.addedNodes)) {
+            if (!added.instanceOf(Element)) continue;
+            if (added.matches('.menu')) monitor.additions += 1;
+            monitor.additions += added.querySelectorAll('.menu').length;
+          }
+        }
       }),
-    );
-    target.dispatchEvent(
-      new PointerEvent('pointerup', {
-        ...eventData,
-        isPrimary: true,
-        pointerId: 41,
-        pointerType: 'touch',
-      }),
-    );
-    target.dispatchEvent(new MouseEvent('click', { ...eventData, button: 0, detail: 1 }));
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => {
-        resolve();
-      });
-    });
-    observer.disconnect();
-    return menuAdditions;
-  }, control);
+    };
+    monitor.observer.observe(document.body, { childList: true, subtree: true });
+    taskWindow.__abyssTask6MenuMonitor = monitor;
+  });
+}
+
+async function stopMenuMutationMonitor(): Promise<number> {
+  return browser.execute(() => {
+    const taskWindow = window as Window & {
+      __abyssTask6MenuMonitor?: { additions: number; observer: MutationObserver };
+    };
+    const monitor = taskWindow.__abyssTask6MenuMonitor;
+    if (monitor === undefined) return 0;
+    monitor.observer.disconnect();
+    delete taskWindow.__abyssTask6MenuMonitor;
+    return monitor.additions;
+  });
+}
+
+async function countMenusOpenedBy(action: () => Promise<void>): Promise<number> {
+  await startMenuMutationMonitor();
+  let monitorStopped = false;
+  try {
+    await action();
+    await browser.pause(50);
+    const additions = await stopMenuMutationMonitor();
+    monitorStopped = true;
+    return additions;
+  } finally {
+    await browser.releaseActions();
+    if (!monitorStopped) await stopMenuMutationMonitor();
+  }
+}
+
+async function touchMenu(control: string): Promise<void> {
+  const selector = `[data-control="${control}"]`;
+  await $(selector).waitForExist({ timeout: 15_000 });
+  const point = await targetCenter(selector);
+  const openings = await countMenusOpenedBy(async () => {
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: `task-6-${control}-touch`,
+        parameters: { pointerType: 'touch' },
+        actions: [
+          { type: 'pointerMove', duration: 0, origin: 'viewport', ...point },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pointerUp', button: 0 },
+        ],
+      },
+    ]);
+  });
   expect(openings).toBe(1);
   await $('.menu').waitForDisplayed({ timeout: 3_000 });
+}
+
+async function longPressQuick(moveBy = 0): Promise<number> {
+  const point = await targetCenter('[data-annotation-tool="highlight"]');
+  return countMenusOpenedBy(async () => {
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'task-6-quick-long-press-touch',
+        parameters: { pointerType: 'touch' },
+        actions: [
+          { type: 'pointerMove', duration: 0, origin: 'viewport', ...point },
+          { type: 'pointerDown', button: 0 },
+          ...(moveBy === 0
+            ? []
+            : [
+                {
+                  type: 'pointerMove' as const,
+                  duration: 0,
+                  origin: 'viewport',
+                  x: point.x + moveBy,
+                  y: point.y,
+                },
+              ]),
+          { type: 'pause', duration: 550 },
+          { type: 'pointerUp', button: 0 },
+        ],
+      },
+    ]);
+  });
 }
 
 describe('reader toolbar under a 390px coarse pointer', () => {
@@ -156,8 +219,22 @@ describe('reader toolbar under a 390px coarse pointer', () => {
     await expect($('.menu')).not.toBeDisplayed();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
 
+    expect(await longPressQuick(20)).toBe(0);
+    await expect($('.menu')).not.toBeDisplayed();
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
+    await $('[data-annotation-tool="highlight"]').click();
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
+
+    expect(await longPressQuick()).toBe(1);
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
+    await browser.keys(['Escape']);
+    await expect($('.menu')).not.toBeDisplayed();
+
     await touchMenu('overflow');
     await expect($('.menu')).toHaveText(expect.stringContaining('Fit page'));
+    await expect($('.menu')).toHaveText(expect.stringContaining('Previous page'));
+    await expect($('.menu')).toHaveText(expect.stringContaining('Next page'));
     await browser.keys(['Escape']);
     await expect($('.menu')).not.toBeDisplayed();
   });

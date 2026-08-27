@@ -1331,9 +1331,6 @@ export class ReaderController {
       case 'redo-annotation':
         this.containAnnotationAction(this.runAnnotationHistory('redo'));
         return;
-      case 'delete-annotation':
-        this.containAnnotationAction(this.deleteSelectedAnnotation());
-        return;
     }
   }
 
@@ -1487,17 +1484,6 @@ export class ReaderController {
       if (annotationEditorOf(this.viewport) === editor) this.lastAnnotationFailureKey = null;
     } catch (cause) {
       this.reportAnnotationFailure(`${action} PDF annotation`, cause, { action });
-    }
-  }
-
-  private async deleteSelectedAnnotation(): Promise<void> {
-    const editor = annotationEditorOf(this.viewport);
-    if (editor === null) return;
-    try {
-      await editor.deleteSelection();
-      if (annotationEditorOf(this.viewport) === editor) this.lastAnnotationFailureKey = null;
-    } catch (cause) {
-      this.reportAnnotationFailure('delete selected annotation', cause, {});
     }
   }
 
@@ -2304,7 +2290,6 @@ function isAnnotationToolbarIntent(intent: ReaderShellIntent): intent is Annotat
     intent.type === 'set-annotation-tool' ||
     intent.type === 'set-annotation-color' ||
     intent.type === 'undo-annotation' ||
-    intent.type === 'redo-annotation' ||
-    intent.type === 'delete-annotation'
+    intent.type === 'redo-annotation'
   );
 }

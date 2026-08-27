@@ -44,6 +44,12 @@ describe('AnnotationToolbar', () => {
     expect(
       host.querySelector('[data-annotation-tool="freetext"]')?.getAttribute('aria-label'),
     ).toBe('Text');
+    expect(
+      host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-haspopup'),
+    ).toBe('menu');
+    expect(
+      host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-expanded'),
+    ).toBe('false');
     host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')?.click();
     expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-tool', tool: 'highlight' });
     toolbar.setTool('highlight');
@@ -150,6 +156,152 @@ describe('AnnotationToolbar', () => {
 
     toolbar.destroy();
     host.remove();
+  });
+
+  it('opens the Quick Highlight palette from the primary control by keyboard and context menu', () => {
+    const addItem = vi.spyOn(Menu.prototype, 'addItem');
+    const host = document.body.createDiv();
+    const onIntent = vi.fn();
+    const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
+    const primary = host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]');
+    if (primary === null) throw new Error('Expected Quick Highlight.');
+
+    const open = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'ArrowDown',
+    });
+    primary.dispatchEvent(open);
+    expect(open.defaultPrevented).toBe(true);
+    expect(addItem).toHaveBeenCalledTimes(palette.length);
+    expect(primary.getAttribute('aria-expanded')).toBe('true');
+
+    const context = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    primary.dispatchEvent(context);
+    expect(context.defaultPrevented).toBe(true);
+    expect(addItem).toHaveBeenCalledTimes(palette.length * 2);
+    expect(onIntent).not.toHaveBeenCalled();
+
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('opens Quick Highlight on a cancellable long press without toggling the tool', () => {
+    vi.useFakeTimers();
+    try {
+      const addItem = vi.spyOn(Menu.prototype, 'addItem');
+      const host = document.body.createDiv();
+      const onIntent = vi.fn();
+      const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
+      const primary = host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]');
+      if (primary === null) throw new Error('Expected Quick Highlight.');
+      const capturedPointers = new Set<number>();
+      Object.assign(primary, {
+        hasPointerCapture: (pointerId: number) => capturedPointers.has(pointerId),
+        releasePointerCapture: (pointerId: number) => capturedPointers.delete(pointerId),
+        setPointerCapture: (pointerId: number) => capturedPointers.add(pointerId),
+      });
+      const OwnerPointerEvent = (primary.win as Window & { PointerEvent: typeof PointerEvent })
+        .PointerEvent;
+      const OwnerMouseEvent = (primary.win as Window & { MouseEvent: typeof MouseEvent })
+        .MouseEvent;
+      const pointer = (type: string, y: number) =>
+        new OwnerPointerEvent(type, {
+          bubbles: true,
+          button: 0,
+          clientX: 10,
+          clientY: y,
+          isPrimary: true,
+          pointerId: 11,
+          pointerType: 'touch',
+        });
+
+      primary.dispatchEvent(pointer('pointerdown', 10));
+      primary.dispatchEvent(pointer('pointermove', 30));
+      vi.advanceTimersByTime(600);
+      expect(addItem).not.toHaveBeenCalled();
+
+      primary.dispatchEvent(pointer('pointerdown', 10));
+      vi.advanceTimersByTime(1_600);
+      expect(addItem).toHaveBeenCalledTimes(palette.length);
+      primary.dispatchEvent(pointer('pointerup', 10));
+      primary.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
+      expect(onIntent).not.toHaveBeenCalled();
+
+      primary.dispatchEvent(pointer('pointerdown', 10));
+      vi.advanceTimersByTime(500);
+      primary.dispatchEvent(pointer('pointerup', 10));
+      vi.advanceTimersByTime(1_001);
+      primary.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
+      expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-tool', tool: 'highlight' });
+
+      primary.dispatchEvent(pointer('pointerdown', 10));
+      primary.dispatchEvent(pointer('pointercancel', 10));
+      vi.advanceTimersByTime(600);
+      expect(addItem).toHaveBeenCalledTimes(palette.length * 2);
+
+      primary.dispatchEvent(pointer('pointerdown', 10));
+      toolbar.destroy();
+      vi.advanceTimersByTime(600);
+      expect(addItem).toHaveBeenCalledTimes(palette.length * 2);
+      expect(capturedPointers.size).toBe(0);
+      host.remove();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('coalesces touch contextmenu before and after the Quick Highlight long-press threshold', () => {
+    vi.useFakeTimers();
+    try {
+      const addItem = vi.spyOn(Menu.prototype, 'addItem');
+      const host = document.body.createDiv();
+      const onIntent = vi.fn();
+      const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
+      const primary = host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]');
+      if (primary === null) throw new Error('Expected Quick Highlight.');
+      const OwnerPointerEvent = (primary.win as Window & { PointerEvent: typeof PointerEvent })
+        .PointerEvent;
+      const OwnerMouseEvent = (primary.win as Window & { MouseEvent: typeof MouseEvent })
+        .MouseEvent;
+      const pointer = (type: string, pointerId: number) =>
+        new OwnerPointerEvent(type, {
+          bubbles: true,
+          button: 0,
+          clientX: 10,
+          clientY: 10,
+          isPrimary: true,
+          pointerId,
+          pointerType: 'touch',
+        });
+      const contextmenu = () =>
+        new OwnerMouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      const click = () => new OwnerMouseEvent('click', { bubbles: true, detail: 1 });
+
+      primary.dispatchEvent(pointer('pointerdown', 31));
+      vi.advanceTimersByTime(200);
+      primary.dispatchEvent(contextmenu());
+      expect(addItem).toHaveBeenCalledTimes(palette.length);
+      vi.advanceTimersByTime(600);
+      expect(addItem).toHaveBeenCalledTimes(palette.length);
+      primary.dispatchEvent(pointer('pointerup', 31));
+      primary.dispatchEvent(click());
+      expect(onIntent).not.toHaveBeenCalled();
+
+      primary.dispatchEvent(pointer('pointerdown', 32));
+      vi.advanceTimersByTime(500);
+      expect(addItem).toHaveBeenCalledTimes(palette.length * 2);
+      primary.dispatchEvent(contextmenu());
+      expect(addItem).toHaveBeenCalledTimes(palette.length * 2);
+      primary.dispatchEvent(pointer('pointerup', 32));
+      primary.dispatchEvent(click());
+      expect(onIntent).not.toHaveBeenCalled();
+
+      toolbar.destroy();
+      host.remove();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('toggles active Quick Highlight and Ink tools back to Select', () => {

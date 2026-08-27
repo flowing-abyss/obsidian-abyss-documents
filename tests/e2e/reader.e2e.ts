@@ -873,17 +873,17 @@ describe('PDF reader foundation', () => {
     expect(metrics).toMatchObject({ counters: { maxAnnotationCards: 48 } });
   });
 
-  it('starts in Default, Single + Continuous and exposes all four layout combinations', async () => {
+  it('starts in Default, Single + Continuous and composes all four layout combinations', async () => {
     await openPdf('Documents/text-12-pages.pdf');
     await waitForFirstPage();
 
     await expect($('[data-abyss-document]')).toHaveAttribute('data-reading-profile', 'default');
 
     for (const [choice, pages, scrolling] of [
-      ['Two pages · Continuous', 'facing', 'continuous'],
-      ['Two pages · Paged', 'facing', 'page-by-page'],
-      ['Single page · Paged', 'single', 'page-by-page'],
-      ['Single page · Continuous', 'single', 'continuous'],
+      ['Two pages', 'facing', 'continuous'],
+      ['Continuous scrolling', 'facing', 'page-by-page'],
+      ['Single page', 'single', 'page-by-page'],
+      ['Continuous scrolling', 'single', 'continuous'],
     ] as const) {
       await chooseMoreOption(choice);
       expect(

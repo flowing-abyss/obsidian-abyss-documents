@@ -4,13 +4,13 @@ import type { AnnotationPaletteEntry } from '../settings.js';
 import { createIconButton, updateIconButtonLabel } from './icon-button.js';
 import { shouldRestoreMenuTriggerFocus } from './menu-focus.js';
 import { ownerWindow } from './owner-dom.js';
+import { LongPressMenuGesture } from './toolbar.js';
 
 export type AnnotationToolbarIntent =
   | { readonly type: 'set-annotation-tool'; readonly tool: PdfAnnotationTool }
   | { readonly type: 'set-annotation-color'; readonly color: string }
   | { readonly type: 'undo-annotation' }
-  | { readonly type: 'redo-annotation' }
-  | { readonly type: 'delete-annotation' };
+  | { readonly type: 'redo-annotation' };
 
 interface ToolChoice {
   readonly icon: IconName;
@@ -70,12 +70,37 @@ export class AnnotationToolbar {
     quickButton.addClass('abyss-reader-split-main');
     quickButton.disabled = readOnlyReason !== null;
     quickButton.setAttribute('aria-pressed', 'false');
+    quickButton.setAttribute('aria-haspopup', 'menu');
+    quickButton.setAttribute('aria-expanded', 'false');
     const colorDot = ownerWindow(this.root).createSpan();
     colorDot.className = 'abyss-reader-quick-color';
     colorDot.setAttribute('aria-hidden', 'true');
     quickButton.append(colorDot);
-    this.listen(quickButton, 'click', () => {
+    const showQuickMenu = (): void => {
+      this.showPaletteMenu(quickButton);
+    };
+    const longPress = this.bindLongPressMenuTrigger(quickButton, showQuickMenu);
+    this.listen(quickButton, 'click', (event) => {
+      if (longPress.consumeClick()) {
+        event.preventDefault();
+        return;
+      }
       this.chooseTool(this.currentTool === 'highlight' ? 'select' : 'highlight');
+    });
+    this.listen(quickButton, 'keydown', (event) => {
+      if (event.key !== 'ArrowDown') return;
+      event.preventDefault();
+      showQuickMenu();
+    });
+    this.listen(quickButton, 'contextmenu', (event) => {
+      if (
+        longPress.handleContextMenu(event, () => {
+          this.showPaletteMenu(quickButton, event);
+        })
+      )
+        return;
+      event.preventDefault();
+      this.showPaletteMenu(quickButton, event);
     });
 
     const quickMenu = this.iconButton('Quick Highlight colors', 'chevron-down', quick);
@@ -154,7 +179,7 @@ export class AnnotationToolbar {
     this.quickButton.style.setProperty('--abyss-quick-highlight-color', this.currentColor);
   }
 
-  private showPaletteMenu(trigger: HTMLButtonElement): void {
+  private showPaletteMenu(trigger: HTMLButtonElement, event?: MouseEvent): void {
     for (const open of [...this.menus]) open.close();
     const menu = new Menu();
     menu.setUseNativeMenu(false);
@@ -175,8 +200,12 @@ export class AnnotationToolbar {
       trigger.setAttribute('aria-expanded', 'false');
       this.restoreMenuTriggerFocus(trigger);
     });
-    const bounds = trigger.getBoundingClientRect();
-    menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, this.root.doc);
+    if (event === undefined) {
+      const bounds = trigger.getBoundingClientRect();
+      menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, this.root.doc);
+    } else {
+      menu.showAtMouseEvent(event);
+    }
   }
 
   private restoreMenuTriggerFocus(trigger: HTMLButtonElement): void {
@@ -248,6 +277,22 @@ export class AnnotationToolbar {
       event.preventDefault();
       show();
     });
+  }
+
+  private bindLongPressMenuTrigger(
+    trigger: HTMLButtonElement,
+    show: () => void,
+  ): LongPressMenuGesture {
+    const gesture = new LongPressMenuGesture(trigger, this.root.win, show);
+    this.listen(trigger, 'pointerdown', gesture.onPointerDown);
+    this.listen(trigger, 'pointermove', gesture.onPointerMove);
+    this.listen(trigger, 'pointerup', gesture.onPointerUp);
+    this.listen(trigger, 'pointercancel', gesture.onPointerCancel);
+    this.listen(trigger, 'lostpointercapture', gesture.onPointerCancel);
+    this.cleanups.push(() => {
+      gesture.destroy();
+    });
+    return gesture;
   }
 }
 

@@ -1192,7 +1192,7 @@ describe('AbyssDocumentsPlugin', () => {
     );
     if (layout === null) throw new Error('Expected More options.');
     layout.click();
-    entries.find((entry) => entry.title === 'Single page · Paged')?.click();
+    entries.find((entry) => entry.title === 'Single page')?.click();
     await vi.waitFor(() => {
       expect(reader.saveData).toHaveBeenCalledOnce();
     });
