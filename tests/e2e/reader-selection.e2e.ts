@@ -2036,6 +2036,22 @@ describe('reader selection-first annotations', () => {
         },
       );
       await $('.highlightEditor').click();
+      await browser.waitUntil(
+        async () =>
+          browser.execute(() => {
+            const replacement = document.querySelector<HTMLElement>('.highlightEditor');
+            const active = document.activeElement;
+            return (
+              replacement !== null &&
+              replacement.classList.contains('selectedEditor') &&
+              (active === replacement || (active !== null && replacement.contains(active)))
+            );
+          }),
+        {
+          timeout: 5_000,
+          timeoutMsg: 'Replacement native PDF.js editor did not receive DOM focus.',
+        },
+      );
       expect(
         await browser.execute((selector) => {
           const state = (
@@ -2049,6 +2065,7 @@ describe('reader selection-first annotations', () => {
           ).__abyssTask4Replacement;
           const replacement = document.querySelector<HTMLElement>('.highlightEditor');
           const custom = document.querySelector<HTMLElement>(selector);
+          const active = document.activeElement;
           return {
             customInteractable:
               state !== undefined &&
@@ -2060,8 +2077,11 @@ describe('reader selection-first annotations', () => {
                 false,
             newDistinct:
               state !== undefined && replacement !== null && !state.native.isSameNode(replacement),
-            newFocused: replacement?.classList.contains('selectedEditor') ?? false,
+            newFocused:
+              replacement !== null &&
+              (active === replacement || (active !== null && replacement.contains(active))),
             newId: replacement?.id ?? null,
+            newSelected: replacement?.classList.contains('selectedEditor') ?? false,
             oldDisconnected: state?.native.isConnected === false,
             oldId: state?.nativeId ?? null,
           };
@@ -2071,6 +2091,7 @@ describe('reader selection-first annotations', () => {
         newDistinct: true,
         newFocused: true,
         newId: expect.any(String),
+        newSelected: true,
         oldDisconnected: true,
         oldId: expect.any(String),
       });

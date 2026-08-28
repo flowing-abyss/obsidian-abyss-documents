@@ -360,6 +360,7 @@ export class AnnotationEditorPopover {
     const request = this.active;
     if (request === null) return true;
     if (!this.flushPendingMetadata()) return false;
+    this.cancelPendingSelectionCreation(request);
     this.cancelFocusAwayTimer();
     this.openGeneration += 1;
     this.active = null;
@@ -858,11 +859,13 @@ export class AnnotationEditorPopover {
 
   private dismissSelection(): void {
     if (this.active?.target.kind !== 'selection') return;
-    if (this.selectionCreationState === 'pending' && this.selectionCreation !== null) {
-      this.selectionCreation.cancelled = true;
-      this.selectionCreationState = 'draft';
-    }
     this.close('external');
+  }
+
+  private cancelPendingSelectionCreation(request: AnnotationEditorPopoverRequest): void {
+    if (request.target.kind !== 'selection' || this.selectionCreationState !== 'pending') return;
+    if (this.selectionCreation?.request === request) this.selectionCreation.cancelled = true;
+    this.selectionCreationState = 'draft';
   }
 
   private place(x: number, y: number, target: AnnotationEditorTarget): void {

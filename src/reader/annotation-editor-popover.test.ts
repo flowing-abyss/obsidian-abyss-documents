@@ -672,46 +672,111 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
-  it('persists the latest pending creation draft after click-away without reopening the UI', async () => {
-    const host = document.body.createDiv();
-    const creation = deferred<DocumentAnnotation>();
-    const onClose = vi.fn();
-    const onUpdate = vi.fn();
-    const popover = new AnnotationEditorPopover(host);
-    popover.open({
-      ...editorRequest({ kind: 'selection', selection: selection() }),
-      onClose,
-      onCreate: () => creation.promise,
-      onUpdate,
-    });
-    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-    if (comment === null) throw new Error('Expected comment field.');
-    comment.value = 'Initial draft #Fresh [[Closed note]]';
-    comment.dispatchEvent(new Event('input', { bubbles: true }));
-    popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
-    comment.value = 'Closed draft #Fresh [[Closed note]]';
-    comment.dispatchEvent(new Event('input', { bubbles: true }));
+  it.each([
+    {
+      dismiss: () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+        ),
+      label: 'Escape',
+      reason: 'escape',
+    },
+    {
+      dismiss: () =>
+        document.body.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true })),
+      label: 'click-away',
+      reason: 'click-away',
+    },
+  ] as const)(
+    'cancels pending creation on $label and ignores its late resolution',
+    async ({ dismiss, reason }) => {
+      const host = document.body.createDiv();
+      const quote = host.createSpan({ text: 'Selected passage' });
+      const range = document.createRange();
+      range.selectNodeContents(quote);
+      document.getSelection()?.removeAllRanges();
+      document.getSelection()?.addRange(range);
+      const creation = deferred<DocumentAnnotation>();
+      const onClose = vi.fn();
+      const onUpdate = vi.fn();
+      const popover = new AnnotationEditorPopover(host);
+      popover.open({
+        ...editorRequest({ kind: 'selection', selection: selection() }),
+        onClose,
+        onCreate: () => creation.promise,
+        onUpdate,
+      });
+      editComment(popover, 'Initial draft #Fresh [[Closed note]]');
+      editComment(popover, 'Latest draft #Fresh [[Closed note]]');
 
-    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
-    expect(popover.element.hidden).toBe(true);
-    expect(onClose).toHaveBeenCalledWith('click-away');
+      dismiss();
+      expect(popover.element.hidden).toBe(true);
+      expect(document.getSelection()?.rangeCount).toBe(0);
+      expect(onClose).toHaveBeenCalledOnce();
+      expect(onClose).toHaveBeenCalledWith(reason);
 
-    const created = editableAnnotation({
-      color: '#5fb236',
-      comment: 'Initial draft #Fresh [[Closed note]]',
-    });
-    creation.resolve(created);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(popover.element.hidden).toBe(true);
-    expect(onUpdate).toHaveBeenCalledWith({
-      annotations: [created],
-      comment: 'Closed draft #Fresh [[Closed note]]',
-    });
+      creation.resolve(editableAnnotation({ comment: 'Initial draft #Fresh [[Closed note]]' }));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(popover.element.hidden).toBe(true);
+      expect(onUpdate).not.toHaveBeenCalled();
+      popover.destroy();
+      host.remove();
+    },
+  );
 
-    popover.destroy();
-    host.remove();
-  });
+  it.each([
+    {
+      dismiss: () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+        ),
+      label: 'Escape',
+      reason: 'escape',
+    },
+    {
+      dismiss: () =>
+        document.body.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true })),
+      label: 'click-away',
+      reason: 'click-away',
+    },
+  ] as const)(
+    'cancels pending creation on $label and handles its late rejection',
+    async ({ dismiss, reason }) => {
+      const host = document.body.createDiv();
+      const quote = host.createSpan({ text: 'Selected passage' });
+      const range = document.createRange();
+      range.selectNodeContents(quote);
+      document.getSelection()?.removeAllRanges();
+      document.getSelection()?.addRange(range);
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const creation = deferred<DocumentAnnotation>();
+      const onClose = vi.fn();
+      const onUpdate = vi.fn();
+      const popover = new AnnotationEditorPopover(host);
+      popover.open({
+        ...editorRequest({ kind: 'selection', selection: selection() }),
+        onClose,
+        onCreate: () => creation.promise,
+        onUpdate,
+      });
+      editComment(popover, 'Pending draft');
+
+      dismiss();
+      expect(popover.element.hidden).toBe(true);
+      expect(document.getSelection()?.rangeCount).toBe(0);
+      expect(onClose).toHaveBeenCalledWith(reason);
+
+      creation.reject(new Error('late failure'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(popover.element.hidden).toBe(true);
+      expect(onUpdate).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      popover.destroy();
+      host.remove();
+    },
+  );
 
   it('persists a replaced pending creation draft without disturbing the replacement UI', async () => {
     const host = document.body.createDiv();
