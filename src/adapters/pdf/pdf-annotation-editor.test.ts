@@ -1101,9 +1101,10 @@ describe('PdfAnnotationEditor lifecycle', () => {
       const current = fixture({ dispatchModeChanges: false });
       const annotation = createdAnnotation('', { id: 'timed-out-highlight' });
       current.editor.setAnnotationProjection([{ annotation, stableId: 'timed-out-highlight' }]);
+      const uiManager = manager();
       current.eventBus.dispatch('annotationeditoruimanager', {
         source: current.viewer,
-        uiManager: manager(),
+        uiManager,
       });
       Object.defineProperty(current.viewer, 'annotationEditorMode', {
         configurable: true,
@@ -1134,9 +1135,26 @@ describe('PdfAnnotationEditor lifecycle', () => {
       await vi.advanceTimersByTimeAsync(1);
       await vi.runOnlyPendingTimersAsync();
 
-      await expect(activation).resolves.toBe('readonly');
+      await expect(activation).resolves.toBe('cancelled');
+      expect(current.editor.hasContextualEdit).toBe(true);
+      expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalledWith(
+        'timed-out-highlight',
+        expect.any(AbortSignal),
+        annotation,
+        { forceReadonly: true },
+      );
       expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
       expect(vi.getTimerCount()).toBe(0);
+
+      current.viewer.currentMode = 0;
+      current.eventBus.dispatch('annotationeditormodechanged', {
+        mode: 0,
+        source: current.viewer,
+      });
+
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(uiManager.disableUserSelect.mock.calls).toEqual([[true], [false]]);
     } finally {
       vi.useRealTimers();
     }
@@ -1265,8 +1283,25 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect(outcome).toBe('pending');
       await vi.advanceTimersByTimeAsync(2);
 
-      await expect(activation).resolves.toBe('readonly');
+      await expect(activation).resolves.toBe('cancelled');
+      expect(current.editor.hasContextualEdit).toBe(true);
+      expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalledWith(
+        'after-previous',
+        expect.any(AbortSignal),
+        projected,
+        { forceReadonly: true },
+      );
       expect(vi.getTimerCount()).toBe(0);
+
+      current.viewer.currentMode = 0;
+      current.eventBus.dispatch('annotationeditormodechanged', {
+        mode: 0,
+        source: current.viewer,
+      });
+
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(uiManager.disableUserSelect).toHaveBeenLastCalledWith(false);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -1275,6 +1310,10 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it('does not start a fresh timeout when NONE containment cannot be confirmed', async () => {
     vi.useFakeTimers();
+    const layer = document.body.createDiv({ cls: 'annotationEditorLayer' });
+    const anchor = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    const toolbar = anchor.createDiv({ cls: 'editToolbar' });
+    toolbar.setCssProps({ display: 'flex' });
     try {
       const current = fixture({ dispatchModeChanges: false });
       const projected = createdAnnotation('', { id: 'containment-deadline' });
@@ -1297,12 +1336,12 @@ describe('PdfAnnotationEditor lifecycle', () => {
           current.viewer.currentMode = request.mode;
           if (request.mode === 0) return;
           window.setTimeout(() => {
-            uiManager.firstSelectedEditor = selectedEditor('containment-deadline', 9);
+            uiManager.firstSelectedEditor = selectedEditor('containment-deadline', 9, anchor);
             current.eventBus.dispatch('annotationeditormodechanged', {
               mode: request.mode,
               source: current.viewer,
             });
-          }, 19_999);
+          }, 19_998);
         },
       });
       let outcome: string = 'pending';
@@ -1317,10 +1356,136 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect(outcome).toBe('pending');
       await vi.advanceTimersByTimeAsync(1);
 
-      await expect(activation).resolves.toBe('readonly');
+      const result = await activation;
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+        'containment-deadline',
+        expect.any(AbortSignal),
+        projected,
+        { forceReadonly: true },
+      );
+      expect(result).toBe('readonly');
       expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(uiManager.disableUserSelect.mock.calls).toEqual([[true], [false]]);
+      expect(toolbar.hidden).toBe(false);
+      expect(toolbar.style.getPropertyValue('display')).toBe('flex');
       expect(vi.getTimerCount()).toBe(0);
     } finally {
+      layer.remove();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps unsafe containment cancelled until a late confirmed NONE releases its guard', async () => {
+    vi.useFakeTimers();
+    const layer = document.body.createDiv({ cls: 'annotationEditorLayer' });
+    const anchor = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    const toolbar = anchor.createDiv({ cls: 'editToolbar' });
+    toolbar.setCssProps({ display: 'grid' });
+    try {
+      const current = fixture({ dispatchModeChanges: false });
+      const projected = createdAnnotation('', { id: 'late-none-containment' });
+      current.editor.setAnnotationProjection([
+        { annotation: projected, stableId: 'late-none-containment' },
+      ]);
+      const uiManager = manager();
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      current.commentBridge.focusAnnotation.mockImplementation(
+        async (_id, _signal, _annotation, options) => options?.forceReadonly === true,
+      );
+      Object.defineProperty(current.viewer, 'annotationEditorMode', {
+        configurable: true,
+        get: () => current.viewer.currentMode,
+        set: (request: { readonly mode: number }) => {
+          current.modeRequests.push({ ...request });
+          if (request.mode === 0) return;
+          current.viewer.currentMode = request.mode;
+          window.setTimeout(() => {
+            uiManager.firstSelectedEditor = selectedEditor('late-none-containment', 9, anchor);
+            current.eventBus.dispatch('annotationeditormodechanged', {
+              mode: request.mode,
+              source: current.viewer,
+            });
+          }, 19_999);
+        },
+      });
+
+      const activation = current.editor.focusAnnotation('late-none-containment', {
+        kind: 'root-click',
+      });
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      await expect(activation).resolves.toBe('cancelled');
+      expect(current.editor.hasContextualEdit).toBe(true);
+      expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(1);
+      expect(uiManager.disableUserSelect.mock.calls).toEqual([[true]]);
+      expect(toolbar.hidden).toBe(true);
+      expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalledWith(
+        'late-none-containment',
+        expect.any(AbortSignal),
+        projected,
+        { forceReadonly: true },
+      );
+
+      current.viewer.currentMode = 0;
+      current.eventBus.dispatch('annotationeditormodechanged', {
+        mode: 0,
+        source: current.viewer,
+      });
+
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(uiManager.disableUserSelect.mock.calls).toEqual([[true], [false]]);
+      expect(toolbar.hidden).toBe(false);
+      expect(toolbar.style.getPropertyValue('display')).toBe('grid');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      layer.remove();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles a rejecting deadline fallback as cancelled exactly once', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const resolver = deferred<DocumentAnnotation | null>();
+    try {
+      const locked = createdAnnotation('', { id: 'rejecting-fallback', writable: false });
+      current.editor.setAnnotationProjection([
+        { annotation: locked, stableId: 'rejecting-fallback' },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+      current.editor.setAnnotationResolver(async () => resolver.promise);
+      current.commentBridge.focusAnnotation.mockRejectedValue(new Error('fallback failed'));
+      const outcomes: PdfAnnotationActivationResult[] = [];
+      const activation = current.editor.focusAnnotation('rejecting-fallback', { kind: 'sidebar' });
+      void activation.then((result) => outcomes.push(result)).catch(() => undefined);
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await Promise.resolve();
+
+      await expect(activation).resolves.toBe('cancelled');
+      expect(outcomes).toEqual(['cancelled']);
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledExactlyOnceWith(
+        'rejecting-fallback',
+        expect.any(AbortSignal),
+        locked,
+        { forceReadonly: true },
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      resolver.resolve(null);
       vi.clearAllTimers();
       vi.useRealTimers();
     }
@@ -2049,6 +2214,78 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(viewer.annotationEditorMode).toBe(0);
     expect(modeRequests).toEqual([
       { editComment: false, editId: 'highlight-1', mode: 9 },
+      { mode: 0 },
+    ]);
+  });
+
+  it('restores an in-flight contextual selection when an exact multi delete is rejected', async () => {
+    const { commentBridge, editor, eventBus, modeRequests, saveDocument, viewer } = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    saveDocument.mockReturnValue(pending.promise);
+    commentBridge.deleteAnnotations.mockReturnValue(false);
+    const selected = selectedEditor('multi-first', 9);
+    const uiManager = manager(selected);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({ editComment: false, id: 'multi-first', kind: 'highlight' });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+    const annotations = [
+      createdAnnotation('', { id: 'multi-first' }),
+      createdAnnotation('', { id: 'multi-second' }),
+    ];
+
+    const saving = editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(saveDocument).toHaveBeenCalledOnce();
+    });
+    expect(editor.deleteAnnotations(annotations)).toBe(false);
+    pending.resolve(new Uint8Array([37, 80, 68, 70]));
+    await saving;
+
+    expect(commentBridge.deleteAnnotations).toHaveBeenCalledExactlyOnceWith(annotations);
+    expect(viewer.annotationEditorMode).toBe(9);
+    expect(editor.hasContextualEdit).toBe(true);
+    expect(uiManager.firstSelectedEditor).toBe(selected);
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: 'multi-first', mode: 9 },
+      { mode: 0 },
+      { editComment: false, editId: 'multi-first', mode: 9 },
+    ]);
+  });
+
+  it('does not resurrect an in-flight contextual target after an accepted delete', async () => {
+    const { commentBridge, editor, eventBus, modeRequests, saveDocument, viewer } = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    saveDocument.mockReturnValue(pending.promise);
+    commentBridge.deleteAnnotations.mockReturnValue(true);
+    const uiManager = manager(selectedEditor('deleted-during-save', 9));
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'deleted-during-save',
+      kind: 'highlight',
+    });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+    const deleted = createdAnnotation('', { id: 'deleted-during-save' });
+
+    const saving = editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(saveDocument).toHaveBeenCalledOnce();
+    });
+    expect(editor.deleteAnnotations([deleted])).toBe(true);
+    pending.resolve(new Uint8Array([37, 80, 68, 70]));
+    await saving;
+
+    expect(commentBridge.deleteAnnotations).toHaveBeenCalledExactlyOnceWith([deleted]);
+    expect(viewer.annotationEditorMode).toBe(0);
+    expect(editor.hasContextualEdit).toBe(false);
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: 'deleted-during-save', mode: 9 },
       { mode: 0 },
     ]);
   });

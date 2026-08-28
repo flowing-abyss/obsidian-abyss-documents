@@ -697,6 +697,118 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('clears the stable writable binding when readonly focus resolves a replacement editor', async () => {
+    const host = document.body.createDiv();
+    const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const oldNode = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    oldNode.id = 'old-runtime-editor';
+    const oldEditor = editor('Old writable editor', {
+      anchor: oldNode,
+      dataId: 'replacement-highlight',
+      uid: 'old-runtime-editor',
+    });
+    const oldManager = uiManager(oldEditor);
+    oldManager.getEditor.mockImplementation((id) =>
+      id === 'old-runtime-editor' ? oldEditor : undefined,
+    );
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(oldManager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+    await expect(bridge.focusAnnotation('replacement-highlight')).resolves.toBe(true);
+    oldManager.setSelected.mockClear();
+
+    oldNode.remove();
+    const replacementNode = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    replacementNode.id = 'new-runtime-editor';
+    const replacementEditor = editor('Replacement editor', {
+      anchor: replacementNode,
+      dataId: 'replacement-highlight',
+      uid: 'new-runtime-editor',
+    });
+    const replacementManager = uiManager(replacementEditor);
+    replacementManager.getEditor.mockImplementation((id) =>
+      id === 'new-runtime-editor' ? replacementEditor : undefined,
+    );
+    bridge.setSidebarUiManager(replacementManager);
+
+    await expect(
+      bridge.focusAnnotation(
+        'replacement-highlight',
+        undefined,
+        annotation('replacement-highlight', false),
+        { forceReadonly: true },
+      ),
+    ).resolves.toBe(true);
+
+    const readonly = focused[focused.length - 1]?.annotations[0];
+    if (readonly === undefined) throw new Error('Expected replacement read-only focus.');
+    expect(bridge.updateAnnotations({ annotations: [readonly], comment: 'Must not write' })).toBe(
+      false,
+    );
+    expect(bridge.deleteAnnotations([readonly])).toBe(false);
+    expect(oldEditor.comment).toBe('Old writable editor');
+    expect(oldManager.setSelected).not.toHaveBeenCalled();
+    expect(oldManager.updateParams).not.toHaveBeenCalled();
+    expect(oldManager.delete).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('clears the stable writable binding when authoritative readonly focus is imported', async () => {
+    const host = document.body.createDiv();
+    const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const oldNode = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    oldNode.id = 'old-imported-runtime';
+    const oldEditor = editor('Old imported predecessor', {
+      anchor: oldNode,
+      dataId: 'imported-readonly-highlight',
+      uid: 'old-imported-runtime',
+    });
+    const oldManager = uiManager(oldEditor);
+    oldManager.getEditor.mockImplementation((id) =>
+      id === 'old-imported-runtime' ? oldEditor : undefined,
+    );
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(oldManager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+    await expect(bridge.focusAnnotation('imported-readonly-highlight')).resolves.toBe(true);
+    oldManager.setSelected.mockClear();
+
+    editorLayer.remove();
+    const annotationLayer = host.createDiv({ cls: 'annotationLayer' });
+    const imported = annotationLayer.createDiv({ cls: 'highlightAnnotation' });
+    imported.dataset['annotationId'] = 'imported-readonly-highlight';
+    bridge.setSidebarUiManager(uiManager());
+
+    await expect(
+      bridge.focusAnnotation(
+        'imported-readonly-highlight',
+        undefined,
+        annotation('imported-readonly-highlight', false),
+        { forceReadonly: true },
+      ),
+    ).resolves.toBe(true);
+
+    const readonly = focused[focused.length - 1]?.annotations[0];
+    if (readonly === undefined) throw new Error('Expected imported read-only focus.');
+    expect(bridge.updateAnnotations({ annotations: [readonly], comment: 'Must not write' })).toBe(
+      false,
+    );
+    expect(bridge.deleteAnnotations([readonly])).toBe(false);
+    expect(oldEditor.comment).toBe('Old imported predecessor');
+    expect(oldManager.setSelected).not.toHaveBeenCalled();
+    expect(oldManager.updateParams).not.toHaveBeenCalled();
+    expect(oldManager.delete).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
   it('clears request-scoped readonly state when the authoritative projection becomes writable', async () => {
     const host = document.body.createDiv();
     const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });

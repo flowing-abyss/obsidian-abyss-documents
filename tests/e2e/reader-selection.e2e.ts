@@ -739,8 +739,46 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         target !== null &&
         (node === target ||
           (node.nodeType === Node.ELEMENT_NODE && (node as Element).contains(target)));
+      const styleHides = (value: string | null): boolean =>
+        /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)(?:\s*!important)?\s*(?:;|$)/iu.test(
+          value ?? '',
+        );
+      const visibleFromAttributes = (hidden: string | null, style: string | null): boolean =>
+        popover.isConnected && hidden === null && !styleHides(style);
+      const valueAfterRecord = (
+        records: MutationRecord[],
+        recordIndex: number,
+        attributeName: string,
+      ): string | null => {
+        for (let index = recordIndex + 1; index < records.length; index += 1) {
+          const next = records[index];
+          if (
+            next?.type === 'attributes' &&
+            next.target === popover &&
+            next.attributeName === attributeName
+          )
+            return next.oldValue;
+        }
+        return popover.getAttribute(attributeName);
+      };
       const processRecords = (records: MutationRecord[]): void => {
-        for (const record of records) {
+        const firstHidden = records.find(
+          (record) =>
+            record.type === 'attributes' &&
+            record.target === popover &&
+            record.attributeName === 'hidden',
+        );
+        const firstStyle = records.find(
+          (record) =>
+            record.type === 'attributes' &&
+            record.target === popover &&
+            record.attributeName === 'style',
+        );
+        let hiddenAttribute =
+          firstHidden === undefined ? popover.getAttribute('hidden') : firstHidden.oldValue;
+        let styleAttribute =
+          firstStyle === undefined ? popover.getAttribute('style') : firstStyle.oldValue;
+        for (const [recordIndex, record] of records.entries()) {
           for (const removed of Array.from(record.removedNodes)) {
             if (removedTarget(removed, reader)) trace.readerDisconnects += 1;
             if (removedTarget(removed, viewer)) trace.viewerDisconnects += 1;
@@ -750,6 +788,25 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
             if (removedTarget(removed, popover)) trace.popoverDisconnects += 1;
             if (removedTarget(removed, card)) trace.cardDisconnects += 1;
           }
+          const attributeName = record.attributeName;
+          if (
+            record.type !== 'attributes' ||
+            record.target !== popover ||
+            (attributeName !== 'hidden' && attributeName !== 'style')
+          )
+            continue;
+          const beforeVisible = visibleFromAttributes(hiddenAttribute, styleAttribute);
+          const nextValue = valueAfterRecord(records, recordIndex, attributeName);
+          if (attributeName === 'hidden') hiddenAttribute = nextValue;
+          else styleAttribute = nextValue;
+          const afterVisible = visibleFromAttributes(hiddenAttribute, styleAttribute);
+          if (beforeVisible && !afterVisible) trace.hiddenAfterVisible += 1;
+          trace.lastPopoverVisible = afterVisible;
+          trace.events.push(
+            `attribute:${attributeName}:${beforeVisible ? 'visible' : 'hidden'}->${
+              afterVisible ? 'visible' : 'hidden'
+            }`,
+          );
         }
       };
       const sample = (event: string): void => {
@@ -794,6 +851,8 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         sample('focus');
       };
       observer.observe(leaf, {
+        attributeFilter: ['class', 'hidden', 'style'],
+        attributeOldValue: true,
         attributes: true,
         childList: true,
         characterData: true,
@@ -806,6 +865,34 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         observer.disconnect();
         document.removeEventListener('focusin', onFocus, true);
       };
+      const verifySynchronousHideTrace = (): void => {
+        const originalHidden = popover.getAttribute('hidden');
+        const originalStyle = popover.getAttribute('style');
+        popover.hidden = false;
+        popover.style.removeProperty('display');
+        popover.style.removeProperty('visibility');
+        observer.takeRecords();
+        trace.hiddenAfterVisible = 0;
+        trace.events.splice(0);
+        trace.lastPopoverVisible = false;
+        sample('self-test-visible');
+        popover.hidden = true;
+        popover.hidden = false;
+        processRecords(observer.takeRecords());
+        if (trace.hiddenAfterVisible !== 1)
+          throw new Error('Persisted activation trace missed synchronous hide/show.');
+        if (originalHidden === null) popover.removeAttribute('hidden');
+        else popover.setAttribute('hidden', originalHidden);
+        if (originalStyle === null) popover.removeAttribute('style');
+        else popover.setAttribute('style', originalStyle);
+        observer.takeRecords();
+        trace.hiddenAfterVisible = 0;
+        trace.prematureFocus = 0;
+        trace.readonlyVisible = 0;
+        trace.events.splice(0);
+        trace.lastPopoverVisible = false;
+      };
+      verifySynchronousHideTrace();
       (
         window as Window & { __abyssTask3ActivationTrace?: typeof trace }
       ).__abyssTask3ActivationTrace = trace;
@@ -1059,7 +1146,6 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
               ): () => void;
             };
             commentBridge?: {
-              activeBinding?: { editor?: unknown } | null;
               activeSelectedEditors?: unknown[];
               activeSource?: unknown;
               bindings?: Map<string, unknown>;
@@ -1125,7 +1211,6 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
       __abyssTask3FreeTextProbe?: {
         calls: number;
         bridge: {
-          activeBinding?: { editor?: unknown } | null;
           activeSelectedEditors?: unknown[];
           activeSource?: unknown;
           bindings?: Map<string, unknown>;
@@ -1148,7 +1233,6 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
     const innerText = editable.innerText;
     const result = {
       calls: state.calls,
-      bridgeActiveBinding: state.bridge.activeBinding?.editor === state.native,
       bridgeActiveSource: state.bridge.activeSource === state.native,
       bridgeBindingCount: state.bridge.bindings?.size ?? -1,
       bridgeSelected: state.bridge.activeSelectedEditors?.includes(state.native) ?? false,
@@ -1173,7 +1257,6 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
   });
   expect(result).toMatchObject({
     calls: 0,
-    bridgeActiveBinding: true,
     bridgeActiveSource: true,
     bridgeBindingCount: 1,
     bridgeSelected: true,

@@ -556,28 +556,46 @@ export class PdfAnnotationEditor {
     activation: AnnotationActivation,
   ): Promise<PdfAnnotationActivationResult> {
     const projected = activation.projected;
-    if (!this.isOwnedActivation(activation) || projected === null) return 'cancelled';
+    if (
+      !this.isOwnedActivation(activation) ||
+      projected === null ||
+      !this.canFocusTimedOutProjection()
+    )
+      return 'cancelled';
     const controller = new AbortController();
-    const focusing = this.dependencies.commentBridge.focusAnnotation(
-      activation.id,
-      controller.signal,
-      projected,
-      { forceReadonly: true },
+    try {
+      const focusing = this.dependencies.commentBridge.focusAnnotation(
+        activation.id,
+        controller.signal,
+        projected,
+        { forceReadonly: true },
+      );
+      const focused = await Promise.race([
+        focusing,
+        new Promise<false>((resolve) => {
+          queueMicrotask(() => {
+            resolve(false);
+          });
+        }),
+      ]);
+      if (!this.isOwnedActivation(activation) || !focused || !this.canFocusTimedOutProjection())
+        return 'cancelled';
+      this.releaseActivationFocus(activation, false);
+      return 'readonly';
+    } catch {
+      return 'cancelled';
+    } finally {
+      controller.abort(
+        new DOMException('The deadline fallback readiness check completed.', 'AbortError'),
+      );
+    }
+  }
+
+  private canFocusTimedOutProjection(): boolean {
+    return (
+      this.contextualEditSession === null &&
+      this.dependencies.viewer.annotationEditorMode === this.dependencies.annotationEditorType.NONE
     );
-    const focused = await Promise.race([
-      focusing,
-      new Promise<false>((resolve) => {
-        queueMicrotask(() => {
-          resolve(false);
-        });
-      }),
-    ]);
-    controller.abort(
-      new DOMException('The deadline fallback readiness check completed.', 'AbortError'),
-    );
-    if (!this.isOwnedActivation(activation) || !focused) return 'cancelled';
-    this.releaseActivationFocus(activation, false);
-    return 'readonly';
   }
 
   private async activateWithinEpoch(
@@ -783,8 +801,9 @@ export class PdfAnnotationEditor {
 
   deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean {
     this.cancelAnnotationActivation('Deleting the PDF annotation cancelled its activation.');
-    this.cancelContextualSaveRestore();
-    return this.dependencies.commentBridge.deleteAnnotations(annotations);
+    const deleted = this.dependencies.commentBridge.deleteAnnotations(annotations);
+    if (deleted) this.cancelContextualSaveRestore();
+    return deleted;
   }
 
   updateAnnotations(update: PdfAnnotationUpdate): boolean {
@@ -1584,6 +1603,7 @@ export class PdfAnnotationEditor {
     const data = record(event);
     if (data?.['source'] !== this.dependencies.viewer || typeof data['mode'] !== 'number') return;
     const mode = data['mode'];
+    this.releaseClosingContextualSession(mode);
     if (this.saving) return;
     if (
       this.logicalMode === 'one-shot' &&
@@ -1594,6 +1614,13 @@ export class PdfAnnotationEditor {
     if (this.contextualEditSession?.mode === mode) return;
     this.setLogicalMode(this.logicalModeForNative(mode));
   };
+
+  private releaseClosingContextualSession(mode: number): void {
+    if (mode !== this.dependencies.annotationEditorType.NONE) return;
+    const contextual = this.contextualEditSession;
+    if (contextual?.phase !== 'closing') return;
+    this.releaseContextualEditSession(contextual);
+  }
 
   private synchronizeLogicalModeAfterSave(): void {
     const mode = this.dependencies.viewer.annotationEditorMode;
@@ -1679,7 +1706,12 @@ export class PdfAnnotationEditor {
     try {
       await this.closeContextualEditSession(session, signal === undefined ? {} : { signal });
     } catch {
-      // Keep the creator gate installed when PDF.js cannot confirm NONE.
+      if (
+        signal?.aborted === true &&
+        this.dependencies.viewer.annotationEditorMode ===
+          this.dependencies.annotationEditorType.NONE
+      )
+        this.releaseContextualEditSession(session);
     }
   }
 

@@ -337,6 +337,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   private tryFocusAnnotation(id: string, options: PdfAnnotationFocusOptions): boolean {
+    if (options.forceReadonly === true) this.bindings.delete(id);
     if (options.preserveSelection === true)
       return this.focusSelectedAnnotation(
         id,
