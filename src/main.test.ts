@@ -18,13 +18,13 @@ import { DocumentSaveCoordinator } from './document-core/save-coordinator.js';
 import AbyssDocumentsPlugin from './main.js';
 import { DEFAULT_DATA, type PluginDataV1, type PluginDataV2 } from './plugin-data.js';
 import { readerPerformanceSnapshot } from './reader-performance.js';
-import { AnnotationEditorPopover } from './reader/annotation-editor-popover.js';
 import {
   AbyssDocumentView,
   DOCUMENT_VIEW_TYPE,
   type ReaderViewController,
 } from './reader/document-view.js';
 import { LinkSuggestionService } from './reader/link-suggestions.js';
+import type { ReaderShell } from './reader/reader-shell.js';
 import { BUILTIN_PROFILES } from './reader/reading-profiles.js';
 import { SaveConflictModal, type SaveConflictAction } from './reader/save-conflict-modal.js';
 import { SaveRecoveryModal } from './reader/save-recovery-modal.js';
@@ -236,18 +236,17 @@ describe('AbyssDocumentsPlugin', () => {
       }),
     );
   });
-  it('wires metadata-cache-only wiki suggestions to the reader PDF source path', async () => {
-    const plugin = createPlugin();
+  it('wires cached comment suggestions into the active reader PDF source path', async () => {
     const suggest = vi
       .spyOn(LinkSuggestionService.prototype, 'suggest')
       .mockReturnValue([
         { display: 'Concept', path: 'Notes/Concept.md', insertion: '[[Concept]]' },
       ]);
-    await plugin.onload();
-    const host = createDiv();
-    const provider = (plugin as unknown as { linkSuggestions: LinkSuggestionService })
-      .linkSuggestions;
-    const popover = new AnnotationEditorPopover(host, provider, 'Books/Guide.pdf');
+    const reader = await loadedReader(DEFAULT_DATA, documentSession('suggestions'));
+    const controller = (reader.view as unknown as { controller: { shell: ReaderShell | null } })
+      .controller;
+    const shell = controller.shell;
+    if (shell === null) throw new Error('Expected the active reader shell.');
     const annotation = {
       ...({} as DocumentAnnotation),
       color: '#ffd400',
@@ -256,7 +255,7 @@ describe('AbyssDocumentsPlugin', () => {
       links: [],
       tags: [],
     };
-    popover.open({
+    shell.openAnnotationEditor({
       onCreate: vi.fn(),
       onClose: vi.fn(),
       onDelete: vi.fn(),
@@ -265,15 +264,13 @@ describe('AbyssDocumentsPlugin', () => {
       position: { x: 0, y: 0 },
       target: { annotation, kind: 'annotation' },
     });
-    const input = host.querySelector<HTMLInputElement>('input[aria-label="Links"]');
-    if (input === null) throw new Error('Expected links input.');
-    input.value = '[[con';
-    input.setSelectionRange(input.value.length, input.value.length);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    expect(suggest).toHaveBeenCalledWith('con', 'Books/Guide.pdf');
-    expect(host.querySelector('[role="listbox"]')?.textContent).toContain('Concept');
-
-    popover.destroy();
+    const comment = shell.root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment input.');
+    comment.value = '[[con';
+    comment.setSelectionRange(comment.value.length, comment.value.length);
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(suggest).toHaveBeenCalledWith('link', 'con', 'Books/Guide.pdf');
+    expect(shell.root.querySelector('[role="listbox"]')?.textContent).toContain('Concept');
   });
   it('invalidates the wiki suggestion index for public vault and metadata events', async () => {
     const app = App.createConfigured__({ files: { 'Notes/Concept.md': '' } });

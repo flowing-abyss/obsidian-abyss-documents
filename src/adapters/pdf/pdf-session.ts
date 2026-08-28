@@ -11,7 +11,6 @@ import type {
 import type { DocumentEditingCapabilities } from '../../document-core/editable-document.js';
 import { DocumentCancelledError, DocumentOpenError } from '../../document-core/errors.js';
 import type { BaseToken, NativeEditableSaveSession } from '../../document-core/save-coordinator.js';
-import type { AnnotationLinkSuggestionProvider } from '../../reader/link-suggestions.js';
 import type { PdfAnnotationCapabilities } from './pdf-annotation-capabilities.js';
 import type { PdfAnnotationEditor } from './pdf-annotation-editor.js';
 import { extractAnnotations } from './pdf-annotations.js';
@@ -36,14 +35,12 @@ export type PdfViewportFactory = (
 export interface PdfViewportContext {
   readonly annotationCapabilities: PdfAnnotationCapabilities;
   readonly sourcePath: string;
-  readonly linkSuggestions?: AnnotationLinkSuggestionProvider;
 }
 
 interface PdfSessionAnnotationAccess {
   readonly annotationCapabilities: PdfAnnotationCapabilities;
   readonly viewportFactory: PdfViewportFactory;
   readonly openedBaseToken?: BaseToken | null;
-  readonly linkSuggestions?: AnnotationLinkSuggestionProvider;
 }
 
 export class PdfDocumentSession implements DocumentSession {
@@ -170,11 +167,9 @@ export class PdfDocumentSession implements DocumentSession {
   }
 
   private viewportContext(): PdfViewportContext {
-    const linkSuggestions = this.annotationAccess.linkSuggestions;
     return {
       annotationCapabilities: this.annotationCapabilities,
       sourcePath: this.descriptor.path,
-      ...(linkSuggestions === undefined ? {} : { linkSuggestions }),
     };
   }
 

@@ -2,7 +2,6 @@ import type { TFile, Vault } from 'obsidian';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import type { DocumentAdapter, DocumentSession } from '../../document-core/document.js';
 import { incrementReaderCounter, markReaderPerformance } from '../../reader-performance.js';
-import type { AnnotationLinkSuggestionProvider } from '../../reader/link-suggestions.js';
 import {
   loadPdfAnnotationCapabilities,
   type PdfAnnotationCapabilities,
@@ -88,7 +87,6 @@ export class PdfDocumentAdapter implements DocumentAdapter {
     private readonly vault: Pick<Vault, 'readBinary'>,
     private readonly runtimeLoader: Pick<PdfRuntimeLoader, 'load'>,
     private readonly viewportFactory: PdfViewportFactory,
-    private readonly linkSuggestions?: AnnotationLinkSuggestionProvider,
   ) {}
 
   supports(file: TFile): boolean {
@@ -122,7 +120,6 @@ export class PdfDocumentAdapter implements DocumentAdapter {
         annotationCapabilities,
         openedBaseToken: baseToken,
         viewportFactory: this.viewportFactory,
-        ...(this.linkSuggestions === undefined ? {} : { linkSuggestions: this.linkSuggestions }),
       });
       signal.throwIfAborted();
       ownedLoadingTask = null;

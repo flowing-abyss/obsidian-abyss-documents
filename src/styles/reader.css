@@ -200,13 +200,14 @@
   z-index: var(--layer-popover);
   box-sizing: border-box;
   display: flex;
-  width: min(22rem, calc(100vw - var(--size-4-6)));
-  max-width: 100%;
+  width: max-content;
+  min-width: min(240px, calc(100vw - 16px));
+  max-width: min(304px, calc(100vw - 16px));
   flex-direction: column;
-  gap: var(--size-2-2);
+  gap: 4px;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: var(--size-4-2);
+  padding: 8px;
   border: var(--border-width) solid var(--background-modifier-border);
   border-radius: var(--radius-m);
   background: var(--background-primary);
@@ -230,6 +231,7 @@
 
 .abyss-documents .abyss-annotation-editor-palette {
   min-width: 0;
+  padding-inline-end: 28px;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
   scrollbar-width: none;
@@ -240,28 +242,32 @@
 }
 
 .abyss-documents .abyss-annotation-editor-swatch {
-  width: 1.5rem;
-  min-width: 1.5rem;
-  height: 1.5rem;
+  display: grid;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  place-items: center;
   padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.abyss-documents .abyss-annotation-editor-swatch::before {
+  width: 22px;
+  height: 22px;
   border: var(--border-width) solid var(--background-modifier-border);
   border-radius: var(--radius-xs);
   background: var(--abyss-annotation-swatch-color);
+  content: '';
 }
 
-.abyss-documents .abyss-annotation-editor-swatch[aria-pressed='true'] {
-  outline: 2px solid var(--text-normal);
-  outline-offset: 2px;
+.abyss-documents .abyss-annotation-editor-swatch[aria-pressed='true']::before {
+  box-shadow:
+    0 0 0 2px var(--background-primary),
+    0 0 0 4px var(--text-normal);
 }
 
-.abyss-documents .abyss-annotation-editor-swatch:focus-visible,
-.abyss-documents
-  .abyss-annotation-editor-metadata
-  :is(
-    .abyss-annotation-editor-comment,
-    .abyss-annotation-editor-tags,
-    .abyss-annotation-editor-links
-  ):focus-visible {
+.abyss-documents .abyss-annotation-editor-swatch:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }
@@ -272,31 +278,35 @@
   gap: var(--size-2-1);
 }
 
-.abyss-documents
-  .abyss-annotation-editor-metadata
-  :is(
-    .abyss-annotation-editor-comment,
-    .abyss-annotation-editor-tags,
-    .abyss-annotation-editor-links
-  ) {
+.abyss-documents .abyss-annotation-editor-comment {
   box-sizing: border-box;
   width: 100%;
+  height: var(--abyss-annotation-comment-height, auto);
   min-width: 0;
+  min-height: calc(2lh + 12px);
+  max-height: calc(5lh + 12px);
+  overflow-y: auto;
+  resize: none;
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-small);
+  field-sizing: content;
 }
 
-.abyss-documents .abyss-annotation-editor-comment {
-  min-height: 3.5rem;
-  resize: vertical;
+.abyss-documents .abyss-annotation-editor-comment:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 
 .abyss-documents .abyss-annotation-editor-actions {
-  justify-content: flex-end;
+  position: absolute;
+  inset-block-start: 8px;
+  inset-inline-end: 8px;
 }
 
 .abyss-documents .abyss-annotation-editor-delete {
-  width: var(--input-height);
-  min-width: var(--input-height);
-  min-height: var(--input-height);
+  width: 24px;
+  min-width: 24px;
+  min-height: 24px;
   padding: 0;
   color: var(--text-muted);
 }
@@ -321,12 +331,6 @@
   gap: var(--size-2-1);
   color: var(--text-normal);
   overflow-wrap: anywhere;
-}
-
-.abyss-documents .abyss-annotation-editor-readonly-metadata [data-field='tags'],
-.abyss-documents .abyss-annotation-editor-readonly-metadata [data-field='links'] {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
 }
 
 .abyss-documents [data-region='document'] {
@@ -622,146 +626,12 @@
   color: var(--text-muted);
 }
 
-.abyss-documents .abyss-annotation-tags {
-  box-sizing: border-box;
-  max-height: min(40%, 280px);
-  min-height: 0;
-  flex: 0 0 auto;
-  border-top: var(--border-width) solid var(--background-modifier-border);
-  background: var(--background-primary);
-  color: var(--text-muted);
-}
-
 .abyss-documents .abyss-annotation-footer {
   display: contents;
 }
 
 .abyss-documents .abyss-annotation-footer[hidden] {
   display: none;
-}
-
-.abyss-documents .abyss-annotation-tags[data-expanded='true'] {
-  display: flex;
-  flex: 0 1 auto;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.abyss-documents .abyss-annotation-tags-summary {
-  display: flex;
-  min-height: 36px;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--size-2-2);
-  padding: var(--size-2-1) var(--size-4-2);
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: var(--font-ui-small);
-  font-weight: var(--font-medium);
-}
-
-.abyss-documents .abyss-annotation-tags-summary::before {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-right: 1.5px solid currentcolor;
-  border-bottom: 1.5px solid currentcolor;
-  content: '';
-  transform: rotate(-45deg);
-  transition: transform 100ms ease-out;
-}
-
-.abyss-documents
-  .abyss-annotation-tags[data-expanded='true']
-  > .abyss-annotation-tags-summary::before {
-  transform: rotate(45deg);
-}
-
-.abyss-documents .abyss-annotation-tags-summary:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
-}
-
-.abyss-documents .abyss-annotation-tags-summary:focus-visible {
-  outline: var(--border-width) solid var(--interactive-accent);
-  outline-offset: -2px;
-}
-
-.abyss-documents .abyss-annotation-tags-count {
-  min-width: 1.5em;
-  margin-inline-start: auto;
-  padding-inline: 0.4em;
-  border-radius: var(--radius-l);
-  background: var(--background-modifier-hover);
-  color: var(--text-faint);
-  font-size: var(--font-ui-smaller);
-  font-variant-numeric: tabular-nums;
-  font-weight: var(--font-normal);
-  text-align: center;
-}
-
-.abyss-documents .abyss-annotation-tags-body {
-  display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--size-2-2);
-  padding: 0 var(--size-4-2) var(--size-4-2);
-}
-
-.abyss-documents .abyss-annotation-tags-body[hidden] {
-  display: none;
-}
-
-.abyss-documents .abyss-annotation-tags-body > [data-annotation-tag-search] {
-  width: 100%;
-  min-width: 0;
-  flex: 0 0 auto;
-}
-
-.abyss-documents .abyss-annotation-tag-scroll-host {
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: hidden auto;
-  overscroll-behavior: contain;
-}
-
-.abyss-documents .abyss-annotation-tag-rows {
-  display: flex;
-  align-content: flex-start;
-  gap: var(--size-2-1);
-  flex-wrap: wrap;
-}
-
-.abyss-documents .abyss-annotation-tag-chip {
-  display: inline-flex;
-  box-sizing: border-box;
-  width: auto;
-  max-width: 100%;
-  min-height: 28px;
-  align-items: center;
-  overflow: hidden;
-  padding: 2px var(--size-2-2);
-  border: var(--border-width) solid var(--background-modifier-border);
-  border-radius: var(--radius-l);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  line-height: var(--line-height-tight);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.abyss-documents .abyss-annotation-tag-chip:hover,
-.abyss-documents .abyss-annotation-tag-chip[aria-pressed='true'] {
-  border-color: var(--background-modifier-border-hover);
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
-}
-
-.abyss-documents .abyss-annotation-tag-chip:focus-visible {
-  outline: var(--border-width) solid var(--interactive-accent);
-  outline-offset: 1px;
 }
 
 .abyss-documents .abyss-annotations-context-status {
@@ -907,7 +777,6 @@
 }
 
 .abyss-documents .abyss-annotation-controls[hidden],
-.abyss-documents .abyss-annotation-tags[hidden],
 .abyss-documents .abyss-annotations-list[hidden] {
   display: none;
 }
@@ -985,7 +854,7 @@
   font-size: var(--font-ui-smaller);
 }
 
-.abyss-documents .abyss-annotation-link-suggestions {
+.abyss-documents .abyss-annotation-comment-suggestions {
   max-height: min(14rem, 40vh);
   overflow: auto;
   padding: var(--size-2-1);
@@ -995,7 +864,7 @@
   box-shadow: var(--shadow-s);
 }
 
-.abyss-documents .abyss-annotation-link-suggestions > [role='option'] {
+.abyss-documents .abyss-annotation-comment-suggestions > [role='option'] {
   display: block;
   width: 100%;
   min-height: 44px;
@@ -1005,7 +874,7 @@
   text-align: start;
 }
 
-.abyss-documents .abyss-annotation-link-suggestions > [role='option'][aria-selected='true'] {
+.abyss-documents .abyss-annotation-comment-suggestions > [role='option'][aria-selected='true'] {
   background: var(--background-modifier-hover);
 }
 
@@ -1068,44 +937,6 @@
   line-height: var(--line-height-normal);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
-}
-
-.abyss-documents .abyss-annotation-card-links,
-.abyss-documents .abyss-annotation-card-tags {
-  display: flex;
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  align-self: stretch;
-  flex-wrap: wrap;
-  gap: var(--size-2-1);
-}
-
-.abyss-documents .abyss-annotation-card-link,
-.abyss-documents .abyss-annotation-card-tag {
-  box-sizing: border-box;
-  width: auto;
-  min-width: 0;
-  max-width: 100%;
-  flex: 0 1 auto;
-  overflow: hidden;
-  font-size: var(--font-ui-smaller);
-  line-height: var(--line-height-tight);
-  text-overflow: ellipsis;
-  unicode-bidi: plaintext;
-  white-space: nowrap;
-}
-
-.abyss-documents .abyss-annotation-card-link {
-  padding: 1px var(--size-2-1);
-  border-radius: var(--radius-s);
-  background: var(--background-modifier-hover);
-  color: var(--text-muted);
-}
-
-.abyss-documents .abyss-annotation-card-tag {
-  color: var(--text-accent);
 }
 
 .abyss-documents .abyss-reader-search-result {
@@ -1258,6 +1089,24 @@
 }
 
 @media (pointer: coarse) {
+  .abyss-documents .abyss-annotation-editor-popover {
+    gap: 6px;
+  }
+
+  .abyss-documents .abyss-annotation-editor-palette {
+    display: grid;
+    align-self: start;
+    grid-template-columns: repeat(4, 44px);
+    gap: 6px;
+    padding-inline-end: 50px;
+    overflow-x: visible;
+  }
+
+  .abyss-documents .abyss-annotation-editor-swatch::before {
+    width: 24px;
+    height: 24px;
+  }
+
   .abyss-documents .abyss-reader-annotations {
     --abyss-annotation-action-height: 44px;
     --abyss-annotation-action-width: 104px;
@@ -1287,12 +1136,7 @@
     min-height: 2.75rem;
   }
 
-  .abyss-documents .abyss-annotation-editor-swatch {
-    height: 2.75rem;
-  }
-
-  .abyss-documents .abyss-annotation-color-chip,
-  .abyss-documents .abyss-annotation-tag-chip {
+  .abyss-documents .abyss-annotation-color-chip {
     min-width: 2.75rem;
     min-height: 2.75rem;
   }
@@ -1305,7 +1149,6 @@
 
   .abyss-documents .abyss-reader-toolbar-page-field,
   .abyss-documents .abyss-reader-sidebar-tab,
-  .abyss-documents .abyss-annotation-tags-summary,
   .abyss-documents .abyss-reader-outline-search,
   .abyss-documents .abyss-reader-search-input,
   .abyss-documents [data-action='retry'] {

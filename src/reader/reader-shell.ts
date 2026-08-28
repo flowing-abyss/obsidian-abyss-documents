@@ -11,6 +11,7 @@ import type {
   QuickHighlightState,
 } from './annotation-interaction-controller.js';
 import { AnnotationToolbar, type AnnotationToolbarIntent } from './annotation-toolbar.js';
+import type { AnnotationSuggestionProvider } from './link-suggestions.js';
 import type { ObsidianTheme } from './reading-profiles.js';
 import { ReaderSidebar, type ReaderSidebarCallbacks, type ReaderSidebarTab } from './sidebar.js';
 import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
@@ -21,7 +22,9 @@ export type ReaderShellIntent =
   | { readonly type: 'open-sidebar'; readonly tab: ReaderSidebarTab };
 
 export interface ReaderShellOptions {
+  readonly annotationSuggestions?: AnnotationSuggestionProvider;
   readonly sidebarWidth?: number;
+  readonly sourcePath?: string;
 }
 
 const DEFAULT_SIDEBAR_WIDTH = 320;
@@ -72,7 +75,11 @@ export class ReaderShell implements AnnotationInteractionHost {
     this.body = this.root.createDiv({ cls: 'abyss-reader-body' });
     this.documentHost = this.body.createDiv({ attr: { 'data-region': 'document' } });
     this.documentHost.tabIndex = -1;
-    this.annotationEditor = new AnnotationEditorPopover(this.root);
+    this.annotationEditor = new AnnotationEditorPopover(
+      this.root,
+      options.annotationSuggestions ?? null,
+      options.sourcePath ?? '',
+    );
     const onKeyDown = (event: KeyboardEvent): void => {
       this.handleReaderShortcut(event);
     };

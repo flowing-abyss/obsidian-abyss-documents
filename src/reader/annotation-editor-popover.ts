@@ -1,13 +1,12 @@
 import { setIcon, setTooltip } from 'obsidian';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
-import { decodeAnnotationComment, updateAnnotationComment } from '../annotation-tokens.js';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import {
-  annotationLinkTokenAtCursor,
-  replaceAnnotationLinkSuggestion,
-  type AnnotationLinkSuggestionProvider,
-  type LinkSuggestion,
+  annotationCaretTokenAtCursor,
+  replaceAnnotationSuggestion,
+  type AnnotationSuggestion,
+  type AnnotationSuggestionProvider,
 } from './link-suggestions.js';
 import { ownerWindow } from './owner-dom.js';
 
@@ -55,26 +54,25 @@ export interface AnnotationEditorPopoverRequest {
 
 const DEFAULT_COLOR = '#ffd400';
 const METADATA_DEBOUNCE_MS = 300;
+const POPOVER_EDGE_INSET = 8;
+const POPOVER_ANCHOR_GAP = 6;
+const UNSAFE_BATCH_REASON = 'These annotations cannot be changed together safely.';
 let editorSequence = 0;
 
 interface AnnotationEditorElements {
   readonly actions: HTMLDivElement;
   readonly comment: HTMLTextAreaElement;
   readonly element: HTMLDivElement;
-  readonly links: HTMLInputElement;
   readonly metadata: HTMLDivElement;
   readonly palette: HTMLDivElement;
   readonly readOnly: HTMLDivElement;
   readonly status: HTMLDivElement;
   readonly suggestions: HTMLDivElement;
-  readonly tags: HTMLInputElement;
 }
 
 interface AnnotationMetadataElements {
   readonly comment: HTMLTextAreaElement;
-  readonly links: HTMLInputElement;
   readonly suggestions: HTMLDivElement;
-  readonly tags: HTMLInputElement;
 }
 
 interface FixedViewportBounds {
@@ -90,8 +88,6 @@ interface AnnotationCreationDraft {
   readonly color: string;
   readonly comment: string;
   readonly commentField: string;
-  readonly linksField: string;
-  readonly tagsField: string;
 }
 
 interface AnnotationCreationJob {
@@ -108,8 +104,6 @@ export class AnnotationEditorPopover {
   private readonly paletteElement: HTMLDivElement;
   private readonly metadataElement: HTMLDivElement;
   private readonly commentInput: HTMLTextAreaElement;
-  private readonly tagsInput: HTMLInputElement;
-  private readonly linksInput: HTMLInputElement;
   private readonly suggestionsElement: HTMLDivElement;
   private readonly readOnlyElement: HTMLDivElement;
   private readonly statusElement: HTMLDivElement;
@@ -118,21 +112,22 @@ export class AnnotationEditorPopover {
   private active: AnnotationEditorPopoverRequest | null = null;
   private activeColor = DEFAULT_COLOR;
   private commentSource = '';
-  private readonly dirtyMetadata = new Set<'links' | 'prose' | 'tags'>();
+  private commentDirty = false;
   private metadataTimer: number | null = null;
+  private focusAwayTimer: number | null = null;
   private openGeneration = 0;
   private readonly pendingCreationUpdates = new Set<AnnotationCreationJob>();
   private previousFocus: HTMLElement | null = null;
   private selectionCreation: AnnotationCreationJob | null = null;
   private selectionCommitted = false;
   private suggestionIndex = -1;
-  private suggestionItems: readonly LinkSuggestion[] = [];
+  private suggestionItems: readonly AnnotationSuggestion[] = [];
   private suggestionOrigin: { readonly open: number; readonly query: string } | null = null;
   private destroyed = false;
 
   constructor(
     private readonly host: HTMLElement,
-    private readonly linkSuggestions: AnnotationLinkSuggestionProvider | null = null,
+    private readonly linkSuggestions: AnnotationSuggestionProvider | null = null,
     private readonly sourcePath = '',
   ) {
     const elements = createEditorElements(host);
@@ -140,8 +135,6 @@ export class AnnotationEditorPopover {
     this.paletteElement = elements.palette;
     this.metadataElement = elements.metadata;
     this.commentInput = elements.comment;
-    this.tagsInput = elements.tags;
-    this.linksInput = elements.links;
     this.suggestionsElement = elements.suggestions;
     this.readOnlyElement = elements.readOnly;
     this.statusElement = elements.status;
@@ -173,6 +166,7 @@ export class AnnotationEditorPopover {
       const target = event.target;
       if (!(target instanceof ownerWindow(this.host).Element)) return;
       if (target.closest('[data-action="delete-annotation"]') !== null) this.deleteTarget();
+      if (target.closest('[data-action="dismiss-selection"]') !== null) this.dismissSelection();
     });
     this.registerMetadataListeners();
   }
@@ -205,25 +199,20 @@ export class AnnotationEditorPopover {
 
   private registerMetadataListeners(): void {
     this.listen(this.commentInput, 'input', () => {
-      this.metadataChanged('prose');
-    });
-    this.listen(this.tagsInput, 'input', () => {
-      this.metadataChanged('tags');
-    });
-    this.listen(this.linksInput, 'input', () => {
-      this.metadataChanged('links');
+      this.resizeComment();
+      this.commentChanged();
       this.updateSuggestions();
     });
-    this.listen(this.linksInput, 'select', () => {
+    this.listen(this.commentInput, 'select', () => {
       this.updateSuggestions();
     });
-    this.listen(this.linksInput, 'click', () => {
+    this.listen(this.commentInput, 'click', () => {
       this.updateSuggestions();
     });
-    this.listen(this.linksInput, 'keyup', (event) => {
+    this.listen(this.commentInput, 'keyup', (event) => {
       if (isCaretMovementKey(event.key)) this.updateSuggestions();
     });
-    this.listen(this.linksInput, 'keydown', (event) => {
+    this.listen(this.commentInput, 'keydown', (event) => {
       this.handleSuggestionKey(event);
     });
   }
@@ -244,11 +233,21 @@ export class AnnotationEditorPopover {
     });
     this.listenDocument('focusin', (event) => {
       if (this.active === null) return;
+      this.cancelFocusAwayTimer();
       const target = event.target;
       if (target instanceof ownerWindow(this.host).Element && this.element.contains(target)) return;
       if (this.isAnnotationOwnerTarget(target)) return;
-      if (this.active.target.kind === 'selection' && this.selectionCommitted) return;
-      this.close('focus-away');
+      this.focusAwayTimer = ownerWindow(this.host).setTimeout(() => {
+        this.focusAwayTimer = null;
+        if (this.active === null) return;
+        const focused = this.host.ownerDocument.activeElement;
+        if (
+          (focused instanceof ownerWindow(this.host).Element && this.element.contains(focused)) ||
+          this.isAnnotationOwnerTarget(focused)
+        )
+          return;
+        this.close('focus-away');
+      }, 0);
     });
   }
 
@@ -267,7 +266,7 @@ export class AnnotationEditorPopover {
   }
 
   get hasPendingChanges(): boolean {
-    return this.dirtyMetadata.size > 0 || this.pendingCreationUpdates.size > 0;
+    return this.commentDirty || this.pendingCreationUpdates.size > 0;
   }
 
   flushPendingChanges(): boolean {
@@ -310,15 +309,16 @@ export class AnnotationEditorPopover {
     if (!this.flushPendingMetadata()) return false;
     if (this.active === null) this.capturePreviousFocus();
     this.openGeneration += 1;
+    this.cancelFocusAwayTimer();
     this.active = request;
     this.cancelMetadataTimer();
-    this.dirtyMetadata.clear();
+    this.commentDirty = false;
     this.selectionCreation = null;
     this.selectionCommitted = false;
     this.render(request);
     this.element.hidden = false;
     const position = request.position ?? targetPosition(request.target);
-    this.place(position.x, position.y);
+    this.place(position.x, position.y, request.target);
     return true;
   }
 
@@ -326,10 +326,13 @@ export class AnnotationEditorPopover {
     const request = this.active;
     if (request === null) return true;
     if (!this.flushPendingMetadata()) return false;
+    this.cancelFocusAwayTimer();
     this.openGeneration += 1;
     this.active = null;
     this.selectionCreation = null;
     this.element.hidden = true;
+    if (request.target.kind === 'selection' && !this.selectionCommitted)
+      this.host.ownerDocument.getSelection()?.removeAllRanges();
     if (restoreFocus) this.restoreFocus();
     this.previousFocus = null;
     request.onClose(reason);
@@ -351,7 +354,7 @@ export class AnnotationEditorPopover {
     this.active = next;
     this.selectionCreation = null;
     this.selectionCommitted = target.kind !== 'selection';
-    this.dirtyMetadata.clear();
+    this.commentDirty = false;
     this.render(next);
     return true;
   }
@@ -362,6 +365,7 @@ export class AnnotationEditorPopover {
     this.destroyed = true;
     this.openGeneration += 1;
     this.cancelMetadataTimer();
+    this.cancelFocusAwayTimer();
     this.active = null;
     this.selectionCreation = null;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
@@ -373,7 +377,7 @@ export class AnnotationEditorPopover {
     const annotation = singleAnnotation(request.target);
     const color = targetColor(request, annotation);
     this.activeColor = color;
-    this.renderPalette(request.palette, color);
+    this.renderPalette(request.palette, color, request.target.kind === 'multiple');
     this.populateMetadata(annotation);
     this.renderTargetState(request.target);
     this.hideSuggestions();
@@ -381,11 +385,16 @@ export class AnnotationEditorPopover {
   }
 
   private populateMetadata(annotation: DocumentAnnotation | null): void {
-    const fields = annotationFields(annotation);
-    this.commentSource = fields.source;
-    this.commentInput.value = fields.prose;
-    this.tagsInput.value = renderTags(fields.tags);
-    this.linksInput.value = renderLinks(fields.links);
+    this.commentSource = annotation?.comment ?? '';
+    this.commentInput.value = this.commentSource;
+    this.resizeComment();
+  }
+
+  private resizeComment(): void {
+    this.commentInput.setCssProps({ '--abyss-annotation-comment-height': 'auto' });
+    this.commentInput.setCssProps({
+      '--abyss-annotation-comment-height': `${String(this.commentInput.scrollHeight)}px`,
+    });
   }
 
   private renderTargetState(target: AnnotationEditorTarget): void {
@@ -397,11 +406,17 @@ export class AnnotationEditorPopover {
     this.readOnlyElement.replaceChildren();
     this.statusElement.hidden = !multiple && !readOnly;
     this.statusElement.textContent = targetStatus(target);
+    delete this.statusElement.dataset['batchUnavailable'];
+    if (multiple) this.statusElement.dataset['batchUnavailable'] = '';
     this.element.setAttribute('aria-label', targetDialogLabel(target));
     if (readOnly) this.renderReadOnly(target.annotation);
   }
 
-  private renderPalette(palette: readonly AnnotationPaletteEntry[], activeColor: string): void {
+  private renderPalette(
+    palette: readonly AnnotationPaletteEntry[],
+    activeColor: string,
+    disableBatch: boolean,
+  ): void {
     this.paletteElement.replaceChildren();
     for (const entry of palette) {
       const button = ownerWindow(this.host).createEl('button');
@@ -410,8 +425,11 @@ export class AnnotationEditorPopover {
       button.dataset['editorColor'] = entry.color;
       button.dataset['shape'] = 'square';
       button.style.setProperty('--abyss-annotation-swatch-color', entry.color);
-      button.setAttribute('aria-label', semanticColorLabel(entry));
+      const label = semanticColorLabel(entry);
+      button.setAttribute('aria-label', label);
+      setTooltip(button, label, { delay: 250 });
       button.setAttribute('aria-pressed', String(entry.color === activeColor));
+      if (disableBatch) this.disableBatchAction(button);
       this.paletteElement.append(button);
     }
   }
@@ -488,8 +506,6 @@ export class AnnotationEditorPopover {
       color: this.activeColor,
       comment,
       commentField: this.commentInput.value,
-      linksField: this.linksInput.value,
-      tagsField: this.tagsInput.value,
     };
   }
 
@@ -509,12 +525,11 @@ export class AnnotationEditorPopover {
     this.selectionCreation = null;
     this.render(next);
     this.commentInput.value = draft.commentField;
-    this.tagsInput.value = draft.tagsField;
-    this.linksInput.value = draft.linksField;
+    this.resizeComment();
     this.commentSource = draft.comment;
     this.activeColor = draft.color;
     this.updatePressedColor();
-    this.dirtyMetadata.clear();
+    this.commentDirty = false;
     this.persistCreatedDraft(job, annotation);
   }
 
@@ -536,7 +551,7 @@ export class AnnotationEditorPopover {
     return true;
   }
 
-  private metadataChanged(kind: 'links' | 'prose' | 'tags'): void {
+  private commentChanged(): void {
     const request = this.active;
     if (
       request === null ||
@@ -544,11 +559,11 @@ export class AnnotationEditorPopover {
       request.target.kind === 'multiple'
     )
       return;
-    this.dirtyMetadata.add(kind);
+    this.commentDirty = true;
     if (request.target.kind === 'selection') {
       const comment = this.metadataComment();
       if (!this.selectionCommitted && comment === this.commentSource) {
-        this.dirtyMetadata.delete(kind);
+        this.commentDirty = false;
         return;
       }
       this.createSelection(comment);
@@ -573,16 +588,12 @@ export class AnnotationEditorPopover {
   }
 
   private metadataComment(): string {
-    return updateAnnotationComment(this.commentSource, {
-      ...(this.dirtyMetadata.has('prose') ? { prose: this.commentInput.value } : {}),
-      ...(this.dirtyMetadata.has('tags') ? { tags: parseTagsField(this.tagsInput.value) } : {}),
-      ...(this.dirtyMetadata.has('links') ? { links: parseLinksField(this.linksInput.value) } : {}),
-    });
+    return this.commentDirty ? this.commentInput.value : this.commentSource;
   }
 
   private persistMetadata(): boolean {
     const request = this.active;
-    if (request?.target.kind !== 'annotation' || this.dirtyMetadata.size === 0) return true;
+    if (request?.target.kind !== 'annotation' || !this.commentDirty) return true;
     const annotation = request.target.annotation;
     const comment = this.metadataComment();
     const revert = (): void => {
@@ -601,27 +612,23 @@ export class AnnotationEditorPopover {
       throw cause;
     }
     this.commentSource = comment;
-    this.dirtyMetadata.clear();
+    this.commentDirty = false;
     return true;
   }
 
   private updateSuggestions(): void {
-    const cursor = this.linksInput.selectionStart;
-    if (
-      this.linkSuggestions === null ||
-      cursor === null ||
-      cursor !== this.linksInput.selectionEnd
-    ) {
+    const cursor = this.commentInput.selectionStart;
+    if (this.linkSuggestions === null || cursor !== this.commentInput.selectionEnd) {
       this.hideSuggestions();
       return;
     }
-    const token = annotationLinkTokenAtCursor(this.linksInput.value, cursor);
+    const token = annotationCaretTokenAtCursor(this.commentInput.value, cursor);
     if (token === null) {
       this.hideSuggestions();
       return;
     }
     this.suggestionOrigin = { open: token.open, query: token.query };
-    this.suggestionItems = this.linkSuggestions.suggest(token.query, this.sourcePath);
+    this.suggestionItems = this.linkSuggestions.suggest(token.kind, token.query, this.sourcePath);
     this.suggestionIndex = this.suggestionItems.length > 0 ? 0 : -1;
     this.suggestionsElement.replaceChildren();
     for (const [index, suggestion] of this.suggestionItems.entries()) {
@@ -634,7 +641,7 @@ export class AnnotationEditorPopover {
       this.suggestionsElement.append(option);
     }
     this.suggestionsElement.hidden = this.suggestionItems.length === 0;
-    this.linksInput.setAttribute('aria-expanded', String(!this.suggestionsElement.hidden));
+    this.commentInput.setAttribute('aria-expanded', String(!this.suggestionsElement.hidden));
     this.updateSuggestionSelection();
   }
 
@@ -664,32 +671,32 @@ export class AnnotationEditorPopover {
 
   private chooseSuggestion(index: number): void {
     const suggestion = this.suggestionItems[index];
-    const cursor = this.linksInput.selectionStart;
+    const cursor = this.commentInput.selectionStart;
     if (
       suggestion === undefined ||
-      cursor === null ||
-      cursor !== this.linksInput.selectionEnd ||
+      cursor !== this.commentInput.selectionEnd ||
       this.suggestionOrigin === null
     ) {
       this.hideSuggestions();
       return;
     }
-    const token = annotationLinkTokenAtCursor(this.linksInput.value, cursor);
+    const token = annotationCaretTokenAtCursor(this.commentInput.value, cursor);
     if (token?.open !== this.suggestionOrigin.open || token.query !== this.suggestionOrigin.query) {
       this.hideSuggestions();
       return;
     }
-    const replacement = replaceAnnotationLinkSuggestion(
-      this.linksInput.value,
+    const replacement = replaceAnnotationSuggestion(
+      this.commentInput.value,
       cursor,
       suggestion.insertion,
     );
     if (replacement === null) return;
-    this.linksInput.value = replacement.value;
-    this.linksInput.setSelectionRange(replacement.cursor, replacement.cursor);
+    this.commentInput.value = replacement.value;
+    this.resizeComment();
+    this.commentInput.setSelectionRange(replacement.cursor, replacement.cursor);
     this.hideSuggestions();
-    this.metadataChanged('links');
-    this.linksInput.focus();
+    this.commentChanged();
+    this.commentInput.focus();
   }
 
   private updateSuggestionSelection(): void {
@@ -697,8 +704,8 @@ export class AnnotationEditorPopover {
       option.setAttribute('aria-selected', String(index === this.suggestionIndex));
     });
     const active = this.suggestionsElement.querySelector<HTMLElement>('[aria-selected="true"]');
-    if (active === null) this.linksInput.removeAttribute('aria-activedescendant');
-    else this.linksInput.setAttribute('aria-activedescendant', active.id);
+    if (active === null) this.commentInput.removeAttribute('aria-activedescendant');
+    else this.commentInput.setAttribute('aria-activedescendant', active.id);
   }
 
   private hideSuggestions(): void {
@@ -707,8 +714,8 @@ export class AnnotationEditorPopover {
     this.suggestionOrigin = null;
     this.suggestionsElement.replaceChildren();
     this.suggestionsElement.hidden = true;
-    this.linksInput.setAttribute('aria-expanded', 'false');
-    this.linksInput.removeAttribute('aria-activedescendant');
+    this.commentInput.setAttribute('aria-expanded', 'false');
+    this.commentInput.removeAttribute('aria-activedescendant');
   }
 
   private cancelMetadataTimer(): void {
@@ -717,10 +724,16 @@ export class AnnotationEditorPopover {
     this.metadataTimer = null;
   }
 
+  private cancelFocusAwayTimer(): void {
+    if (this.focusAwayTimer === null) return;
+    ownerWindow(this.host).clearTimeout(this.focusAwayTimer);
+    this.focusAwayTimer = null;
+  }
+
   private flushPendingMetadata(): boolean {
     this.cancelMetadataTimer();
     if (!this.retryPendingUpdates()) return false;
-    return this.dirtyMetadata.size === 0 || this.persistMetadata();
+    return !this.commentDirty || this.persistMetadata();
   }
 
   private capturePreviousFocus(): void {
@@ -745,40 +758,46 @@ export class AnnotationEditorPopover {
 
   private renderActions(target: AnnotationEditorTarget): void {
     this.actionsElement.replaceChildren();
+    if (target.kind === 'selection') {
+      const button = this.contextAction('Dismiss selection', 'x');
+      button.dataset['action'] = 'dismiss-selection';
+      this.actionsElement.append(button);
+      return;
+    }
     if (target.kind !== 'annotation' && target.kind !== 'multiple') return;
-    const button = ownerWindow(this.host).createEl('button');
-    button.type = 'button';
-    button.className = 'clickable-icon abyss-annotation-editor-delete';
-    button.dataset['action'] = 'delete-annotation';
-    button.dataset['touchTarget'] = '44';
     const label = target.kind === 'multiple' ? 'Delete annotations' : 'Delete annotation';
-    button.setAttribute('aria-label', label);
-    setIcon(button, 'trash-2');
-    setTooltip(button, label, { delay: 250 });
+    const button = this.contextAction(label, 'trash-2');
+    button.dataset['action'] = 'delete-annotation';
+    if (target.kind === 'multiple') this.disableBatchAction(button);
     this.actionsElement.append(button);
   }
 
+  private contextAction(label: string, icon: 'trash-2' | 'x'): HTMLButtonElement {
+    const button = ownerWindow(this.host).createEl('button');
+    button.type = 'button';
+    button.className = 'clickable-icon abyss-annotation-editor-delete';
+    button.dataset['touchTarget'] = '44';
+    button.setAttribute('aria-label', label);
+    setIcon(button, icon);
+    setTooltip(button, label, { delay: 250 });
+    return button;
+  }
+
+  private disableBatchAction(button: HTMLButtonElement): void {
+    button.disabled = true;
+    button.setAttribute('aria-disabled', 'true');
+    button.setAttribute('aria-describedby', this.statusElement.id);
+    button.title = UNSAFE_BATCH_REASON;
+    setTooltip(button, UNSAFE_BATCH_REASON, { delay: 250 });
+  }
+
   private renderReadOnly(annotation: DocumentAnnotation): void {
-    const decoded = decodeAnnotationComment(annotation.comment);
-    const values = [
-      { label: 'Comment', value: decoded.prose.trim() },
-      {
-        label: 'Tags',
-        value: renderTags(decoded.tags.length > 0 ? decoded.tags : annotation.tags),
-      },
-      {
-        label: 'Links',
-        value: renderLinks(decoded.links.length > 0 ? decoded.links : annotation.links),
-      },
-    ];
-    for (const field of values) {
-      if (field.value.length === 0) continue;
-      const value = ownerWindow(this.host).createDiv();
-      value.dataset['field'] = field.label.toLowerCase();
-      value.setAttribute('aria-label', field.label);
-      value.textContent = field.value;
-      this.readOnlyElement.append(value);
-    }
+    if (annotation.comment.length === 0) return;
+    const value = ownerWindow(this.host).createDiv();
+    value.dataset['field'] = 'comment';
+    value.setAttribute('aria-label', 'Comment');
+    value.textContent = annotation.comment;
+    this.readOnlyElement.append(value);
   }
 
   private deleteTarget(): void {
@@ -790,15 +809,23 @@ export class AnnotationEditorPopover {
     this.close('external');
   }
 
-  private place(x: number, y: number): void {
+  private dismissSelection(): void {
+    if (this.active?.target.kind !== 'selection' || this.selectionCommitted) return;
+    this.close('external');
+  }
+
+  private place(x: number, y: number, target: AnnotationEditorTarget): void {
     const owner = ownerWindow(this.host);
     const viewport = fixedViewportBounds(owner, this.element);
     const bounds = this.element.getBoundingClientRect();
+    const anchorTop = target.kind === 'selection' ? selectionAnchorRect(target.selection).top : y;
+    const placedY =
+      y + bounds.height > viewport.bottom ? anchorTop - POPOVER_ANCHOR_GAP - bounds.height : y;
     this.element.dataset['overflow'] = 'scroll';
-    this.element.style.maxWidth = `${Math.max(0, viewport.right - viewport.left)}px`;
+    this.element.style.maxWidth = `${Math.min(304, Math.max(0, viewport.right - viewport.left))}px`;
     this.element.style.maxHeight = `${Math.max(0, viewport.bottom - viewport.top)}px`;
     this.element.style.left = `${clamp(x, viewport.left, viewport.right - bounds.width) - viewport.originLeft}px`;
-    this.element.style.top = `${clamp(y, viewport.top, viewport.bottom - bounds.height) - viewport.originTop}px`;
+    this.element.style.top = `${clamp(placedY, viewport.top, viewport.bottom - bounds.height) - viewport.originTop}px`;
   }
 
   private listen<K extends keyof HTMLElementEventMap>(
@@ -833,15 +860,23 @@ function fixedViewportBounds(
   const right = left + (viewport?.width ?? owner.innerWidth);
   const bottom = top + (viewport?.height ?? owner.innerHeight);
   const containingBlock = element.offsetParent;
-  if (containingBlock === null) return { bottom, left, originLeft: 0, originTop: 0, right, top };
+  if (containingBlock === null)
+    return {
+      bottom: bottom - POPOVER_EDGE_INSET,
+      left: left + POPOVER_EDGE_INSET,
+      originLeft: 0,
+      originTop: 0,
+      right: right - POPOVER_EDGE_INSET,
+      top: top + POPOVER_EDGE_INSET,
+    };
   const bounds = containingBlock.getBoundingClientRect();
   return {
-    bottom: Math.min(bottom, bounds.bottom),
-    left: Math.max(left, bounds.left),
+    bottom: Math.min(bottom, bounds.bottom) - POPOVER_EDGE_INSET,
+    left: Math.max(left, bounds.left) + POPOVER_EDGE_INSET,
     originLeft: bounds.left,
     originTop: bounds.top,
-    right: Math.min(right, bounds.right),
-    top: Math.max(top, bounds.top),
+    right: Math.min(right, bounds.right) - POPOVER_EDGE_INSET,
+    top: Math.max(top, bounds.top) + POPOVER_EDGE_INSET,
   };
 }
 
@@ -874,7 +909,7 @@ function createEditorElements(host: HTMLElement): AnnotationEditorElements {
   const metadata = owner.createDiv();
   metadata.className = 'abyss-annotation-editor-metadata';
   const inputs = createMetadataElements(owner);
-  metadata.append(inputs.comment, inputs.tags, inputs.links, inputs.suggestions);
+  metadata.append(inputs.comment, inputs.suggestions);
   const readOnly = owner.createDiv();
   readOnly.className = 'abyss-annotation-editor-readonly-metadata';
   readOnly.setAttribute('aria-label', 'Annotation metadata');
@@ -883,6 +918,7 @@ function createEditorElements(host: HTMLElement): AnnotationEditorElements {
   const status = owner.createDiv();
   status.className = 'abyss-annotation-editor-status';
   status.setAttribute('role', 'status');
+  status.id = `${inputs.suggestions.id}-status`;
   status.hidden = true;
   const actions = owner.createDiv();
   actions.className = 'abyss-annotation-editor-actions';
@@ -896,27 +932,17 @@ function createMetadataElements(owner: ReturnType<typeof ownerWindow>): Annotati
   comment.setAttribute('aria-label', 'Comment');
   comment.placeholder = 'Add a comment…';
   comment.rows = 2;
-  const tags = owner.createEl('input');
-  tags.className = 'abyss-annotation-editor-tags';
-  tags.setAttribute('aria-label', 'Tags');
-  tags.placeholder = 'Add tags';
-  tags.type = 'text';
-  const links = owner.createEl('input');
-  links.className = 'abyss-annotation-editor-links';
-  links.setAttribute('aria-label', 'Links');
-  links.placeholder = 'Add links';
-  links.type = 'text';
   const suggestions = owner.createDiv();
-  suggestions.className = 'abyss-annotation-link-suggestions';
+  suggestions.className = 'abyss-annotation-comment-suggestions';
   suggestions.id = `abyss-annotation-editor-suggestions-${++editorSequence}`;
-  suggestions.setAttribute('aria-label', 'Link suggestions');
+  suggestions.setAttribute('aria-label', 'Comment suggestions');
   suggestions.setAttribute('role', 'listbox');
   suggestions.hidden = true;
-  links.setAttribute('aria-autocomplete', 'list');
-  links.setAttribute('aria-controls', suggestions.id);
-  links.setAttribute('aria-expanded', 'false');
-  links.setAttribute('role', 'combobox');
-  return { comment, links, suggestions, tags };
+  comment.setAttribute('aria-autocomplete', 'list');
+  comment.setAttribute('aria-controls', suggestions.id);
+  comment.setAttribute('aria-expanded', 'false');
+  comment.setAttribute('role', 'combobox');
+  return { comment, suggestions };
 }
 
 function singleAnnotation(target: AnnotationEditorTarget): DocumentAnnotation | null {
@@ -927,19 +953,6 @@ function targetAnnotations(target: AnnotationEditorTarget): readonly DocumentAnn
   if (target.kind === 'annotation' || target.kind === 'readonly') return [target.annotation];
   if (target.kind === 'multiple') return target.annotations;
   return [];
-}
-
-function annotationFields(annotation: DocumentAnnotation | null): {
-  readonly links: readonly string[];
-  readonly prose: string;
-  readonly source: string;
-  readonly tags: readonly string[];
-} {
-  const source = annotation?.comment ?? '';
-  const decoded = decodeAnnotationComment(source);
-  const tags = decoded.tags.length > 0 ? decoded.tags : (annotation?.tags ?? []);
-  const links = decoded.links.length > 0 ? decoded.links : (annotation?.links ?? []);
-  return { links, prose: decoded.prose.trim(), source, tags };
 }
 
 function commonColor(annotations: readonly DocumentAnnotation[]): string {
@@ -965,7 +978,7 @@ function targetDialogLabel(target: AnnotationEditorTarget): string {
 function targetStatus(target: AnnotationEditorTarget): string {
   if (target.kind === 'readonly') return 'Read-only annotation';
   if (target.kind !== 'multiple') return '';
-  return `${target.annotations.length} annotations selected`;
+  return `${target.annotations.length} annotations selected. ${UNSAFE_BATCH_REASON}`;
 }
 
 function targetPosition(target: AnnotationEditorTarget): {
@@ -973,9 +986,12 @@ function targetPosition(target: AnnotationEditorTarget): {
   readonly y: number;
 } {
   if (target.kind !== 'selection') return { x: 0, y: 0 };
-  const rects = target.selection.clientRects;
-  const rect = rects[rects.length - 1] ?? target.selection.clientRect;
-  return { x: rect.left, y: rect.bottom + 8 };
+  const rect = selectionAnchorRect(target.selection);
+  return { x: rect.left, y: rect.bottom + POPOVER_ANCHOR_GAP };
+}
+
+function selectionAnchorRect(selection: PdfTextSelection): PdfTextSelection['clientRect'] {
+  return selection.clientRects[selection.clientRects.length - 1] ?? selection.clientRect;
 }
 
 function semanticColorLabel(entry: AnnotationPaletteEntry): string {
@@ -983,45 +999,6 @@ function semanticColorLabel(entry: AnnotationPaletteEntry): string {
   if (meaning.length > 0) return meaning;
   const name = entry.name.trim();
   return name.length > 0 ? name : 'Custom color';
-}
-
-function renderTags(tags: readonly string[]): string {
-  return tags.map((tag) => `#${tag.replace(/^#+/u, '')}`).join(' ');
-}
-
-function renderLinks(links: readonly string[]): string {
-  return links
-    .map((link) => (link.startsWith('[[') && link.endsWith(']]') ? link : `[[${link}]]`))
-    .join(' ');
-}
-
-function parseTagsField(value: string): readonly string[] {
-  const explicit = Array.from(value.matchAll(/#([\p{L}\p{N}_/-]+)/gu), (match) => match[1] ?? '');
-  if (explicit.length > 0) return explicit.filter((tag) => tag.length > 0);
-  return splitFieldValues(value);
-}
-
-function parseLinksField(value: string): readonly string[] {
-  const explicit: string[] = [];
-  let cursor = 0;
-  while (cursor < value.length) {
-    const open = value.indexOf('[[', cursor);
-    if (open < 0) break;
-    const close = value.indexOf(']]', open + 2);
-    if (close < 0) break;
-    cursor = close + 2;
-    const body = value.slice(open + 2, close);
-    if (body.length > 0 && !body.includes('\n')) explicit.push(body);
-  }
-  if (explicit.length > 0) return explicit.filter((link) => link.length > 0);
-  return splitFieldValues(value);
-}
-
-function splitFieldValues(value: string): readonly string[] {
-  return value
-    .split(/[\s,]+/u)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
 }
 
 function isCaretMovementKey(key: string): boolean {

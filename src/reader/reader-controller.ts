@@ -75,6 +75,7 @@ import type { ReaderSidebarCallbacks, ReaderSidebarTab } from './sidebar.js';
 export type ShellFactory = (
   host: HTMLElement,
   onIntent: (intent: ReaderShellIntent) => void,
+  options: { readonly sourcePath: string },
 ) => ReaderShell;
 
 export interface ReaderProfileState {
@@ -449,9 +450,13 @@ export class ReaderController {
   }
 
   private async mountCurrent(file: TFile, host: HTMLElement, signal: AbortSignal): Promise<void> {
-    const shell = this.createShell(host, (intent) => {
-      this.handleToolbarIntent(intent);
-    });
+    const shell = this.createShell(
+      host,
+      (intent) => {
+        this.handleToolbarIntent(intent);
+      },
+      { sourcePath: file.path },
+    );
     this.shell = shell;
     let session: DocumentSession | null = null;
     let viewport: DocumentViewport | null = null;

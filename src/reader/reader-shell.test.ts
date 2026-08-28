@@ -16,6 +16,42 @@ function selection(): PdfTextSelection {
 }
 
 describe('ReaderShell', () => {
+  it('injects comment suggestions with the current PDF source path', () => {
+    const host = document.body.createDiv();
+    const suggest = vi.fn(() => [
+      { display: 'Note', insertion: '[[Note]]', path: 'Notes/Note.md' },
+    ]);
+    const shell = new ReaderShell(host, () => undefined, {
+      annotationSuggestions: { suggest },
+      sourcePath: 'Books/Current.pdf',
+    });
+    const annotation = {
+      ...({} as DocumentAnnotation),
+      color: '#ffd400',
+      comment: 'See [[No',
+      identity: { id: asAnnotationId('suggestion'), kind: 'stable' as const },
+      links: [],
+      tags: [],
+    };
+    shell.openAnnotationEditor({
+      onClose: vi.fn(),
+      onCreate: vi.fn(),
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(),
+      palette: [],
+      target: { annotation, kind: 'annotation' },
+    });
+    const comment = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
+    comment.setSelectionRange(comment.value.length, comment.value.length);
+    comment.dispatchEvent(new Event('select', { bubbles: true }));
+
+    expect(suggest).toHaveBeenCalledWith('link', 'No', 'Books/Current.pdf');
+    expect(host.querySelector('[role="listbox"]')?.textContent).toBe('Note');
+    shell.destroy();
+    host.remove();
+  });
+
   it('synchronizes one sidebar row when PDF focus opens the unified editor', () => {
     const host = document.body.createDiv();
     const shell = new ReaderShell(host);

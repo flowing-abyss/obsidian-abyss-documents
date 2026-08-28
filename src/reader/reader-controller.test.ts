@@ -419,6 +419,30 @@ function capturingShellFactory() {
 }
 
 describe('ReaderController', () => {
+  it('passes the current PDF source path to the shell factory', async () => {
+    const [pdf] = files('Books/Current.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const options: unknown[] = [];
+    const createShell = ((
+      host: HTMLElement,
+      onIntent: (intent: ReaderShellIntent) => void,
+      value: unknown,
+    ) => {
+      options.push(value);
+      return new ReaderShell(host, onIntent);
+    }) as ShellFactory;
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      createShell,
+    );
+
+    await controller.open(pdf, createDiv());
+
+    expect(options).toEqual([{ sourcePath: 'Books/Current.pdf' }]);
+    await controller.close();
+  });
+
   it('activates the exact overlapping annotation through navigation and the unified editor', async () => {
     const [pdf] = files('Books/Overlapping-annotations.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -1254,15 +1278,15 @@ describe('ReaderController', () => {
     shell.created.root.querySelector<HTMLButtonElement>('[data-editor-color="#ffd400"]')?.click();
     expect(createdViewport.projectSelectionRects).toHaveBeenCalledWith(pdfSelection());
     expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['selection-token']);
-    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain('Résumé —');
     expect(
-      shell.created.sidebar?.annotationsPanel.root.querySelector('.abyss-annotation-card-tags')
+      shell.created.sidebar?.annotationsPanel.root.querySelector('[data-annotation-comment]')
         ?.textContent,
-    ).toContain('#review');
+    ).toBe('Résumé — #review [[Source]]');
     expect(
-      shell.created.sidebar?.annotationsPanel.root.querySelector('.abyss-annotation-card-links')
-        ?.textContent,
-    ).toContain('Source');
+      shell.created.sidebar?.annotationsPanel.root.querySelector(
+        '.abyss-annotation-card-tags, .abyss-annotation-card-links',
+      ),
+    ).toBeNull();
     await vi.waitFor(() => {
       expect(createdViewport.commitSelection).toHaveBeenCalledExactlyOnceWith(
         'selection-token',

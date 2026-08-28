@@ -2,10 +2,10 @@ import type { TFile } from 'obsidian';
 import { App, TFile as MockTFile } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  annotationLinkTokenAtCursor,
+  annotationCaretTokenAtCursor,
   LinkSuggestionService,
   parseAnnotationTokens,
-  replaceAnnotationLinkSuggestion,
+  replaceAnnotationSuggestion,
 } from './link-suggestions.js';
 
 function md(path: string): TFile {
@@ -19,11 +19,25 @@ describe('annotation link suggestions', () => {
   it('locates the active wiki-link target and preserves a closed token alias on replacement', () => {
     const value = 'See [[con|Existing alias]] later';
     expect({
-      replacement: replaceAnnotationLinkSuggestion(value, 9, '[[Concept]]'),
-      token: annotationLinkTokenAtCursor(value, 9),
+      replacement: replaceAnnotationSuggestion(value, 9, '[[Concept]]'),
+      token: annotationCaretTokenAtCursor(value, 9),
     }).toEqual({
       replacement: { cursor: 13, value: 'See [[Concept|Existing alias]] later' },
-      token: { close: 24, open: 4, query: 'con', targetEnd: 9 },
+      token: { close: 24, kind: 'link', open: 4, query: 'con', targetEnd: 9 },
+    });
+  });
+
+  it('locates and replaces only the active tag token inside a full comment', () => {
+    const value = 'Review #todo before [[Note]] later';
+    const cursor = value.indexOf('do');
+
+    expect(annotationCaretTokenAtCursor(value, cursor)).toMatchObject({
+      kind: 'tag',
+      query: 'to',
+    });
+    expect(replaceAnnotationSuggestion(value, cursor, '#topic')).toEqual({
+      cursor: 13,
+      value: 'Review #topic before [[Note]] later',
     });
   });
 
@@ -47,14 +61,30 @@ describe('annotation link suggestions', () => {
       { generateMarkdownLink },
     );
 
-    expect(service.suggest('ide', 'Books/Book.pdf')).toEqual([
+    expect(service.suggest('link', 'ide', 'Books/Book.pdf')).toEqual([
       { display: 'Idea', path: 'Notes/Concept.md', insertion: '[[Concept|Idea]]' },
     ]);
-    expect(service.suggest('', 'Books/Book.pdf').map(({ path }) => path)).toEqual([
+    expect(service.suggest('link', '', 'Books/Book.pdf').map(({ path }) => path)).toEqual([
       'Notes/Concept.md',
     ]);
     expect(generateMarkdownLink).toHaveBeenCalledWith(concept, 'Books/Book.pdf', undefined, 'Idea');
     expect(service).not.toHaveProperty('isPathIgnored');
+  });
+
+  it('offers tag completions from public cached metadata and omits ignored files', () => {
+    const included = md('Notes/Included.md');
+    const ignored = md('Private/Ignored.md');
+    const service = new LinkSuggestionService(
+      { getMarkdownFiles: () => [included, ignored] },
+      {
+        getFileCache: (file) =>
+          file === included ? { frontmatter: { tags: ['Topic', 'Review'] } } : null,
+      },
+      { generateMarkdownLink: () => '[[unused]]' },
+    );
+    expect(service.suggest('tag', 'to', 'Books/Source.pdf')).toEqual([
+      { display: '#Topic', insertion: '#Topic' },
+    ]);
   });
 
   it('uses basenames, sorts and caps candidates, and ignores malformed tokens', () => {
@@ -66,7 +96,7 @@ describe('annotation link suggestions', () => {
       { getFileCache: () => ({}) },
       { generateMarkdownLink: (file) => `[[${file.basename}]]` },
     );
-    const results = service.suggest(' z ', 'Source.md');
+    const results = service.suggest('link', ' z ', 'Source.md');
     expect(results).toHaveLength(50);
     expect(results[0]?.display).toBe('Z00');
     expect(results[0]?.insertion).toBe('[[Z00]]');
@@ -109,12 +139,12 @@ describe('annotation link suggestions', () => {
       { getFileCache },
       { generateMarkdownLink: () => '[[Concept]]' },
     );
-    service.suggest('con', 'Books/One.pdf');
-    service.suggest('con', 'Books/Two.pdf');
+    service.suggest('link', 'con', 'Books/One.pdf');
+    service.suggest('link', 'con', 'Books/Two.pdf');
     expect(getMarkdownFiles).toHaveBeenCalledOnce();
     expect(getFileCache).toHaveBeenCalledOnce();
     service.invalidate();
-    service.suggest('con', 'Books/Two.pdf');
+    service.suggest('link', 'con', 'Books/Two.pdf');
     expect(getMarkdownFiles).toHaveBeenCalledTimes(2);
   });
 });

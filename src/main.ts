@@ -319,7 +319,6 @@ export default class AbyssDocumentsPlugin extends Plugin {
       this.app.vault,
       this.runtimeLoader,
       createPdfDocumentViewport,
-      linkSuggestions,
     );
     const registry = new DocumentAdapterRegistry([pdfAdapter]);
     this.saveBoundary = new PdfWriteBoundary(this.app.vault);
@@ -341,9 +340,11 @@ export default class AbyssDocumentsPlugin extends Plugin {
       createController: () =>
         new ReaderController(
           registry,
-          (host, onIntent) =>
+          (host, onIntent, shellContext) =>
             new ReaderShell(host, onIntent, {
+              annotationSuggestions: linkSuggestions,
               sidebarWidth: store.snapshot.view.sidebarWidth,
+              sourcePath: shellContext.sourcePath,
             }),
           profileState,
           {

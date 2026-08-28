@@ -12,6 +12,7 @@ const activeReaderSelector = '.workspace-leaf.mod-active [data-abyss-document]';
 const selectionEditorSelector =
   '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
 const nativeEditorSelector = selectionEditorSelector;
+const task4AutocompletePath = 'Task 4 autocomplete.md';
 
 function activeReaderDescendant(selector: string): string {
   return `${activeReaderSelector} ${selector}`;
@@ -27,6 +28,29 @@ async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<
     },
     { sourcePath, targetPath },
   );
+}
+
+async function installTask4AutocompleteNote(): Promise<void> {
+  await browser.executeObsidian(async ({ app }, path) => {
+    const existing = app.vault.getAbstractFileByPath(path);
+    if (existing !== null) await app.fileManager.trashFile(existing);
+    await app.vault.create(path, '---\ntags:\n  - topic\n---\n');
+  }, task4AutocompletePath);
+  await browser.waitUntil(
+    async () =>
+      browser.executeObsidian(({ app }, path) => {
+        const file = app.vault.getFileByPath(path);
+        return file !== null && app.metadataCache.getFileCache(file) !== null;
+      }, task4AutocompletePath),
+    { timeout: 5_000, timeoutMsg: 'Task 4 autocomplete fixture did not enter metadata cache.' },
+  );
+}
+
+async function removeTask4AutocompleteNote(): Promise<void> {
+  await browser.executeObsidian(async ({ app }, path) => {
+    const existing = app.vault.getAbstractFileByPath(path);
+    if (existing !== null) await app.fileManager.trashFile(existing);
+  }, task4AutocompletePath);
 }
 
 async function openPdf(path: string): Promise<void> {
@@ -1906,6 +1930,90 @@ describe('reader selection-first annotations', () => {
     await expect($(`${selectionEditorSelector} [aria-label="Comment"]`)).toExist();
   });
 
+  it('keeps pointer and keyboard autocomplete inside one connected composite editor', async () => {
+    await installTask4AutocompleteNote();
+    try {
+      await selectFixtureText();
+      const popover = $(selectionEditorSelector);
+      await popover.waitForDisplayed({ timeout: 5_000 });
+      const commentSelector = `${selectionEditorSelector} [aria-label="Comment"]`;
+      const comment = $(commentSelector);
+      await comment.click();
+      await browser.execute((selector) => {
+        const input = document.querySelector<HTMLTextAreaElement>(selector);
+        if (input === null) throw new Error('Task 4 comment editor is unavailable.');
+        input.value = 'Review #to … see [[Ta after';
+        input.setSelectionRange(10, 10);
+        input.dataset['task4Composite'] = '';
+        input
+          .closest<HTMLElement>('[data-annotation-editor-popover]')
+          ?.setAttribute('data-task4-composite', '');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+      }, commentSelector);
+      const chosenTag = $(`${selectionEditorSelector} [role="option"][aria-selected="true"]`);
+      await chosenTag.waitForDisplayed({ timeout: 5_000 });
+      await expect(chosenTag).toHaveText('#topic');
+      await chosenTag.click();
+      await expect(comment).toHaveValue('Review #topic … see [[Ta after');
+
+      await browser.execute((selector) => {
+        const input = document.querySelector<HTMLTextAreaElement>(selector);
+        if (input === null) throw new Error('Task 4 comment editor is unavailable.');
+        input.value = 'Review #topic … see [[Task 4 auto';
+        input.setSelectionRange(input.value.length, input.value.length);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+      }, commentSelector);
+      const chosenLink = $(`${selectionEditorSelector} [role="option"][aria-selected="true"]`);
+      await chosenLink.waitForDisplayed({ timeout: 5_000 });
+      await expect(chosenLink).toHaveText(expect.stringContaining('Task 4 autocomplete'));
+      await browser.keys(Key.Enter);
+      await expect(comment).toHaveValue('Review #topic … see [[Task 4 autocomplete]]');
+      await expect($$('.highlightEditor')).toBeElementsArrayOfSize(1);
+      expect(
+        await browser.execute(
+          () =>
+            document.querySelector('[data-task4-composite]')?.isConnected === true &&
+            document
+              .querySelector('[data-task4-composite] textarea')
+              ?.hasAttribute('data-task4-composite') === true,
+        ),
+      ).toBe(true);
+
+      await popover.$('[data-editor-color="#5fb236"]').click();
+      await expect(popover.$('[data-editor-color="#5fb236"]')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      await browser.execute((selector) => {
+        const input = document.querySelector<HTMLTextAreaElement>(selector);
+        if (input === null) throw new Error('Task 4 comment editor is unavailable.');
+        input.value += ' #to';
+        input.setSelectionRange(input.value.length, input.value.length);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+      }, commentSelector);
+      await $(`${selectionEditorSelector} [role="option"]`).waitForDisplayed({ timeout: 5_000 });
+      await browser.keys(Key.Escape);
+      await expect(popover).toBeDisplayed();
+      await expect($(`${selectionEditorSelector} [role="option"]`)).not.toExist();
+      await browser.keys(Key.Escape);
+      await expect(popover).not.toBeDisplayed();
+
+      await $('.highlightEditor').click();
+      await popover.waitForDisplayed({ timeout: 5_000 });
+      await $('[data-control="sidebar"]').click();
+      await expect(popover).not.toBeDisplayed();
+      await $('.highlightEditor').click();
+      await popover.waitForDisplayed({ timeout: 5_000 });
+      await popover.$('[data-action="delete-annotation"]').click();
+      await expect($$('.highlightEditor')).toBeElementsArrayOfSize(0);
+    } finally {
+      await removeTask4AutocompleteNote();
+    }
+  });
+
   it('creates enriches saves and reloads one selection-first annotation without remounting', async () => {
     await $('[data-control="sidebar"]').click();
     await $('[data-tab="annotations"]').click();
@@ -1924,8 +2032,6 @@ describe('reader selection-first annotations', () => {
       expect(timing.latencyMs).toBeLessThanOrEqual(100);
 
       const comment = `${selectionEditorSelector} [aria-label="Comment"]`;
-      const tags = `${selectionEditorSelector} [aria-label="Tags"]`;
-      const links = `${selectionEditorSelector} [aria-label="Links"]`;
       const saveBaseline = await captureAnnotationSaveBaseline();
       await installCreationContinuityProbe();
       await $(comment).click();
@@ -1945,19 +2051,13 @@ describe('reader selection-first annotations', () => {
           timeoutMsg: 'Provisional annotation card missed the first frame after metadata input.',
         },
       );
-      const initialCommentTiming = await setMetadataByNextFrames(comment, 'Draft', 'Draft');
-      const initialTagTiming = await setMetadataByNextFrames(tags, '#review', '#review');
-      const initialLinkTiming = await setMetadataByNextFrames(
-        links,
-        '[[Draft note]]',
-        'Draft note',
+      const initialCommentTiming = await setMetadataByNextFrames(
+        comment,
+        'Draft #review [[Draft note]]',
+        'Draft #review [[Draft note]]',
       );
       expect(initialCommentTiming).toMatchObject({ sameCard: true, sustained: true });
-      expect(initialTagTiming).toMatchObject({ sameCard: true, sustained: true });
-      expect(initialLinkTiming).toMatchObject({ sameCard: true, sustained: true });
       expect(initialCommentTiming.latencyMs).toBeLessThanOrEqual(100);
-      expect(initialTagTiming.latencyMs).toBeLessThanOrEqual(100);
-      expect(initialLinkTiming.latencyMs).toBeLessThanOrEqual(100);
       const beforeSwatch = await browser.execute(() => ({
         cards: document.querySelectorAll('.abyss-annotation-card').length,
         editors: document.querySelectorAll('.highlightEditor').length,
@@ -2068,14 +2168,11 @@ describe('reader selection-first annotations', () => {
 
       const commentTiming = await setMetadataByNextFrames(
         comment,
-        'Résumé — проверка',
-        'Résumé — проверка',
+        'Résumé — проверка #review [[Linked note]]',
+        'Résumé — проверка #review [[Linked note]]',
       );
-      const linkTiming = await setMetadataByNextFrames(links, '[[Linked note]]', 'Linked note');
       expect(commentTiming).toMatchObject({ sameCard: true, sustained: true });
-      expect(linkTiming).toMatchObject({ sameCard: true, sustained: true });
       expect(commentTiming.latencyMs).toBeLessThanOrEqual(100);
-      expect(linkTiming.latencyMs).toBeLessThanOrEqual(100);
 
       await browser.waitUntil(
         async () =>
@@ -2171,7 +2268,7 @@ describe('reader selection-first annotations', () => {
         cardCount: 1,
         cardRemoved: false,
         canvasRemoved: false,
-        focusLabel: 'Links',
+        focusLabel: 'Comment',
         pageRemoved: false,
         popoverHidden: false,
         popoverRemoved: false,
@@ -2206,28 +2303,10 @@ describe('reader selection-first annotations', () => {
       await $('[data-tab="annotations"]').click();
       await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(1);
       await expect($('.abyss-annotation-card')).toHaveText(
-        expect.stringContaining('Résumé — проверка'),
+        expect.stringContaining('Résumé — проверка #review [[Linked note]]'),
       );
-      try {
-        await browser.waitUntil(
-          async () =>
-            browser.execute(
-              () =>
-                document.querySelector('[data-annotation-card-tag]')?.textContent === '#review' &&
-                document.querySelector('[data-annotation-link]')?.textContent === 'Linked note',
-            ),
-          { timeout: 10_000, timeoutMsg: 'Reloaded annotation metadata did not settle.' },
-        );
-      } catch (cause) {
-        const card = await browser.execute(
-          () => document.querySelector<HTMLElement>('.abyss-annotation-card')?.outerHTML ?? null,
-        );
-        throw new Error(
-          `Reloaded metadata diagnostic: ${JSON.stringify(card)}; cause: ${String(cause)}`,
-        );
-      }
-      await expect($('[data-annotation-card-tag]')).toHaveText('#review');
-      await expect($('[data-annotation-link]')).toHaveText(expect.stringContaining('Linked note'));
+      await expect($('[data-annotation-card-tag]')).not.toExist();
+      await expect($('[data-annotation-link]')).not.toExist();
     } finally {
       await cleanupTask9SelectionProbes();
     }
@@ -2557,29 +2636,15 @@ describe('reader selection-first annotations', () => {
     const comment = popover.$('[aria-label="Comment"]');
     const commentTiming = await setMetadataByNextFrames(
       `${nativeEditorSelector} [aria-label="Comment"]`,
-      'Contextual comment',
-      'Contextual comment',
-    );
-    const linkTiming = await setMetadataByNextFrames(
-      `${nativeEditorSelector} [aria-label="Links"]`,
-      '[[Link]]',
-      'Link',
-    );
-    const tagTiming = await setMetadataByNextFrames(
-      `${nativeEditorSelector} [aria-label="Tags"]`,
-      '#tag',
-      '#tag',
+      'Contextual comment #tag [[Link]]',
+      'Contextual comment #tag [[Link]]',
     );
     if (!commentTiming.sameCard || !commentTiming.sustained) {
       throw new Error(`Comment metadata continuity failed: ${JSON.stringify(commentTiming)}`);
     }
-    expect(linkTiming).toMatchObject({ sameCard: true, sustained: true });
-    expect(tagTiming).toMatchObject({ sameCard: true, sustained: true });
-    expect(
-      Math.max(commentTiming.latencyMs, linkTiming.latencyMs, tagTiming.latencyMs),
-    ).toBeLessThanOrEqual(100);
+    expect(commentTiming.latencyMs).toBeLessThanOrEqual(100);
     await expect($('[data-task9-existing-card]')).toExist();
-    await expect(comment).toHaveValue('Contextual comment');
+    await expect(comment).toHaveValue('Contextual comment #tag [[Link]]');
     const retainedFocus = await browser.execute(
       (editorSelector) =>
         new Promise<boolean>((resolve) => {
@@ -2604,7 +2669,7 @@ describe('reader selection-first annotations', () => {
     expect(retainedFocus).toBe(true);
     hash = await waitForPdfBytesToChange(workingPath, hash);
     await expect(popover).toBeDisplayed();
-    await expect(comment).toHaveValue('Contextual comment');
+    await expect(comment).toHaveValue('Contextual comment #tag [[Link]]');
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(1);
     await popover.$('[data-action="delete-annotation"]').click();
     const immediateDeletion = await browser.execute(
@@ -2837,10 +2902,21 @@ describe('reader selection-first annotations', () => {
     const batchMutationState = async () =>
       browser.execute((selector) => {
         const editor = document.querySelector<HTMLElement>(selector);
+        const status = editor?.querySelector<HTMLElement>('[role="status"]') ?? null;
+        const statusId = status?.id ?? null;
+        const palette = Array.from(
+          editor?.querySelectorAll<HTMLButtonElement>('[data-editor-color]') ?? [],
+        );
+        const actions = Array.from(
+          editor?.querySelectorAll<HTMLButtonElement>('button[data-action]') ?? [],
+        );
         return {
-          actionLabels: Array.from(
-            editor?.querySelectorAll('button[data-action]') ?? [],
-            (button) => button.getAttribute('aria-label'),
+          actionLabels: actions.map((button) => button.getAttribute('aria-label')),
+          actionsDisabled: actions.every(
+            (button) => button.disabled && button.getAttribute('aria-describedby') === statusId,
+          ),
+          paletteDisabled: palette.every(
+            (button) => button.disabled && button.getAttribute('aria-describedby') === statusId,
           ),
           paletteHidden:
             editor?.querySelector<HTMLElement>('.abyss-annotation-editor-palette')?.hidden ?? true,
@@ -2853,13 +2929,13 @@ describe('reader selection-first annotations', () => {
               getComputedStyle(toolbar).visibility !== 'hidden',
           ),
           readOnly: editor?.innerText.includes('Read-only') ?? false,
-          status: editor?.querySelector<HTMLElement>('[role="status"]')?.textContent ?? '',
+          status: status?.textContent ?? '',
         };
       }, nativeEditorSelector);
     const assertFailClosedBatchContract = async (): Promise<void> => {
       try {
         await browser.waitUntil(
-          async () => (await batchMutationState()).status === '2 annotations selected',
+          async () => (await batchMutationState()).status.startsWith('2 annotations selected.'),
           {
             timeout: 5_000,
             timeoutMsg: 'The exact persisted overlap selection did not reach the unified target.',
@@ -2922,18 +2998,20 @@ describe('reader selection-first annotations', () => {
       }
       expect(await batchMutationState()).toEqual({
         actionLabels: ['Delete annotations'],
+        actionsDisabled: true,
         nativeToolbarVisible: false,
+        paletteDisabled: true,
         paletteHidden: false,
         readOnly: false,
-        status: '2 annotations selected',
+        status: '2 annotations selected. These annotations cannot be changed together safely.',
       });
       const green = $(`${nativeEditorSelector} [data-editor-color="#5fb236"]`);
       await browser.execute((selector) => {
         const button = document.querySelector<HTMLButtonElement>(
           `${selector} [data-editor-color="#5fb236"]`,
         );
-        if (button === null || button.hidden || button.disabled)
-          throw new Error('Unified batch palette action is unavailable.');
+        if (button === null || button.hidden || !button.disabled)
+          throw new Error('Unified batch palette action is not safely disabled.');
         button.click();
       }, nativeEditorSelector);
       await expect(green).toHaveAttribute('aria-pressed', 'false');
@@ -2941,8 +3019,8 @@ describe('reader selection-first annotations', () => {
         const button = document.querySelector<HTMLButtonElement>(
           `${selector} [data-action="delete-annotation"]`,
         );
-        if (button === null || button.hidden || button.disabled)
-          throw new Error('Unified batch delete action is unavailable.');
+        if (button === null || button.hidden || !button.disabled)
+          throw new Error('Unified batch delete action is not safely disabled.');
         button.click();
       }, nativeEditorSelector);
       await expect($(nativeEditorSelector)).toBeDisplayed();

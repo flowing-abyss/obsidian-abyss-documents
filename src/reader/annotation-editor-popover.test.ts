@@ -92,7 +92,39 @@ function editComment(popover: AnnotationEditorPopover, value: string): void {
 }
 
 describe('AnnotationEditorPopover', () => {
-  it('renders a writable annotation as square palette and inline metadata fields with only trash', () => {
+  it('auto-grows the two-row comment field without a resize handle', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open(editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }));
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected the comment textarea.');
+    Object.defineProperty(comment, 'scrollHeight', { configurable: true, value: 96 });
+
+    comment.value += '\nA longer line';
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+
+    expect(comment.rows).toBe(2);
+    expect(comment.style.getPropertyValue('--abyss-annotation-comment-height')).toBe('96px');
+    popover.destroy();
+    host.remove();
+  });
+
+  it('uses semantic Obsidian tooltips for every palette swatch', () => {
+    iconMocks.setTooltip.mockClear();
+    const host = document.body.createDiv();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open(editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }));
+    const swatches = Array.from(
+      popover.element.querySelectorAll<HTMLButtonElement>('[data-editor-color]'),
+    );
+
+    expect(iconMocks.setTooltip).toHaveBeenCalledWith(swatches[0], 'Important', { delay: 250 });
+    expect(iconMocks.setTooltip).toHaveBeenCalledWith(swatches[1], 'Question', { delay: 250 });
+    popover.destroy();
+    host.remove();
+  });
+
+  it('renders exactly one raw comment textarea with palette and contextual trash only', () => {
     const host = document.body.createDiv();
     const popover = new AnnotationEditorPopover(host);
     popover.open(editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }));
@@ -113,22 +145,103 @@ describe('AnnotationEditorPopover', () => {
       ['square', 'Important', 'true'],
       ['square', 'Question', 'false'],
     ]);
+    expect(popover.element.querySelectorAll('textarea')).toHaveLength(1);
     expect(
       popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.value,
-    ).toBe('Reader prose');
-    expect(popover.element.querySelector<HTMLInputElement>('[aria-label="Tags"]')?.value).toBe(
-      '#Important',
-    );
-    expect(popover.element.querySelector<HTMLInputElement>('[aria-label="Links"]')?.value).toBe(
-      '[[Concept]]',
-    );
+    ).toBe('Reader prose #Important [[Concept]]');
+    expect(
+      popover.element.querySelector(
+        '.abyss-annotation-editor-tags, .abyss-annotation-editor-links, [aria-label="Tags"], [aria-label="Links"]',
+      ),
+    ).toBeNull();
     expect(
       Array.from(popover.element.querySelectorAll('button[data-action]'), (button) =>
         button.getAttribute('aria-label'),
       ),
     ).toEqual(['Delete annotation']);
-    expect(popover.element.textContent).not.toMatch(/Save|Cancel|Add Text|Comment|Link|Tag/u);
+    expect(popover.element.textContent).not.toMatch(
+      /Save|Cancel|Add Text|Link|Tag|Document tags|Settings/u,
+    );
 
+    popover.destroy();
+    host.remove();
+  });
+
+  it('keeps raw comment bytes exact on open close and ordinary prose edits', () => {
+    vi.useFakeTimers();
+    try {
+      const host = document.body.createDiv();
+      const source = '  Привет\n\t#タグ [[Note|Alias]] [[Note#Heading]]  ';
+      const annotation = editableAnnotation({ comment: source });
+      const onCreate = vi.fn();
+      const onDelete = vi.fn();
+      const onUpdate = vi.fn();
+      const popover = new AnnotationEditorPopover(host);
+      const request = {
+        ...editorRequest({ annotation, kind: 'annotation' as const }),
+        onCreate,
+        onDelete,
+        onUpdate,
+      };
+
+      popover.open(request);
+      const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+      if (comment === null) throw new Error('Expected one comment textarea.');
+      expect(comment.value).toBe(source);
+      expect(popover.close('external')).toBe(true);
+      expect({
+        creates: onCreate.mock.calls,
+        deletes: onDelete.mock.calls,
+        updates: onUpdate.mock.calls,
+      }).toEqual({ creates: [], deletes: [], updates: [] });
+
+      popover.open(request);
+      const edited = '  Revised Привет\n\t#タグ [[Note|Alias]] [[Note#Heading]]  ';
+      comment.value = edited;
+      comment.dispatchEvent(new Event('input', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+
+      expect(onUpdate).toHaveBeenCalledOnce();
+      expect(onUpdate).toHaveBeenLastCalledWith({ annotations: [annotation], comment: edited });
+      popover.destroy();
+      host.remove();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('dismisses a fresh selection with X without creating or deleting an annotation', () => {
+    const host = document.body.createDiv();
+    const quote = host.createSpan({ text: 'Selected passage' });
+    const range = document.createRange();
+    range.selectNodeContents(quote);
+    document.getSelection()?.addRange(range);
+    const onClose = vi.fn();
+    const onCreate = vi.fn();
+    const onDelete = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onClose,
+      onCreate,
+      onDelete,
+    });
+
+    const dismiss = popover.element.querySelector<HTMLButtonElement>(
+      '[data-action="dismiss-selection"]',
+    );
+    expect(dismiss?.getAttribute('aria-label')).toBe('Dismiss selection');
+    expect(document.getSelection()?.rangeCount).toBe(1);
+    expect(popover.element.querySelector('[data-action="delete-annotation"]')).toBeNull();
+    dismiss?.click();
+
+    expect({ creates: onCreate.mock.calls, deletes: onDelete.mock.calls }).toEqual({
+      creates: [],
+      deletes: [],
+    });
+    expect(onClose).toHaveBeenCalledWith('external');
+    expect(popover.element.hidden).toBe(true);
+    expect(document.getSelection()?.rangeCount).toBe(0);
     popover.destroy();
     host.remove();
   });
@@ -163,11 +276,11 @@ describe('AnnotationEditorPopover', () => {
       overflow: popover.element.dataset['overflow'],
       top: popover.element.style.top,
     }).toEqual({
-      left: '280px',
-      maxHeight: '370px',
-      maxWidth: '400px',
+      left: '272px',
+      maxHeight: '354px',
+      maxWidth: '304px',
       overflow: 'scroll',
-      top: '290px',
+      top: '264px',
     });
 
     Object.defineProperty(popover.element, 'getBoundingClientRect', {
@@ -188,14 +301,47 @@ describe('AnnotationEditorPopover', () => {
       maxHeight: popover.element.style.maxHeight,
       maxWidth: popover.element.style.maxWidth,
       top: popover.element.style.top,
-    }).toEqual({ left: '44px', maxHeight: '120px', maxWidth: '180px', top: '20px' });
+    }).toEqual({ left: '48px', maxHeight: '104px', maxWidth: '164px', top: '28px' });
 
     Reflect.deleteProperty(host.win, 'visualViewport');
     popover.destroy();
     host.remove();
   });
 
-  it('creates lazily on first metadata input and keeps one creation through a later swatch', async () => {
+  it('keeps an eight-pixel inset and flips a selection popover above the viewport edge', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationEditorPopover(host);
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 250, 80),
+    });
+    Object.defineProperty(popover.element, 'offsetParent', { configurable: true, value: null });
+    Object.defineProperty(host.win, 'visualViewport', {
+      configurable: true,
+      value: { height: 200, offsetLeft: 0, offsetTop: 0, width: 260 },
+    });
+    const selected = selection();
+    const edgeSelection: PdfTextSelection = {
+      ...selected,
+      clientRect: { ...selected.clientRect, bottom: 186, left: 0, top: 170 },
+      clientRects: [{ ...selected.clientRect, bottom: 186, left: 0, top: 170 }],
+    };
+
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: edgeSelection }),
+      position: undefined,
+    });
+
+    expect({ left: popover.element.style.left, top: popover.element.style.top }).toEqual({
+      left: '8px',
+      top: '84px',
+    });
+    Reflect.deleteProperty(host.win, 'visualViewport');
+    popover.destroy();
+    host.remove();
+  });
+
+  it('creates lazily on first non-empty comment and keeps one creation through a later swatch', async () => {
     const host = document.body.createDiv();
     const popover = new AnnotationEditorPopover(host);
     const chosenSelection = selection();
@@ -222,10 +368,7 @@ describe('AnnotationEditorPopover', () => {
       onCreate: lazyCreate,
     });
     const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-    const tags = popover.element.querySelector<HTMLInputElement>('[aria-label="Tags"]');
-    const links = popover.element.querySelector<HTMLInputElement>('[aria-label="Links"]');
-    if (comment === null || tags === null || links === null)
-      throw new Error('Expected metadata fields.');
+    if (comment === null) throw new Error('Expected comment field.');
     comment.dispatchEvent(new Event('input', { bubbles: true }));
     expect(lazyCreate).not.toHaveBeenCalled();
     comment.value = 'Draft thought';
@@ -236,10 +379,8 @@ describe('AnnotationEditorPopover', () => {
       comment: 'Draft thought',
       selection: chosenSelection,
     });
-    tags.value = '#review';
-    tags.dispatchEvent(new Event('input', { bubbles: true }));
-    links.value = '[[Source]]';
-    links.dispatchEvent(new Event('input', { bubbles: true }));
+    comment.value = 'Draft thought #review [[Source]]';
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
     popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#ffd400"]')?.click();
     expect(lazyCreate).toHaveBeenCalledOnce();
     lazyResult.resolve(editableAnnotation());
@@ -266,20 +407,13 @@ describe('AnnotationEditorPopover', () => {
     });
     const sameNode = popover.element;
     const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-    const tags = popover.element.querySelector<HTMLInputElement>('[aria-label="Tags"]');
-    const links = popover.element.querySelector<HTMLInputElement>('[aria-label="Links"]');
-    if (comment === null || tags === null || links === null)
-      throw new Error('Expected metadata fields.');
+    if (comment === null) throw new Error('Expected comment field.');
 
-    comment.value = 'Initial draft';
+    comment.value = 'Initial draft #Fresh [[New note]]';
     comment.dispatchEvent(new Event('input', { bubbles: true }));
-    tags.value = '#Fresh';
-    tags.dispatchEvent(new Event('input', { bubbles: true }));
-    links.value = '[[New note]]';
-    links.dispatchEvent(new Event('input', { bubbles: true }));
     popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
     expect(onCreate).toHaveBeenCalledOnce();
-    comment.value = 'Latest draft';
+    comment.value = 'Latest draft #Fresh [[New note]]';
     comment.dispatchEvent(new Event('input', { bubbles: true }));
     expect(onSelectionPreview).toHaveBeenLastCalledWith({
       color: '#5fb236',
@@ -295,15 +429,52 @@ describe('AnnotationEditorPopover', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(popover.element).toBe(sameNode);
-    expect(comment.value).toBe('Latest draft');
-    expect(tags.value).toBe('#Fresh');
-    expect(links.value).toBe('[[New note]]');
+    expect(comment.value).toBe('Latest draft #Fresh [[New note]]');
     expect(
       popover.element.querySelector('[data-editor-color="#5fb236"]')?.getAttribute('aria-pressed'),
     ).toBe('true');
     expect(onUpdate).toHaveBeenLastCalledWith({
       annotations: [created],
       comment: 'Latest draft #Fresh [[New note]]',
+    });
+
+    popover.destroy();
+    host.remove();
+  });
+
+  it('keeps a failed creation draft connected and retryable', async () => {
+    const host = document.body.createDiv();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const failure = new Error('creation failed');
+    const created = editableAnnotation({ comment: 'Retry me' });
+    const onCreate = vi
+      .fn<Parameters<AnnotationEditorPopover['open']>[0]['onCreate']>()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(created);
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onCreate,
+    });
+    const sameNode = popover.element;
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
+    comment.value = 'Retry me';
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(popover.element).toBe(sameNode);
+    expect(popover.element.isConnected).toBe(true);
+    expect(popover.element.hidden).toBe(false);
+    expect(comment.value).toBe('Retry me');
+    popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onCreate).toHaveBeenCalledTimes(2);
+    expect(popover.element.querySelector('[data-action="delete-annotation"]')).not.toBeNull();
+    expect(log).toHaveBeenCalledWith('[abyss-documents] Could not create selection annotation', {
+      cause: failure,
     });
 
     popover.destroy();
@@ -355,18 +526,11 @@ describe('AnnotationEditorPopover', () => {
       onUpdate,
     });
     const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-    const tags = popover.element.querySelector<HTMLInputElement>('[aria-label="Tags"]');
-    const links = popover.element.querySelector<HTMLInputElement>('[aria-label="Links"]');
-    if (comment === null || tags === null || links === null)
-      throw new Error('Expected metadata fields.');
-    comment.value = 'Initial draft';
+    if (comment === null) throw new Error('Expected comment field.');
+    comment.value = 'Initial draft #Fresh [[Closed note]]';
     comment.dispatchEvent(new Event('input', { bubbles: true }));
-    tags.value = '#Fresh';
-    tags.dispatchEvent(new Event('input', { bubbles: true }));
-    links.value = '[[Closed note]]';
-    links.dispatchEvent(new Event('input', { bubbles: true }));
     popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
-    comment.value = 'Closed draft';
+    comment.value = 'Closed draft #Fresh [[Closed note]]';
     comment.dispatchEvent(new Event('input', { bubbles: true }));
 
     document.body.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
@@ -426,19 +590,21 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
-  it('persists color immediately and debounces lossless metadata with wiki-link keyboard suggestions', () => {
+  it('completes tag and link caret tokens in the same comment by keyboard and pointer', () => {
     vi.useFakeTimers();
     try {
       const host = document.body.createDiv();
-      const suggest = vi.fn((query: string, sourcePath: string) =>
-        query === 'con' && sourcePath === 'Books/Book.pdf'
-          ? [{ display: 'Concept', insertion: '[[Concept|Idea]]', path: 'Notes/Concept.md' }]
-          : [],
-      );
+      const suggest = vi.fn((kind: 'link' | 'tag', query: string, sourcePath: string) => {
+        if (sourcePath !== 'Books/Book.pdf') return [];
+        if (kind === 'tag' && query === 'to') return [{ display: '#topic', insertion: '#topic' }];
+        if (kind === 'link' && query === 'No')
+          return [{ display: 'Note', insertion: '[[Note|Alias]]', path: 'Notes/Note.md' }];
+        return [];
+      });
       const popover = new AnnotationEditorPopover(host, { suggest }, 'Books/Book.pdf');
       const onUpdate = vi.fn();
       const onPreviewUpdate = vi.fn();
-      const annotation = editableAnnotation();
+      const annotation = editableAnnotation({ comment: 'Review #to … see [[No after' });
       popover.open({
         ...editorRequest({ annotation, kind: 'annotation' }),
         onPreviewUpdate,
@@ -449,29 +615,28 @@ describe('AnnotationEditorPopover', () => {
       expect(onUpdate).toHaveBeenLastCalledWith({ annotations: [annotation], color: '#5fb236' });
 
       const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-      const tags = popover.element.querySelector<HTMLInputElement>('[aria-label="Tags"]');
-      const links = popover.element.querySelector<HTMLInputElement>('[aria-label="Links"]');
-      if (comment === null || tags === null || links === null)
-        throw new Error('Expected metadata fields.');
-      comment.value = 'Revised prose';
-      comment.dispatchEvent(new Event('input', { bubbles: true }));
-      tags.value = '#Renamed';
-      tags.dispatchEvent(new Event('input', { bubbles: true }));
-      links.value = '[[con';
-      links.setSelectionRange(5, 5);
-      links.dispatchEvent(new Event('input', { bubbles: true }));
-
-      expect(links.getAttribute('role')).toBe('combobox');
-      expect(popover.element.querySelector('[role="listbox"]')?.textContent).toBe('Concept');
-      expect(links.getAttribute('aria-activedescendant')).toBe(
+      if (comment === null) throw new Error('Expected the comment textarea.');
+      comment.setSelectionRange(10, 10);
+      comment.dispatchEvent(new Event('select', { bubbles: true }));
+      expect(popover.element.querySelector('[role="listbox"]')?.textContent).toBe('#topic');
+      expect(comment.getAttribute('aria-activedescendant')).toBe(
         popover.element.querySelector('[role="option"][aria-selected="true"]')?.id,
       );
-      links.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown' }));
-      links.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
-      expect(links.value).toBe('[[Concept|Idea]]');
+      comment.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+      expect(comment.value).toBe('Review #topic … see [[No after');
+
+      const linkCursor = comment.value.indexOf('No') + 2;
+      comment.setSelectionRange(linkCursor, linkCursor);
+      comment.dispatchEvent(new Event('select', { bubbles: true }));
+      popover.element
+        .querySelector<HTMLElement>('[role="option"]')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(comment.value).toBe('Review #topic … see [[Note|Alias]] after');
+      expect(suggest).toHaveBeenCalledWith('tag', 'to', 'Books/Book.pdf');
+      expect(suggest).toHaveBeenCalledWith('link', 'No', 'Books/Book.pdf');
       expect(onPreviewUpdate).toHaveBeenLastCalledWith({
         annotations: [annotation],
-        comment: 'Revised prose #Renamed [[Concept|Idea]]',
+        comment: 'Review #topic … see [[Note|Alias]] after',
       });
 
       vi.advanceTimersByTime(299);
@@ -479,7 +644,7 @@ describe('AnnotationEditorPopover', () => {
       vi.advanceTimersByTime(1);
       expect(onUpdate).toHaveBeenLastCalledWith({
         annotations: [annotation],
-        comment: 'Revised prose #Renamed [[Concept|Idea]]',
+        comment: 'Review #topic … see [[Note|Alias]] after',
       });
 
       popover.destroy();
@@ -487,6 +652,59 @@ describe('AnnotationEditorPopover', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('accepts a draft suggestion with Enter without creating a second annotation', () => {
+    const host = document.body.createDiv();
+    const suggest = vi.fn(() => [{ display: '#topic', insertion: '#topic' }]);
+    const onCreate = vi.fn(() => 'created' as const);
+    const popover = new AnnotationEditorPopover(host, { suggest }, 'Books/Book.pdf');
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onCreate,
+    });
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
+    comment.value = '#to';
+    comment.setSelectionRange(3, 3);
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+    comment.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+
+    expect(comment.value).toBe('#topic');
+    expect(onCreate).toHaveBeenCalledOnce();
+    popover.destroy();
+    host.remove();
+  });
+
+  it('closes suggestions on first Escape and the popover on second Escape', () => {
+    const host = document.body.createDiv();
+    const onClose = vi.fn();
+    const popover = new AnnotationEditorPopover(
+      host,
+      { suggest: () => [{ display: '#topic', insertion: '#topic' }] },
+      'Books/Book.pdf',
+    );
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation({ comment: '#to' }), kind: 'annotation' }),
+      onClose,
+    });
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
+    comment.setSelectionRange(3, 3);
+    comment.dispatchEvent(new Event('select', { bubbles: true }));
+    comment.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(popover.isOpen).toBe(true);
+    expect(popover.element.querySelector<HTMLElement>('[role="listbox"]')?.hidden).toBe(true);
+    comment.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+    expect(popover.isOpen).toBe(false);
+    expect(onClose).toHaveBeenCalledWith('escape');
+    popover.destroy();
+    host.remove();
   });
 
   it('reverts the pressed color when its immediate update is rejected', () => {
@@ -544,7 +762,7 @@ describe('AnnotationEditorPopover', () => {
       editComment(popover, 'Unsaved');
       expect(onPreviewUpdate).toHaveBeenLastCalledWith({
         annotations: [annotation],
-        comment: 'Unsaved #Original',
+        comment: 'Unsaved',
       });
       if (_label === 'throws') expect(() => popover.flushPendingChanges()).toThrow('failed');
       else expect(popover.flushPendingChanges()).toBe(false);
@@ -645,7 +863,7 @@ describe('AnnotationEditorPopover', () => {
 
   it('refreshes suggestions on caret selection and rejects stale Enter or click origins', () => {
     const host = document.body.createDiv();
-    const suggest = vi.fn((query: string) => {
+    const suggest = vi.fn((_kind: 'link' | 'tag', query: string) => {
       if (query === 'con')
         return [{ display: 'Concept', insertion: '[[Concept]]', path: 'Concept.md' }];
       if (query === 'oth') return [{ display: 'Other', insertion: '[[Other]]', path: 'Other.md' }];
@@ -653,32 +871,32 @@ describe('AnnotationEditorPopover', () => {
     });
     const popover = new AnnotationEditorPopover(host, { suggest });
     popover.open(editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }));
-    const links = popover.element.querySelector<HTMLInputElement>('[aria-label="Links"]');
-    if (links === null) throw new Error('Expected links field.');
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
 
-    links.value = '[[con]] [[oth]]';
-    links.setSelectionRange(5, 5);
-    links.dispatchEvent(new Event('input', { bubbles: true }));
+    comment.value = '[[con]] [[oth]]';
+    comment.setSelectionRange(5, 5);
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
     expect(popover.element.querySelector('[role="listbox"]')?.textContent).toBe('Concept');
-    links.setSelectionRange(13, 13);
-    links.dispatchEvent(new Event('select', { bubbles: true }));
+    comment.setSelectionRange(13, 13);
+    comment.dispatchEvent(new Event('select', { bubbles: true }));
     expect(popover.element.querySelector('[role="listbox"]')?.textContent).toBe('Other');
 
-    links.value = '[[con]] [[changed]]';
-    links.setSelectionRange(17, 17);
-    links.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
-    expect(links.value).toBe('[[con]] [[changed]]');
+    comment.value = '[[con]] [[changed]]';
+    comment.setSelectionRange(17, 17);
+    comment.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    expect(comment.value).toBe('[[con]] [[changed]]');
     expect(popover.element.querySelector<HTMLElement>('[role="listbox"]')?.hidden).toBe(true);
 
-    links.value = '[[con]]';
-    links.setSelectionRange(5, 5);
-    links.dispatchEvent(new Event('select', { bubbles: true }));
+    comment.value = '[[con]]';
+    comment.setSelectionRange(5, 5);
+    comment.dispatchEvent(new Event('select', { bubbles: true }));
     const staleOption = popover.element.querySelector<HTMLElement>('[role="option"]');
     if (staleOption === null) throw new Error('Expected suggestion option.');
-    links.value = '[[changed]]';
-    links.setSelectionRange(9, 9);
+    comment.value = '[[changed]]';
+    comment.setSelectionRange(9, 9);
     staleOption.click();
-    expect(links.value).toBe('[[changed]]');
+    expect(comment.value).toBe('[[changed]]');
     expect(popover.element.querySelector<HTMLElement>('[role="listbox"]')?.hidden).toBe(true);
 
     popover.destroy();
@@ -709,24 +927,24 @@ describe('AnnotationEditorPopover', () => {
       popover.open({ ...editorRequest({ annotation: second, kind: 'annotation' }), onUpdate });
       expect(onUpdate).toHaveBeenNthCalledWith(1, {
         annotations: [first],
-        comment: 'Before replacement #Important [[Concept]]',
+        comment: 'Before replacement',
       });
 
       editComment(popover, 'Before refresh');
       popover.updateTarget({ annotation: third, kind: 'annotation' });
       expect(onUpdate).toHaveBeenNthCalledWith(2, {
         annotations: [second],
-        comment: 'Before refresh #Two',
+        comment: 'Before refresh',
       });
       expect(
         popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.value,
-      ).toBe('Third source');
+      ).toBe('Third source #Three');
 
       editComment(popover, 'Before destroy');
       popover.destroy();
       expect(onUpdate).toHaveBeenNthCalledWith(3, {
         annotations: [third],
-        comment: 'Before destroy #Three',
+        comment: 'Before destroy',
       });
       expect(onUpdate).toHaveBeenCalledTimes(3);
       host.remove();
@@ -873,7 +1091,7 @@ describe('AnnotationEditorPopover', () => {
     expect(onUpdate).toHaveBeenCalledOnce();
     expect(onUpdate).toHaveBeenCalledWith({
       annotations: [annotation],
-      comment: 'Saved before delete #Important [[Concept]]',
+      comment: 'Saved before delete',
     });
     expect(onDelete).toHaveBeenCalledWith([annotation]);
     expect(popover.isOpen).toBe(false);
@@ -973,7 +1191,6 @@ describe('AnnotationEditorPopover', () => {
     expect(popover.element.querySelector('[data-action="delete-annotation"]')).not.toBeNull();
 
     popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.focus();
-    popover.element.querySelector<HTMLInputElement>('[aria-label="Tags"]')?.focus();
     expect(popover.element.hidden).toBe(false);
     popover.element.dispatchEvent(
       new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
@@ -1014,7 +1231,33 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
-  it('reduces multiple selection to common color/delete and renders read-only metadata without controls', () => {
+  it('defers focus-away dismissal across native editor DOM replacement', async () => {
+    const host = document.body.createDiv();
+    const nativeLayer = document.body.createDiv({ cls: 'annotationEditorLayer' });
+    const oldEditor = nativeLayer.createEl('button', { cls: 'highlightEditor' });
+    const onClose = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      onClose,
+    });
+    oldEditor.focus();
+    oldEditor.remove();
+    document.body.tabIndex = -1;
+    document.body.focus();
+    document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    const replacement = nativeLayer.createEl('button', { cls: 'highlightEditor' });
+    replacement.focus();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(popover.isOpen).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    popover.destroy();
+    nativeLayer.remove();
+    host.remove();
+  });
+
+  it('keeps exact multiple selection visible while disabling unsafe batch controls', () => {
     const host = document.body.createDiv();
     const first = editableAnnotation();
     const second = editableAnnotation({
@@ -1030,7 +1273,7 @@ describe('AnnotationEditorPopover', () => {
       onUpdate,
     });
 
-    expect(popover.element.querySelector('[role="status"]')?.textContent).toBe(
+    expect(popover.element.querySelector('[role="status"]')?.textContent).toContain(
       '2 annotations selected',
     );
     expect(
@@ -1041,10 +1284,24 @@ describe('AnnotationEditorPopover', () => {
         button.getAttribute('aria-label'),
       ),
     ).toEqual(['Delete annotations']);
-    popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
-    expect(onUpdate).toHaveBeenCalledWith({ annotations: [first, second], color: '#5fb236' });
-    popover.element.querySelector<HTMLButtonElement>('[data-action="delete-annotation"]')?.click();
-    expect(onDelete).toHaveBeenCalledWith([first, second]);
+    const swatches = Array.from(
+      popover.element.querySelectorAll<HTMLButtonElement>('[data-editor-color]'),
+    );
+    const deleteButton = popover.element.querySelector<HTMLButtonElement>(
+      '[data-action="delete-annotation"]',
+    );
+    expect(swatches.every((button) => button.disabled)).toBe(true);
+    expect(deleteButton?.disabled).toBe(true);
+    expect(swatches[0]?.getAttribute('aria-describedby')).toBe(
+      popover.element.querySelector('[data-batch-unavailable]')?.id,
+    );
+    expect(popover.element.querySelector('[data-batch-unavailable]')?.textContent).toContain(
+      'cannot be changed together safely',
+    );
+    swatches[1]?.click();
+    deleteButton?.click();
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
 
     popover.open(editorRequest({ annotation: first, kind: 'readonly' }));
     const readOnly = popover.element.querySelector<HTMLElement>(

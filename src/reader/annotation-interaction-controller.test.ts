@@ -494,19 +494,13 @@ describe('AnnotationInteractionController', () => {
     const element = host.querySelector<HTMLElement>('[data-annotation-editor-popover]');
     if (element === null) throw new Error('Expected the shell-owned selection editor.');
     const comment = element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-    const tags = element.querySelector<HTMLInputElement>('[aria-label="Tags"]');
-    const links = element.querySelector<HTMLInputElement>('[aria-label="Links"]');
-    if (comment === null || tags === null || links === null)
-      throw new Error('Expected the shell-owned selection editor.');
+    if (comment === null) throw new Error('Expected the shell-owned selection editor.');
+    expect(element.querySelector('[aria-label="Tags"], [aria-label="Links"]')).toBeNull();
 
     comment.value = 'F';
     comment.dispatchEvent(new Event('input', { bubbles: true }));
-    comment.value = 'Final draft';
+    comment.value = 'Final draft #review [[Source]]';
     comment.dispatchEvent(new Event('input', { bubbles: true }));
-    tags.value = '#review';
-    tags.dispatchEvent(new Event('input', { bubbles: true }));
-    links.value = '[[Source]]';
-    links.dispatchEvent(new Event('input', { bubbles: true }));
     element.querySelector<HTMLButtonElement>('[data-editor-color="#ffd400"]')?.click();
     const annotation = nativeAnnotation();
     created.resolve(annotation);
@@ -517,9 +511,7 @@ describe('AnnotationInteractionController', () => {
     expect(host.querySelector('[data-annotation-editor-popover]')).toBe(element);
     expect(element.isConnected).toBe(true);
     expect(element.hidden).toBe(false);
-    expect(comment.value).toBe('Final draft');
-    expect(tags.value).toBe('#review');
-    expect(links.value).toBe('[[Source]]');
+    expect(comment.value).toBe('Final draft #review [[Source]]');
     expect(updateAnnotations).toHaveBeenCalledWith({
       annotations: [annotation],
       comment: 'Final draft #review [[Source]]',

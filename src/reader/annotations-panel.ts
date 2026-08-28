@@ -7,12 +7,10 @@ import { ownerWindow, type ReaderOwnerWindow } from './owner-dom.js';
 
 const MAX_CARDS = 48;
 const MAX_COLOR_FACETS = 16;
-const MAX_TAG_FACETS = 48;
 const ESTIMATED_CARD_HEIGHT = 112;
 const SCROLL_OVERSCAN = 10;
 const HEIGHT_EPSILON = 0.5;
 const LOADING_SPINNER_DELAY_MS = 250;
-let nextDocumentTagsBodyId = 0;
 
 type AnnotationPanelState = 'loading' | 'empty' | 'content' | 'filtered-empty' | 'unavailable';
 
@@ -32,19 +30,9 @@ interface ProjectionRovingSnapshot {
   readonly rowId: string | null;
 }
 
-interface TagFacetControls {
-  readonly body: HTMLElement;
-  readonly count: HTMLElement;
-  readonly rows: HTMLElement;
-  readonly search: HTMLInputElement;
-  readonly tags: HTMLElement;
-  readonly toggle: HTMLButtonElement;
-}
-
 export interface AnnotationPanelFilter {
   readonly query: string;
   readonly colors: ReadonlySet<string>;
-  readonly tags: ReadonlySet<string>;
 }
 
 export interface AnnotationColorFacet {
@@ -84,19 +72,12 @@ export class AnnotationsPanel {
   private readonly colors: HTMLElement;
   private readonly colorSearch: HTMLInputElement;
   private readonly colorRows: HTMLElement;
-  private readonly tags: HTMLElement;
-  private readonly tagCount: HTMLElement;
-  private readonly tagBody: HTMLElement;
-  private readonly tagSearch: HTMLInputElement;
-  private readonly tagRows: HTMLElement;
-  private readonly tagToggle: HTMLButtonElement;
-  private displayTags: ReadonlyArray<readonly [string, string]> = [];
   private displayColors: readonly AnnotationColorFacet[] = [];
   private annotations: readonly DocumentAnnotation[] = [];
   private projectionRows: readonly AnnotationProjectionRow[] | null = null;
   private provisionalRowIds = new Set<string>();
   private filtered: readonly DocumentAnnotation[] = [];
-  private filter: AnnotationPanelFilter = { query: '', colors: new Set(), tags: new Set() };
+  private filter: AnnotationPanelFilter = { query: '', colors: new Set() };
   private currentPage = 0;
   private state: AnnotationPanelState = 'loading';
   private loadingVisible = false;
@@ -132,18 +113,6 @@ export class AnnotationsPanel {
   };
   private readonly onResize = (): void => {
     if (!this.destroyed) this.invalidateMeasurements(true);
-  };
-  private readonly onTagsToggle = (): void => {
-    if (this.destroyed) return;
-    this.rebaseLastFocusedVisualAnchor();
-    const expanded = this.tagToggle.getAttribute('aria-expanded') !== 'true';
-    this.tagToggle.setAttribute('aria-expanded', String(expanded));
-    this.tags.dataset['expanded'] = String(expanded);
-    this.renderTagFacets();
-    this.restoreFocusedVisualAnchor();
-  };
-  private readonly onTagSearchInput = (): void => {
-    if (!this.destroyed) this.renderTagRows();
   };
   private readonly onColorSearchInput = (): void => {
     if (!this.destroyed) this.renderColorRows();
@@ -214,14 +183,6 @@ export class AnnotationsPanel {
     this.colorSearch = colorControls.search;
     this.colorRows = colorControls.rows;
     this.controls.append(this.query);
-    ({
-      body: this.tagBody,
-      count: this.tagCount,
-      rows: this.tagRows,
-      search: this.tagSearch,
-      tags: this.tags,
-      toggle: this.tagToggle,
-    } = createTagFacetControls(owner));
     this.list = owner.createDiv();
     this.list.className = 'abyss-annotations-list';
     this.list.setAttribute('role', 'list');
@@ -230,7 +191,7 @@ export class AnnotationsPanel {
     this.footer = owner.createDiv();
     this.footer.className = 'abyss-annotation-footer';
     this.footer.dataset['annotationFooter'] = '';
-    this.footer.append(this.colors, this.tags);
+    this.footer.append(this.colors);
     this.mount(host);
     this.bindEvents();
     this.setLoading();
@@ -243,8 +204,6 @@ export class AnnotationsPanel {
     ownerWindow(this.root).removeEventListener('resize', this.onResize);
     ownerWindow(this.root).document.removeEventListener('focusin', this.onDocumentFocusIn);
     ownerWindow(this.root).document.removeEventListener('pointerdown', this.onDocumentPointerDown);
-    this.tagToggle.removeEventListener('click', this.onTagsToggle);
-    this.tagSearch.removeEventListener('input', this.onTagSearchInput);
     this.colorSearch.removeEventListener('input', this.onColorSearchInput);
     if (this.measurementFrame !== null) {
       ownerWindow(this.root).cancelAnimationFrame(this.measurementFrame);
@@ -269,8 +228,6 @@ export class AnnotationsPanel {
     ownerWindow(this.root).addEventListener('resize', this.onResize);
     ownerWindow(this.root).document.addEventListener('focusin', this.onDocumentFocusIn);
     ownerWindow(this.root).document.addEventListener('pointerdown', this.onDocumentPointerDown);
-    this.tagToggle.addEventListener('click', this.onTagsToggle);
-    this.tagSearch.addEventListener('input', this.onTagSearchInput);
     this.colorSearch.addEventListener('input', this.onColorSearchInput);
     this.query.addEventListener('input', () => {
       this.filter = { ...this.filter, query: this.query.value };
@@ -412,20 +369,11 @@ export class AnnotationsPanel {
     if (invalidateMeasurements) this.clearMeasurements();
     const query = normalize(this.filter.query.trim());
     const colors = new Set(Array.from(this.filter.colors, normalize));
-    const tags = new Set(Array.from(this.filter.tags, normalize));
     this.filtered = this.annotations.filter((annotation) => {
       if (colors.size > 0 && !colors.has(normalize(annotation.color ?? ''))) return false;
-      const annotationTags = new Set(annotation.tags.map(normalize));
-      if (tags.size > 0 && !Array.from(tags).every((tag) => annotationTags.has(tag))) return false;
       if (query.length === 0) return true;
       return normalize(
-        [
-          annotation.selectedText,
-          annotation.comment,
-          annotation.author,
-          ...annotation.tags,
-          ...annotation.links,
-        ]
+        [annotation.selectedText, annotation.comment, annotation.author]
           .filter((value): value is string => typeof value === 'string')
           .join(' '),
       ).includes(query);
@@ -447,9 +395,6 @@ export class AnnotationsPanel {
       this.options.colorMeanings,
     );
     this.renderColorFacets();
-    this.displayTags = collectTagFacets(this.annotations, this.filter.tags);
-    this.tagCount.textContent = String(this.displayTags.length);
-    this.renderTagFacets();
   }
 
   private renderColorFacets(): void {
@@ -505,58 +450,6 @@ export class AnnotationsPanel {
         this.applyFilter(true);
       });
       this.colorRows.append(chip);
-    }
-    this.recordPanelDomMaximum();
-  }
-
-  private renderTagFacets(): void {
-    const expanded = this.tagToggle.getAttribute('aria-expanded') === 'true';
-    this.tagBody.hidden = !expanded;
-    this.tagSearch.hidden = !expanded;
-    if (!expanded) {
-      this.tagRows.replaceChildren();
-      return;
-    }
-    this.renderTagRows();
-  }
-
-  private renderTagRows(): void {
-    this.tagRows.replaceChildren();
-    const query = normalize(this.tagSearch.value.trim());
-    const selected = new Set(Array.from(this.filter.tags, normalize));
-    const matching = this.displayTags.filter(
-      ([key, display]) =>
-        query.length === 0 || key.includes(query) || normalize(display).includes(query),
-    );
-    const visible = [
-      ...this.displayTags.filter(([key]) => selected.has(key)),
-      ...matching.filter(([key]) => !selected.has(key)),
-    ].slice(0, MAX_TAG_FACETS);
-    for (const [key, display] of visible) {
-      const chip = ownerWindow(this.root).createEl('button');
-      chip.type = 'button';
-      chip.className = 'abyss-annotation-tag-chip';
-      chip.dataset['annotationTagRow'] = '';
-      chip.dataset['annotationTag'] = key;
-      const pressed = selected.has(key);
-      chip.setAttribute('aria-pressed', String(pressed));
-      chip.setAttribute('aria-label', `${display} tag`);
-      chip.textContent = `#${display}`;
-      chip.title = `#${display}`;
-      setTooltip(chip, `#${display}`, { delay: 250 });
-      chip.setAttribute('aria-label', `${display} tag`);
-      chip.addEventListener('click', () => {
-        const next = new Set(this.filter.tags);
-        const previous = Array.from(next).find((tag) => normalize(tag) === key);
-        if (previous === undefined) next.add(display);
-        else next.delete(previous);
-        chip.setAttribute('aria-pressed', String(previous === undefined));
-        this.filter = { ...this.filter, tags: next };
-        this.resetVirtualScroll();
-        this.renderFacets();
-        this.applyFilter(true);
-      });
-      this.tagRows.append(chip);
     }
     this.recordPanelDomMaximum();
   }
@@ -674,12 +567,9 @@ export class AnnotationsPanel {
     else button.removeAttribute('aria-current');
     button.replaceChildren(
       this.cardHeader(annotation),
-      ...[
-        this.cardQuote(annotation),
-        this.cardComment(annotation),
-        this.cardLinks(annotation),
-        this.cardTags(annotation),
-      ].filter((element): element is HTMLElement => element !== null),
+      ...[this.cardQuote(annotation), this.cardComment(annotation)].filter(
+        (element): element is HTMLElement => element !== null,
+      ),
     );
   }
 
@@ -768,42 +658,6 @@ export class AnnotationsPanel {
     note.dataset['annotationComment'] = '';
     note.textContent = comment;
     return note;
-  }
-
-  private cardLinks(annotation: DocumentAnnotation): HTMLElement | null {
-    const links = annotation.links.map(nonEmpty).filter((value): value is string => value !== null);
-    if (links.length === 0) return null;
-    const owner = ownerWindow(this.root);
-    const linkRow = owner.createSpan();
-    linkRow.className = 'abyss-annotation-card-links';
-    linkRow.dataset['annotationLinks'] = '';
-    for (const link of links) {
-      const item = owner.createSpan();
-      item.className = 'abyss-annotation-card-link';
-      item.dataset['annotationLink'] = link;
-      item.textContent = link;
-      item.title = link;
-      linkRow.append(item);
-    }
-    return linkRow;
-  }
-
-  private cardTags(annotation: DocumentAnnotation): HTMLElement | null {
-    const tags = annotation.tags.map(nonEmpty).filter((value): value is string => value !== null);
-    if (tags.length === 0) return null;
-    const owner = ownerWindow(this.root);
-    const tagRow = owner.createSpan();
-    tagRow.className = 'abyss-annotation-card-tags';
-    tagRow.dataset['annotationCardTags'] = '';
-    for (const tag of tags) {
-      const item = owner.createSpan();
-      item.className = 'abyss-annotation-card-tag';
-      item.dataset['annotationCardTag'] = normalize(tag);
-      item.textContent = `#${tag}`;
-      item.title = `#${tag}`;
-      tagRow.append(item);
-    }
-    return tagRow;
   }
 
   private cardRow(rowId: string): HTMLElement {
@@ -1225,33 +1079,6 @@ export class AnnotationsPanel {
     if (this.suppressFocusActivationRowId === rowId) this.suppressFocusActivationRowId = null;
   }
 
-  private restoreFocusedVisualAnchor(): void {
-    const anchor = this.lastFocusedVisualAnchor;
-    if (anchor === null) return;
-    const row = this.renderedRow(anchor.rowId);
-    if (row === undefined) return;
-    const card = row.querySelector<HTMLElement>('.abyss-annotation-card');
-    if (card === null) return;
-    const delta = card.getBoundingClientRect().top - anchor.top;
-    if (!Number.isFinite(delta) || Math.abs(delta) <= HEIGHT_EPSILON) return;
-    this.scrollHost.scrollTop += delta;
-    anchor.top = card.getBoundingClientRect().top;
-  }
-
-  private rebaseLastFocusedVisualAnchor(): void {
-    const anchor = this.lastFocusedVisualAnchor;
-    if (anchor === null) return;
-    const row = this.renderedRow(anchor.rowId);
-    this.lastFocusedVisualAnchor =
-      row === undefined ? null : this.visualAnchorFor(row, anchor.rowId);
-  }
-
-  private renderedRow(rowId: string): HTMLElement | undefined {
-    return Array.from(
-      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row[data-annotation-row-id]'),
-    ).find((candidate) => candidate.dataset['annotationRowId'] === rowId);
-  }
-
   private visualAnchorFor(
     row: HTMLElement,
     rowId: string | undefined,
@@ -1312,7 +1139,6 @@ export class AnnotationsPanel {
     this.controls.hidden = !hasControls;
     this.footer.hidden = !hasControls;
     this.query.hidden = !hasControls;
-    this.tags.hidden = !hasControls || this.displayTags.length === 0;
     this.list.hidden = this.state !== 'content';
     this.status.hidden =
       this.state === 'content' || (this.state === 'loading' && !this.loadingVisible);
@@ -1464,23 +1290,6 @@ function retainSelectedColor(counts: Map<string, number>, selectedColor: string)
   if (!retained) counts.set(display, 0);
 }
 
-function collectTagFacets(
-  annotations: readonly DocumentAnnotation[],
-  selectedTags: ReadonlySet<string>,
-): ReadonlyArray<readonly [string, string]> {
-  const tags = new Map<string, string>();
-  for (const annotation of annotations) collectAnnotationTags(tags, annotation.tags);
-  collectAnnotationTags(tags, selectedTags);
-  return Array.from(tags.entries()).sort((left, right) => left[1].localeCompare(right[1]));
-}
-
-function collectAnnotationTags(tags: Map<string, string>, values: Iterable<string>): void {
-  for (const value of values) {
-    const display = nonEmpty(value);
-    if (display !== null && !tags.has(normalize(display))) tags.set(normalize(display), display);
-  }
-}
-
 function createColorFacetControls(owner: ReaderOwnerWindow): {
   readonly colors: HTMLElement;
   readonly rows: HTMLElement;
@@ -1544,68 +1353,6 @@ function createScrollHost(
   scrollHost.dataset['annotationScrollHost'] = '';
   scrollHost.append(status, list);
   return scrollHost;
-}
-
-function createTagFacetControls(owner: ReaderOwnerWindow): TagFacetControls {
-  const tags = owner.createEl('section');
-  tags.className = 'abyss-annotation-tags';
-  tags.dataset['section'] = 'tags';
-  tags.dataset['expanded'] = 'false';
-  const { body, rows, search } = createTagBody(owner);
-  const { count, toggle } = createTagToggle(owner, body.id);
-  tags.append(toggle, body);
-  return { body, count, rows, search, tags, toggle };
-}
-
-function createTagToggle(
-  owner: ReaderOwnerWindow,
-  bodyId: string,
-): {
-  readonly count: HTMLElement;
-  readonly toggle: HTMLButtonElement;
-} {
-  const summary = owner.createEl('button');
-  summary.type = 'button';
-  summary.className = 'abyss-annotation-tags-summary';
-  summary.dataset['action'] = 'toggle-document-tags';
-  summary.setAttribute('aria-controls', bodyId);
-  summary.setAttribute('aria-expanded', 'false');
-  const label = owner.createSpan();
-  label.dataset['annotationTagsLabel'] = '';
-  label.textContent = 'Document tags';
-  const count = owner.createSpan();
-  count.className = 'abyss-annotation-tags-count';
-  count.dataset['annotationTagsCount'] = '';
-  count.setAttribute('aria-label', 'Unique tags');
-  count.textContent = '0';
-  summary.append(label, count);
-  return { count, toggle: summary };
-}
-
-function createTagBody(owner: ReaderOwnerWindow): {
-  readonly body: HTMLElement;
-  readonly rows: HTMLElement;
-  readonly search: HTMLInputElement;
-} {
-  const body = owner.createDiv();
-  body.className = 'abyss-annotation-tags-body';
-  nextDocumentTagsBodyId += 1;
-  body.id = `abyss-document-tags-${String(nextDocumentTagsBodyId)}`;
-  body.hidden = true;
-  const search = owner.createEl('input');
-  search.type = 'search';
-  search.placeholder = 'Filter tags';
-  search.setAttribute('aria-label', 'Filter document tags');
-  search.dataset['annotationTagSearch'] = '';
-  search.hidden = true;
-  const scrollHost = owner.createDiv();
-  scrollHost.className = 'abyss-annotation-tag-scroll-host';
-  scrollHost.dataset['annotationTagScrollHost'] = '';
-  const rows = owner.createDiv();
-  rows.className = 'abyss-annotation-tag-rows';
-  scrollHost.append(rows);
-  body.append(search, scrollHost);
-  return { body, rows, search };
 }
 
 function measuredCardHeight(card: HTMLElement): number {

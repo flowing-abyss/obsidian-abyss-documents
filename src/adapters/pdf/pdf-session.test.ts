@@ -278,24 +278,24 @@ describe('PdfDocumentSession', () => {
     });
   });
 
-  it('passes the per-reader link provider only through its PDF source context', async () => {
+  it('keeps comment suggestion services out of the PDF viewport context', async () => {
     const fixture = sessionFixture();
     const linkSuggestions = { suggest: vi.fn(() => []) };
+    const annotationAccess = {
+      annotationCapabilities: fixture.annotationCapabilities,
+      viewportFactory: fixture.viewportFactory,
+      linkSuggestions,
+    } as unknown as ConstructorParameters<typeof PdfDocumentSession>[3];
     const configured = new PdfDocumentSession(
       file('Books/Guide.pdf'),
       fixture.document,
       fixture.pdfjsViewer,
-      {
-        annotationCapabilities: fixture.annotationCapabilities,
-        viewportFactory: fixture.viewportFactory,
-        linkSuggestions,
-      },
+      annotationAccess,
     );
     await configured.createViewport();
     expect(fixture.viewportFactory.mock.calls[0]?.[3]).toEqual({
       annotationCapabilities: fixture.annotationCapabilities,
       sourcePath: 'Books/Guide.pdf',
-      linkSuggestions,
     });
   });
 
