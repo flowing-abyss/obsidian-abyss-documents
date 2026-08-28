@@ -1986,15 +1986,108 @@ describe('reader selection-first annotations', () => {
         const custom = document.querySelector<HTMLElement>(selector);
         if (native === null || custom === null)
           throw new Error('Task 4 replacement baseline is incomplete.');
+        const comment = custom.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+        if (!custom.isConnected || custom.hidden || comment === null || comment.disabled)
+          throw new Error('Task 4 custom popover is not interactable at the replacement baseline.');
+        type ContinuityTransition = {
+          readonly kind: 'disconnected' | 'hidden';
+          readonly oldValue: string | null;
+          readonly transition:
+            'connected-to-disconnected' | 'hidden-to-visible' | 'visible-to-hidden';
+        };
+        const classify = (
+          root: HTMLElement,
+          records: readonly MutationRecord[],
+        ): readonly ContinuityTransition[] => {
+          const observed: ContinuityTransition[] = [];
+          for (const record of records) {
+            if (
+              record.type === 'attributes' &&
+              record.target === root &&
+              record.attributeName === 'hidden'
+            ) {
+              observed.push({
+                kind: 'hidden',
+                oldValue: record.oldValue,
+                transition: record.oldValue === null ? 'visible-to-hidden' : 'hidden-to-visible',
+              });
+            }
+            if (
+              record.type === 'childList' &&
+              Array.from(record.removedNodes).some(
+                (removed) => removed === root || removed.contains(root),
+              )
+            ) {
+              observed.push({
+                kind: 'disconnected',
+                oldValue: null,
+                transition: 'connected-to-disconnected',
+              });
+            }
+          }
+          return observed;
+        };
+        const canary = document.body.createDiv();
+        const canaryObserver = new MutationObserver(() => undefined);
+        canaryObserver.observe(canary, {
+          attributeFilter: ['hidden'],
+          attributeOldValue: true,
+          attributes: true,
+        });
+        canaryObserver.observe(document.documentElement, { childList: true, subtree: true });
+        canary.hidden = true;
+        canary.hidden = false;
+        canary.remove();
+        const canaryTransitions = classify(canary, canaryObserver.takeRecords());
+        canaryObserver.disconnect();
+        if (
+          canaryTransitions.map(({ transition }) => transition).join(',') !==
+          'visible-to-hidden,hidden-to-visible,connected-to-disconnected'
+        )
+          throw new Error(
+            'Task 4 continuity observer canary did not classify synchronous changes.',
+          );
+
+        const transitions: ContinuityTransition[] = [];
+        const record = (records: readonly MutationRecord[]): void => {
+          transitions.push(...classify(custom, records));
+        };
+        const observer = new MutationObserver(record);
+        observer.observe(custom, {
+          attributeFilter: ['hidden'],
+          attributeOldValue: true,
+          attributes: true,
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        const drain = (): void => {
+          record(observer.takeRecords());
+        };
+        const cleanup = (): readonly ContinuityTransition[] => {
+          drain();
+          observer.disconnect();
+          return [...transitions];
+        };
         (
           window as Window & {
             __abyssTask4Replacement?: {
+              readonly canaryTransitions: readonly ContinuityTransition[];
+              readonly cleanup: () => readonly ContinuityTransition[];
               readonly custom: HTMLElement;
+              readonly drain: () => void;
               readonly native: HTMLElement;
               readonly nativeId: string;
+              readonly transitions: readonly ContinuityTransition[];
             };
           }
-        ).__abyssTask4Replacement = { custom, native, nativeId: native.id };
+        ).__abyssTask4Replacement = {
+          canaryTransitions,
+          cleanup,
+          custom,
+          drain,
+          native,
+          nativeId: native.id,
+          transitions,
+        };
       }, selectionEditorSelector);
 
       const replacementSave = await captureAnnotationSaveBaseline();
@@ -2035,6 +2128,38 @@ describe('reader selection-first annotations', () => {
           timeoutMsg: 'Native PDF.js editor was not replaced by the supported save workflow.',
         },
       );
+      expect(
+        await browser.execute((selector) => {
+          const state = (
+            window as Window & {
+              __abyssTask4Replacement?: {
+                readonly canaryTransitions: ReadonlyArray<{ readonly transition: string }>;
+                readonly custom: HTMLElement;
+                readonly drain: () => void;
+                readonly transitions: readonly unknown[];
+              };
+            }
+          ).__abyssTask4Replacement;
+          state?.drain();
+          const current = document.querySelector<HTMLElement>(selector);
+          const comment = current?.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+          return {
+            canaryTransitions: state?.canaryTransitions.map(({ transition }) => transition) ?? [],
+            connected: state?.custom.isConnected ?? false,
+            current: current !== null && state?.custom.isSameNode(current) === true,
+            enabled: comment !== null && comment !== undefined && !comment.disabled,
+            hidden: state?.custom.hidden ?? true,
+            transitions: state?.transitions ?? [],
+          };
+        }, selectionEditorSelector),
+      ).toEqual({
+        canaryTransitions: ['visible-to-hidden', 'hidden-to-visible', 'connected-to-disconnected'],
+        connected: true,
+        current: true,
+        enabled: true,
+        hidden: false,
+        transitions: [],
+      });
       await $('.highlightEditor').click();
       await browser.waitUntil(
         async () =>
@@ -2058,11 +2183,14 @@ describe('reader selection-first annotations', () => {
             window as Window & {
               __abyssTask4Replacement?: {
                 readonly custom: HTMLElement;
+                readonly drain: () => void;
                 readonly native: HTMLElement;
                 readonly nativeId: string;
+                readonly transitions: readonly unknown[];
               };
             }
           ).__abyssTask4Replacement;
+          state?.drain();
           const replacement = document.querySelector<HTMLElement>('.highlightEditor');
           const custom = document.querySelector<HTMLElement>(selector);
           const active = document.activeElement;
@@ -2084,6 +2212,7 @@ describe('reader selection-first annotations', () => {
             newSelected: replacement?.classList.contains('selectedEditor') ?? false,
             oldDisconnected: state?.native.isConnected === false,
             oldId: state?.nativeId ?? null,
+            transitions: state?.transitions ?? [],
           };
         }, selectionEditorSelector),
       ).toEqual({
@@ -2094,6 +2223,7 @@ describe('reader selection-first annotations', () => {
         newSelected: true,
         oldDisconnected: true,
         oldId: expect.any(String),
+        transitions: [],
       });
       await browser.execute((selector) => {
         const input = document.querySelector<HTMLTextAreaElement>(selector);
@@ -2107,6 +2237,34 @@ describe('reader selection-first annotations', () => {
       await browser.keys(Key.Escape);
       await expect(popover).toBeDisplayed();
       await expect($(`${selectionEditorSelector} [role="option"]`)).not.toExist();
+      expect(
+        await browser.execute((selector) => {
+          const state = (
+            window as Window & {
+              __abyssTask4Replacement?: {
+                readonly cleanup: () => readonly unknown[];
+                readonly custom: HTMLElement;
+              };
+            }
+          ).__abyssTask4Replacement;
+          const current = document.querySelector<HTMLElement>(selector);
+          return {
+            connected: state?.custom.isConnected ?? false,
+            current: current !== null && state?.custom.isSameNode(current) === true,
+            enabled:
+              current?.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.disabled ===
+              false,
+            hidden: state?.custom.hidden ?? true,
+            transitions: state?.cleanup() ?? [],
+          };
+        }, selectionEditorSelector),
+      ).toEqual({
+        connected: true,
+        current: true,
+        enabled: true,
+        hidden: false,
+        transitions: [],
+      });
       await browser.keys(Key.Escape);
       await expect(popover).not.toBeDisplayed();
 
@@ -2120,11 +2278,11 @@ describe('reader selection-first annotations', () => {
       await expect($$('.highlightEditor')).toBeElementsArrayOfSize(0);
     } finally {
       await browser.execute(() => {
-        delete (
-          window as Window & {
-            __abyssTask4Replacement?: unknown;
-          }
-        ).__abyssTask4Replacement;
+        const host = window as Window & {
+          __abyssTask4Replacement?: { readonly cleanup?: () => readonly unknown[] };
+        };
+        host.__abyssTask4Replacement?.cleanup?.();
+        delete host.__abyssTask4Replacement;
       });
       await removeTask4AutocompleteNote();
     }
