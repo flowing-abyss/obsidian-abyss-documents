@@ -122,6 +122,92 @@ describe('AnnotationProjection', () => {
     });
   });
 
+  it('replays an explicit comment clear over verification of an older revision', () => {
+    const projection = new AnnotationProjection();
+    const annotation = {
+      ...verifiedAnnotation('stable-id'),
+      comment: 'Old comment #review [[Old note]]',
+      links: ['Old note'],
+      tags: ['review'],
+    };
+    projection.reconcile([annotation], 1);
+
+    projection.applyEditorUpdate({ annotations: [annotation], comment: '' }, 2);
+    projection.reconcile([annotation], 1);
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        links: row.annotation.links,
+        tags: row.annotation.tags,
+      })),
+    ).toEqual([{ comment: '', links: [], tags: [] }]);
+  });
+
+  it('releases confirmed overlay fields while retaining newer fields', () => {
+    const projection = new AnnotationProjection();
+    const original = verifiedAnnotation('stable-id');
+    projection.reconcile([original], 0);
+    projection.applyEditorUpdate({ annotations: [original], comment: 'Revision one' }, 1);
+    projection.applyEditorUpdate({ annotations: [original], color: '#2f80ed' }, 2);
+
+    projection.reconcile(
+      [{ ...original, color: '#ff6666', comment: 'Revision one normalized' }],
+      1,
+    );
+
+    expect(
+      projection.snapshot().map((row) => ({
+        color: row.annotation.color,
+        comment: row.annotation.comment,
+      })),
+    ).toEqual([{ color: '#2f80ed', comment: 'Revision one normalized' }]);
+  });
+
+  it('replays a deletion tombstone over verification of an older revision', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([verifiedAnnotation('deleted-id')], 1);
+
+    projection.remove('deleted-id', undefined, 2);
+    projection.reconcile([verifiedAnnotation('deleted-id')], 1);
+
+    expect(projection.snapshot().map((row) => row.nativeId)).toEqual([]);
+  });
+
+  it('ignores an older verified revision after a newer revision was accepted', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([{ ...verifiedAnnotation('stable-id'), comment: 'Revision 2' }], 2);
+
+    projection.reconcile([{ ...verifiedAnnotation('stable-id'), comment: 'Revision 1' }], 1);
+
+    expect(projection.snapshot().map((row) => row.annotation.comment)).toEqual(['Revision 2']);
+  });
+
+  it('keeps a failed save unconfirmed and releases its overlay after retry verification', () => {
+    const projection = new AnnotationProjection();
+    const original = { ...verifiedAnnotation('stable-id'), comment: 'Original' };
+    projection.reconcile([original], 0);
+    projection.applyEditorUpdate({ annotations: [original], comment: 'Pending retry' }, 1);
+
+    expect(projection.snapshot().map((row) => row.annotation.comment)).toEqual(['Pending retry']);
+
+    projection.reconcile([{ ...original, comment: 'Confirmed retry' }], 1);
+    expect(projection.snapshot().map((row) => row.annotation.comment)).toEqual(['Confirmed retry']);
+
+    projection.reconcile([original], 0);
+    expect(projection.snapshot().map((row) => row.annotation.comment)).toEqual(['Confirmed retry']);
+  });
+
+  it('replays a live create made during extraction of an older revision', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([], 1);
+
+    projection.upsert(viewportAnnotation('created-at-revision-2'), 2);
+    projection.reconcile([], 1);
+
+    expect(projection.snapshot().map((row) => row.nativeId)).toEqual(['created-at-revision-2']);
+  });
+
   it('releases an optimistic editor overlay when its row is removed', () => {
     const projection = new AnnotationProjection();
     projection.upsert(viewportAnnotation('native-1', 'selection-1'));
@@ -367,6 +453,54 @@ describe('AnnotationProjection', () => {
     expect(projection.snapshot()[0]?.annotation.capabilities).toBe(verified.capabilities);
   });
 
+  it('replaces provisional writability with verified capabilities', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('stable-id'));
+    const annotation = verifiedAnnotation('stable-id');
+    const verified = {
+      ...annotation,
+      capabilities: {
+        ...annotation.capabilities,
+        deletion: {
+          available: false as const,
+          reason: {
+            code: 'unsupported-annotation' as const,
+            message: 'This annotation cannot be deleted.',
+          },
+        },
+      },
+    };
+
+    projection.reconcile([verified]);
+
+    expect(projection.snapshot().map((row) => row.writable)).toEqual([false]);
+  });
+
+  it('refreshes live writability from unchanged verified annotation data', () => {
+    const projection = new AnnotationProjection();
+    const verified = verifiedAnnotation('stable-id');
+    projection.reconcile([verified], 0);
+    projection.upsert({ ...viewportAnnotation('stable-id'), writable: false }, 1);
+
+    projection.reconcile([verified], 1);
+
+    expect(projection.snapshot().map((row) => row.writable)).toEqual([true]);
+  });
+
+  it('retains a selection preview until its native mutation commits or discards', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('selection-token', 'selection-token'), 1);
+    const initialKey = projection.snapshot()[0]?.key;
+
+    projection.reconcile([], 1);
+    const committed = verifiedAnnotation('stable-id');
+    expect(projection.bindCommittedSelection('selection-token', committed, 2)).toBe(true);
+
+    expect(projection.snapshot()).toMatchObject([
+      { key: initialKey, nativeId: 'stable-id', provisionalId: 'selection-token' },
+    ]);
+  });
+
   it('binds exact native identities before geometry fallback candidates', () => {
     const projection = new AnnotationProjection();
     projection.upsert(viewportAnnotation('temporary-native', 'selection-1'));
@@ -377,6 +511,77 @@ describe('AnnotationProjection', () => {
     expect(projection.snapshot().map((row) => ({ key: row.key, nativeId: row.nativeId }))).toEqual([
       { key: 'annotation-row-1', nativeId: 'stable-b' },
       { key: 'annotation-row-0', nativeId: 'stable-a' },
+    ]);
+  });
+
+  it('does not bind ambiguous overlapping geometry to provisional row identities', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert({
+      ...viewportAnnotation('temporary-red', 'selection-red'),
+      color: '#ff6666',
+      comment: 'Red comment',
+    });
+    projection.upsert({
+      ...viewportAnnotation('temporary-blue', 'selection-blue'),
+      color: '#2f80ed',
+      comment: 'Blue comment',
+    });
+    const red = {
+      ...verifiedAnnotation('stable-red'),
+      color: '#ff6666',
+      comment: 'Red comment',
+    };
+    const blue = {
+      ...verifiedAnnotation('stable-blue'),
+      color: '#2f80ed',
+      comment: 'Blue comment',
+    };
+
+    projection.reconcile([blue, red]);
+
+    expect(
+      projection.snapshot().map((row) => ({
+        key: row.key,
+        nativeId: row.nativeId,
+        color: row.annotation.color,
+        comment: row.annotation.comment,
+      })),
+    ).toEqual([
+      {
+        key: 'annotation-row-2',
+        nativeId: 'stable-blue',
+        color: '#2f80ed',
+        comment: 'Blue comment',
+      },
+      {
+        key: 'annotation-row-3',
+        nativeId: 'stable-red',
+        color: '#ff6666',
+        comment: 'Red comment',
+      },
+    ]);
+
+    projection.reconcile([
+      { ...red, comment: 'Red confirmed again' },
+      { ...blue, comment: 'Blue confirmed again' },
+    ]);
+    expect(
+      projection.snapshot().map((row) => ({
+        key: row.key,
+        nativeId: row.nativeId,
+        comment: row.annotation.comment,
+      })),
+    ).toEqual([
+      {
+        key: 'annotation-row-3',
+        nativeId: 'stable-red',
+        comment: 'Red confirmed again',
+      },
+      {
+        key: 'annotation-row-2',
+        nativeId: 'stable-blue',
+        comment: 'Blue confirmed again',
+      },
     ]);
   });
 
@@ -393,10 +598,10 @@ describe('AnnotationProjection', () => {
 
     expect({ beforeRemoval, afterRemoval: projection.snapshot().map((row) => row.key) }).toEqual({
       beforeRemoval: [
-        { key: 'annotation-row-0', nativeId: 'stable-a' },
-        { key: 'annotation-row-1', nativeId: 'stable-b' },
+        { key: 'annotation-row-2', nativeId: 'stable-a' },
+        { key: 'annotation-row-3', nativeId: 'stable-b' },
       ],
-      afterRemoval: ['annotation-row-1'],
+      afterRemoval: ['annotation-row-3'],
     });
   });
 

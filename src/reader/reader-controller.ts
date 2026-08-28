@@ -232,7 +232,6 @@ export class ReaderController {
   private annotationLiveRevision = 0;
   private annotationsLoadedFor: DocumentSession | null = null;
   private annotationsLoadingFor: DocumentSession | null = null;
-  private annotationTerminalFailureFor: DocumentSession | null = null;
   private currentAnnotations: readonly DocumentAnnotation[] = [];
   private verifiedAnnotationAbort: AbortController | null = null;
   private verifiedAnnotationFailureCause: unknown = null;
@@ -567,7 +566,6 @@ export class ReaderController {
     this.annotationIntentFor = null;
     this.annotationsLoadedFor = null;
     this.annotationsLoadingFor = null;
-    this.annotationTerminalFailureFor = null;
     this.currentAnnotations = [];
     this.annotationProjection.reset();
     this.annotationLiveRevision = 0;
@@ -627,12 +625,13 @@ export class ReaderController {
         },
         onAnnotationDelete: (annotations) => {
           if (this.viewport !== viewport || this.shell !== shell) return;
+          const revision = this.annotationMutationRevision();
           const changed = annotations.reduce((removed, annotation) => {
             const id =
               annotation.identity.kind === 'stable'
                 ? annotation.identity.id
                 : annotation.identity.fingerprint;
-            return this.annotationProjection.remove(id) || removed;
+            return this.annotationProjection.remove(id, undefined, revision) || removed;
           }, false);
           if (changed) this.renderAnnotationProjection(shell);
         },
@@ -642,7 +641,11 @@ export class ReaderController {
         onSelectionCreateCommit: (creation, annotation) => {
           if (this.viewport !== viewport || this.shell !== shell) return;
           if (
-            !this.annotationProjection.bindCommittedSelection(creation.selection.token, annotation)
+            !this.annotationProjection.bindCommittedSelection(
+              creation.selection.token,
+              annotation,
+              this.annotationMutationRevision(),
+            )
           )
             return;
           this.annotationLiveRevision += 1;
@@ -650,7 +653,13 @@ export class ReaderController {
         },
         onSelectionCreateDiscard: (creation) => {
           if (this.viewport !== viewport || this.shell !== shell) return;
-          if (this.annotationProjection.remove(creation.selection.token, creation.selection.token))
+          if (
+            this.annotationProjection.remove(
+              creation.selection.token,
+              creation.selection.token,
+              this.annotationMutationRevision(),
+            )
+          )
             this.renderAnnotationProjection(shell);
         },
         onSelectionCreatePreview: (creation) => {
@@ -669,7 +678,8 @@ export class ReaderController {
     update: AnnotationEditorUpdate,
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
-    if (!this.annotationProjection.applyEditorUpdate(update)) return;
+    if (!this.annotationProjection.applyEditorUpdate(update, this.annotationMutationRevision()))
+      return;
     this.annotationLiveRevision += 1;
     this.renderAnnotationProjection(shell);
   }
@@ -685,19 +695,22 @@ export class ReaderController {
     const selection = creation.selection;
     const decoded = decodeAnnotationComment(creation.comment);
     if (
-      !this.annotationProjection.upsert({
-        nativeId: selection.token,
-        provisionalId: selection.token,
-        pageIndex: selection.pageIndex,
-        type: 'highlight',
-        rects: projector.projectSelectionRects(selection),
-        selectedText: selection.text,
-        color: creation.color,
-        comment: creation.comment,
-        tags: decoded.tags,
-        links: decoded.links,
-        writable: true,
-      })
+      !this.annotationProjection.upsert(
+        {
+          nativeId: selection.token,
+          provisionalId: selection.token,
+          pageIndex: selection.pageIndex,
+          type: 'highlight',
+          rects: projector.projectSelectionRects(selection),
+          selectedText: selection.text,
+          color: creation.color,
+          comment: creation.comment,
+          tags: decoded.tags,
+          links: decoded.links,
+          writable: true,
+        },
+        this.annotationMutationRevision(),
+      )
     )
       return;
     this.annotationLiveRevision += 1;
@@ -897,15 +910,13 @@ export class ReaderController {
       this.verifiedAnnotationAbort = abort;
       const refresh = { abort, marker } satisfies VerifiedAnnotationRefresh;
       try {
-        const liveRevision = this.annotationLiveRevision;
         const annotations = await this.reextractVerifiedAnnotations(refresh);
         if (!this.isCurrentAnnotationRefresh(refresh)) return;
-        if (liveRevision !== this.annotationLiveRevision) return;
         this.verifiedAnnotationMarker = null;
         this.verifiedAnnotationFailureCause = null;
         this.annotationsLoadedFor = session;
         this.annotationsLoadingFor = null;
-        this.acceptVerifiedAnnotations(annotations, marker.shell);
+        this.acceptVerifiedAnnotations(annotations, marker.shell, marker.revision);
       } finally {
         if (this.verifiedAnnotationAbort === abort) this.verifiedAnnotationAbort = null;
       }
@@ -1766,8 +1777,7 @@ export class ReaderController {
           return;
         }
         this.annotationsLoadedFor = session;
-        this.annotationTerminalFailureFor = null;
-        this.acceptVerifiedAnnotations(annotations, shell);
+        this.acceptVerifiedAnnotations(annotations, shell, this.confirmedAnnotationRevision());
       })
       .catch((cause: unknown) => {
         if (
@@ -1778,8 +1788,7 @@ export class ReaderController {
         )
           return;
         this.annotationsLoadingFor = null;
-        this.annotationTerminalFailureFor = session;
-        shell.sidebar?.annotationsPanel.setUnavailable(false);
+        shell.sidebar?.annotationsPanel.setUnavailable();
         console.error('[abyss-documents] Failed to extract PDF annotations', {
           path: session.descriptor.path,
           page: annotationFailurePage(cause) ?? this.currentPageIndex + 1,
@@ -1819,7 +1828,7 @@ export class ReaderController {
     this.annotationsLoadingFor = null;
     if (liveRevision !== this.annotationLiveRevision) return null;
     this.annotationsLoadedFor = session;
-    return this.acceptVerifiedAnnotations(annotations, shell);
+    return this.acceptVerifiedAnnotations(annotations, shell, this.confirmedAnnotationRevision());
   }
 
   private requestPendingVerifiedAnnotations(session: DocumentSession, shell: ReaderShell): boolean {
@@ -2189,11 +2198,13 @@ export class ReaderController {
   ): void {
     if (event.type === 'annotation-change') {
       this.annotationLiveRevision += 1;
-      if (this.annotationProjection.apply(event.change)) this.renderAnnotationProjection(shell);
+      if (this.annotationProjection.apply(event.change, this.annotationMutationRevision()))
+        this.renderAnnotationProjection(shell);
       return;
     }
     const changed = event.annotations.reduce(
-      (updated, annotation) => this.annotationProjection.upsert(annotation) || updated,
+      (updated, annotation) =>
+        this.annotationProjection.upsert(annotation, this.annotationMutationRevision()) || updated,
       false,
     );
     if (!changed) return;
@@ -2225,7 +2236,6 @@ export class ReaderController {
 
   private renderAnnotationProjection(shell: ReaderShell): void {
     this.currentAnnotations = this.annotationProjection.annotations();
-    if (this.annotationTerminalFailureFor === this.session) return;
     shell.sidebar?.annotationsPanel.setProjectedAnnotations(this.annotationProjection.snapshot());
     shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
   }
@@ -2233,11 +2243,19 @@ export class ReaderController {
   private acceptVerifiedAnnotations(
     annotations: readonly DocumentAnnotation[],
     shell: ReaderShell,
+    confirmedRevision: number,
   ): readonly DocumentAnnotation[] {
-    this.annotationTerminalFailureFor = null;
-    this.annotationProjection.reconcile(annotations);
+    this.annotationProjection.reconcile(annotations, confirmedRevision);
     this.renderAnnotationProjection(shell);
     return this.currentAnnotations;
+  }
+
+  private annotationMutationRevision(): number {
+    return this.nativeSaveSession?.pendingRevision ?? 0;
+  }
+
+  private confirmedAnnotationRevision(): number {
+    return this.nativeSaveSession?.committedRevision ?? 0;
   }
 
   private handleSearchResults(

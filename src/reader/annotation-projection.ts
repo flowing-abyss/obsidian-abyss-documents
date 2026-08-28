@@ -25,13 +25,14 @@ export interface AnnotationProjectionRow {
 }
 
 interface CandidateQueue {
-  index: number;
   readonly rows: AnnotationProjectionRow[];
 }
 
 export class AnnotationProjection {
   private rows: AnnotationProjectionRow[] = [];
   private nextKey = 0;
+  private confirmedRevision = 0;
+  private pendingOperations: AnnotationProjectionOperation[] = [];
   private readonly editorOverlays = new WeakMap<
     AnnotationProjectionRow,
     AnnotationProjectionOverlay
@@ -45,18 +46,20 @@ export class AnnotationProjection {
     return this.rows.map((row) => row.annotation);
   }
 
-  apply(change: ViewportAnnotationChange): boolean {
+  apply(change: ViewportAnnotationChange, revision = 0): boolean {
     return change.operation === 'upsert'
-      ? this.upsert(change.annotation)
-      : this.remove(change.nativeId, change.provisionalId);
+      ? this.upsert(change.annotation, revision)
+      : this.remove(change.nativeId, change.provisionalId, revision);
   }
 
   reset(): void {
     this.rows = [];
     this.nextKey = 0;
+    this.confirmedRevision = 0;
+    this.pendingOperations = [];
   }
 
-  applyEditorUpdate(update: AnnotationProjectionEditorUpdate): boolean {
+  applyEditorUpdate(update: AnnotationProjectionEditorUpdate, revision = 0): boolean {
     const identities = new Set(update.annotations.map(annotationId));
     let changed = false;
     this.rows = this.rows.map((row) => {
@@ -66,7 +69,7 @@ export class AnnotationProjection {
         !identities.has(annotationId(row.annotation))
       )
         return row;
-      const overlay = editorOverlay(this.editorOverlays.get(row), update);
+      const overlay = editorOverlay(this.editorOverlays.get(row), update, revision);
       const annotation = annotationWithOverlay(row.annotation, overlay);
       if (sameEditorFields(annotation, row.annotation)) {
         this.editorOverlays.set(row, overlay);
@@ -80,7 +83,23 @@ export class AnnotationProjection {
     return changed;
   }
 
-  bindCommittedSelection(provisionalId: string, annotation: DocumentAnnotation): boolean {
+  bindCommittedSelection(
+    provisionalId: string,
+    annotation: DocumentAnnotation,
+    revision = 0,
+  ): boolean {
+    const changed = this.bindCommittedSelectionRow(provisionalId, annotation);
+    if (changed && revision > this.confirmedRevision)
+      this.pendingOperations.push(
+        Object.freeze({ annotation, kind: 'bind', provisionalId, revision }),
+      );
+    return changed;
+  }
+
+  private bindCommittedSelectionRow(
+    provisionalId: string,
+    annotation: DocumentAnnotation,
+  ): boolean {
     const current = this.rows.find(
       (row) => row.nativeId === provisionalId || row.provisionalId === provisionalId,
     );
@@ -111,7 +130,13 @@ export class AnnotationProjection {
     return true;
   }
 
-  upsert(snapshot: ViewportAnnotationSnapshot): boolean {
+  upsert(snapshot: ViewportAnnotationSnapshot, revision = 0): boolean {
+    if (revision > this.confirmedRevision)
+      this.pendingOperations.push(Object.freeze({ kind: 'upsert', revision, snapshot }));
+    return this.upsertRows(snapshot);
+  }
+
+  private upsertRows(snapshot: ViewportAnnotationSnapshot): boolean {
     const identities = new Set([snapshot.nativeId]);
     if (snapshot.provisionalId !== undefined) identities.add(snapshot.provisionalId);
     const matches = this.rows.filter(
@@ -143,7 +168,20 @@ export class AnnotationProjection {
     return true;
   }
 
-  remove(nativeId: string, provisionalId?: string): boolean {
+  remove(nativeId: string, provisionalId?: string, revision = 0): boolean {
+    if (revision > this.confirmedRevision)
+      this.pendingOperations.push(
+        Object.freeze({
+          kind: 'remove',
+          nativeId,
+          ...(provisionalId === undefined ? {} : { provisionalId }),
+          revision,
+        }),
+      );
+    return this.removeRows(nativeId, provisionalId);
+  }
+
+  private removeRows(nativeId: string, provisionalId?: string): boolean {
     const previousLength = this.rows.length;
     this.rows = this.rows.filter((row) => {
       const retained =
@@ -159,10 +197,35 @@ export class AnnotationProjection {
 
   reconcile(
     verified: readonly DocumentAnnotation[],
-    options: { readonly retainUnmatched?: boolean } = {},
+    revisionOrOptions: number | { readonly retainUnmatched?: boolean } = {},
   ): boolean {
+    const confirmedRevision =
+      typeof revisionOrOptions === 'number' ? revisionOrOptions : Number.MAX_SAFE_INTEGER;
+    const options = typeof revisionOrOptions === 'number' ? {} : revisionOrOptions;
+    if (confirmedRevision < this.confirmedRevision) return false;
     const previous = this.rows;
-    for (const row of previous) this.editorOverlays.delete(row);
+    this.releaseConfirmedOverlays(confirmedRevision);
+    const next = this.rowsFromVerified(verified, options.retainUnmatched === true);
+    this.confirmAndReplay(next, confirmedRevision);
+    if (!sameRows(this.rows, previous)) return true;
+    this.rows = previous;
+    return false;
+  }
+
+  private releaseConfirmedOverlays(confirmedRevision: number): void {
+    for (const row of this.rows) {
+      const overlay = this.editorOverlays.get(row);
+      if (overlay === undefined) continue;
+      const retained = overlayAfterRevision(overlay, confirmedRevision);
+      if (retained === undefined) this.editorOverlays.delete(row);
+      else this.editorOverlays.set(row, retained);
+    }
+  }
+
+  private rowsFromVerified(
+    verified: readonly DocumentAnnotation[],
+    retainUnmatched: boolean,
+  ): AnnotationProjectionRow[] {
     const claimed = new Set<string>();
     const reconciled = this.bindExactRows(verified, claimed);
     const fallback = fallbackIndex(this.rows, claimed);
@@ -172,14 +235,31 @@ export class AnnotationProjection {
     const verifiedRows = reconciled.filter(
       (row): row is AnnotationProjectionRow => row !== undefined,
     );
-    const next =
-      options.retainUnmatched === true
-        ? [...verifiedRows, ...this.rows.filter((row) => !claimed.has(row.key))]
-        : verifiedRows;
-    if (next.length === previous.length && next.every((row, index) => row === previous[index]))
-      return false;
+    const retainedRows = this.rows.filter(
+      (row) => !claimed.has(row.key) && (retainUnmatched || isPendingSelectionPreview(row)),
+    );
+    return [...verifiedRows, ...retainedRows];
+  }
+
+  private confirmAndReplay(next: AnnotationProjectionRow[], confirmedRevision: number): void {
+    this.confirmedRevision = Math.max(this.confirmedRevision, confirmedRevision);
+    this.pendingOperations = this.pendingOperations.filter(
+      (operation) => operation.revision > this.confirmedRevision,
+    );
     this.rows = next;
-    return true;
+    for (const operation of this.pendingOperations) this.replay(operation);
+  }
+
+  private replay(operation: AnnotationProjectionOperation): void {
+    if (operation.kind === 'upsert') {
+      this.upsertRows(operation.snapshot);
+      return;
+    }
+    if (operation.kind === 'bind') {
+      this.bindCommittedSelectionRow(operation.provisionalId, operation.annotation);
+      return;
+    }
+    this.removeRows(operation.nativeId, operation.provisionalId);
   }
 
   private bindExactRows(
@@ -206,7 +286,8 @@ export class AnnotationProjection {
       const queue = fallback
         .get(annotationBucket(annotation))
         ?.get(annotationSignature(annotation));
-      const current = takeQueued(queue);
+      if (!hasUniqueVerifiedFallback(verified, reconciled, annotation)) return;
+      const current = takeUnique(queue);
       if (current === undefined) return;
       claimed.add(current.key);
       reconciled[index] = this.rowFromVerified(current.key, annotation, current);
@@ -273,7 +354,7 @@ export class AnnotationProjection {
       annotation: annotationWithOverlay(annotation, overlay),
       nativeId: snapshot.nativeId,
       ...(provisionalId === undefined ? {} : { provisionalId }),
-      writable: snapshot.writable ?? current?.writable ?? annotationIsWritable(annotation),
+      writable: snapshot.writable ?? annotationIsWritable(annotation),
     });
   }
 
@@ -282,22 +363,27 @@ export class AnnotationProjection {
     annotation: DocumentAnnotation,
     current: AnnotationProjectionRow | undefined,
   ): AnnotationProjectionRow {
+    const overlay = current === undefined ? undefined : this.editorOverlays.get(current);
+    const projected = annotationWithOverlay(annotation, overlay);
     if (
       current?.nativeId === annotationId(annotation) &&
-      JSON.stringify(current.annotation) === JSON.stringify(annotation)
+      current.writable === annotationIsWritable(annotation) &&
+      JSON.stringify(current.annotation) === JSON.stringify(projected)
     )
       return current;
     const verifiedId = annotationId(annotation);
     let provisionalId: string | undefined;
     if (current !== undefined)
       provisionalId = current.nativeId === verifiedId ? current.provisionalId : current.nativeId;
-    return Object.freeze({
+    const row = Object.freeze({
       key,
-      annotation,
+      annotation: projected,
       nativeId: verifiedId,
       ...(provisionalId === undefined ? {} : { provisionalId }),
-      writable: current?.writable ?? annotationIsWritable(annotation),
+      writable: annotationIsWritable(annotation),
     });
+    if (overlay !== undefined) this.editorOverlays.set(row, overlay);
+    return row;
   }
 }
 
@@ -346,28 +432,57 @@ function retainDerivedList(
 }
 
 interface AnnotationProjectionOverlay {
-  readonly color?: string;
-  readonly comment?: string;
-  readonly links?: readonly string[];
-  readonly tags?: readonly string[];
+  readonly color?: AnnotationProjectionOverlayField<string>;
+  readonly comment?: AnnotationProjectionOverlayField<string>;
+  readonly links?: AnnotationProjectionOverlayField<readonly string[]>;
+  readonly tags?: AnnotationProjectionOverlayField<readonly string[]>;
 }
+
+interface AnnotationProjectionOverlayField<T> {
+  readonly revision: number;
+  readonly value: T;
+}
+
+type AnnotationProjectionOperation =
+  | {
+      readonly kind: 'bind';
+      readonly annotation: DocumentAnnotation;
+      readonly provisionalId: string;
+      readonly revision: number;
+    }
+  | {
+      readonly kind: 'remove';
+      readonly nativeId: string;
+      readonly provisionalId?: string;
+      readonly revision: number;
+    }
+  | {
+      readonly kind: 'upsert';
+      readonly revision: number;
+      readonly snapshot: ViewportAnnotationSnapshot;
+    };
 
 function editorOverlay(
   current: AnnotationProjectionOverlay | undefined,
   update: AnnotationProjectionEditorUpdate,
+  revision: number,
 ): AnnotationProjectionOverlay {
   if (update.comment === undefined)
     return Object.freeze({
       ...current,
-      ...(update.color === undefined ? {} : { color: update.color }),
+      ...(update.color === undefined
+        ? {}
+        : { color: Object.freeze({ revision, value: update.color }) }),
     });
   const decoded = decodeAnnotationComment(update.comment);
   return Object.freeze({
     ...current,
-    ...(update.color === undefined ? {} : { color: update.color }),
-    comment: update.comment,
-    links: decoded.links,
-    tags: decoded.tags,
+    ...(update.color === undefined
+      ? {}
+      : { color: Object.freeze({ revision, value: update.color }) }),
+    comment: Object.freeze({ revision, value: update.comment }),
+    links: Object.freeze({ revision, value: decoded.links }),
+    tags: Object.freeze({ revision, value: decoded.tags }),
   });
 }
 
@@ -378,11 +493,32 @@ function annotationWithOverlay(
   if (overlay === undefined) return annotation;
   return Object.freeze({
     ...annotation,
-    ...(overlay.color === undefined ? {} : { color: overlay.color }),
-    ...(overlay.comment === undefined ? {} : { comment: overlay.comment }),
-    ...(overlay.links === undefined ? {} : { links: overlay.links }),
-    ...(overlay.tags === undefined ? {} : { tags: overlay.tags }),
+    ...(overlay.color === undefined ? {} : { color: overlay.color.value }),
+    ...(overlay.comment === undefined ? {} : { comment: overlay.comment.value }),
+    ...(overlay.links === undefined ? {} : { links: overlay.links.value }),
+    ...(overlay.tags === undefined ? {} : { tags: overlay.tags.value }),
   });
+}
+
+function overlayAfterRevision(
+  overlay: AnnotationProjectionOverlay,
+  confirmedRevision: number,
+): AnnotationProjectionOverlay | undefined {
+  const retained = Object.freeze({
+    ...(overlay.color !== undefined && overlay.color.revision > confirmedRevision
+      ? { color: overlay.color }
+      : {}),
+    ...(overlay.comment !== undefined && overlay.comment.revision > confirmedRevision
+      ? { comment: overlay.comment }
+      : {}),
+    ...(overlay.links !== undefined && overlay.links.revision > confirmedRevision
+      ? { links: overlay.links }
+      : {}),
+    ...(overlay.tags !== undefined && overlay.tags.revision > confirmedRevision
+      ? { tags: overlay.tags }
+      : {}),
+  });
+  return Object.keys(retained).length === 0 ? undefined : retained;
 }
 
 function sameEditorFields(left: DocumentAnnotation, right: DocumentAnnotation): boolean {
@@ -416,7 +552,7 @@ function rowMatchesSnapshot(
   return (
     row.nativeId === snapshot.nativeId &&
     row.provisionalId === (snapshot.provisionalId ?? row.provisionalId) &&
-    row.writable === (snapshot.writable ?? row.writable) &&
+    row.writable === (snapshot.writable ?? annotationIsWritable(annotation)) &&
     JSON.stringify(row.annotation) === JSON.stringify(annotation)
   );
 }
@@ -454,7 +590,7 @@ function fallbackIndex(
     if (!index.has(bucket)) index.set(bucket, signatures);
     const signature = annotationSignature(row.annotation);
     const queue = signatures.get(signature);
-    if (queue === undefined) signatures.set(signature, { index: 0, rows: [row] });
+    if (queue === undefined) signatures.set(signature, { rows: [row] });
     else queue.rows.push(row);
   }
   return index;
@@ -512,11 +648,36 @@ function takeUnclaimed(
   return undefined;
 }
 
-function takeQueued(queue: CandidateQueue | undefined): AnnotationProjectionRow | undefined {
-  if (queue === undefined) return undefined;
-  const row = queue.rows[queue.index];
-  queue.index += 1;
-  return row;
+function takeUnique(queue: CandidateQueue | undefined): AnnotationProjectionRow | undefined {
+  return queue?.rows.length === 1 ? queue.rows[0] : undefined;
+}
+
+function hasUniqueVerifiedFallback(
+  verified: readonly DocumentAnnotation[],
+  reconciled: ReadonlyArray<AnnotationProjectionRow | undefined>,
+  annotation: DocumentAnnotation,
+): boolean {
+  const bucket = annotationBucket(annotation);
+  const signature = annotationSignature(annotation);
+  return (
+    verified.filter(
+      (candidate, index) =>
+        reconciled[index] === undefined &&
+        annotationBucket(candidate) === bucket &&
+        annotationSignature(candidate) === signature,
+    ).length === 1
+  );
+}
+
+function sameRows(
+  left: readonly AnnotationProjectionRow[],
+  right: readonly AnnotationProjectionRow[],
+): boolean {
+  return left.length === right.length && left.every((row, index) => row === right[index]);
+}
+
+function isPendingSelectionPreview(row: AnnotationProjectionRow): boolean {
+  return row.provisionalId !== undefined && row.nativeId === row.provisionalId;
 }
 
 function annotationFromViewport(snapshot: ViewportAnnotationSnapshot): DocumentAnnotation {
