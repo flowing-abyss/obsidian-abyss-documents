@@ -107,7 +107,9 @@ export class PdfDocumentSession implements DocumentSession {
   async listAnnotations(signal: AbortSignal, sink: AnnotationSink): Promise<void> {
     this.assertOpen();
     try {
-      await extractAnnotations(this.pdf, signal, sink);
+      await extractAnnotations(this.pdf, signal, sink, (pageNumber, cause) => {
+        console.error('[abyss-documents] Could not read PDF annotations', { pageNumber, cause });
+      });
       this.assertOpen();
     } catch (cause) {
       if (signal.aborted || isPdfAbortFailure(cause)) {

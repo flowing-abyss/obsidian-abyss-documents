@@ -547,6 +547,11 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'annotationEditorLayer' })
       .createDiv({ cls: 'highlightEditor' });
     native.id = 'internal-created';
+    native.dataset['color'] = '#ffd400';
+    native.dataset['comment'] = 'Editor comment';
+    native.dataset['selectedText'] = 'Editor text';
+    native.dataset['tags'] = '["review"]';
+    native.dataset['links'] = '["Notes/Review"]';
     vi.spyOn(native, 'getBoundingClientRect').mockReturnValue({
       left: 110,
       top: 220,
@@ -577,11 +582,11 @@ describe('PdfDocumentViewport', () => {
           pageIndex: 0,
           type: 'highlight',
           rects: [{ x: 5, y: 10, width: 20, height: 10 }],
-          selectedText: '',
-          color: '',
-          comment: '',
-          tags: [],
-          links: [],
+          selectedText: 'Editor text',
+          color: '#ffd400',
+          comment: 'Editor comment',
+          tags: ['review'],
+          links: ['Notes/Review'],
           writable: true,
         },
       },
@@ -596,6 +601,74 @@ describe('PdfDocumentViewport', () => {
       type: 'annotation-change',
       change: { operation: 'remove', nativeId: 'native-created' },
     });
+  });
+
+  it('omits unknown mounted facts and structural annotation-layer objects', async () => {
+    const { host, runtime, viewport } = await mountedViewport(1);
+    const eventBus = runtime.state.eventBus;
+    const viewer = runtime.state.viewer;
+    const page = host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (eventBus === undefined || viewer === undefined || page === null)
+      throw new Error('Expected mounted PDF state.');
+    vi.spyOn(page, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 700,
+      bottom: 1000,
+      width: 600,
+      height: 800,
+      x: 100,
+      y: 200,
+      toJSON: () => ({}),
+    });
+    const layer = page.createDiv({ cls: 'annotationLayer' });
+    const highlight = layer.createDiv({ cls: 'highlightAnnotation' });
+    highlight.dataset['annotationId'] = 'imported-highlight';
+    vi.spyOn(highlight, 'getBoundingClientRect').mockReturnValue({
+      left: 110,
+      top: 220,
+      right: 150,
+      bottom: 240,
+      width: 40,
+      height: 20,
+      x: 110,
+      y: 220,
+      toJSON: () => ({}),
+    });
+    const link = layer.createDiv({ cls: 'linkAnnotation' });
+    link.dataset['annotationId'] = 'structural-link';
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    await nextFrame();
+
+    expect(events).toContainEqual({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'imported-highlight',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 5, y: 10, width: 20, height: 10 }],
+          tags: [],
+          links: [],
+        },
+      },
+    });
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'annotation-change' &&
+          event.change.operation === 'upsert' &&
+          event.change.annotation.nativeId === 'structural-link',
+      ),
+    ).toBe(false);
   });
 
   it('bounds mounted snapshot work after visiting many virtualized pages and mutating', async () => {

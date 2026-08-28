@@ -118,6 +118,72 @@ describe('extractAnnotations', () => {
     ]);
   });
 
+  it('excludes structural PDF objects and names genuine external markups', async () => {
+    const fixtures = [
+      { annotationType: 2, id: 'link' },
+      { annotationType: 16, id: 'popup' },
+      { annotationType: 20, id: 'widget' },
+      { annotationType: 21, id: 'screen' },
+      { annotationType: 22, id: 'printer-mark' },
+      { annotationType: 24, id: 'watermark' },
+      { annotationType: 9, id: 'highlight', isEditable: true },
+      { annotationType: 15, id: 'ink', isEditable: true },
+      { annotationType: 3, id: 'free-text', isEditable: true },
+      { annotationType: 10, id: 'underline', isEditable: false },
+      { annotationType: 1, id: 'text-note', isEditable: false },
+      { annotationType: 13, id: 'stamp' },
+      { annotationType: 12, id: 'strike-out' },
+      { annotationType: 11, id: 'squiggly' },
+      { annotationType: 4, id: 'line' },
+      { annotationType: 5, id: 'square' },
+      { annotationType: 99, id: 'unknown' },
+    ];
+    const batches: DocumentAnnotation[][] = [];
+
+    await extractAnnotations(
+      {
+        numPages: 1,
+        getPage: vi.fn(async () => page(fixtures)),
+      },
+      new AbortController().signal,
+      (batch) => batches.push([...batch]),
+    );
+
+    const annotations = batches.flat();
+    expect(annotations.map(({ identity }) => identity)).toEqual(
+      fixtures.slice(6).map(({ id }) => ({ kind: 'stable', id })),
+    );
+    expect(annotations.map(({ type, externalType }) => ({ type, externalType }))).toEqual([
+      { type: 'highlight', externalType: undefined },
+      { type: 'ink', externalType: undefined },
+      { type: 'free-text', externalType: undefined },
+      { type: 'underline', externalType: undefined },
+      { type: 'text-note', externalType: undefined },
+      { type: 'unsupported', externalType: 'Stamp' },
+      { type: 'unsupported', externalType: 'StrikeOut' },
+      { type: 'unsupported', externalType: 'Squiggly' },
+      { type: 'unsupported', externalType: 'Line' },
+      { type: 'unsupported', externalType: 'Square' },
+      { type: 'unsupported', externalType: 'PDF annotation type 99' },
+    ]);
+    expect(annotations.map(({ capabilities }) => capabilities.comment.available)).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+    expect(annotations.map(({ externalType }) => externalType).filter(Boolean)).not.toContain(
+      'unsupported',
+    );
+  });
+
   it('stops before reading a stale page and yields batches within a configurable deadline', async () => {
     const controller = new AbortController();
     const second = page([]);
@@ -135,25 +201,6 @@ describe('extractAnnotations', () => {
       }),
     ).rejects.toMatchObject({ name: 'AbortError' });
     expect(pdf.getPage).toHaveBeenCalledTimes(1);
-  });
-
-  it('enriches a page read failure with its exact 1-based page number', async () => {
-    const cause = new Error('worker page failed');
-    const pdf = {
-      numPages: 3,
-      getPage: vi.fn(async (pageNumber: number) => {
-        if (pageNumber === 2) throw cause;
-        return page([]);
-      }),
-    };
-
-    await expect(
-      extractAnnotations(pdf, new AbortController().signal, () => undefined),
-    ).rejects.toMatchObject({
-      name: 'PdfAnnotationExtractionError',
-      pageNumber: 2,
-      cause,
-    });
   });
 
   it('flushes a large page in time-bounded batches without rendering it', async () => {
@@ -223,8 +270,16 @@ describe('extractAnnotations', () => {
         },
       },
     });
-    expect(result[3]).toMatchObject({ type: 'unsupported', externalType: '99', links: ['ok'] });
-    expect(result[4]).toMatchObject({ type: 'unsupported', externalType: 'unknown', author: '' });
+    expect(result[3]).toMatchObject({
+      type: 'unsupported',
+      externalType: 'PDF annotation type 99',
+      links: ['ok'],
+    });
+    expect(result[4]).toMatchObject({
+      type: 'unsupported',
+      externalType: 'PDF annotation type unknown',
+      author: '',
+    });
   });
 
   it('cancels immediately when already aborted and after an owned yield', async () => {

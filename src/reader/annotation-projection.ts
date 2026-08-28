@@ -121,7 +121,11 @@ export class AnnotationProjection {
     );
     const current = matches[0];
     if (current !== undefined) {
-      if (matches.length === 1 && rowMatchesSnapshot(current, snapshot)) return false;
+      if (
+        matches.length === 1 &&
+        rowMatchesSnapshot(current, snapshot, this.editorOverlays.get(current))
+      )
+        return false;
       const duplicateKeys = new Set(matches.slice(1).map((row) => row.key));
       for (const duplicate of matches.slice(1)) this.editorOverlays.delete(duplicate);
       const overlay = this.editorOverlays.get(current);
@@ -262,13 +266,14 @@ export class AnnotationProjection {
     const annotation = retainVerifiedMetadata(
       annotationFromViewport(snapshot),
       current?.annotation,
+      snapshot,
     );
     return Object.freeze({
       key,
       annotation: annotationWithOverlay(annotation, overlay),
       nativeId: snapshot.nativeId,
       ...(provisionalId === undefined ? {} : { provisionalId }),
-      writable: snapshot.writable,
+      writable: snapshot.writable ?? current?.writable ?? annotationIsWritable(annotation),
     });
   }
 
@@ -299,16 +304,45 @@ export class AnnotationProjection {
 function retainVerifiedMetadata(
   viewport: DocumentAnnotation,
   current: DocumentAnnotation | undefined,
+  snapshot: ViewportAnnotationSnapshot,
 ): DocumentAnnotation {
   if (current === undefined) return viewport;
   return Object.freeze({
     ...viewport,
     ...(current.identity.kind === 'stable' ? { identity: current.identity } : {}),
-    comment: viewport.comment.length === 0 ? current.comment : viewport.comment,
-    links: viewport.links.length === 0 ? current.links : viewport.links,
-    selectedText: viewport.selectedText ?? current.selectedText,
-    tags: viewport.tags.length === 0 ? current.tags : viewport.tags,
+    ...retainedExternalType(current),
+    author: current.author,
+    createdAt: current.createdAt,
+    modifiedAt: current.modifiedAt,
+    color: retainOptional(snapshot.color, viewport.color, current.color),
+    comment: retainOptional(snapshot.comment, viewport.comment, current.comment),
+    links: retainDerivedList(viewport.links, current.links, snapshot.comment),
+    selectedText: retainOptional(
+      snapshot.selectedText,
+      viewport.selectedText,
+      current.selectedText,
+    ),
+    tags: retainDerivedList(viewport.tags, current.tags, snapshot.comment),
+    capabilities: retainOptional(snapshot.writable, viewport.capabilities, current.capabilities),
   });
+}
+
+function retainedExternalType(
+  annotation: DocumentAnnotation,
+): Pick<DocumentAnnotation, 'externalType'> {
+  return annotation.externalType === undefined ? {} : { externalType: annotation.externalType };
+}
+
+function retainOptional<T>(presence: unknown, value: T, fallback: T): T {
+  return presence === undefined ? fallback : value;
+}
+
+function retainDerivedList(
+  value: readonly string[],
+  fallback: readonly string[],
+  comment: string | undefined,
+): readonly string[] {
+  return comment === undefined && value.length === 0 ? fallback : value;
 }
 
 interface AnnotationProjectionOverlay {
@@ -373,12 +407,17 @@ function annotationId(annotation: DocumentAnnotation): string {
 function rowMatchesSnapshot(
   row: AnnotationProjectionRow,
   snapshot: ViewportAnnotationSnapshot,
+  overlay: AnnotationProjectionOverlay | undefined,
 ): boolean {
+  const annotation = annotationWithOverlay(
+    retainVerifiedMetadata(annotationFromViewport(snapshot), row.annotation, snapshot),
+    overlay,
+  );
   return (
     row.nativeId === snapshot.nativeId &&
-    row.provisionalId === snapshot.provisionalId &&
-    row.writable === snapshot.writable &&
-    JSON.stringify(row.annotation) === JSON.stringify(annotationFromViewport(snapshot))
+    row.provisionalId === (snapshot.provisionalId ?? row.provisionalId) &&
+    row.writable === (snapshot.writable ?? row.writable) &&
+    JSON.stringify(row.annotation) === JSON.stringify(annotation)
   );
 }
 
@@ -490,15 +529,15 @@ function annotationFromViewport(snapshot: ViewportAnnotationSnapshot): DocumentA
       coordinateSpace: 'page-points-top-left',
       geometry: annotationGeometry(snapshot.rects),
     },
-    color: snapshot.color,
-    selectedText: snapshot.selectedText,
+    color: snapshot.color ?? null,
+    selectedText: snapshot.selectedText ?? null,
     author: '',
     createdAt: null,
     modifiedAt: null,
-    comment: snapshot.comment,
+    comment: snapshot.comment ?? '',
     tags: Object.freeze([...snapshot.tags]),
     links: Object.freeze([...snapshot.links]),
-    capabilities: capabilities(snapshot.writable),
+    capabilities: capabilities(snapshot.writable ?? false),
   };
   return Object.freeze(annotation);
 }

@@ -14,7 +14,7 @@ export type AnnotationType =
   'highlight' | 'underline' | 'ink' | 'text-note' | 'free-text' | 'unsupported';
 
 export type ConvertibleAnnotationType = 'highlight' | 'underline';
-export type WritableAnnotationType = Exclude<AnnotationType, 'unsupported'>;
+export type WritableAnnotationType = 'highlight' | 'ink' | 'free-text';
 
 export interface AnnotationPoint {
   readonly x: number;
@@ -348,17 +348,10 @@ function validateCreateMutation(
 function createAnchorMatchesType(type: WritableAnnotationType, anchor: AnnotationAnchor): boolean {
   const runtimeType: unknown = type;
   if (typeof runtimeType !== 'string') return false;
-  if (anchor.kind === 'reflowable-text') {
-    return (
-      runtimeType === 'highlight' || runtimeType === 'underline' || runtimeType === 'text-note'
-    );
-  }
+  if (anchor.kind === 'reflowable-text') return runtimeType === 'highlight';
   const geometry = anchor.geometry.kind;
-  if (runtimeType === 'highlight' || runtimeType === 'underline') {
-    return geometry === 'quadrilaterals';
-  }
+  if (runtimeType === 'highlight') return geometry === 'quadrilaterals';
   if (runtimeType === 'ink') return geometry === 'ink';
-  if (runtimeType === 'text-note') return geometry === 'point';
   return runtimeType === 'free-text' && geometry === 'rectangle';
 }
 

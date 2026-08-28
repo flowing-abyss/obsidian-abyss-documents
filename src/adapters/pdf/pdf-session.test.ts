@@ -2,6 +2,7 @@ import type { TFile } from 'obsidian';
 import { App, TFile as MockTFile } from 'obsidian-test-mocks/obsidian';
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
+import type { DocumentAnnotation } from '../../document-core/annotations.js';
 import type { DocumentViewport } from '../../document-core/document.js';
 import { DocumentPasswordError } from '../../document-core/errors.js';
 import type { BaseToken } from '../../document-core/save-coordinator.js';
@@ -142,20 +143,39 @@ describe('PdfDocumentSession', () => {
     expect(batches).toHaveLength(1);
   });
 
-  it('maps annotation extraction failures and owned cancellation at the session boundary', async () => {
+  it('keeps successful annotation pages and diagnoses an isolated page failure', async () => {
     const cause = new Error('annotation worker failed');
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const { session } = sessionFixture({
-      numPages: 1,
-      getPage: vi.fn(async () => {
-        throw cause;
-      }),
+      numPages: 3,
+      getPage: vi.fn(async (pageNumber: number) => {
+        if (pageNumber === 2) throw cause;
+        return {
+          getAnnotations: vi.fn(async () => [
+            { annotationType: 9, id: `highlight-${String(pageNumber)}`, rect: [0, 0, 1, 1] },
+          ]),
+          view: [0, 0, 600, 800],
+        };
+      }) as never,
     });
-    await expect(
-      session.listAnnotations(new AbortController().signal, () => undefined),
-    ).rejects.toMatchObject({
-      name: 'DocumentOpenError',
-      cause: { name: 'PdfAnnotationExtractionError', pageNumber: 1, cause },
+    const annotations: DocumentAnnotation[] = [];
+
+    await session.listAnnotations(new AbortController().signal, (batch) => {
+      annotations.push(...batch);
     });
+
+    expect(annotations.map(({ identity }) => identity)).toEqual([
+      { kind: 'stable', id: 'highlight-1' },
+      { kind: 'stable', id: 'highlight-3' },
+    ]);
+    expect(diagnostic).toHaveBeenCalledWith('[abyss-documents] Could not read PDF annotations', {
+      pageNumber: 2,
+      cause,
+    });
+  });
+
+  it('maps owned annotation cancellation at the session boundary', async () => {
+    const { session } = sessionFixture();
 
     const controller = new AbortController();
     controller.abort();

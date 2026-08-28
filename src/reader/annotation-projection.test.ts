@@ -243,12 +243,90 @@ describe('AnnotationProjection', () => {
       },
     ]);
 
-    projection.upsert(viewportAnnotation('stable-id'));
+    projection.upsert({
+      nativeId: 'stable-id',
+      pageIndex: 1,
+      type: 'highlight',
+      rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+      tags: [],
+      links: [],
+    });
 
     expect(projection.snapshot()[0]?.annotation).toMatchObject({
       comment: 'Résumé #review [[Linked note]]',
       links: ['Linked note'],
       tags: ['review'],
+    });
+  });
+
+  it('preserves every verified fact when a mounted snapshot omits unknown values', () => {
+    const projection = new AnnotationProjection();
+    const verified = {
+      ...verifiedAnnotation('stable-id'),
+      color: '#ff6666',
+      selectedText: 'Verified text',
+      comment: 'Verified #review [[Linked note]]',
+      tags: ['review'],
+      links: ['Linked note'],
+    };
+    projection.reconcile([verified]);
+
+    projection.upsert({
+      nativeId: 'stable-id',
+      pageIndex: 1,
+      type: 'highlight',
+      rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+      tags: [],
+      links: [],
+    });
+
+    expect(projection.snapshot()[0]).toMatchObject({
+      annotation: {
+        color: '#ff6666',
+        selectedText: 'Verified text',
+        comment: 'Verified #review [[Linked note]]',
+        tags: ['review'],
+        links: ['Linked note'],
+        capabilities: { deletion: { available: true } },
+      },
+      writable: true,
+    });
+  });
+
+  it('applies every mounted fact when an editor-layer snapshot provides it', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([
+      {
+        ...verifiedAnnotation('stable-id'),
+        comment: 'Verified #review [[Verified note]]',
+        tags: ['review'],
+        links: ['Verified note'],
+      },
+    ]);
+
+    projection.upsert({
+      nativeId: 'stable-id',
+      pageIndex: 1,
+      type: 'highlight',
+      rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+      color: '#ff6666',
+      selectedText: 'Editor text',
+      comment: 'Editor comment',
+      tags: [],
+      links: [],
+      writable: false,
+    });
+
+    expect(projection.snapshot()[0]).toMatchObject({
+      annotation: {
+        color: '#ff6666',
+        selectedText: 'Editor text',
+        comment: 'Editor comment',
+        tags: [],
+        links: [],
+        capabilities: { deletion: { available: false } },
+      },
+      writable: false,
     });
   });
 

@@ -115,6 +115,7 @@ describe('annotation identity', () => {
 
     expectTypeOf<CreateMutation['id']>().toEqualTypeOf<GeneratedAnnotationId>();
     expectTypeOf<CreateMutation['type']>().toEqualTypeOf<WritableAnnotationType>();
+    expectTypeOf<WritableAnnotationType>().toEqualTypeOf<'highlight' | 'ink' | 'free-text'>();
   });
 
   it('requires explicit normalized UTC timestamps', () => {

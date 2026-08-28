@@ -38,12 +38,12 @@ export interface ViewportAnnotationSnapshot {
   readonly pageIndex: number;
   readonly type: DocumentAnnotation['type'];
   readonly rects: readonly PdfPageRect[];
-  readonly selectedText: string;
-  readonly color: string;
-  readonly comment: string;
+  readonly selectedText?: string;
+  readonly color?: string;
+  readonly comment?: string;
   readonly tags: readonly string[];
   readonly links: readonly string[];
-  readonly writable: boolean;
+  readonly writable?: boolean;
 }
 
 export type ViewportAnnotationChange =

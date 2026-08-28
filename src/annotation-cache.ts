@@ -9,12 +9,16 @@ import type {
   DocumentAnnotation,
 } from './document-core/annotations.js';
 
-export interface AnnotationCacheV1 {
-  readonly version: 1;
+export interface AnnotationCacheV2 {
+  readonly version: 2;
   readonly documentPath: string;
   readonly fingerprint: string;
   readonly annotations: readonly DocumentAnnotation[];
 }
+
+type AnnotationCacheWrite = Omit<AnnotationCacheV2, 'version'> & {
+  readonly version?: number;
+};
 
 export class StaleAnnotationCacheReadError extends Error {
   override readonly name = 'AbortError';
@@ -32,7 +36,7 @@ export class AnnotationCache {
     private readonly adapter: DataAdapter,
     configDir: string,
   ) {
-    this.root = `${configDir}/plugins/abyss-documents/cache/annotations-v1`;
+    this.root = `${configDir}/plugins/abyss-documents/cache/annotations-v2`;
   }
 
   async partitionPath(documentPath: string): Promise<string> {
@@ -63,7 +67,7 @@ export class AnnotationCache {
       return null;
     }
     this.assertCurrent(documentPath, generation);
-    if (!isCacheV1(value)) {
+    if (!isCacheV2(value)) {
       await this.removeIfPresent(path);
       this.assertCurrent(documentPath, generation);
       return null;
@@ -81,14 +85,14 @@ export class AnnotationCache {
   }
 
   async write(
-    value: AnnotationCacheV1,
+    value: AnnotationCacheWrite,
     generation = this.generation(value.documentPath),
   ): Promise<boolean> {
     if (generation !== this.generation(value.documentPath)) return false;
     await this.ensureRoot();
     if (generation !== this.generation(value.documentPath)) return false;
     const path = await this.partitionPath(value.documentPath);
-    await this.adapter.write(path, JSON.stringify(value));
+    await this.adapter.write(path, JSON.stringify(cacheV2(value)));
     if (generation === this.generation(value.documentPath)) return true;
     await this.removeIfPresent(path);
     return false;
@@ -117,11 +121,34 @@ export class AnnotationCache {
   }
 }
 
-function isCacheV1(value: unknown): value is AnnotationCacheV1 {
+function cacheV2(value: AnnotationCacheWrite): AnnotationCacheV2 {
+  return {
+    version: 2,
+    documentPath: value.documentPath,
+    fingerprint: value.fingerprint,
+    annotations: value.annotations.map((annotation) => ({
+      identity: annotation.identity,
+      type: annotation.type,
+      ...(annotation.externalType === undefined ? {} : { externalType: annotation.externalType }),
+      anchor: annotation.anchor,
+      color: annotation.color,
+      selectedText: annotation.selectedText,
+      author: annotation.author,
+      createdAt: annotation.createdAt,
+      modifiedAt: annotation.modifiedAt,
+      comment: annotation.comment,
+      tags: [...annotation.tags],
+      links: [...annotation.links],
+      capabilities: annotation.capabilities,
+    })),
+  };
+}
+
+function isCacheV2(value: unknown): value is AnnotationCacheV2 {
   if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<AnnotationCacheV1>;
+  const candidate = value as Partial<AnnotationCacheV2>;
   return (
-    candidate.version === 1 &&
+    candidate.version === 2 &&
     isNonEmptyString(candidate.documentPath) &&
     isNonEmptyString(candidate.fingerprint) &&
     Array.isArray(candidate.annotations) &&

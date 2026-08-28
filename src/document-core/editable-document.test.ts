@@ -79,21 +79,13 @@ describe('EditableDocumentSession contract', () => {
     };
     const create: Record<WritableAnnotationType, AnnotationCapability> = {
       highlight: unavailable,
-      underline: unavailable,
       ink: unavailable,
-      'text-note': unavailable,
       'free-text': unavailable,
     };
     const capabilities: DocumentEditingCapabilities = { mutation: unavailable, create };
 
     expect(capabilities.mutation).toEqual(unavailable);
-    expect(Object.values(capabilities.create)).toEqual([
-      unavailable,
-      unavailable,
-      unavailable,
-      unavailable,
-      unavailable,
-    ]);
+    expect(Object.values(capabilities.create)).toEqual([unavailable, unavailable, unavailable]);
   });
 
   it('acknowledges the stable identity produced by durable journaling', () => {

@@ -1,6 +1,6 @@
 import type { DataAdapter } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
-import { AnnotationCache, type AnnotationCacheV1 } from './annotation-cache.js';
+import { AnnotationCache, type AnnotationCacheV2 } from './annotation-cache.js';
 import { asAnnotationId } from './document-core/annotations.js';
 
 const CONFIG_DIR = '.config-test';
@@ -27,8 +27,8 @@ function adapter(initial: Record<string, string> = {}) {
   return { files, read, value, write };
 }
 
-const record: AnnotationCacheV1 = {
-  version: 1,
+const record: AnnotationCacheV2 = {
+  version: 2,
   documentPath: 'Books/Guide.pdf',
   fingerprint: 'fp',
   annotations: [
@@ -69,6 +69,53 @@ function cachedAnnotation(): Record<string, unknown> {
 }
 
 describe('AnnotationCache', () => {
+  it('ignores an annotations-v1 partition containing structural rows and writability state', async () => {
+    const fixture = adapter();
+    const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
+    const currentPath = await cache.partitionPath(record.documentPath);
+    const oldPath = currentPath.replace('/annotations-v2/', '/annotations-v1/');
+    fixture.files.set(
+      oldPath,
+      JSON.stringify({
+        ...record,
+        version: 1,
+        annotations: [
+          {
+            ...cachedAnnotation(),
+            type: 'unsupported',
+            externalType: 'Link',
+            writable: false,
+          },
+        ],
+      }),
+    );
+
+    await expect(cache.read(record.documentPath, record.fingerprint)).resolves.toBeNull();
+    expect(fixture.files.has(oldPath)).toBe(true);
+  });
+
+  it('writes cache v2 without transient materialization or binding state', async () => {
+    const fixture = adapter();
+    const cache = new AnnotationCache(fixture.value, CONFIG_DIR);
+    const transient = {
+      ...record,
+      pendingRevision: 7,
+      annotations: record.annotations.map((annotation) => ({
+        ...annotation,
+        materialized: true,
+        bound: { nativeId: 'temporary-binding' },
+      })),
+    };
+
+    await cache.write(transient);
+
+    const payload = JSON.parse([...fixture.files.values()][0] ?? 'null') as Record<string, unknown>;
+    expect(payload['version']).toBe(2);
+    expect(payload).not.toHaveProperty('pendingRevision');
+    expect((payload['annotations'] as unknown[])[0]).not.toHaveProperty('materialized');
+    expect((payload['annotations'] as unknown[])[0]).not.toHaveProperty('bound');
+  });
+
   it('uses a bounded SHA-256 partition for long Cyrillic paths and still verifies the source path', async () => {
     const documentPath =
       'Библиотека/Очень длинное название документа на русском языке с повторяющимися словами и символами.pdf';
@@ -101,13 +148,13 @@ describe('AnnotationCache', () => {
     await cache.write(record);
 
     expect([...fixture.files.keys()][0]).toMatch(
-      /^\.config-test\/plugins\/abyss-documents\/cache\/annotations-v1\//u,
+      /^\.config-test\/plugins\/abyss-documents\/cache\/annotations-v2\//u,
     );
     await expect(cache.read('Books/Guide.pdf', 'fp')).resolves.toEqual(record.annotations);
     await expect(cache.read('Books/Guide.pdf', 'other')).resolves.toBeNull();
   });
 
-  it.each(['not json', JSON.stringify({ ...record, version: 2 })])(
+  it.each(['not json', JSON.stringify({ ...record, version: 3 })])(
     'deletes a corrupt or future cache partition and permits a rebuild: %s',
     async (payload) => {
       const fixture = adapter();

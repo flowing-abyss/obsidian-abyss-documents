@@ -20,6 +20,7 @@ interface PdfAnnotationData {
   readonly creationDate?: unknown;
   readonly id?: unknown;
   readonly inkLists?: unknown;
+  readonly isEditable?: unknown;
   readonly modificationDate?: unknown;
   readonly overlaidText?: unknown;
   readonly quadPoints?: unknown;
@@ -53,16 +54,39 @@ const READ_ONLY_CAPABILITIES: AnnotationCapabilities = Object.freeze({
   conversions: Object.freeze({ highlight: NO_CONVERSION, underline: NO_CONVERSION }),
 });
 
-class PdfAnnotationExtractionError extends Error {
-  override readonly name = 'PdfAnnotationExtractionError';
+const AVAILABLE = Object.freeze({ available: true as const });
 
-  constructor(
-    readonly pageNumber: number,
-    readonly cause: unknown,
-  ) {
-    super(`Could not extract annotations from PDF page ${pageNumber}.`);
-  }
-}
+const EDITABLE_CAPABILITIES: AnnotationCapabilities = Object.freeze({
+  geometry: AVAILABLE,
+  comment: AVAILABLE,
+  color: AVAILABLE,
+  deletion: AVAILABLE,
+  metadata: AVAILABLE,
+  conversions: Object.freeze({ highlight: NO_CONVERSION, underline: NO_CONVERSION }),
+});
+
+type AnnotationPageError = (pageNumber: number, cause: unknown) => void;
+
+const STRUCTURAL_ANNOTATION_TYPES = new Set([2, 16, 20, 21, 22, 24]);
+
+const EXTERNAL_ANNOTATION_TYPES = new Map<number, string>([
+  [4, 'Line'],
+  [5, 'Square'],
+  [6, 'Circle'],
+  [7, 'Polygon'],
+  [8, 'PolyLine'],
+  [11, 'Squiggly'],
+  [12, 'StrikeOut'],
+  [13, 'Stamp'],
+  [14, 'Caret'],
+  [17, 'File Attachment'],
+  [18, 'Sound'],
+  [19, 'Movie'],
+  [23, 'TrapNet'],
+  [25, '3D'],
+  [26, 'Redaction'],
+  [27, 'Rich Media'],
+]);
 
 export async function extractAnnotations(
   pdf: {
@@ -71,6 +95,7 @@ export async function extractAnnotations(
   },
   signal: AbortSignal,
   onBatch: AnnotationBatch,
+  onPageError: AnnotationPageError = () => undefined,
 ): Promise<void> {
   let deadline = performance.now() + 50;
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
@@ -82,8 +107,7 @@ export async function extractAnnotations(
       });
     } catch (cause) {
       if (signal.aborted || isAbortFailure(cause)) throw cause;
-      if (cause instanceof PdfAnnotationExtractionError) throw cause;
-      throw new PdfAnnotationExtractionError(pageNumber, cause);
+      onPageError(pageNumber, cause);
     }
   }
 }
@@ -107,7 +131,7 @@ async function extractPageAnnotations(
   let batchStartedAt = performance.now();
   for (const [index, annotation] of raw.entries()) {
     throwIfAborted(signal);
-    if (annotation.annotationType === 16) continue;
+    if (isStructuralAnnotation(annotation.annotationType)) continue;
     batch.push(mapPdfAnnotation(annotation, page, pageNumber - 1, index));
     if (performance.now() < nextDeadline) continue;
     flushBatch(batch, onBatch, batchStartedAt);
@@ -165,8 +189,19 @@ function mapPdfAnnotation(
     comment,
     tags: Object.freeze(tokens.tags.map(({ display }) => display)),
     links: Object.freeze(tokens.links),
-    capabilities: READ_ONLY_CAPABILITIES,
+    capabilities:
+      isWritableType(type) && source.isEditable === true
+        ? EDITABLE_CAPABILITIES
+        : READ_ONLY_CAPABILITIES,
   });
+}
+
+function isStructuralAnnotation(value: unknown): boolean {
+  return typeof value === 'number' && STRUCTURAL_ANNOTATION_TYPES.has(value);
+}
+
+function isWritableType(type: AnnotationType): boolean {
+  return type === 'highlight' || type === 'ink' || type === 'free-text';
 }
 
 function annotationType(value: unknown): AnnotationType {
@@ -261,7 +296,8 @@ function objectString(value: unknown): string {
 }
 
 function externalType(value: unknown): string {
-  return typeof value === 'string' || typeof value === 'number' ? String(value) : 'unknown';
+  const known = typeof value === 'number' ? EXTERNAL_ANNOTATION_TYPES.get(value) : undefined;
+  return known ?? `PDF annotation type ${typeof value === 'number' ? String(value) : 'unknown'}`;
 }
 
 function pdfDate(value: unknown): UtcTimestamp | null {

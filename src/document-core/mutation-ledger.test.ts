@@ -42,9 +42,7 @@ const session: EditableDocumentSession = {
     mutation: unavailable,
     create: {
       highlight: unavailable,
-      underline: unavailable,
       ink: unavailable,
-      'text-note': unavailable,
       'free-text': unavailable,
     },
   },
@@ -891,7 +889,10 @@ describe('MutationLedger', () => {
       kind: 'fixed-page' as const,
       pageIndex: 0,
       coordinateSpace: 'page-points-top-left' as const,
-      geometry: { kind: 'point' as const, point: { x: 1, y: 2 } },
+      geometry: {
+        kind: 'rectangle' as const,
+        rectangle: { x: 1, y: 2, width: 3, height: 4 },
+      },
     };
     const anchorWithExtras = {
       ...canonicalAnchor,
@@ -899,14 +900,14 @@ describe('MutationLedger', () => {
       geometry: {
         ...canonicalAnchor.geometry,
         external,
-        point: { ...canonicalAnchor.geometry.point, external },
+        rectangle: { ...canonicalAnchor.geometry.rectangle, external },
       },
     };
     const targetWithExtras = { ...target, external };
     const commonCreate = {
       kind: 'create' as const,
       id: generated,
-      type: 'text-note' as const,
+      type: 'free-text' as const,
       color: null,
       selectedText: null,
       author: '',
@@ -1190,7 +1191,7 @@ describe('MutationLedger', () => {
       createdAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
       modifiedAt: asUtcTimestamp('2026-08-11T10:00:00.000Z'),
       comment: '',
-    } satisfies AnnotationMutation;
+    } as unknown as AnnotationMutation;
     const ledger = new MutationLedger(session);
 
     expect(() => ledger.append(invalid)).toThrow(InvalidAnnotationMutationError);
@@ -1214,7 +1215,7 @@ describe('MutationLedger', () => {
     const valid: readonly AnnotationMutation[] = [
       {
         ...common,
-        type: 'underline',
+        type: 'highlight',
         anchor: {
           kind: 'reflowable-text',
           selector: { exact: 'quote', prefix: '', suffix: '' },
@@ -1229,15 +1230,6 @@ describe('MutationLedger', () => {
           pageIndex: 0,
           coordinateSpace: 'page-points-top-left',
           geometry: { kind: 'ink', paths: [[{ x: 1, y: 2 }]] },
-        },
-      },
-      {
-        ...common,
-        type: 'text-note',
-        anchor: {
-          kind: 'reflowable-text',
-          selector: { exact: 'note anchor', prefix: '', suffix: '' },
-          progression: null,
         },
       },
       {
@@ -1257,7 +1249,7 @@ describe('MutationLedger', () => {
 
     for (const mutation of valid) ledger.append(mutation);
 
-    expect(ledger.pending()).toHaveLength(4);
+    expect(ledger.pending()).toHaveLength(3);
   });
 
   it('refuses malformed fixed and reflowable create anchors before journaling', () => {

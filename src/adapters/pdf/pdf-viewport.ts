@@ -168,12 +168,12 @@ function annotationTypeForEditableKind(
   return null;
 }
 
-function annotationNodeColor(node: HTMLElement): string {
+function annotationNodeColor(node: HTMLElement): string | undefined {
   const dataColor = node.dataset['color']?.trim();
   if (dataColor !== undefined && dataColor.length > 0) return dataColor;
   const inlineColor = node.style.getPropertyValue('--editor-highlight-color').trim();
   if (inlineColor.length > 0) return inlineColor;
-  return '';
+  return undefined;
 }
 
 function annotationNodePageIndex(node: Element): number | null {
@@ -202,10 +202,13 @@ function annotationNodeNativeId(
   return bindingId ?? node.dataset['annotationId']?.trim() ?? internalId;
 }
 
-function annotationNodeSelectedText(node: HTMLElement, selection: PdfTextSelection | null): string {
-  return selection === null
-    ? (node.dataset['selectedText'] ?? node.textContent.trim())
-    : selection.text;
+function annotationNodeSelectedText(
+  node: HTMLElement,
+  selection: PdfTextSelection | null,
+): string | undefined {
+  if (selection !== null) return selection.text;
+  const selectedText = node.dataset['selectedText'] ?? node.textContent.trim();
+  return selectedText.length === 0 ? undefined : selectedText;
 }
 
 function annotationNodeList(value: string | undefined): readonly string[] {
@@ -866,7 +869,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     const root = this.requireMounted(this.root);
     const nodes = Array.from(
       root.querySelectorAll<HTMLElement>(
-        '.annotationLayer [data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
+        '.annotationLayer :is(.highlightAnnotation, .underlineAnnotation, .inkAnnotation, .freeTextAnnotation, .textAnnotation)[data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
       ),
     );
     const snapshots = new Map<string, ViewportAnnotationSnapshot>();
@@ -893,18 +896,21 @@ export class PdfDocumentViewport implements DocumentViewport {
     binding: ReturnType<PdfAnnotationEditor['resolveNativeEditor']>,
   ): ViewportAnnotationSnapshot {
     const selected = this.annotationSelectionFor(node, pageIndex);
+    const selectedText = annotationNodeSelectedText(node, selected);
+    const color = annotationNodeColor(node);
+    const comment = node.dataset['comment'];
     return {
       nativeId,
       ...(selected === null ? {} : { provisionalId: selected.token }),
       pageIndex,
       type: annotationTypeForNode(node, binding?.kind ?? null),
       rects: this.annotationNodeRects(node, pageIndex, selected),
-      selectedText: annotationNodeSelectedText(node, selected),
-      color: annotationNodeColor(node),
-      comment: node.dataset['comment'] ?? '',
+      ...(selectedText === undefined ? {} : { selectedText }),
+      ...(color === undefined ? {} : { color }),
+      ...(comment === undefined ? {} : { comment }),
       tags: annotationNodeList(node.dataset['tags']),
       links: annotationNodeList(node.dataset['links']),
-      writable: binding !== null,
+      ...(binding === null ? {} : { writable: true }),
     };
   }
 

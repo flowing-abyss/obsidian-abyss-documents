@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ViewportEvent } from './document.js';
+import type { ViewportAnnotationSnapshot, ViewportEvent } from './document.js';
 import { TypedEventSource } from './events.js';
 
 describe('TypedEventSource', () => {
@@ -32,17 +32,13 @@ describe('TypedEventSource', () => {
     const events = new TypedEventSource<ViewportEvent>();
     const delivered: ViewportEvent[] = [];
     events.subscribe((event) => delivered.push(event));
-    const annotation = {
+    const annotation: ViewportAnnotationSnapshot = {
       nativeId: 'native-1',
       pageIndex: 0,
       type: 'highlight' as const,
       rects: [{ x: 1, y: 2, width: 3, height: 4 }],
-      selectedText: 'Selected',
-      color: '#ffd400',
-      comment: '',
       tags: [],
       links: [],
-      writable: true,
     };
 
     events.emit({ type: 'annotation-change', change: { operation: 'upsert', annotation } });
