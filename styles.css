@@ -6296,6 +6296,8 @@
 
 .abyss-documents .abyss-reader-toolbar {
   --abyss-reader-toolbar-control-size: 2rem;
+  --abyss-reader-split-disclosure-width: 14px;
+  --abyss-reader-split-main-width: 34px;
 
   display: flex;
   min-width: 0;
@@ -6361,6 +6363,7 @@
 
 .abyss-documents .abyss-reader-toolbar-annotations {
   display: flex;
+  min-width: 0;
   flex: 0 0 auto;
   align-items: center;
 }
@@ -6396,12 +6399,14 @@
 }
 
 .abyss-documents .abyss-reader-split-control .abyss-reader-split-main {
+  width: var(--abyss-reader-split-main-width);
+  min-width: var(--abyss-reader-split-main-width);
   border-radius: var(--radius-s) 0 0 var(--radius-s);
 }
 
 .abyss-documents .abyss-reader-split-control .abyss-reader-split-menu {
-  width: var(--abyss-reader-toolbar-control-size);
-  min-width: var(--abyss-reader-toolbar-control-size);
+  width: var(--abyss-reader-split-disclosure-width);
+  min-width: var(--abyss-reader-split-disclosure-width);
   padding-inline: 0;
   border-radius: 0 var(--radius-s) var(--radius-s) 0;
 }
@@ -6411,11 +6416,11 @@
   color: var(--text-accent);
 }
 
-.abyss-documents .abyss-reader-quick-control .abyss-reader-split-main {
+.abyss-documents .abyss-annotation-toolbar .abyss-reader-split-main {
   position: relative;
 }
 
-.abyss-documents .abyss-reader-quick-color {
+.abyss-documents .abyss-reader-tool-color {
   position: absolute;
   inset-inline-end: 0.25rem;
   inset-block-end: 0.2rem;
@@ -6423,7 +6428,7 @@
   height: 0.4rem;
   border: var(--border-width) solid var(--background-primary);
   border-radius: 50%;
-  background: var(--abyss-quick-highlight-color, #ffd400);
+  background: var(--abyss-annotation-tool-color, #ffd400);
   box-shadow: 0 0 0 var(--border-width) var(--background-modifier-border);
 }
 
@@ -6707,7 +6712,6 @@
 
 .abyss-documents .abyss-reader-annotations {
   --abyss-annotation-action-height: 28px;
-  --abyss-annotation-action-width: 86px;
   --abyss-annotation-color-chip-height: 24px;
 
   display: flex;
@@ -6725,7 +6729,7 @@
 
 .abyss-documents .abyss-reader-outline-controls {
   display: flex;
-  min-height: 32px;
+  min-height: 28px;
   align-items: center;
   justify-content: flex-end;
   gap: var(--size-2-1);
@@ -6754,13 +6758,13 @@
   flex: 1 1 auto;
   overflow: hidden auto;
   margin: 0;
-  padding: var(--size-2-1) var(--size-4-1) var(--size-4-2);
+  padding: var(--size-2-1) var(--size-2-2) var(--size-4-2);
   list-style: none;
 }
 
 .abyss-documents .abyss-reader-outline-tree [role='group'] {
-  margin: 0 0 0 9px;
-  padding: 0 0 0 7px;
+  margin: 0;
+  padding: 0 0 0 13px;
   border-inline-start: var(--nav-indentation-guide-width, var(--border-width)) solid
     var(--nav-indentation-guide-color, var(--background-modifier-border));
   list-style: none;
@@ -6770,22 +6774,22 @@
   display: flex;
   width: 100%;
   min-width: 0;
-  height: 32px;
+  height: 27px;
   align-items: center;
-  gap: var(--size-2-1);
-  padding-inline: var(--size-2-1) var(--size-4-1);
-  border-radius: var(--radius-s);
+  gap: 0;
+  padding-inline: 0 var(--size-2-2);
+  border-radius: var(--nav-item-radius, var(--radius-s));
   background: transparent;
-  color: var(--text-normal);
+  color: var(--nav-item-color, var(--text-normal));
   text-align: start;
 }
 
 .abyss-documents .abyss-reader-outline-chevron {
   display: inline-flex;
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
-  min-height: 32px;
+  width: 17px;
+  min-width: 17px;
+  height: 27px;
+  min-height: 27px;
   align-items: center;
   justify-content: center;
   padding: 0;
@@ -6795,8 +6799,8 @@
 }
 
 .abyss-documents .abyss-reader-outline-chevron.is-interactive:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-muted);
+  background: var(--nav-item-background-hover, var(--background-modifier-hover));
+  color: var(--nav-item-color-hover, var(--text-muted));
 }
 
 .abyss-documents .abyss-reader-outline-chevron .svg-icon {
@@ -6829,13 +6833,15 @@
 
 .abyss-documents .abyss-reader-outline-treeitem:hover > .abyss-reader-outline-row-shell,
 .abyss-documents .abyss-reader-outline-treeitem:focus-visible > .abyss-reader-outline-row-shell {
-  background: var(--background-modifier-hover);
+  background: var(--nav-item-background-hover, var(--background-modifier-hover));
+  color: var(--nav-item-color-hover, var(--text-normal));
 }
 
 .abyss-documents
   .abyss-reader-outline-treeitem[aria-current='location']
   > .abyss-reader-outline-row-shell {
-  background: var(--background-modifier-hover);
+  background: var(--nav-item-background-active, var(--background-modifier-hover));
+  color: var(--nav-item-color-active, var(--text-normal));
   box-shadow: inset 2px 0 0 var(--interactive-accent);
   font-weight: var(--font-medium);
 }
@@ -7056,7 +7062,7 @@
 .abyss-documents .abyss-annotations-list {
   display: flex;
   flex-direction: column;
-  padding: var(--size-4-2);
+  padding: 0 var(--size-2-2);
 }
 
 .abyss-documents .abyss-annotation-virtual-spacer {
@@ -7069,9 +7075,9 @@
   min-width: 0;
   height: auto;
   flex-direction: column;
-  gap: var(--size-2-2);
-  padding: var(--size-4-2) var(--size-4-3);
-  border: var(--border-width) solid transparent;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 0;
   border-radius: var(--radius-s);
   background: transparent;
   color: var(--text-normal);
@@ -7155,10 +7161,9 @@
 .abyss-documents .abyss-annotation-card-header {
   display: flex;
   min-width: 0;
-  min-height: var(--abyss-annotation-action-height);
+  min-height: 20px;
   align-items: center;
-  gap: var(--size-2-2);
-  padding-inline-end: var(--abyss-annotation-action-width);
+  gap: var(--size-2-1);
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   font-variant-numeric: tabular-nums;
@@ -7194,7 +7199,8 @@
   border-inline-start: 2px solid var(--abyss-annotation-color, var(--background-modifier-border));
   color: var(--text-muted);
   font-size: var(--font-ui-small);
-  line-height: var(--line-height-normal);
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
 }
 
 .abyss-documents .abyss-annotation-card-comment {
@@ -7202,7 +7208,7 @@
   overflow: hidden;
   color: var(--text-normal);
   font-size: var(--font-ui-small);
-  line-height: var(--line-height-normal);
+  line-height: 1.35;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
@@ -7350,13 +7356,25 @@
     padding-inline: var(--size-4-1);
   }
 
-  .abyss-documents [data-control='previous-page'],
-  .abyss-documents [data-control='next-page'] {
+  .abyss-documents
+    .abyss-annotation-toolbar[data-annotation-mode='select']
+    > .abyss-reader-split-control:not(.abyss-reader-quick-control) {
+    display: none;
+  }
+
+  .abyss-documents
+    .abyss-annotation-toolbar:not([data-annotation-mode='select'])
+    > .abyss-reader-split-control:not(:has([data-annotation-tool][aria-pressed='true'])) {
     display: none;
   }
 }
 
 @media (pointer: coarse) {
+  .abyss-documents .abyss-reader-toolbar {
+    --abyss-reader-split-disclosure-width: 24px;
+    --abyss-reader-split-main-width: 44px;
+  }
+
   .abyss-documents .abyss-annotation-editor-popover {
     gap: 6px;
   }
@@ -7377,19 +7395,36 @@
 
   .abyss-documents .abyss-reader-annotations {
     --abyss-annotation-action-height: 44px;
-    --abyss-annotation-action-width: 104px;
     --abyss-annotation-color-chip-height: 44px;
   }
 
+  .abyss-documents .abyss-annotation-colors {
+    min-height: 44px;
+    padding-block: 0;
+    border-top: 0;
+    box-shadow: inset 0 var(--border-width) var(--background-modifier-border);
+  }
+
   .abyss-documents .abyss-reader-outline-row-shell {
-    min-height: 2.75rem;
+    height: 44px;
+    min-height: 44px;
   }
 
   .abyss-documents .abyss-reader-outline-chevron {
-    width: 2.75rem;
-    min-width: 2.75rem;
-    height: 2.75rem;
-    min-height: 2.75rem;
+    position: relative;
+    width: 18px;
+    min-width: 18px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .abyss-documents .abyss-reader-outline-chevron.is-interactive::after {
+    position: absolute;
+    inset: 50% auto auto 50%;
+    width: 44px;
+    height: 44px;
+    transform: translate(-50%, -50%);
+    content: '';
   }
 
   .abyss-documents .abyss-reader-toolbar-button,
@@ -7410,9 +7445,21 @@
   }
 
   .abyss-documents .abyss-reader-split-control .abyss-reader-split-menu {
-    width: 2.75rem;
-    min-width: 2.75rem;
+    width: var(--abyss-reader-split-disclosure-width);
+    min-width: var(--abyss-reader-split-disclosure-width);
     min-height: 2.75rem;
+  }
+
+  .abyss-documents
+    .abyss-annotation-toolbar[data-annotation-mode='select']
+    > .abyss-reader-split-control:not(.abyss-reader-quick-control) {
+    display: none;
+  }
+
+  .abyss-documents
+    .abyss-annotation-toolbar:not([data-annotation-mode='select'])
+    > .abyss-reader-split-control:not(:has([data-annotation-tool][aria-pressed='true'])) {
+    display: none;
   }
 
   .abyss-documents .abyss-reader-toolbar-page-field,

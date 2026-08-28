@@ -1467,7 +1467,7 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
     await $('[data-control="sidebar"]').click();
     await $('[data-tab="annotations"]').click();
     await expect($('[data-sidebar-panel="annotations"] [role="status"]')).toHaveText(
-      'Couldn’t load annotations',
+      "Couldn't load annotations",
     );
     expect(
       await browser.execute(() => {

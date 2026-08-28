@@ -271,6 +271,37 @@ describe('AnnotationsPanel', () => {
     expect(root.querySelector('[data-section="tags"]')).toBeNull();
   });
 
+  it('renders deterministic compact headers without unsupported or custom-color jargon', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([
+      annotation(0, { color: '#123456', comment: '', selectedText: null }),
+      annotation(1, {
+        color: null,
+        comment: '',
+        externalType: 'Stamp',
+        selectedText: null,
+        type: 'unsupported',
+      }),
+    ]);
+
+    const cards = Array.from(root.querySelectorAll<HTMLElement>('.abyss-annotation-card'));
+    expect(
+      cards.map((card) => ({
+        comment: card.querySelector('[data-annotation-comment]') !== null,
+        header: card.querySelector('[data-annotation-header]')?.textContent,
+        quote: card.querySelector('[data-annotation-quote]') !== null,
+        swatch: card.querySelector('[data-annotation-color-swatch]') !== null,
+      })),
+    ).toEqual([
+      { comment: false, header: 'Page 1 · Highlight', quote: false, swatch: true },
+      { comment: false, header: 'Page 2 · Stamp', quote: false, swatch: false },
+    ]);
+    expect(root.textContent).not.toMatch(/unsupported|custom color/iu);
+
+    panel.destroy();
+  });
+
   it('hides the color footer when annotations have no display or retained active color', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
@@ -317,7 +348,7 @@ describe('AnnotationsPanel', () => {
       ],
     ).toBe('unavailable');
     expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
-      'Couldn’t load annotations',
+      "Couldn't load annotations",
     );
     expect(root.querySelector<HTMLElement>('.abyss-annotations-list')?.hidden).toBe(true);
     expect(root.textContent).not.toContain('No annotations');
@@ -330,7 +361,7 @@ describe('AnnotationsPanel', () => {
     panel.setUnavailable();
 
     expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
-      'Couldn’t load annotations',
+      "Couldn't load annotations",
     );
     expect(root.querySelector('[data-annotations-status]')?.getAttribute('role')).toBe('status');
     expect(root.querySelector('[data-action="retry-annotations"]')).toBeNull();
@@ -650,7 +681,7 @@ describe('AnnotationsPanel', () => {
     const chips = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'));
     expect(
       Object.fromEntries(chips.map((chip) => [chip.dataset['annotationColor'], chip.textContent])),
-    ).toEqual({ '#00ff00': 'Question1', '#ffd400': 'Important2', '#ff00ff': 'Custom color1' });
+    ).toEqual({ '#00ff00': 'Question1', '#ffd400': 'Important2', '#ff00ff': '1' });
     expect(chips.map((chip) => chip.getAttribute('aria-pressed'))).toEqual([
       'false',
       'false',
@@ -658,7 +689,7 @@ describe('AnnotationsPanel', () => {
     ]);
   });
 
-  it('labels unknown colors as Custom color', () => {
+  it('keeps unknown color filters to their swatch and count', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, {
       colorMeanings: { '#ffd400': '  ', '#00ff00': 'Review', '#0000ff': 'Review' },
@@ -671,7 +702,7 @@ describe('AnnotationsPanel', () => {
     ]);
 
     const chips = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'));
-    expect(chips.map((chip) => chip.textContent)).toEqual(['Review1', 'Review1', 'Custom color1']);
+    expect(chips.map((chip) => chip.textContent)).toEqual(['Review1', 'Review1', '1']);
     expect(root.querySelector('.abyss-annotation-colors')?.textContent).not.toMatch(
       /#[\da-f]{6}/iu,
     );
@@ -688,7 +719,7 @@ describe('AnnotationsPanel', () => {
     panel.setAnnotations([annotation(0, { color: '' })]);
 
     expect(root.querySelector('[data-annotation-color]')).toBeNull();
-    expect(root.querySelector('[data-annotation-meaning]')?.textContent).toBe('highlight');
+    expect(root.querySelector('[data-annotation-meaning]')?.textContent).toBe('Highlight');
     panel.destroy();
   });
 
@@ -708,19 +739,14 @@ describe('AnnotationsPanel', () => {
     ]);
 
     const chips = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-annotation-color]'));
-    expect(chips.map((chip) => chip.textContent)).toEqual([
-      'Review1',
-      'Review1',
-      'Custom color1',
-      'Custom color1',
-    ]);
+    expect(chips.map((chip) => chip.textContent)).toEqual(['Review1', 'Review1', '1', '1']);
     const names = chips.map((chip) => chip.getAttribute('aria-label'));
     expect(new Set(names).size).toBe(4);
     expect(names).toEqual([
       'Review — Blue, 1 annotation',
       'Review — Green, 1 annotation',
-      'Custom color — Color 1 of 2, 1 annotation',
-      'Custom color — Color 2 of 2, 1 annotation',
+      'Color 1, 1 annotation',
+      'Color 2, 1 annotation',
     ]);
     expect(names.join(' ')).not.toMatch(/#[\da-f]{6}/iu);
 
@@ -1290,7 +1316,7 @@ describe('AnnotationsPanel', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
     panel.setUnavailable();
-    expect(root.querySelector('[role="status"]')?.textContent).toBe('Couldn’t load annotations');
+    expect(root.querySelector('[role="status"]')?.textContent).toBe("Couldn't load annotations");
   });
 
   it('sets drag payloads and exposes keyboard/mobile Copy and Insert actions', () => {

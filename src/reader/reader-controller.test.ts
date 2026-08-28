@@ -198,7 +198,7 @@ function editableViewport(pageCount = 3) {
   const created = viewport(pageCount);
   const deleteSelection = vi.fn(async (): Promise<void> => undefined);
   const redo = vi.fn(async (): Promise<void> => undefined);
-  const setParameter = vi.fn(async (): Promise<void> => undefined);
+  const setParameter = vi.fn<PdfAnnotationEditor['setParameter']>(async () => undefined);
   const setAnnotationProjection = vi.fn<PdfAnnotationEditor['setAnnotationProjection']>();
   const setAnnotationResolver = vi.fn<PdfAnnotationEditor['setAnnotationResolver']>();
   const setTool = vi.fn(async (_tool: PdfAnnotationTool): Promise<void> => undefined);
@@ -248,7 +248,7 @@ function interactiveViewport(pageCount = 3) {
       for (const listener of modeListeners) listener(mode);
     },
   );
-  const updateAnnotations = vi.fn(() => true);
+  const updateAnnotations = vi.fn<PdfAnnotationInteraction['updateAnnotations']>(() => true);
   const focusAnnotation = vi.fn<PdfAnnotationInteraction['focusAnnotation']>(
     async () => 'editable',
   );
@@ -1243,7 +1243,7 @@ describe('ReaderController', () => {
 
     expect(
       shell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]')?.textContent,
-    ).toBe('Couldn’t load annotations');
+    ).toBe("Couldn't load annotations");
     expect(
       shell.created.sidebar?.annotationsPanel.root.querySelector(
         '[data-action="retry-annotations"]',
@@ -1295,7 +1295,7 @@ describe('ReaderController', () => {
       );
     });
 
-    shell.send({ tool: 'highlight', type: 'set-annotation-tool' });
+    shell.send({ color: '#ffd400', tool: 'highlight', type: 'set-annotation-tool' });
     await vi.waitFor(() => {
       expect(createdViewport.setQuickHighlight).toHaveBeenCalledWith({
         color: '#ffd400',
@@ -1305,7 +1305,7 @@ describe('ReaderController', () => {
     createdViewport.emitSelection(pdfSelection('quick-native'));
     expect(createdViewport.commitSelection).toHaveBeenCalledOnce();
 
-    shell.send({ tool: 'ink', type: 'set-annotation-tool' });
+    shell.send({ color: '#ffd400', tool: 'ink', type: 'set-annotation-tool' });
     await vi.waitFor(() => {
       expect(createdViewport.setTool).toHaveBeenCalledWith('ink');
       expect(
@@ -1381,7 +1381,7 @@ describe('ReaderController', () => {
       cause,
     });
 
-    shell.send({ tool: 'highlight', type: 'set-annotation-tool' });
+    shell.send({ color: '#5fb236', tool: 'highlight', type: 'set-annotation-tool' });
     await vi.waitFor(() => {
       expect(createdViewport.setQuickHighlight).toHaveBeenLastCalledWith({
         color: '#5fb236',
@@ -1673,7 +1673,7 @@ describe('ReaderController', () => {
     await vi.waitFor(() => {
       expect(
         shell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]')?.textContent,
-      ).toBe('Couldn’t load annotations');
+      ).toBe("Couldn't load annotations");
     });
 
     createdViewport.emit({
@@ -1760,7 +1760,7 @@ describe('ReaderController', () => {
     await vi.waitFor(() => {
       expect(
         shell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]')?.textContent,
-      ).toBe('Couldn’t load annotations');
+      ).toBe("Couldn't load annotations");
     });
     expect(
       shell.created.sidebar?.annotationsPanel.root.querySelector(
@@ -1995,6 +1995,53 @@ describe('ReaderController', () => {
     expect(refreshed?.color).toBe('#123456');
   });
 
+  it('uses the annotation type when a configured palette color has no semantic meaning', async () => {
+    const [pdf] = files('Books/Meaning-fallback.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const state = profileState();
+    Object.assign(state.value, {
+      annotations: {
+        author: '',
+        markdownTemplate: '',
+        palette: [{ color: '#ffd400', meaning: '', name: 'Yellow' }],
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          color: '#ffd400',
+          comment: '',
+          links: [],
+          nativeId: 'meaning-fallback',
+          pageIndex: 0,
+          rects: [{ height: 4, width: 3, x: 1, y: 2 }],
+          selectedText: 'Fallback label',
+          tags: [],
+          type: 'highlight',
+          writable: true,
+        },
+      },
+    });
+
+    expect(
+      shell.created.sidebar?.annotationsPanel.root.querySelector('[data-annotation-header]')
+        ?.textContent,
+    ).toBe('Page 1 · Highlight');
+  });
+
   it('renders the exact read-only reason and never calls a missing native editor', async () => {
     const [pdf] = files('Books/Signed.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -2044,19 +2091,19 @@ describe('ReaderController', () => {
     const notices = vi.spyOn(Notice.prototype, 'constructor__');
     await controller.open(pdf, createDiv());
 
-    shell.send({ type: 'set-annotation-tool', tool: 'ink' });
+    shell.send({ type: 'set-annotation-tool', tool: 'ink', color: '#ffd400' });
     await vi.waitFor(() => {
       expect(createdViewport.setParameter).toHaveBeenCalledWith('ink-color', '#ffd400');
     });
     shell.created.annotationToolbar?.setTool('ink');
-    shell.send({ type: 'set-annotation-color', color: '#111111' });
+    shell.send({ type: 'set-annotation-color', tool: 'ink', color: '#111111' });
     expect(createdViewport.setParameter).toHaveBeenLastCalledWith('ink-color', '#111111');
-    shell.send({ type: 'set-annotation-tool', tool: 'freetext' });
+    shell.send({ type: 'set-annotation-tool', tool: 'freetext', color: '#ffd400' });
     await vi.waitFor(() => {
-      expect(createdViewport.setParameter).toHaveBeenCalledWith('freetext-color', '#111111');
+      expect(createdViewport.setParameter).toHaveBeenCalledWith('freetext-color', '#ffd400');
     });
     shell.created.annotationToolbar?.setTool('freetext');
-    shell.send({ type: 'set-annotation-color', color: '#222222' });
+    shell.send({ type: 'set-annotation-color', tool: 'freetext', color: '#222222' });
     expect(createdViewport.setParameter).toHaveBeenLastCalledWith('freetext-color', '#222222');
 
     createdViewport.setTool
@@ -2068,20 +2115,187 @@ describe('ReaderController', () => {
     createdViewport.undo.mockImplementationOnce(() => {
       throw new Error('undo failed');
     });
-    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight', color: '#ffd400' });
     await vi.waitFor(() => {
       expect(log).toHaveBeenCalledTimes(1);
     });
-    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight', color: '#ffd400' });
     await vi.waitFor(() => {
       expect(log).toHaveBeenCalledTimes(2);
     });
-    shell.send({ type: 'set-annotation-color', color: '#333333' });
+    shell.send({ type: 'set-annotation-color', tool: 'freetext', color: '#333333' });
     shell.send({ type: 'undo-annotation' });
     await vi.waitFor(() => {
       expect(log).toHaveBeenCalledTimes(4);
     });
     expect(notices).toHaveBeenCalledTimes(3);
+  });
+
+  it('preserves an independent color while switching among writable annotation tools', async () => {
+    const [pdf] = files('Books/Tool-colors.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = editableViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+
+    shell.send({ type: 'set-annotation-color', tool: 'ink', color: '#111111' });
+    shell.send({ type: 'set-annotation-color', tool: 'freetext', color: '#222222' });
+    shell.send({ type: 'set-annotation-color', tool: 'highlight', color: '#333333' });
+
+    shell.send({ type: 'set-annotation-tool', tool: 'ink', color: '#111111' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setParameter).toHaveBeenLastCalledWith('ink-color', '#111111');
+    });
+    shell.send({ type: 'set-annotation-tool', tool: 'freetext', color: '#222222' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setParameter).toHaveBeenLastCalledWith('freetext-color', '#222222');
+    });
+    shell.send({ type: 'set-annotation-tool', tool: 'ink', color: '#111111' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setParameter).toHaveBeenLastCalledWith('ink-color', '#111111');
+    });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight', color: '#333333' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setParameter).toHaveBeenLastCalledWith('highlight-color', '#333333');
+    });
+
+    await controller.close();
+  });
+
+  it('keeps Sticky Highlight independent from interactive Ink and FreeText color events', async () => {
+    const [pdf] = files('Books/Interactive-tool-colors.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    createdViewport.setParameter.mockImplementation(async (_parameter, value) => {
+      if (typeof value === 'string') createdViewport.emitColor(value);
+    });
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const state = profileState();
+    Object.assign(state.value, {
+      annotations: {
+        ...DEFAULT_SETTINGS.annotations,
+        palette: [
+          { color: '#ffd400', meaning: 'Key idea', name: 'Yellow' },
+          { color: '#333333', meaning: 'Reference', name: 'Gray' },
+          { color: '#111111', meaning: 'Ink note', name: 'Black' },
+          { color: '#222222', meaning: 'Text note', name: 'Graphite' },
+        ],
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    const toolbar = shell.created.annotationToolbar;
+    if (toolbar === null) throw new Error('Expected annotation toolbar.');
+
+    shell.send({ type: 'set-annotation-color', tool: 'highlight', color: '#333333' });
+    shell.send({ type: 'set-annotation-tool', tool: 'ink', color: '#111111' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setParameter).toHaveBeenLastCalledWith('ink-color', '#111111');
+    });
+    expect(toolbar.colorFor('highlight')).toBe('#333333');
+
+    shell.send({ type: 'set-annotation-tool', tool: 'freetext', color: '#222222' });
+    await vi.waitFor(() => {
+      expect(createdViewport.setParameter).toHaveBeenLastCalledWith('freetext-color', '#222222');
+    });
+    expect(toolbar.colorFor('highlight')).toBe('#333333');
+
+    toolbar.root.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')?.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.setQuickHighlight).toHaveBeenLastCalledWith({
+        color: '#333333',
+        enabled: true,
+      });
+    });
+    await controller.close();
+  });
+
+  it('keeps contextual Ink and FreeText recolors separate from Sticky Highlight', async () => {
+    const [pdf] = files('Books/Contextual-tool-colors.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    createdViewport.updateAnnotations.mockImplementation((update) => {
+      if (update.color !== undefined) createdViewport.emitColor(update.color);
+      return true;
+    });
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const state = profileState();
+    Object.assign(state.value, {
+      annotations: {
+        ...DEFAULT_SETTINGS.annotations,
+        palette: [
+          { color: '#ffd400', meaning: 'Key idea', name: 'Yellow' },
+          { color: '#333333', meaning: 'Reference', name: 'Gray' },
+          { color: '#ff6666', meaning: 'Ink note', name: 'Red' },
+          { color: '#2ea8e5', meaning: 'Text note', name: 'Blue' },
+        ],
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    const toolbar = shell.created.annotationToolbar;
+    if (toolbar === null) throw new Error('Expected annotation toolbar.');
+    shell.send({ type: 'set-annotation-color', tool: 'highlight', color: '#333333' });
+
+    for (const [type, tool, color] of [
+      ['ink', 'ink', '#ff6666'],
+      ['free-text', 'freetext', '#2ea8e5'],
+    ] as const) {
+      createdViewport.emitAnnotationFocus({
+        annotations: [
+          {
+            ...annotationRecord(`${tool}-contextual`, 0, {
+              kind: 'point',
+              point: { x: 10, y: 20 },
+            }),
+            color: '#ffd400',
+            type,
+          },
+        ],
+        editable: true,
+        position: { x: 10, y: 20 },
+      });
+      shell.created.root
+        .querySelector<HTMLButtonElement>(`[data-editor-color="${color}"]`)
+        ?.click();
+      expect(toolbar.colorFor(tool)).toBe(color);
+      expect(toolbar.colorFor('highlight')).toBe('#333333');
+    }
+
+    toolbar.root.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')?.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.setQuickHighlight).toHaveBeenLastCalledWith({
+        color: '#333333',
+        enabled: true,
+      });
+    });
   });
 
   it('commits tool UI only after native mode success and reapplies the selected palette color', async () => {
@@ -2106,15 +2320,15 @@ describe('ReaderController', () => {
       shell.createShell,
     );
     await controller.open(pdf, createDiv());
-    shell.send({ type: 'set-annotation-color', color: '#ff6666' });
+    shell.send({ type: 'set-annotation-color', tool: 'ink', color: '#ff6666' });
 
-    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight', color: '#ffd400' });
     expect(
       shell.created.annotationToolbar?.root
         .querySelector('[data-annotation-tool="highlight"]')
         ?.getAttribute('aria-pressed'),
     ).toBe('false');
-    shell.send({ type: 'set-annotation-tool', tool: 'ink' });
+    shell.send({ type: 'set-annotation-tool', tool: 'ink', color: '#ff6666' });
     highlight.reject(new DOMException('Superseded', 'AbortError'));
     ink.resolve();
 
@@ -2146,7 +2360,7 @@ describe('ReaderController', () => {
     const notices = vi.spyOn(Notice.prototype, 'constructor__');
     await controller.open(pdf, createDiv());
 
-    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight', color: '#ffd400' });
     await new Promise((resolve) => {
       queueMicrotask(() => {
         resolve(undefined);
@@ -2160,7 +2374,7 @@ describe('ReaderController', () => {
     ).toBe('false');
 
     createdViewport.setTool.mockRejectedValueOnce(new Error('mode failed'));
-    shell.send({ type: 'set-annotation-tool', tool: 'ink' });
+    shell.send({ type: 'set-annotation-tool', tool: 'ink', color: '#ffd400' });
     await vi.waitFor(() => {
       expect(notices).toHaveBeenCalledTimes(1);
     });
@@ -2192,7 +2406,7 @@ describe('ReaderController', () => {
     const notices = vi.spyOn(Notice.prototype, 'constructor__');
     await controller.open(pdf, createDiv());
 
-    shell.send({ type: 'set-annotation-tool', tool: 'highlight' });
+    shell.send({ type: 'set-annotation-tool', tool: 'highlight', color: '#ffd400' });
 
     await vi.waitFor(() => {
       expect(createdViewport.setTool.mock.calls).toEqual([['highlight'], ['select']]);
@@ -2291,7 +2505,7 @@ describe('ReaderController', () => {
       expect(
         secondShell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]')
           ?.textContent,
-      ).toBe('Couldn’t load annotations');
+      ).toBe("Couldn't load annotations");
     });
     expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to extract PDF annotations', {
       path: pdf.path,
@@ -3151,11 +3365,56 @@ describe('ReaderController', () => {
       state.value,
     );
     await controller.open(pdf, createDiv());
-    shell.send({ type: 'set-annotation-color', color: '#123456' });
+    shell.send({ type: 'set-annotation-color', tool: 'highlight', color: '#123456' });
 
     controller.refreshReadingSettings();
 
     expect(shell.created.annotationToolbar?.color).toBe('#123456');
+  });
+
+  it('falls back when settings remove the active interactive Highlight color', async () => {
+    const [pdf] = files('Books/Removed-highlight-color.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const state = profileState();
+    Object.assign(state.value, {
+      annotations: {
+        ...DEFAULT_SETTINGS.annotations,
+        palette: [
+          { color: '#ffd400', meaning: 'Key idea', name: 'Yellow' },
+          { color: '#123456', meaning: 'Question', name: 'Ocean' },
+        ],
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      state.value,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'set-annotation-color', tool: 'highlight', color: '#123456' });
+    Object.assign(state.value.annotations as object, {
+      palette: [{ color: '#e56eee', meaning: 'Follow up', name: 'Magenta' }],
+    });
+
+    controller.refreshReadingSettings();
+
+    expect(shell.created.annotationToolbar?.colorFor('highlight')).toBe('#e56eee');
+    shell.created.annotationToolbar?.root
+      .querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')
+      ?.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.setQuickHighlight).toHaveBeenLastCalledWith({
+        color: '#e56eee',
+        enabled: true,
+      });
+    });
   });
 
   it('uses the global default and leaves the fingerprint map untouched when remembering is off', async () => {

@@ -1,6 +1,7 @@
 import { Menu } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import type { ReaderLayout } from '../document-core/reading.js';
+import { AnnotationToolbar } from './annotation-toolbar.js';
 import { ReaderToolbar, type ReaderToolbarIntent } from './toolbar.js';
 
 interface CapturedMenuItem {
@@ -246,6 +247,25 @@ describe('ReaderToolbar', () => {
     expect(menu?.getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('closes the active Fit menu when its disclosure is activated again', () => {
+    const entries = captureMenuItems();
+    const close = vi.spyOn(Menu.prototype, 'close');
+    const { host, toolbar } = fixture();
+    const trigger = host.querySelector<HTMLButtonElement>('[data-control="fit-menu"]');
+    if (trigger === null) throw new Error('Expected Fit options.');
+
+    trigger.click();
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+
+    trigger.click();
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(entries.map(({ title }) => title)).toEqual(['Fit width', 'Fit page', 'Fit height']);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+
+    toolbar.destroy();
+  });
+
   it('opens Fit by pointer keyboard touch and context routes', () => {
     const entries = captureMenuItems();
     const { host, intents } = fixture();
@@ -281,12 +301,6 @@ describe('ReaderToolbar', () => {
     ]);
     expect(intents).toHaveLength(3);
     expect(entries.map((entry) => entry.title)).toEqual([
-      'Fit width',
-      'Fit page',
-      'Fit height',
-      'Fit width',
-      'Fit page',
-      'Fit height',
       'Fit width',
       'Fit page',
       'Fit height',
@@ -341,6 +355,10 @@ describe('ReaderToolbar', () => {
       fit.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
       expect(intents).toEqual([]);
       expect(bubbledClicks).not.toHaveBeenCalled();
+
+      fit.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowDown' }),
+      );
 
       fit.dispatchEvent(pointer('pointerdown', 10));
       vi.advanceTimersByTime(500);
@@ -401,6 +419,10 @@ describe('ReaderToolbar', () => {
       fit.dispatchEvent(pointer('pointerup', 21));
       fit.dispatchEvent(click());
       expect(intents).toEqual([]);
+
+      fit.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowDown' }),
+      );
 
       fit.dispatchEvent(pointer('pointerdown', 22));
       vi.advanceTimersByTime(500);
@@ -585,18 +607,49 @@ describe('ReaderToolbar', () => {
     ]);
   });
 
-  it('moves hidden previous and next page actions into More at phone width', () => {
+  it('keeps page navigation direct without duplicating it in More at phone width', () => {
     const entries = captureMenuItems();
-    const { host, intents, toolbar } = fixture();
+    const { host, toolbar } = fixture();
     setToolbarWidth(host, 390);
     toolbar.setPageCount(3);
     toolbar.setCurrentPage(1);
 
     host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
-    entries.find(({ title }) => title === 'Previous page')?.click();
-    entries.find(({ title }) => title === 'Next page')?.click();
 
-    expect(intents).toEqual([{ type: 'previous-page' }, { type: 'next-page' }]);
+    expect(entries.map(({ title }) => title)).not.toContain('Previous page');
+    expect(entries.map(({ title }) => title)).not.toContain('Next page');
+    expect(host.querySelector('[data-control="previous-page"]')).not.toBeNull();
+    expect(host.querySelector('[data-control="next-page"]')).not.toBeNull();
+  });
+
+  it('moves only inactive annotation tools into More at phone width', () => {
+    const entries = captureMenuItems();
+    const { host, toolbar } = fixture();
+    setToolbarWidth(host, 390);
+    const onAnnotationIntent = vi.fn();
+    const annotations = new AnnotationToolbar(
+      toolbar.annotationHost,
+      [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      null,
+      onAnnotationIntent,
+    );
+    annotations.setTool('ink');
+
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+
+    const toolItems = entries.filter(
+      ({ disabled, section }) => section === 'abyss-documents-tools' && !disabled,
+    );
+    expect(toolItems.map(({ title }) => title)).toEqual(['Sticky Highlight', 'Text']);
+    toolItems[0]?.click();
+    expect(onAnnotationIntent).toHaveBeenCalledWith({
+      type: 'set-annotation-tool',
+      tool: 'highlight',
+      color: '#ffd400',
+    });
+
+    annotations.destroy();
+    toolbar.destroy();
   });
 
   it('does not duplicate zoom and Fit actions in More for a wide reader leaf', () => {
@@ -644,7 +697,8 @@ describe('ReaderToolbar', () => {
     overflow.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
     expect(entries.filter(({ title }) => title === 'Layout')).toHaveLength(1);
     overflow.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
-    expect(entries.filter(({ title }) => title === 'Layout')).toHaveLength(2);
+    expect(entries.filter(({ title }) => title === 'Layout')).toHaveLength(1);
+    expect(overflow.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('omits OCR when no provider is qualified', () => {

@@ -107,6 +107,34 @@ describe('OutlinePanel', () => {
     host.remove();
   });
 
+  it('uses native Obsidian navigation tokens for branches and leaves', () => {
+    const host = createDiv();
+    const panel = new OutlinePanel(host, vi.fn());
+    panel.render(searchableOutline);
+    const branch = panel.root.querySelector<HTMLElement>('[data-outline-id="knowledge"]');
+    const leaf = panel.root.querySelector<HTMLElement>('[data-outline-id="appendix"]');
+
+    expect({
+      branch: branch?.classList.contains('nav-folder'),
+      branchTitle: branch
+        ?.querySelector('[data-outline-row]')
+        ?.classList.contains('nav-folder-title'),
+      children: branch?.querySelector('[role="group"]')?.classList.contains('nav-folder-children'),
+      collapse: branch
+        ?.querySelector('[data-outline-chevron]')
+        ?.classList.contains('nav-folder-collapse-indicator'),
+      leaf: leaf?.classList.contains('nav-file'),
+      leafTitle: leaf?.querySelector('[data-outline-row]')?.classList.contains('nav-file-title'),
+    }).toEqual({
+      branch: true,
+      branchTitle: true,
+      children: true,
+      collapse: true,
+      leaf: true,
+      leafTitle: true,
+    });
+  });
+
   it('clears heading search before Escape hides its empty field', () => {
     const host = createDiv();
     host.doc.body.append(host);

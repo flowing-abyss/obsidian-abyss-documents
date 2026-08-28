@@ -95,7 +95,7 @@ function fixture(
       for (const listener of modeListeners) listener(mode);
     },
   );
-  const updateAnnotations = vi.fn(() => true);
+  const updateAnnotations = vi.fn<PdfAnnotationInteraction['updateAnnotations']>(() => true);
   const deleteAnnotations = vi.fn(() => true);
   const focusAnnotation = vi.fn(async () => 'editable' as const);
   const interaction: PdfAnnotationInteraction = {
@@ -569,6 +569,20 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it('arms Sticky Highlight with the color carried by its tool request', async () => {
+    const test = fixture();
+
+    expect(test.controller.requestTool('highlight', '#ff6666')).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
+        color: '#ff6666',
+        enabled: true,
+      });
+    });
+    expect(test.controller.color).toBe('#ff6666');
+  });
+
   it('keeps Ink FreeText and disabled modes owned by PDF.js', () => {
     for (const mode of ['ink', 'freetext', 'disabled'] as const) {
       const test = fixture(mode);
@@ -578,6 +592,55 @@ describe('AnnotationInteractionController', () => {
       expect(test.setQuickHighlight).not.toHaveBeenCalled();
       test.controller.destroy();
     }
+  });
+
+  it('does not let native Ink or FreeText colors replace the Sticky Highlight color', () => {
+    const test = fixture();
+
+    test.emitMode('ink');
+    test.emitColor('#ff6666');
+    test.emitMode('freetext');
+    test.emitColor('#2ea8e5');
+
+    expect(test.controller.color).toBe('#ffd400');
+    expect(test.observedColors).toEqual([]);
+    expect(test.states[test.states.length - 1]).toEqual({ armed: false, color: '#ffd400' });
+    test.controller.destroy();
+  });
+
+  it('routes contextual Ink and FreeText recolors without changing Sticky Highlight', () => {
+    const contextualColors: Array<{ color: string; tool: 'ink' | 'freetext' }> = [];
+    const test = fixture('neutral', {
+      onToolColorChange: (tool, color) => contextualColors.push({ color, tool }),
+    });
+
+    for (const [type, color] of [
+      ['ink', '#ff6666'],
+      ['free-text', '#2ea8e5'],
+    ] as const) {
+      const annotation = { ...nativeAnnotation(), color: '#ffd400', type };
+      test.emitAnnotationFocus({
+        annotations: [annotation],
+        editable: true,
+        position: { x: 10, y: 20 },
+      });
+      const request = test.opened[test.opened.length - 1];
+      if (request === undefined) throw new Error('Expected a contextual annotation request.');
+      test.updateAnnotations.mockImplementationOnce((update) => {
+        if (update.color !== undefined) test.emitColor(update.color);
+        return true;
+      });
+
+      expect(request.onUpdate({ annotations: [annotation], color })).toBe(true);
+    }
+
+    expect(test.controller.color).toBe('#ffd400');
+    expect(test.observedColors).toEqual([]);
+    expect(contextualColors).toEqual([
+      { color: '#ff6666', tool: 'ink' },
+      { color: '#2ea8e5', tool: 'freetext' },
+    ]);
+    test.controller.destroy();
   });
 
   it('contains native creation failures while retaining the unified editor for retry', async () => {
@@ -598,19 +661,19 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
-  it('synchronizes native colors and palette changes without stale snap-back', async () => {
+  it('falls back when a palette refresh removes the active Sticky Highlight color', async () => {
     const test = fixture('quick-highlight');
     test.emitColor('#ff6666');
     test.controller.updatePalette([{ color: '#e56eee', meaning: 'Question', name: 'Magenta' }]);
 
     await vi.waitFor(() => {
       expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
-        color: '#ff6666',
+        color: '#e56eee',
         enabled: true,
       });
     });
-    expect(test.controller.color).toBe('#ff6666');
-    expect(test.observedColors).toEqual(['#ff6666']);
+    expect(test.controller.color).toBe('#e56eee');
+    expect(test.observedColors).toEqual(['#ff6666', '#e56eee']);
     test.controller.destroy();
   });
 

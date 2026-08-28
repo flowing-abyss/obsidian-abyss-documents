@@ -161,7 +161,7 @@ describe('ReaderShell', () => {
       .querySelector<HTMLButtonElement>('[data-annotation-tool="ink"]')
       ?.click();
 
-    expect(intents).toContainEqual({ type: 'set-annotation-tool', tool: 'ink' });
+    expect(intents).toContainEqual({ color: '#ffd400', type: 'set-annotation-tool', tool: 'ink' });
     shell.destroy();
     host.remove();
   });

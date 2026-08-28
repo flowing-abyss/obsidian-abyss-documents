@@ -160,6 +160,7 @@ interface AnnotationSelectionProjectionViewport extends DocumentViewport {
 }
 
 interface AnnotationToolRequest {
+  readonly color: string | null;
   readonly editor: PdfAnnotationEditor;
   readonly previous: PdfAnnotationTool;
   readonly revision: number;
@@ -167,6 +168,8 @@ interface AnnotationToolRequest {
   readonly tool: PdfAnnotationTool;
   readonly viewport: DocumentViewport;
 }
+
+type WritableAnnotationTool = Exclude<PdfAnnotationTool, 'select'>;
 
 interface CleanPeerReloadContext {
   readonly file: TFile;
@@ -261,7 +264,9 @@ export class ReaderController {
   private annotationInteractionController: AnnotationInteractionController | null = null;
   private annotationActivationAbort: AbortController | null = null;
   private currentAnnotationTool: PdfAnnotationTool = 'select';
-  private currentAnnotationColor = DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400';
+  private annotationToolColors = annotationToolColorDefaults(
+    DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400',
+  );
   private readonly saveFailureOwner = {};
   private currentFile: TFile | null = null;
   private currentHost: HTMLElement | null = null;
@@ -630,9 +635,9 @@ export class ReaderController {
     shell: ReaderShell,
   ): AnnotationInteractionControllerOptions {
     return {
-      color: this.currentAnnotationColor,
+      color: this.annotationToolColors.highlight,
       onColorChange: (color) => {
-        this.currentAnnotationColor = color;
+        this.annotationToolColors.highlight = color;
       },
       onFailure: (action, cause, context) => {
         this.reportAnnotationFailure(action, cause, context);
@@ -642,6 +647,11 @@ export class ReaderController {
         const tool = annotationToolForMode(mode);
         this.currentAnnotationTool = tool;
         shell.annotationToolbar?.setTool(tool);
+      },
+      onToolColorChange: (tool, color) => {
+        if (this.viewport !== viewport || this.shell !== shell) return;
+        this.annotationToolColors[tool] = color;
+        shell.annotationToolbar?.setColor(tool, color);
       },
       onAnnotationPreview: (update) => {
         this.projectAnnotationPreview(viewport, shell, update);
@@ -1550,10 +1560,10 @@ export class ReaderController {
   private handleAnnotationToolbarIntent(intent: AnnotationToolbarIntent): void {
     switch (intent.type) {
       case 'set-annotation-tool':
-        this.setAnnotationTool(intent.tool);
+        this.setAnnotationTool(intent.tool, 'color' in intent ? intent.color : undefined);
         return;
       case 'set-annotation-color':
-        this.setAnnotationColor(intent.color);
+        this.setAnnotationColor(intent.tool, intent.color);
         return;
       case 'undo-annotation':
         this.containAnnotationAction(this.runAnnotationHistory('undo'));
@@ -1572,7 +1582,7 @@ export class ReaderController {
     const annotationEditor = annotationEditorOf(viewport);
     const palette = this.profileState.annotations?.palette ?? DEFAULT_SETTINGS.annotations.palette;
     this.currentAnnotationTool = 'select';
-    this.currentAnnotationColor = palette[0]?.color ?? '#ffd400';
+    this.annotationToolColors = annotationToolColorDefaults(palette[0]?.color ?? '#ffd400');
     shell.configureAnnotationToolbar(palette, annotationReadOnlyReason(session, annotationEditor));
   }
 
@@ -1583,24 +1593,34 @@ export class ReaderController {
   ): void {
     const editor = annotationEditorOf(viewport);
     const palette = this.profileState.annotations?.palette ?? DEFAULT_SETTINGS.annotations.palette;
-    shell.configureAnnotationToolbar(palette, annotationReadOnlyReason(session, editor));
-    shell.annotationToolbar?.setTool(this.currentAnnotationTool);
+    const fallbackColor = palette[0]?.color ?? '#ffd400';
+    for (const tool of writableAnnotationTools()) {
+      if (
+        !palette.some(
+          ({ color }) =>
+            color.toLocaleLowerCase() === this.annotationToolColors[tool].toLocaleLowerCase(),
+        )
+      )
+        this.annotationToolColors[tool] = fallbackColor;
+    }
+    const toolbar = shell.configureAnnotationToolbar(
+      palette,
+      annotationReadOnlyReason(session, editor),
+    );
+    for (const tool of writableAnnotationTools())
+      toolbar.setColor(tool, this.annotationToolColors[tool]);
+    toolbar.setTool(this.currentAnnotationTool);
     const interactionController = this.annotationInteractionController;
     if (interactionController !== null) {
       interactionController.updatePalette(palette);
-      this.currentAnnotationColor = interactionController.color;
-      return;
+      this.annotationToolColors.highlight = interactionController.color;
+      toolbar.setColor('highlight', interactionController.color);
     }
-    const selectedColor = palette.some(
-      ({ color }) => color.toLocaleLowerCase() === this.currentAnnotationColor.toLocaleLowerCase(),
-    )
-      ? this.currentAnnotationColor
-      : (palette[0]?.color ?? '#ffd400');
-    this.setAnnotationColor(selectedColor);
   }
 
-  private setAnnotationTool(tool: PdfAnnotationTool): void {
-    if (this.annotationInteractionController?.requestTool(tool) === true) {
+  private setAnnotationTool(tool: PdfAnnotationTool, requestedColor?: string): void {
+    const color = this.annotationToolRequestColor(tool, requestedColor);
+    if (this.annotationInteractionController?.requestTool(tool, color ?? undefined) === true) {
       this.currentAnnotationTool = tool;
       return;
     }
@@ -1610,7 +1630,7 @@ export class ReaderController {
     if (editor === null || shell === null || viewport === null) return;
     const previous = this.currentAnnotationTool;
     const revision = ++this.annotationToolRequestRevision;
-    this.commitAnnotationTool({ editor, previous, revision, shell, tool, viewport }).catch(
+    this.commitAnnotationTool({ color, editor, previous, revision, shell, tool, viewport }).catch(
       (cause: unknown) => {
         console.error('[abyss-documents] Unexpected annotation tool transaction failure', {
           cause,
@@ -1619,27 +1639,36 @@ export class ReaderController {
     );
   }
 
-  private setAnnotationColor(color: string): void {
-    if (this.annotationInteractionController?.selectColor(color) === true) {
-      this.currentAnnotationColor = color;
+  private annotationToolRequestColor(
+    tool: PdfAnnotationTool,
+    requestedColor?: string,
+  ): string | null {
+    if (tool === 'select') return null;
+    const color = requestedColor ?? this.annotationToolColors[tool];
+    this.annotationToolColors[tool] = color;
+    return color;
+  }
+
+  private setAnnotationColor(tool: WritableAnnotationTool, color: string): void {
+    if (tool === 'highlight' && this.annotationInteractionController?.selectColor(color) === true) {
+      this.annotationToolColors.highlight = color;
       this.lastAnnotationFailureKey = null;
       return;
     }
     const editor = annotationEditorOf(this.viewport);
     const toolbar = this.shell?.annotationToolbar;
-    const tool = this.currentAnnotationTool;
-    if (editor === null || toolbar === undefined || toolbar === null) return;
-    if (tool === 'select') {
-      this.currentAnnotationColor = color;
-      toolbar.setColor(color);
+    if (toolbar === undefined || toolbar === null) return;
+    if (editor === null || tool !== this.currentAnnotationTool) {
+      this.annotationToolColors[tool] = color;
+      toolbar.setColor(tool, color);
       return;
     }
     try {
       editor.setParameter(annotationColorParameter(tool), color).then(
         () => {
           if (annotationEditorOf(this.viewport) !== editor) return;
-          this.currentAnnotationColor = color;
-          toolbar.setColor(color);
+          this.annotationToolColors[tool] = color;
+          toolbar.setColor(tool, color);
           this.lastAnnotationFailureKey = null;
         },
         (cause: unknown) => {
@@ -1664,11 +1693,10 @@ export class ReaderController {
   }
 
   private async finishAnnotationTool(request: AnnotationToolRequest): Promise<void> {
-    const { editor, revision, shell, tool, viewport } = request;
+    const { color, editor, revision, shell, tool, viewport } = request;
     if (!this.isCurrentAnnotationRequest(viewport, revision)) return;
-    if (tool !== 'select') {
-      await editor.setParameter(annotationColorParameter(tool), this.currentAnnotationColor);
-    }
+    if (tool !== 'select' && color !== null)
+      await editor.setParameter(annotationColorParameter(tool), color);
     if (!this.isCurrentAnnotationRequest(viewport, revision)) return;
     this.currentAnnotationTool = tool;
     shell.annotationToolbar?.setTool(tool);
@@ -2623,15 +2651,23 @@ function annotationColorParameter(
   return 'freetext-color';
 }
 
+function annotationToolColorDefaults(color: string): Record<WritableAnnotationTool, string> {
+  return { freetext: color, highlight: color, ink: color };
+}
+
+function writableAnnotationTools(): readonly WritableAnnotationTool[] {
+  return ['highlight', 'ink', 'freetext'];
+}
+
 function annotationColorLabels(
   palette: PluginSettings['annotations']['palette'],
 ): Pick<ReaderSidebarCallbacks, 'annotationColorMeanings' | 'annotationColorNames'> {
   return {
     annotationColorMeanings: Object.fromEntries(
-      palette.map((entry) => [
-        entry.color.toLocaleLowerCase(),
-        entry.meaning.trim().length > 0 ? entry.meaning.trim() : entry.name,
-      ]),
+      palette.flatMap((entry) => {
+        const meaning = entry.meaning.trim();
+        return meaning.length > 0 ? [[entry.color.toLocaleLowerCase(), meaning]] : [];
+      }),
     ),
     annotationColorNames: Object.fromEntries(
       palette.map((entry) => [entry.color.toLocaleLowerCase(), entry.name]),

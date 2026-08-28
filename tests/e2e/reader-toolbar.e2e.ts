@@ -3,15 +3,15 @@ import { afterEach, beforeEach, describe, it } from 'mocha';
 
 const pluginId = 'abyss-documents';
 
-async function openPdf(): Promise<void> {
+async function openPdf(path = 'Documents/text-12-pages.pdf'): Promise<void> {
   await browser.executeObsidian(
     async ({ app }, input) => {
       if (!app.plugins.enabledPlugins.has(input.pluginId)) {
         throw new Error(`Plugin ${input.pluginId} is not enabled.`);
       }
-      await app.workspace.openLinkText('Documents/text-12-pages.pdf', '', false);
+      await app.workspace.openLinkText(input.path, '', false);
     },
-    { pluginId },
+    { path, pluginId },
   );
   await $('[data-abyss-document]').waitForDisplayed({ timeout: 15_000 });
   await $('.pdfViewer canvas').waitForExist({ timeout: 15_000 });
@@ -62,6 +62,13 @@ async function closeReaders(): Promise<void> {
 
 async function chooseMenuOption(label: string): Promise<void> {
   await $('[data-control="overflow"]').click();
+  const choice = $(`//*[contains(@class, "menu-item-title") and normalize-space(.)="${label}"]`);
+  await choice.waitForClickable({ timeout: 5_000 });
+  await choice.click();
+}
+
+async function chooseToolColor(control: string, label: string): Promise<void> {
+  await $(`[data-control="${control}"]`).click();
   const choice = $(`//*[contains(@class, "menu-item-title") and normalize-space(.)="${label}"]`);
   await choice.waitForClickable({ timeout: 5_000 });
   await choice.click();
@@ -352,11 +359,27 @@ describe('reader compact toolbar', () => {
           return {
             control: element.dataset['control'] ?? element.dataset['annotationTool'] ?? null,
             height: bounds.height,
+            isSplitDisclosure: element.classList.contains('abyss-reader-split-menu'),
+            isSplitMain: element.classList.contains('abyss-reader-split-main'),
             width: bounds.width,
           };
         }),
     );
-    expect(targets.filter(({ height, width }) => height < 32 || width < 32)).toEqual([]);
+    expect(targets.filter(({ height }) => height < 32)).toEqual([]);
+    expect(
+      targets.filter(
+        ({ isSplitDisclosure, width }) => isSplitDisclosure && (width < 12 || width > 16),
+      ),
+    ).toEqual([]);
+    expect(
+      targets.filter(({ isSplitMain, width }) => isSplitMain && (width < 32 || width > 36)),
+    ).toEqual([]);
+    expect(
+      targets.filter(
+        ({ isSplitDisclosure, isSplitMain, width }) =>
+          !isSplitDisclosure && !isSplitMain && width < 32,
+      ),
+    ).toEqual([]);
 
     const sidebar = $('[data-control="sidebar"]');
     await expect(sidebar).toHaveAttribute('aria-label', 'Toggle sidebar');
@@ -519,6 +542,78 @@ describe('reader compact toolbar', () => {
     expect(geometry.height).toBeLessThanOrEqual(44);
   });
 
+  it('keeps separate colors for every split annotation tool and makes Select explicit', async () => {
+    await chooseToolColor('quick-highlight-menu', 'Red');
+    await chooseToolColor('ink-color-menu', 'Green');
+    await chooseToolColor('freetext-color-menu', 'Blue');
+
+    const presentations = await browser.execute(() => {
+      const toolbar = document.querySelector<HTMLElement>('[data-region="annotation-toolbar"]');
+      if (toolbar === null) throw new Error('Annotation toolbar is missing.');
+      const colors = Object.fromEntries(
+        ['highlight', 'ink', 'freetext'].map((tool) => {
+          const button = toolbar.querySelector<HTMLButtonElement>(
+            `[data-annotation-tool="${tool}"]`,
+          );
+          if (button === null) throw new Error(`${tool} button is missing.`);
+          return [
+            tool,
+            {
+              color: button.style.getPropertyValue('--abyss-annotation-tool-color'),
+              hasMarker: button.querySelector('.abyss-reader-tool-color') !== null,
+              label: button.getAttribute('aria-label'),
+            },
+          ];
+        }),
+      );
+      return { colors, mode: toolbar.dataset['annotationMode'] };
+    });
+    expect(presentations).toEqual({
+      colors: {
+        freetext: { color: '#2ea8e5', hasMarker: true, label: 'Text — Blue — inactive' },
+        highlight: {
+          color: '#ff6666',
+          hasMarker: true,
+          label: 'Sticky Highlight — Red — Select mode',
+        },
+        ink: { color: '#5fb236', hasMarker: true, label: 'Ink — Green — inactive' },
+      },
+      mode: 'select',
+    });
+
+    const highlight = $('[data-annotation-tool="highlight"]');
+    await highlight.click();
+    await expect($('[data-region="annotation-toolbar"]')).toHaveAttribute(
+      'data-annotation-mode',
+      'sticky-highlight',
+    );
+    await expect(highlight).toHaveAttribute('aria-pressed', 'true');
+    await highlight.click();
+    await expect($('[data-region="annotation-toolbar"]')).toHaveAttribute(
+      'data-annotation-mode',
+      'select',
+    );
+    await expect(highlight).toHaveAttribute('aria-pressed', 'false');
+
+    for (const [tool, color] of [
+      ['ink', '#5fb236'],
+      ['freetext', '#2ea8e5'],
+      ['highlight', '#ff6666'],
+    ] as const) {
+      await $(`[data-annotation-tool="${tool}"]`).click();
+      await expect($(`[data-annotation-tool="${tool}"]`)).toHaveAttribute('aria-pressed', 'true');
+      expect(
+        await browser.execute(
+          (activeTool) =>
+            document
+              .querySelector<HTMLElement>(`[data-annotation-tool="${activeTool}"]`)
+              ?.style.getPropertyValue('--abyss-annotation-tool-color'),
+          tool,
+        ),
+      ).toBe(color);
+    }
+  });
+
   it('supports pointer context keyboard and outside-dismissal routes for every toolbar menu', async () => {
     await browser.execute(() => {
       const taskWindow = window as Window & {
@@ -544,6 +639,23 @@ describe('reader compact toolbar', () => {
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await expect($('.menu')).toHaveText(expect.stringContaining('Fit height'));
     await expect(fitMenu).toHaveAttribute('aria-expanded', 'true');
+    await fitMenu.click();
+    await expect($('.menu')).not.toBeDisplayed();
+    await expect(fitMenu).toHaveAttribute('aria-expanded', 'false');
+    await browser.execute(() => {
+      document.querySelector<HTMLButtonElement>('[data-control="fit-menu"]')?.focus();
+    });
+    await browser.keys(['Enter']);
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+    await browser.execute(() => {
+      document.querySelector<HTMLButtonElement>('[data-control="fit-menu"]')?.focus();
+    });
+    await browser.keys(['Enter']);
+    await expect($('.menu')).not.toBeDisplayed();
+    await expect(fitMenu).toHaveAttribute('aria-expanded', 'false');
+
+    await fitMenu.click();
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await $('[data-control="page-field"]').click();
     await expect($('.menu')).not.toBeDisplayed();
     await expect(fitMenu).toHaveAttribute('aria-expanded', 'false');
@@ -693,6 +805,34 @@ describe('reader compact toolbar', () => {
     await browser.keys(['ArrowDown']);
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await expect($('.menu')).toHaveText(expect.stringContaining('Yellow'));
+    await browser.execute(() => {
+      document.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]')?.focus();
+    });
+    await browser.keys([' ']);
+    await expect($('.menu')).not.toBeDisplayed();
+    await expect(quickMenu).toHaveAttribute('aria-expanded', 'false');
+
+    await fitMenu.click();
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+    await quickMenu.click();
+    await expect(fitMenu).toHaveAttribute('aria-expanded', 'false');
+    await expect(quickMenu).toHaveAttribute('aria-expanded', 'true');
+    expect(
+      await browser.execute(
+        () =>
+          Array.from(document.querySelectorAll<HTMLElement>('.menu')).filter(
+            (menu) => menu.offsetParent !== null,
+          ).length,
+      ),
+    ).toBe(1);
+    await quickMenu.click();
+    await expect($('.menu')).not.toBeDisplayed();
+
+    await browser.execute(() => {
+      document.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]')?.focus();
+    });
+    await browser.keys(['ArrowDown']);
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await $('[data-control="page-field"]').click();
     await expect($('.menu')).not.toBeDisplayed();
     await expect(quickMenu).toHaveAttribute('aria-expanded', 'false');
@@ -790,6 +930,11 @@ describe('reader compact toolbar', () => {
       ),
     ).toBe('overflow');
 
+    await more.click();
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+    await more.click();
+    await expect($('.menu')).not.toBeDisplayed();
+    await expect(more).toHaveAttribute('aria-expanded', 'false');
     await more.click();
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await $('[data-control="page-field"]').click();
@@ -1123,7 +1268,11 @@ describe('reader compact toolbar', () => {
   });
 
   it('keeps the toolbar single-row and contained across its responsive boundary', async () => {
-    for (const width of [1440, 1024, 768, 760, 680, 390]) {
+    await closeReaders();
+    await openPdf('Documents/text-700-pages.pdf');
+    await expect($('[data-control="page-total"]')).toHaveText('/ 700');
+
+    for (const width of [1440, 1024, 768, 480, 390]) {
       const geometry = await browser.execute((readerWidth) => {
         const reader = document.querySelector<HTMLElement>('.abyss-documents');
         if (reader === null) throw new Error('Reader is missing.');
@@ -1141,16 +1290,51 @@ describe('reader compact toolbar', () => {
           return Math.round(bounds.top + bounds.height / 2);
         });
         const fit = toolbar.querySelector<HTMLElement>('.abyss-reader-fit-control');
+        const visibleTools = Array.from(
+          toolbar.querySelectorAll<HTMLElement>('[data-annotation-tool]'),
+        )
+          .filter((element) => element.offsetParent !== null)
+          .map((element) => element.dataset['annotationTool']);
         return {
           centers,
           clientWidth: toolbar.clientWidth,
+          directPageNavigation: ['previous-page', 'page-field', 'next-page'].every(
+            (control) =>
+              toolbar.querySelector<HTMLElement>(`[data-control="${control}"]`)?.offsetParent !==
+              null,
+          ),
           fitVisible: fit?.offsetParent !== null,
+          overflowVisible:
+            toolbar.querySelector<HTMLElement>('[data-control="overflow"]')?.offsetParent !== null,
           scrollWidth: toolbar.scrollWidth,
+          visibleTools,
         };
       }, width);
       expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
       expect(Math.max(...geometry.centers) - Math.min(...geometry.centers)).toBeLessThanOrEqual(1);
       expect(geometry.fitVisible).toBe(width > 760);
+      expect(geometry.directPageNavigation).toBe(true);
+      expect(geometry.overflowVisible).toBe(true);
+      expect(geometry.visibleTools).toEqual(
+        width <= 600 ? ['highlight'] : ['highlight', 'ink', 'freetext'],
+      );
+
+      await $('[data-control="overflow"]').click();
+      await $('.menu').waitForDisplayed({ timeout: 3_000 });
+      const toolTitles = await browser.execute(() =>
+        Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '.menu .menu-item[data-section="abyss-documents-tools"]:not(.is-label) .menu-item-title',
+          ),
+          (item) => item.textContent.trim(),
+        ),
+      );
+      expect(toolTitles).toEqual(width <= 600 ? ['Ink', 'Text'] : []);
+      const menuText = await $('.menu').getText();
+      expect(menuText).not.toContain('Previous page');
+      expect(menuText).not.toContain('Next page');
+      await $('[data-control="overflow"]').click();
+      await expect($('.menu')).not.toBeDisplayed();
     }
   });
 });

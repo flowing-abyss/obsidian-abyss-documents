@@ -7,15 +7,31 @@ import { ownerWindow } from './owner-dom.js';
 import { LongPressMenuGesture } from './toolbar.js';
 
 export type AnnotationToolbarIntent =
-  | { readonly type: 'set-annotation-tool'; readonly tool: PdfAnnotationTool }
-  | { readonly type: 'set-annotation-color'; readonly color: string }
+  | { readonly type: 'set-annotation-tool'; readonly tool: 'select' }
+  | {
+      readonly type: 'set-annotation-tool';
+      readonly tool: WritableAnnotationTool;
+      readonly color: string;
+    }
+  | {
+      readonly type: 'set-annotation-color';
+      readonly tool: WritableAnnotationTool;
+      readonly color: string;
+    }
   | { readonly type: 'undo-annotation' }
   | { readonly type: 'redo-annotation' };
+
+type WritableAnnotationTool = Exclude<PdfAnnotationTool, 'select'>;
 
 interface ToolChoice {
   readonly icon: IconName;
   readonly label: string;
   readonly tool: 'freetext' | 'ink';
+}
+
+interface ActiveMenu {
+  readonly menu: Menu;
+  readonly trigger: HTMLButtonElement;
 }
 
 const TOOLS: readonly ToolChoice[] = [
@@ -28,10 +44,9 @@ export class AnnotationToolbar {
 
   private readonly cleanups: Array<() => void> = [];
   private readonly focusFrames = new Set<number>();
-  private readonly menus = new Set<Menu>();
   private readonly palette: readonly AnnotationPaletteEntry[];
-  private readonly quickButton: HTMLButtonElement;
-  private currentColor: string;
+  private readonly toolColors: Record<WritableAnnotationTool, string>;
+  private activeMenu: ActiveMenu | null = null;
   private currentTool: PdfAnnotationTool = 'select';
   private destroyed = false;
 
@@ -42,42 +57,45 @@ export class AnnotationToolbar {
     private readonly onIntent: (intent: AnnotationToolbarIntent) => void,
   ) {
     this.palette = palette;
-    this.currentColor = palette[0]?.color ?? '#ffd400';
+    const defaultColor = palette[0]?.color ?? '#ffd400';
+    this.toolColors = {
+      freetext: defaultColor,
+      highlight: defaultColor,
+      ink: defaultColor,
+    };
     this.root = ownerWindow(host).createDiv();
     this.root.className = 'abyss-annotation-toolbar';
     this.root.dataset['region'] = 'annotation-toolbar';
+    this.root.dataset['annotationMode'] = 'select';
     this.root.setAttribute('role', 'group');
     this.root.setAttribute('aria-label', 'PDF annotation tools');
     if (readOnlyReason !== null) this.root.setAttribute('aria-description', readOnlyReason);
     host.append(this.root);
 
-    this.quickButton = this.createQuickControl(readOnlyReason);
+    this.createQuickControl(readOnlyReason);
     this.addToolControls(readOnlyReason);
-    this.refreshQuickPresentation();
+    this.refreshToolPresentations();
   }
 
   private createQuickControl(readOnlyReason: string | null): HTMLButtonElement {
     const quick = this.root.createDiv({
       cls: ['abyss-reader-split-control', 'abyss-reader-quick-control'],
       attr: {
-        'aria-label': 'Quick Highlight',
+        'aria-label': 'Sticky Highlight',
         'data-control-group': 'quick-highlight',
         role: 'group',
       },
     });
-    const quickButton = this.iconButton('Quick Highlight', 'highlighter', quick);
+    const quickButton = this.iconButton('Sticky Highlight', 'highlighter', quick);
     quickButton.dataset['annotationTool'] = 'highlight';
     quickButton.addClass('abyss-reader-split-main');
     quickButton.disabled = readOnlyReason !== null;
     quickButton.setAttribute('aria-pressed', 'false');
     quickButton.setAttribute('aria-haspopup', 'menu');
     quickButton.setAttribute('aria-expanded', 'false');
-    const colorDot = ownerWindow(this.root).createSpan();
-    colorDot.className = 'abyss-reader-quick-color';
-    colorDot.setAttribute('aria-hidden', 'true');
-    quickButton.append(colorDot);
+    this.addToolColorMarker(quickButton);
     const showQuickMenu = (): void => {
-      this.showPaletteMenu(quickButton);
+      this.showPaletteMenu(quickButton, 'highlight');
     };
     const longPress = this.bindLongPressMenuTrigger(quickButton, showQuickMenu);
     this.listen(quickButton, 'click', (event) => {
@@ -101,34 +119,53 @@ export class AnnotationToolbar {
     this.listen(quickButton, 'contextmenu', (event) => {
       if (
         longPress.handleContextMenu(event, () => {
-          this.showPaletteMenu(quickButton, event);
+          this.showPaletteMenu(quickButton, 'highlight', event);
         })
       )
         return;
       event.preventDefault();
-      this.showPaletteMenu(quickButton, event);
+      this.showPaletteMenu(quickButton, 'highlight', event);
     });
 
-    const quickMenu = this.iconButton('Quick Highlight colors', 'chevron-down', quick);
+    const quickMenu = this.iconButton('Sticky Highlight colors', 'chevron-down', quick);
     quickMenu.dataset['control'] = 'quick-highlight-menu';
     quickMenu.addClass('abyss-reader-split-menu');
     quickMenu.disabled = readOnlyReason !== null;
     quickMenu.setAttribute('aria-haspopup', 'menu');
     quickMenu.setAttribute('aria-expanded', 'false');
     this.bindMenuTrigger(quickMenu, () => {
-      this.showPaletteMenu(quickMenu);
+      this.showPaletteMenu(quickMenu, 'highlight');
     });
     return quickButton;
   }
 
   private addToolControls(readOnlyReason: string | null): void {
     for (const choice of TOOLS) {
-      const button = this.iconButton(choice.label, choice.icon);
+      const split = this.root.createDiv({
+        cls: ['abyss-reader-split-control', 'abyss-reader-annotation-tool-control'],
+        attr: {
+          'aria-label': `${choice.label} — more color options`,
+          'data-control-group': `${choice.tool}-annotation`,
+          role: 'group',
+        },
+      });
+      const button = this.iconButton(choice.label, choice.icon, split);
       button.dataset['annotationTool'] = choice.tool;
+      button.addClass('abyss-reader-split-main');
       button.disabled = readOnlyReason !== null;
       button.setAttribute('aria-pressed', 'false');
+      this.addToolColorMarker(button);
       this.listen(button, 'click', () => {
         this.chooseTool(this.currentTool === choice.tool ? 'select' : choice.tool);
+      });
+      const disclosure = this.iconButton(`${choice.label} colors`, 'chevron-down', split);
+      disclosure.dataset['control'] = `${choice.tool}-color-menu`;
+      disclosure.addClass('abyss-reader-split-menu');
+      disclosure.disabled = readOnlyReason !== null;
+      disclosure.setAttribute('aria-haspopup', 'menu');
+      disclosure.setAttribute('aria-expanded', 'false');
+      this.bindMenuTrigger(disclosure, () => {
+        this.showPaletteMenu(disclosure, choice.tool);
       });
     }
   }
@@ -138,73 +175,117 @@ export class AnnotationToolbar {
   }
 
   get color(): string {
-    return this.currentColor;
+    return this.toolColors.highlight;
+  }
+
+  colorFor(tool: WritableAnnotationTool): string {
+    return this.toolColors[tool];
   }
 
   setTool(tool: PdfAnnotationTool): void {
     this.currentTool = tool;
+    this.root.dataset['annotationMode'] = tool === 'highlight' ? 'sticky-highlight' : tool;
     for (const button of Array.from(
       this.root.querySelectorAll<HTMLElement>('[data-annotation-tool]'),
     )) {
       button.setAttribute('aria-pressed', String(button.dataset['annotationTool'] === tool));
     }
-    this.refreshQuickPresentation();
+    this.refreshToolPresentations();
   }
 
-  setColor(color: string): void {
-    this.currentColor = color;
-    this.refreshQuickPresentation();
+  setColor(color: string): void;
+  setColor(tool: WritableAnnotationTool, color: string): void;
+  setColor(toolOrColor: string, nextColor?: string): void {
+    const tool = nextColor === undefined ? 'highlight' : (toolOrColor as WritableAnnotationTool);
+    const color = nextColor ?? toolOrColor;
+    this.toolColors[tool] = color;
+    this.refreshToolPresentation(tool);
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
-    for (const menu of [...this.menus]) menu.close();
-    this.menus.clear();
+    this.activeMenu?.menu.close();
+    this.activeMenu = null;
     for (const frame of this.focusFrames) this.root.win.cancelAnimationFrame(frame);
     this.focusFrames.clear();
     this.root.remove();
   }
 
   private chooseTool(tool: PdfAnnotationTool): void {
-    this.onIntent({ type: 'set-annotation-tool', tool });
+    if (tool === 'select') {
+      this.onIntent({ type: 'set-annotation-tool', tool });
+      return;
+    }
+    this.onIntent({ color: this.toolColors[tool], type: 'set-annotation-tool', tool });
   }
 
-  private chooseColor(color: string): void {
-    this.onIntent({ type: 'set-annotation-color', color });
+  private chooseColor(tool: WritableAnnotationTool, color: string): void {
+    this.onIntent({ type: 'set-annotation-color', tool, color });
   }
 
-  private refreshQuickPresentation(): void {
+  private refreshToolPresentations(): void {
+    for (const tool of ['highlight', 'ink', 'freetext'] as const)
+      this.refreshToolPresentation(tool);
+  }
+
+  private refreshToolPresentation(tool: WritableAnnotationTool): void {
+    const button = this.root.querySelector<HTMLButtonElement>(`[data-annotation-tool="${tool}"]`);
+    if (button === null) return;
+    const currentColor = this.toolColors[tool];
     const entry = this.palette.find(
-      ({ color }) => color.toLocaleLowerCase() === this.currentColor.toLocaleLowerCase(),
+      ({ color }) => color.toLocaleLowerCase() === currentColor.toLocaleLowerCase(),
     );
-    const semantic = entry === undefined ? this.currentColor : paletteLabel(entry);
-    const state = this.currentTool === 'highlight' ? 'on' : 'off';
-    updateIconButtonLabel(this.quickButton, `Quick Highlight — ${semantic} — ${state}`);
-    this.quickButton.style.setProperty('--abyss-quick-highlight-color', this.currentColor);
+    const semantic = entry === undefined ? currentColor : paletteLabel(entry);
+    let state = 'inactive';
+    if (this.currentTool === tool) state = 'active';
+    else if (tool === 'highlight' && this.currentTool === 'select') state = 'Select mode';
+    const labels: Record<WritableAnnotationTool, string> = {
+      freetext: 'Text',
+      highlight: 'Sticky Highlight',
+      ink: 'Ink',
+    };
+    const label = labels[tool];
+    updateIconButtonLabel(button, `${label} — ${semantic} — ${state}`);
+    button.style.setProperty('--abyss-annotation-tool-color', currentColor);
   }
 
-  private showPaletteMenu(trigger: HTMLButtonElement, event?: MouseEvent): void {
-    for (const open of [...this.menus]) open.close();
+  private addToolColorMarker(button: HTMLButtonElement): void {
+    const marker = ownerWindow(this.root).createSpan();
+    marker.className = 'abyss-reader-tool-color';
+    marker.setAttribute('aria-hidden', 'true');
+    button.append(marker);
+  }
+
+  private showPaletteMenu(
+    trigger: HTMLButtonElement,
+    tool: WritableAnnotationTool,
+    event?: MouseEvent,
+  ): void {
+    if (this.activeMenu?.trigger === trigger) {
+      this.activeMenu.menu.close();
+      return;
+    }
+    this.activeMenu?.menu.close();
     const menu = new Menu();
     menu.setUseNativeMenu(false);
     menu.setParentElement(trigger);
-    this.menus.add(menu);
+    this.activeMenu = { menu, trigger };
     trigger.setAttribute('aria-expanded', 'true');
     for (const entry of this.palette) {
       menu.addItem((item) => {
         item
           .setTitle(this.paletteMenuTitle(entry))
-          .setChecked(entry.color.toLocaleLowerCase() === this.currentColor.toLocaleLowerCase())
+          .setChecked(entry.color.toLocaleLowerCase() === this.toolColors[tool].toLocaleLowerCase())
           .onClick(() => {
-            this.chooseColor(entry.color);
+            this.chooseColor(tool, entry.color);
           });
       });
     }
     menu.onHide(() => {
       markReaderMenuClosing(trigger);
-      this.menus.delete(menu);
+      if (this.activeMenu?.menu === menu) this.activeMenu = null;
       trigger.setAttribute('aria-expanded', 'false');
       this.restoreMenuTriggerFocus(trigger);
     });
@@ -221,7 +302,7 @@ export class AnnotationToolbar {
       this.focusFrames.delete(frame);
       if (
         !this.destroyed &&
-        this.menus.size === 0 &&
+        this.activeMenu === null &&
         trigger.isConnected &&
         shouldRestoreMenuTriggerFocus(trigger)
       ) {

@@ -128,10 +128,66 @@ describe('PDF reader foundation on Android', () => {
     await expect($('[data-annotation-tool="select"]')).not.toExist();
     await expect($('[data-annotation-tool="underline"]')).not.toExist();
     await expect($('[data-annotation-tool="text-note"]')).not.toExist();
+    const compactToolbar = await browser.execute(() => {
+      const toolbar = document.querySelector<HTMLElement>('.abyss-reader-toolbar');
+      const highlight = toolbar?.querySelector<HTMLElement>('[data-annotation-tool="highlight"]');
+      const disclosure = toolbar?.querySelector<HTMLElement>(
+        '[data-control="quick-highlight-menu"]',
+      );
+      if (toolbar === null || highlight == null || disclosure == null)
+        throw new Error('Mobile annotation split is missing.');
+      const mainBounds = highlight.getBoundingClientRect();
+      const disclosureBounds = disclosure.getBoundingClientRect();
+      return {
+        directPageNavigation: ['previous-page', 'page-field', 'next-page'].every(
+          (control) =>
+            toolbar.querySelector<HTMLElement>(`[data-control="${control}"]`)?.offsetParent !==
+            null,
+        ),
+        disclosureHeight: disclosureBounds.height,
+        disclosureWidth: disclosureBounds.width,
+        mainHeight: mainBounds.height,
+        mainWidth: mainBounds.width,
+        noOverlap: mainBounds.right <= disclosureBounds.left,
+        overflow: toolbar.scrollWidth > toolbar.clientWidth,
+        visibleTools: Array.from(toolbar.querySelectorAll<HTMLElement>('[data-annotation-tool]'))
+          .filter((button) => button.offsetParent !== null)
+          .map((button) => button.dataset['annotationTool']),
+      };
+    });
+    expect(compactToolbar).toMatchObject({
+      directPageNavigation: true,
+      noOverlap: true,
+      overflow: false,
+      visibleTools: ['highlight'],
+    });
+    expect(compactToolbar.mainHeight).toBeGreaterThanOrEqual(44);
+    expect(compactToolbar.mainWidth).toBeGreaterThanOrEqual(44);
+    expect(compactToolbar.disclosureHeight).toBeGreaterThanOrEqual(44);
+    expect(compactToolbar.disclosureWidth).toBeGreaterThanOrEqual(24);
+
+    await $('[data-control="overflow"]').click();
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+    const compactTools = await browser.execute(() =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '.menu .menu-item[data-section="abyss-documents-tools"]:not(.is-label) .menu-item-title',
+        ),
+        (item) => item.textContent.trim(),
+      ),
+    );
+    expect(compactTools).toEqual(['Ink', 'Text']);
+    expect(await $('.menu').getText()).not.toContain('Previous page');
+    await $('[data-control="overflow"]').click();
+    await expect($('.menu')).not.toBeDisplayed();
     const saveBaseline = await captureAnnotationSaveBaseline();
 
     await $('[data-annotation-tool="highlight"]').click();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
+    await expect($('[data-region="annotation-toolbar"]')).toHaveAttribute(
+      'data-annotation-mode',
+      'sticky-highlight',
+    );
     const selectedText = await browser.execute(() => {
       const text = document.querySelectorAll('[data-page-number="1"] .textLayer span')[1];
       if (text === undefined) throw new Error('Selectable mobile fixture text is unavailable.');
@@ -223,6 +279,21 @@ describe('PDF reader foundation on Android', () => {
     );
 
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 80 });
+    const footer = await browser.execute(() => {
+      const annotationFooter = document.querySelector<HTMLElement>('[data-annotation-footer]');
+      const colors = annotationFooter?.querySelector<HTMLElement>('[data-section="colors"]');
+      if (annotationFooter === null || colors == null)
+        throw new Error('Mobile color footer is missing.');
+      return {
+        height: colors.getBoundingClientRect().height,
+        onlyColors:
+          annotationFooter.childElementCount === 1 &&
+          annotationFooter.firstElementChild === colors &&
+          annotationFooter.querySelector('[data-section="tags"]') === null,
+      };
+    });
+    expect(footer.onlyColors).toBe(true);
+    expect(footer.height).toBeLessThanOrEqual(44);
     const maximumCards = (await runtimeMetrics()).counters.maxAnnotationCards;
     expect(maximumCards).toBeGreaterThan(0);
     expect(maximumCards).toBeLessThanOrEqual(80);

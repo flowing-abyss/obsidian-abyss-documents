@@ -43,7 +43,7 @@ describe('AnnotationToolbar', () => {
     expect(host.textContent).not.toContain('Text Note');
     expect(
       host.querySelector('[data-annotation-tool="freetext"]')?.getAttribute('aria-label'),
-    ).toBe('Text');
+    ).toContain('Text — Yellow — Key idea');
     expect(
       host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-haspopup'),
     ).toBe('menu');
@@ -51,7 +51,11 @@ describe('AnnotationToolbar', () => {
       host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-expanded'),
     ).toBe('false');
     host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')?.click();
-    expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-tool', tool: 'highlight' });
+    expect(onIntent).toHaveBeenCalledWith({
+      type: 'set-annotation-tool',
+      tool: 'highlight',
+      color: '#ffd400',
+    });
     toolbar.setTool('highlight');
     expect(
       host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-pressed'),
@@ -59,6 +63,63 @@ describe('AnnotationToolbar', () => {
     expect(
       host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-label'),
     ).toContain('Key idea');
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('renders Highlight Ink and Text as separate accessible split controls', () => {
+    const host = document.body.createDiv();
+    const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
+
+    const splits = ['highlight', 'ink', 'freetext'].map((tool) => {
+      const primary = host.querySelector<HTMLButtonElement>(`[data-annotation-tool="${tool}"]`);
+      const owner = primary?.closest<HTMLElement>('.abyss-reader-split-control');
+      return {
+        disclosure: owner?.querySelector<HTMLButtonElement>('.abyss-reader-split-menu'),
+        primary,
+        role: owner?.getAttribute('role'),
+      };
+    });
+
+    expect(
+      splits.map(({ disclosure, primary, role }) => ({
+        disclosureHasMenu: disclosure?.getAttribute('aria-haspopup'),
+        primaryIsDisclosure: disclosure === primary,
+        role,
+      })),
+    ).toEqual([
+      { disclosureHasMenu: 'menu', primaryIsDisclosure: false, role: 'group' },
+      { disclosureHasMenu: 'menu', primaryIsDisclosure: false, role: 'group' },
+      { disclosureHasMenu: 'menu', primaryIsDisclosure: false, role: 'group' },
+    ]);
+
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('names Select and Sticky Highlight as explicit mutually exclusive modes', () => {
+    const host = document.body.createDiv();
+    const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
+    const highlight = host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]');
+
+    expect(toolbar.root.dataset['annotationMode']).toBe('select');
+    expect(highlight?.getAttribute('aria-label')).toContain('Sticky Highlight');
+    expect(highlight?.closest('[role="group"]')?.getAttribute('aria-label')).toBe(
+      'Sticky Highlight',
+    );
+    expect(
+      toolbar.root
+        .querySelector('[data-control="quick-highlight-menu"]')
+        ?.getAttribute('aria-label'),
+    ).toContain('Sticky Highlight colors');
+    expect(highlight?.getAttribute('aria-label')).toContain('Select mode');
+
+    toolbar.setTool('highlight');
+
+    expect(toolbar.root.dataset['annotationMode']).toBe('sticky-highlight');
+    expect(highlight?.getAttribute('aria-label')).toContain('active');
+    expect(highlight?.getAttribute('aria-label')).not.toContain('Select mode');
+
     toolbar.destroy();
     host.remove();
   });
@@ -101,12 +162,96 @@ describe('AnnotationToolbar', () => {
     host.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]')?.click();
     redChoice.click?.();
     expect(onIntent).toHaveBeenCalledTimes(1);
-    expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-color', color: '#ff6666' });
+    expect(onIntent).toHaveBeenCalledWith({
+      type: 'set-annotation-color',
+      tool: 'highlight',
+      color: '#ff6666',
+    });
     expect(
       redChoice.title
         ?.querySelector<HTMLElement>('.abyss-documents-menu-color')
         ?.style.getPropertyValue('--abyss-documents-menu-color'),
     ).toBe('#ff6666');
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('routes an independent color with each writable tool intent', () => {
+    const choices: Array<{ click: () => void; title: string }> = [];
+    vi.spyOn(Menu.prototype, 'addItem').mockImplementation(function (
+      this: Menu,
+      callback: Parameters<Menu['addItem']>[0],
+    ) {
+      const choice: { click: () => void; title: string } = { click: () => undefined, title: '' };
+      const item = {
+        onClick(handler: () => void) {
+          choice.click = handler;
+          return item;
+        },
+        setChecked() {
+          return item;
+        },
+        setTitle(title: DocumentFragment | string) {
+          choice.title = typeof title === 'string' ? title : title.textContent;
+          return item;
+        },
+      };
+      callback(item as never);
+      choices.push(choice);
+      return this;
+    });
+    const host = document.body.createDiv();
+    const onIntent = vi.fn();
+    const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
+
+    host.querySelector<HTMLButtonElement>('[data-control="ink-color-menu"]')?.click();
+    choices.find(({ title }) => title === 'Red')?.click();
+    expect(onIntent).toHaveBeenLastCalledWith({
+      type: 'set-annotation-color',
+      tool: 'ink',
+      color: '#ff6666',
+    });
+
+    toolbar.setColor('ink', '#ff6666');
+    host.querySelector<HTMLButtonElement>('[data-annotation-tool="ink"]')?.click();
+    expect(onIntent).toHaveBeenLastCalledWith({
+      type: 'set-annotation-tool',
+      tool: 'ink',
+      color: '#ff6666',
+    });
+
+    host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]')?.click();
+    expect(onIntent).toHaveBeenLastCalledWith({
+      type: 'set-annotation-tool',
+      tool: 'highlight',
+      color: '#ffd400',
+    });
+
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('shows a stable independent color marker on every writable tool', () => {
+    const host = document.body.createDiv();
+    const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
+    toolbar.setColor('highlight', '#ffd400');
+    toolbar.setColor('ink', '#ff6666');
+    toolbar.setColor('freetext', '#5fb236');
+
+    expect(
+      ['highlight', 'ink', 'freetext'].map((tool) => {
+        const primary = host.querySelector<HTMLElement>(`[data-annotation-tool="${tool}"]`);
+        return {
+          color: primary?.style.getPropertyValue('--abyss-annotation-tool-color'),
+          marker: primary?.querySelector('.abyss-reader-tool-color') !== null,
+        };
+      }),
+    ).toEqual([
+      { color: '#ffd400', marker: true },
+      { color: '#ff6666', marker: true },
+      { color: '#5fb236', marker: true },
+    ]);
+
     toolbar.destroy();
     host.remove();
   });
@@ -127,6 +272,27 @@ describe('AnnotationToolbar', () => {
     expect(addItem).toHaveBeenCalledTimes(palette.length);
     trigger.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
     expect(addItem).toHaveBeenCalledTimes(palette.length);
+
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('closes the active palette when its disclosure is activated again', () => {
+    const addItem = vi.spyOn(Menu.prototype, 'addItem');
+    const close = vi.spyOn(Menu.prototype, 'close');
+    const host = document.body.createDiv();
+    const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
+    const trigger = host.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]');
+    if (trigger === null) throw new Error('Expected Quick Highlight menu.');
+
+    trigger.click();
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+
+    trigger.click();
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(addItem).toHaveBeenCalledTimes(palette.length);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
 
     toolbar.destroy();
     host.remove();
@@ -179,7 +345,8 @@ describe('AnnotationToolbar', () => {
     const context = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
     primary.dispatchEvent(context);
     expect(context.defaultPrevented).toBe(true);
-    expect(addItem).toHaveBeenCalledTimes(palette.length * 2);
+    expect(addItem).toHaveBeenCalledTimes(palette.length);
+    expect(primary.getAttribute('aria-expanded')).toBe('false');
     primary.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 2 }));
     expect(onIntent).not.toHaveBeenCalled();
 
@@ -232,12 +399,20 @@ describe('AnnotationToolbar', () => {
       expect(onIntent).not.toHaveBeenCalled();
       expect(bubbledClicks).not.toHaveBeenCalled();
 
+      primary.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowDown' }),
+      );
+
       primary.dispatchEvent(pointer('pointerdown', 10));
       vi.advanceTimersByTime(500);
       primary.dispatchEvent(pointer('pointerup', 10));
       vi.advanceTimersByTime(1_001);
       primary.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
-      expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-tool', tool: 'highlight' });
+      expect(onIntent).toHaveBeenCalledWith({
+        type: 'set-annotation-tool',
+        tool: 'highlight',
+        color: '#ffd400',
+      });
       expect(bubbledClicks).toHaveBeenCalledTimes(1);
 
       primary.dispatchEvent(pointer('pointerdown', 10));
@@ -292,6 +467,10 @@ describe('AnnotationToolbar', () => {
       primary.dispatchEvent(pointer('pointerup', 31));
       primary.dispatchEvent(click());
       expect(onIntent).not.toHaveBeenCalled();
+
+      primary.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowDown' }),
+      );
 
       primary.dispatchEvent(pointer('pointerdown', 32));
       vi.advanceTimersByTime(500);

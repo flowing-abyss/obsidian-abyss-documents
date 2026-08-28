@@ -435,7 +435,9 @@ export class AnnotationsPanel {
       const count = ownerWindow(this.root).createSpan();
       count.className = 'abyss-annotation-color-chip-count';
       count.textContent = String(facet.count);
-      chip.append(swatch, meaning, count);
+      chip.append(swatch);
+      if (facet.meaning.length > 0) chip.append(meaning);
+      chip.append(count);
       chip.addEventListener('click', () => {
         const next = new Set(this.filter.colors);
         const previous = Array.from(next).find(
@@ -623,19 +625,29 @@ export class AnnotationsPanel {
     const owner = ownerWindow(this.root);
     const header = owner.createSpan();
     header.className = 'abyss-annotation-card-header';
+    header.dataset['annotationHeader'] = '';
     const page = owner.createSpan();
     page.dataset['annotationPage'] = '';
-    page.textContent = `Page ${annotationPage(annotation) + 1}`;
+    page.textContent = `Page ${String(annotationPage(annotation) + 1)}`;
+    const separator = owner.createSpan();
+    separator.className = 'abyss-annotation-card-header-separator';
+    separator.setAttribute('aria-hidden', 'true');
+    separator.textContent = ' · ';
     const meaning = owner.createSpan();
     meaning.className = 'abyss-annotation-card-meaning';
     meaning.dataset['annotationMeaning'] = '';
     meaning.textContent = annotationMeaning(annotation, this.options.colorMeanings);
+    const color = nonEmpty(annotation.color);
+    if (color === null) {
+      header.append(page, separator, meaning);
+      return header;
+    }
     const swatch = owner.createSpan();
     swatch.className = 'abyss-annotation-card-swatch';
     swatch.dataset['annotationColorSwatch'] = '';
-    swatch.style.setProperty('--abyss-annotation-color', annotation.color ?? 'transparent');
+    swatch.style.setProperty('--abyss-annotation-color', color);
     swatch.setAttribute('aria-hidden', 'true');
-    header.append(page, swatch, meaning);
+    header.append(page, separator, swatch, meaning);
     return header;
   }
 
@@ -1159,7 +1171,7 @@ export class AnnotationsPanel {
     const copy: Readonly<Record<Exclude<AnnotationPanelState, 'content' | 'loading'>, string>> = {
       empty: 'No annotations',
       'filtered-empty': 'No matching annotations',
-      unavailable: 'Couldn’t load annotations',
+      unavailable: "Couldn't load annotations",
     };
     this.status.append(copy[this.state]);
   }
@@ -1216,6 +1228,12 @@ export class AnnotationsPanel {
       (candidate) => normalize(candidate.meaning) === normalize(facet.meaning),
     );
     const count = `${facet.count} ${facet.count === 1 ? 'annotation' : 'annotations'}`;
+    if (facet.meaning.length === 0) {
+      const configuredName = colorSetting(facet.color, this.options.colorNames);
+      if (configuredName !== null) return `${configuredName}, ${count}`;
+      const label = peers.length === 1 ? 'Color' : `Color ${String(peers.indexOf(facet) + 1)}`;
+      return `${label}, ${count}`;
+    }
     if (peers.length === 1) return `${facet.meaning}, ${count}`;
     const configuredName = colorSetting(facet.color, this.options.colorNames);
     const configuredNameIsUnique =
@@ -1276,8 +1294,9 @@ function configureColorFacetTooltip(
   facet: AnnotationColorFacet,
   accessibleLabel: string,
 ): void {
-  chip.title = facet.meaning;
-  setTooltip(chip, facet.meaning, { delay: 250 });
+  const tooltip = facet.meaning.length > 0 ? facet.meaning : 'Color';
+  chip.title = tooltip;
+  setTooltip(chip, tooltip, { delay: 250 });
   chip.setAttribute('aria-label', accessibleLabel);
 }
 
@@ -1386,14 +1405,28 @@ function annotationMeaning(
   meanings: Readonly<Record<string, string>> | undefined,
 ): string {
   const color = nonEmpty(annotation.color);
-  return color === null ? annotation.type : colorMeaning(color, meanings);
+  const configured = color === null ? null : colorSetting(color, meanings);
+  if (configured !== null) return configured;
+  return annotationTypeLabel(annotation);
+}
+
+function annotationTypeLabel(annotation: DocumentAnnotation): string {
+  if (annotation.type === 'highlight') return 'Highlight';
+  if (annotation.type === 'underline') return 'Underline';
+  if (annotation.type === 'ink') return 'Ink';
+  if (annotation.type === 'text-note') return 'Text note';
+  if (annotation.type === 'free-text') return 'Free text';
+  const externalType = nonEmpty(annotation.externalType);
+  return externalType === null || normalize(externalType) === 'unsupported'
+    ? 'Annotation'
+    : externalType;
 }
 
 function colorMeaning(
   color: string,
   meanings: Readonly<Record<string, string>> | undefined,
 ): string {
-  return colorSetting(color, meanings) ?? 'Custom color';
+  return colorSetting(color, meanings) ?? '';
 }
 
 function colorSetting(

@@ -6,7 +6,8 @@ import { assertNoRelativeUrls, assertScopedSelectors, prefixPdfStyles } from './
 function mobileDeclarations(mobile, selector) {
   const values = new Map();
   mobile?.walkRules((rule) => {
-    if (!rule.selectors.includes(selector)) return;
+    if (!rule.selectors.some((candidate) => candidate.replaceAll(/\s+/gu, ' ').trim() === selector))
+      return;
     rule.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
   });
   return Object.fromEntries(values);
@@ -189,10 +190,21 @@ describe('PDF.js style build', () => {
     expect(
       mobileDeclarations(touch, '.abyss-documents .abyss-reader-outline-chevron'),
     ).toMatchObject({
-      width: '2.75rem',
-      'min-width': '2.75rem',
-      height: '2.75rem',
-      'min-height': '2.75rem',
+      width: '18px',
+      'min-width': '18px',
+      height: '44px',
+      'min-height': '44px',
+    });
+    expect(
+      mobileDeclarations(
+        touch,
+        '.abyss-documents .abyss-reader-outline-chevron.is-interactive::after',
+      ),
+    ).toMatchObject({
+      width: '44px',
+      height: '44px',
+      inset: '50% auto auto 50%',
+      transform: 'translate(-50%, -50%)',
     });
     expect(
       mobileDeclarations(touch, '.abyss-documents .abyss-reader-outline-search'),
@@ -202,22 +214,33 @@ describe('PDF.js style build', () => {
     });
   });
 
-  it('keeps desktop outline chevrons in a native 32px target without enlarging their icons', async () => {
+  it('keeps desktop outline rows and chevrons at native dense metrics', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    expect(
+      topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-row-shell'),
+    ).toMatchObject({ height: '27px' });
     expect(
       topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-chevron'),
     ).toMatchObject({
-      width: '32px',
-      'min-width': '32px',
-      height: '32px',
-      'min-height': '32px',
+      width: '17px',
+      'min-width': '17px',
+      height: '27px',
+      'min-height': '27px',
     });
     expect(
       topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-chevron .svg-icon'),
     ).toMatchObject({ width: 'var(--icon-xs)', height: 'var(--icon-xs)' });
   });
 
-  it('keeps a narrow reader leaf on one row and keeps coarse pointers 44px above 600px', async () => {
+  it('does not reserve resting annotation-card header space for contextual actions', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const header = topLevelDeclarations(root, '.abyss-documents .abyss-annotation-card-header');
+
+    expect(header).not.toHaveProperty('padding-inline-end');
+    expect(await readFile('styles.css', 'utf8')).not.toContain('--abyss-annotation-action-width');
+  });
+
+  it('keeps direct navigation and one active split on a narrow reader leaf', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
     const narrow = root.nodes.find(
       (node) =>
@@ -250,8 +273,22 @@ describe('PDF.js style build', () => {
     expect(
       mobileDeclarations(priority, '.abyss-documents .abyss-reader-toolbar-zoom'),
     ).toMatchObject({ display: 'none' });
+    expect(mobileDeclarations(narrow, ".abyss-documents [data-control='previous-page']")).toEqual(
+      {},
+    );
+    expect(mobileDeclarations(narrow, ".abyss-documents [data-control='next-page']")).toEqual({});
+    expect(mobileDeclarations(narrow, ".abyss-documents [data-control='page-field']")).toEqual({});
     expect(
-      mobileDeclarations(narrow, ".abyss-documents [data-control='previous-page']"),
+      mobileDeclarations(
+        narrow,
+        ".abyss-documents .abyss-annotation-toolbar[data-annotation-mode='select'] > .abyss-reader-split-control:not(.abyss-reader-quick-control)",
+      ),
+    ).toMatchObject({ display: 'none' });
+    expect(
+      mobileDeclarations(
+        narrow,
+        ".abyss-documents .abyss-annotation-toolbar:not([data-annotation-mode='select']) > .abyss-reader-split-control:not(:has([data-annotation-tool][aria-pressed='true']))",
+      ),
     ).toMatchObject({ display: 'none' });
     expect(
       mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar-button'),
@@ -265,7 +302,30 @@ describe('PDF.js style build', () => {
         coarsePointer,
         '.abyss-documents .abyss-reader-split-control .abyss-reader-split-menu',
       ),
-    ).toMatchObject({ width: '2.75rem', 'min-width': '2.75rem', 'min-height': '2.75rem' });
+    ).toMatchObject({
+      width: 'var(--abyss-reader-split-disclosure-width)',
+      'min-width': 'var(--abyss-reader-split-disclosure-width)',
+      'min-height': '2.75rem',
+    });
+    expect(
+      mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar'),
+    ).toMatchObject({
+      '--abyss-reader-split-disclosure-width': '24px',
+      '--abyss-reader-split-main-width': '44px',
+    });
+    expect(
+      mobileDeclarations(coarsePointer, '.abyss-documents .abyss-annotation-colors'),
+    ).toMatchObject({
+      'border-top': '0',
+      'min-height': '44px',
+      'padding-block': '0',
+    });
+    expect(
+      mobileDeclarations(
+        coarsePointer,
+        ".abyss-documents .abyss-annotation-toolbar[data-annotation-mode='select'] > .abyss-reader-split-control:not(.abyss-reader-quick-control)",
+      ),
+    ).toMatchObject({ display: 'none' });
     expect(
       mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar-zoom-button'),
     ).toEqual({});

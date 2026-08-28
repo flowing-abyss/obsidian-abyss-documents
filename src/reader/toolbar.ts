@@ -29,6 +29,11 @@ interface FitChoice {
   readonly value: ReaderScale;
 }
 
+interface ActiveMenu {
+  readonly menu: Menu;
+  readonly trigger: HTMLButtonElement;
+}
+
 const PROFILE_CHOICES: readonly ProfileChoice[] = [
   { id: 'default', label: 'Default' },
   { id: 'follow-obsidian', label: 'Follow Obsidian' },
@@ -45,7 +50,6 @@ const FIT_CHOICES: readonly FitChoice[] = [
 ];
 
 const COMPACT_TOOLBAR_WIDTH = 760;
-const NARROW_NAVIGATION_WIDTH = 600;
 const LONG_PRESS_DELAY_MS = 500;
 const LONG_PRESS_MOVE_TOLERANCE = 10;
 
@@ -184,11 +188,11 @@ export class ReaderToolbar {
 
   private readonly cleanups: Array<() => void> = [];
   private readonly focusFrames = new Set<number>();
-  private readonly menus = new Set<Menu>();
   private readonly nextButton: HTMLButtonElement;
   private readonly pageInput: HTMLInputElement;
   private readonly pageTotal: HTMLElement;
   private readonly previousButton: HTMLButtonElement;
+  private activeMenu: ActiveMenu | null = null;
   private currentLayout: ReaderLayout = DEFAULT_READER_LAYOUT;
   private currentPageIndex = 0;
   private currentProfile: ReadingProfileId = 'default';
@@ -299,8 +303,8 @@ export class ReaderToolbar {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
-    for (const menu of [...this.menus]) menu.close();
-    this.menus.clear();
+    this.activeMenu?.menu.close();
+    this.activeMenu = null;
     for (const frame of this.focusFrames) this.root.win.cancelAnimationFrame(frame);
     this.focusFrames.clear();
   }
@@ -449,8 +453,8 @@ export class ReaderToolbar {
   }
 
   private addOverflowChoices(menu: Menu): void {
-    if (this.isNarrowNavigation()) this.addCompactNavigationChoices(menu);
     if (this.isCompact()) this.addCompactZoomChoices(menu);
+    if (this.isNarrowAnnotationToolbar()) this.addCompactAnnotationChoices(menu);
     this.addLayoutChoices(menu);
     menu.addSeparator();
     this.addAppearanceChoices(menu);
@@ -458,26 +462,45 @@ export class ReaderToolbar {
     this.addExportChoice(menu);
   }
 
-  private addCompactNavigationChoices(menu: Menu): void {
-    menu.addItem((item) => item.setTitle('Page').setIsLabel(true));
-    menu.addItem((item) => {
-      item
-        .setTitle('Previous page')
-        .setIcon('chevron-left')
-        .setDisabled(this.pageCount === 0 || this.currentPageIndex === 0)
-        .onClick(() => {
-          this.onIntent({ type: 'previous-page' });
-        });
+  private addCompactAnnotationChoices(menu: Menu): void {
+    const annotationToolbar = this.annotationHost.querySelector<HTMLElement>(
+      '[data-region="annotation-toolbar"]',
+    );
+    if (annotationToolbar === null) return;
+    const visibleTool =
+      annotationToolbar.dataset['annotationMode'] === 'select'
+        ? 'highlight'
+        : annotationToolbar.querySelector<HTMLElement>(
+            '[data-annotation-tool][aria-pressed="true"]',
+          )?.dataset['annotationTool'];
+    const choices = [
+      { icon: 'highlighter' as const, label: 'Sticky Highlight', tool: 'highlight' },
+      { icon: 'pen-tool' as const, label: 'Ink', tool: 'ink' },
+      { icon: 'type' as const, label: 'Text', tool: 'freetext' },
+    ];
+    const hidden = choices.flatMap((choice) => {
+      const button = annotationToolbar.querySelector<HTMLButtonElement>(
+        `[data-annotation-tool="${choice.tool}"]`,
+      );
+      return button === null || button.disabled || choice.tool === visibleTool
+        ? []
+        : [{ ...choice, button }];
     });
-    menu.addItem((item) => {
-      item
-        .setTitle('Next page')
-        .setIcon('chevron-right')
-        .setDisabled(this.pageCount === 0 || this.currentPageIndex >= this.pageCount - 1)
-        .onClick(() => {
-          this.onIntent({ type: 'next-page' });
-        });
-    });
+    if (hidden.length === 0) return;
+    menu.addItem((item) =>
+      item.setTitle('Tools').setIsLabel(true).setSection('abyss-documents-tools'),
+    );
+    for (const choice of hidden) {
+      menu.addItem((item) => {
+        item
+          .setTitle(choice.label)
+          .setIcon(choice.icon)
+          .setSection('abyss-documents-tools')
+          .onClick(() => {
+            choice.button.click();
+          });
+      });
+    }
     menu.addSeparator();
   }
 
@@ -592,6 +615,7 @@ export class ReaderToolbar {
 
   private showMenuAtButton(trigger: HTMLButtonElement, populate: (menu: Menu) => void): void {
     const menu = this.createMenu(trigger);
+    if (menu === null) return;
     populate(menu);
     const bounds = trigger.getBoundingClientRect();
     menu.showAtPosition({ x: bounds.left, y: bounds.bottom }, this.root.doc);
@@ -603,20 +627,25 @@ export class ReaderToolbar {
     populate: (menu: Menu) => void,
   ): void {
     const menu = this.createMenu(trigger);
+    if (menu === null) return;
     populate(menu);
     menu.showAtMouseEvent(event);
   }
 
-  private createMenu(trigger: HTMLButtonElement): Menu {
-    for (const open of [...this.menus]) open.close();
+  private createMenu(trigger: HTMLButtonElement): Menu | null {
+    if (this.activeMenu?.trigger === trigger) {
+      this.activeMenu.menu.close();
+      return null;
+    }
+    this.activeMenu?.menu.close();
     const menu = new Menu();
     menu.setUseNativeMenu(false);
     menu.setParentElement(trigger);
-    this.menus.add(menu);
+    this.activeMenu = { menu, trigger };
     trigger.setAttribute('aria-expanded', 'true');
     menu.onHide(() => {
       markReaderMenuClosing(trigger);
-      this.menus.delete(menu);
+      if (this.activeMenu?.menu === menu) this.activeMenu = null;
       trigger.setAttribute('aria-expanded', 'false');
       this.restoreMenuTriggerFocus(trigger);
     });
@@ -628,7 +657,7 @@ export class ReaderToolbar {
       this.focusFrames.delete(frame);
       if (
         !this.destroyed &&
-        this.menus.size === 0 &&
+        this.activeMenu === null &&
         trigger.isConnected &&
         shouldRestoreMenuTriggerFocus(trigger)
       ) {
@@ -679,9 +708,13 @@ export class ReaderToolbar {
     return width > 0 && width <= COMPACT_TOOLBAR_WIDTH;
   }
 
-  private isNarrowNavigation(): boolean {
+  private isNarrowAnnotationToolbar(): boolean {
     const width = this.root.getBoundingClientRect().width;
-    return width > 0 && width <= NARROW_NAVIGATION_WIDTH;
+    return (
+      (width > 0 && width <= 600) ||
+      (typeof this.root.win.matchMedia === 'function' &&
+        this.root.win.matchMedia('(pointer: coarse)').matches)
+    );
   }
 }
 

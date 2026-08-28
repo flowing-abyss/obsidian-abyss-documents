@@ -185,6 +185,8 @@ export class OutlinePanel {
     const listItem = this.createTreeItem(parent, item, level);
     const rowShell = this.createRowShell(listItem, level);
     const hasChildren = item.children.length > 0;
+    listItem.addClass(hasChildren ? 'nav-folder' : 'nav-file');
+    rowShell.addClass(hasChildren ? 'nav-folder-title' : 'nav-file-title');
     const chevron = this.createChevron(item, hasChildren);
     const label = this.createLabel(item.label);
     rowShell.append(chevron, label);
@@ -229,7 +231,7 @@ export class OutlinePanel {
   private createLabel(text: string): HTMLElement {
     const owner = ownerWindow(this.root);
     const label = owner.createSpan();
-    label.className = 'abyss-reader-outline-label';
+    label.className = 'tree-item-inner abyss-reader-outline-label';
     label.dataset['outlineLabel'] = '';
     const ranges = this.matchRanges(text);
     if (ranges.length === 0) {
@@ -299,7 +301,7 @@ export class OutlinePanel {
   private createGroup(listItem: HTMLLIElement, hasChildren: boolean): HTMLUListElement | null {
     if (!hasChildren) return null;
     const group = ownerWindow(this.root).createEl('ul');
-    group.className = 'tree-item-children';
+    group.className = 'tree-item-children nav-folder-children';
     group.setAttribute('role', 'group');
     listItem.append(group);
     return group;
@@ -326,7 +328,7 @@ export class OutlinePanel {
   private createChevron(item: OutlineItem, hasChildren: boolean): HTMLSpanElement {
     const owner = ownerWindow(this.root);
     const slot = owner.createSpan();
-    slot.className = 'abyss-reader-outline-chevron';
+    slot.className = 'nav-folder-collapse-indicator abyss-reader-outline-chevron';
     slot.dataset['outlineChevron'] = '';
     slot.setAttribute('aria-hidden', 'true');
     if (!hasChildren) return slot;

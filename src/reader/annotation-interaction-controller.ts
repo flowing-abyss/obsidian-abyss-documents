@@ -38,6 +38,7 @@ export interface AnnotationInteractionControllerOptions {
     context: Readonly<Record<string, unknown>>,
   ) => void;
   readonly onModeChange?: (mode: PdfAnnotationLogicalMode) => void;
+  readonly onToolColorChange?: (tool: 'ink' | 'freetext', color: string) => void;
   readonly onAnnotationPreview?: (update: AnnotationEditorUpdate) => void;
   readonly onAnnotationDelete?: (annotations: readonly DocumentAnnotation[]) => void;
   readonly onAnnotationUpdate?: (update: AnnotationEditorUpdate) => void;
@@ -56,6 +57,7 @@ export class AnnotationInteractionController {
   private readonly cleanups: Array<() => void> = [];
   private activeAbort: AbortController | null = null;
   private activeColor: string;
+  private contextualColorMutationDepth = 0;
   private activeSelectionRevision = 0;
   private ownedSelectionRevision: number | null = null;
   private destroyed = false;
@@ -96,10 +98,11 @@ export class AnnotationInteractionController {
     return this.mode === 'quick-highlight';
   }
 
-  requestTool(tool: PdfAnnotationTool): boolean {
+  requestTool(tool: PdfAnnotationTool, color?: string): boolean {
     if (this.destroyed || (tool !== 'highlight' && tool !== 'select')) return false;
     if (!this.closeActiveSelection()) return false;
     const enabled = tool === 'highlight';
+    if (enabled && color !== undefined && color.trim().length > 0) this.setActiveColor(color);
     const revision = ++this.quickRequestRevision;
     this.contain(this.applyQuickHighlight(enabled, revision));
     return true;
@@ -135,6 +138,9 @@ export class AnnotationInteractionController {
     if (this.destroyed) return;
     this.palette = palette;
     this.interaction.setPalette?.(palette);
+    const activeColor = this.activeColor.toLocaleLowerCase();
+    if (!palette.some(({ color }) => color.toLocaleLowerCase() === activeColor))
+      this.setActiveColor(palette[0]?.color ?? DEFAULT_COLOR);
     if (!this.closeActiveSelection()) return;
     this.publishQuickHighlightState();
     if (this.mode !== 'quick-highlight') return;
@@ -171,7 +177,15 @@ export class AnnotationInteractionController {
   }
 
   private handleColor(color: string): void {
-    if (this.destroyed || color.trim().length === 0) return;
+    if (
+      this.destroyed ||
+      color.trim().length === 0 ||
+      this.contextualColorMutationDepth > 0 ||
+      this.mode === 'ink' ||
+      this.mode === 'freetext' ||
+      this.mode === 'disabled'
+    )
+      return;
     this.setActiveColor(color);
     this.publishQuickHighlightState();
   }
@@ -316,10 +330,35 @@ export class AnnotationInteractionController {
   }
 
   private updateAnnotations(update: AnnotationEditorUpdate): boolean {
-    const updated = this.interaction.updateAnnotations(update);
+    this.contextualColorMutationDepth += 1;
+    let updated: boolean;
+    try {
+      updated = this.interaction.updateAnnotations(update);
+    } finally {
+      this.contextualColorMutationDepth -= 1;
+    }
     if (updated === false) return false;
+    this.rememberContextualColor(update);
     this.options.onAnnotationUpdate?.(update);
     return true;
+  }
+
+  private rememberContextualColor(update: AnnotationEditorUpdate): void {
+    const color = update.color;
+    if (color === undefined || color.trim().length === 0) return;
+    const tools = new Set(
+      update.annotations
+        .map((annotation) => annotationToolForType(annotation.type))
+        .filter((tool): tool is 'highlight' | 'ink' | 'freetext' => tool !== null),
+    );
+    if (tools.size !== 1) return;
+    const [tool] = tools;
+    if (tool === 'highlight') {
+      this.setActiveColor(color);
+      this.publishQuickHighlightState();
+      return;
+    }
+    if (tool !== undefined) this.options.onToolColorChange?.(tool, color);
   }
 
   private async applyQuickHighlight(enabled: boolean, revision: number): Promise<void> {
@@ -378,4 +417,13 @@ function isAbortFailure(cause: unknown): boolean {
   return (
     typeof cause === 'object' && cause !== null && 'name' in cause && cause.name === 'AbortError'
   );
+}
+
+function annotationToolForType(
+  type: DocumentAnnotation['type'],
+): 'highlight' | 'ink' | 'freetext' | null {
+  if (type === 'highlight' || type === 'underline') return 'highlight';
+  if (type === 'ink') return 'ink';
+  if (type === 'free-text') return 'freetext';
+  return null;
 }
