@@ -91,11 +91,20 @@ interface AnnotationCreationDraft {
 }
 
 interface AnnotationCreationJob {
+  cancelled: boolean;
   readonly generation: number;
   readonly request: AnnotationEditorPopoverRequest;
   completed: boolean;
   draft: AnnotationCreationDraft;
   pendingUpdate: AnnotationEditorUpdate | null;
+}
+
+type SelectionCreationState = 'draft' | 'pending' | 'materialized';
+
+interface AnnotationPopoverPlacement {
+  readonly target: AnnotationEditorTarget;
+  readonly x: number;
+  readonly y: number;
 }
 
 export class AnnotationEditorPopover {
@@ -116,10 +125,11 @@ export class AnnotationEditorPopover {
   private metadataTimer: number | null = null;
   private focusAwayTimer: number | null = null;
   private openGeneration = 0;
+  private placement: AnnotationPopoverPlacement | null = null;
   private readonly pendingCreationUpdates = new Set<AnnotationCreationJob>();
   private previousFocus: HTMLElement | null = null;
   private selectionCreation: AnnotationCreationJob | null = null;
-  private selectionCommitted = false;
+  private selectionCreationState: SelectionCreationState = 'draft';
   private suggestionIndex = -1;
   private suggestionItems: readonly AnnotationSuggestion[] = [];
   private suggestionOrigin: { readonly open: number; readonly query: string } | null = null;
@@ -142,6 +152,7 @@ export class AnnotationEditorPopover {
     host.append(this.element);
     this.registerElementListeners();
     this.registerDocumentListeners();
+    this.registerViewportListeners();
   }
 
   private registerElementListeners(): void {
@@ -199,7 +210,8 @@ export class AnnotationEditorPopover {
 
   private registerMetadataListeners(): void {
     this.listen(this.commentInput, 'input', () => {
-      this.resizeComment();
+      const resized = this.resizeComment();
+      if (resized) this.placeActive();
       this.commentChanged();
       this.updateSuggestions();
     });
@@ -248,6 +260,25 @@ export class AnnotationEditorPopover {
           return;
         this.close('focus-away');
       }, 0);
+    });
+  }
+
+  private registerViewportListeners(): void {
+    const owner = ownerWindow(this.host);
+    const place = (): void => {
+      if (this.active === null) return;
+      this.applyViewportConstraints();
+      this.resizeComment();
+      this.placeActive();
+    };
+    owner.addEventListener('resize', place);
+    this.cleanups.push(() => {
+      owner.removeEventListener('resize', place);
+    });
+    const visualViewport = owner.visualViewport;
+    visualViewport?.addEventListener('resize', place);
+    this.cleanups.push(() => {
+      visualViewport?.removeEventListener('resize', place);
     });
   }
 
@@ -314,10 +345,13 @@ export class AnnotationEditorPopover {
     this.cancelMetadataTimer();
     this.commentDirty = false;
     this.selectionCreation = null;
-    this.selectionCommitted = false;
+    this.selectionCreationState = request.target.kind === 'selection' ? 'draft' : 'materialized';
     this.render(request);
     this.element.hidden = false;
     const position = request.position ?? targetPosition(request.target);
+    this.placement = { target: request.target, x: position.x, y: position.y };
+    this.applyViewportConstraints();
+    this.resizeComment();
     this.place(position.x, position.y, request.target);
     return true;
   }
@@ -330,8 +364,9 @@ export class AnnotationEditorPopover {
     this.openGeneration += 1;
     this.active = null;
     this.selectionCreation = null;
+    this.placement = null;
     this.element.hidden = true;
-    if (request.target.kind === 'selection' && !this.selectionCommitted)
+    if (request.target.kind === 'selection' && this.selectionCreationState === 'draft')
       this.host.ownerDocument.getSelection()?.removeAllRanges();
     if (restoreFocus) this.restoreFocus();
     this.previousFocus = null;
@@ -353,9 +388,12 @@ export class AnnotationEditorPopover {
     const next = { ...request, target };
     this.active = next;
     this.selectionCreation = null;
-    this.selectionCommitted = target.kind !== 'selection';
+    this.selectionCreationState = target.kind === 'selection' ? 'draft' : 'materialized';
     this.commentDirty = false;
     this.render(next);
+    this.applyViewportConstraints();
+    this.resizeComment();
+    this.placeActive();
     return true;
   }
 
@@ -368,6 +406,7 @@ export class AnnotationEditorPopover {
     this.cancelFocusAwayTimer();
     this.active = null;
     this.selectionCreation = null;
+    this.placement = null;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     this.element.remove();
     return true;
@@ -387,14 +426,16 @@ export class AnnotationEditorPopover {
   private populateMetadata(annotation: DocumentAnnotation | null): void {
     this.commentSource = annotation?.comment ?? '';
     this.commentInput.value = this.commentSource;
-    this.resizeComment();
   }
 
-  private resizeComment(): void {
+  private resizeComment(): boolean {
+    const previous = this.commentInput.style.getPropertyValue('--abyss-annotation-comment-height');
     this.commentInput.setCssProps({ '--abyss-annotation-comment-height': 'auto' });
+    const next = `${String(this.commentInput.scrollHeight)}px`;
     this.commentInput.setCssProps({
-      '--abyss-annotation-comment-height': `${String(this.commentInput.scrollHeight)}px`,
+      '--abyss-annotation-comment-height': next,
     });
+    return previous !== next;
   }
 
   private renderTargetState(target: AnnotationEditorTarget): void {
@@ -448,7 +489,7 @@ export class AnnotationEditorPopover {
   private createSelection(comment: string): void {
     const request = this.active;
     if (request?.target.kind !== 'selection') return;
-    if (this.selectionCommitted) {
+    if (this.selectionCreationState !== 'draft') {
       if (this.selectionCreation?.request === request)
         this.selectionCreation.draft = this.captureCreationDraft(comment);
       return;
@@ -456,7 +497,7 @@ export class AnnotationEditorPopover {
     const generation = this.openGeneration;
     const job = this.makeCreationJob(request, comment, generation);
     this.selectionCreation = job;
-    this.selectionCommitted = true;
+    this.selectionCreationState = 'pending';
     try {
       const result = request.onCreate({
         color: this.activeColor,
@@ -465,23 +506,25 @@ export class AnnotationEditorPopover {
       });
       void Promise.resolve(result).then(
         (annotation) => {
+          if (job.cancelled) return;
           if (annotation === 'dismissed') {
             if (generation === this.openGeneration && this.active === request) {
-              this.selectionCommitted = false;
+              this.selectionCreationState = 'draft';
               this.selectionCreation = null;
             }
           } else if (annotation !== 'created' && annotation !== null && annotation !== undefined)
             this.finishSelectionCreation(job, annotation);
         },
         (cause: unknown) => {
+          if (job.cancelled) return;
           if (generation !== this.openGeneration || this.active !== request) return;
-          this.selectionCommitted = false;
+          this.selectionCreationState = 'draft';
           this.selectionCreation = null;
           console.error('[abyss-documents] Could not create selection annotation', { cause });
         },
       );
     } catch (cause) {
-      this.selectionCommitted = false;
+      this.selectionCreationState = 'draft';
       this.selectionCreation = null;
       throw cause;
     }
@@ -493,6 +536,7 @@ export class AnnotationEditorPopover {
     generation: number,
   ): AnnotationCreationJob {
     return {
+      cancelled: false,
       completed: false,
       draft: this.captureCreationDraft(comment),
       generation,
@@ -513,7 +557,7 @@ export class AnnotationEditorPopover {
     job: AnnotationCreationJob,
     annotation: DocumentAnnotation,
   ): void {
-    if (job.completed) return;
+    if (job.cancelled || job.completed) return;
     job.completed = true;
     const { draft, request } = job;
     if (job.generation !== this.openGeneration || this.active !== request) {
@@ -523,6 +567,7 @@ export class AnnotationEditorPopover {
     const next = { ...request, target: { annotation, kind: 'annotation' as const } };
     this.active = next;
     this.selectionCreation = null;
+    this.selectionCreationState = 'materialized';
     this.render(next);
     this.commentInput.value = draft.commentField;
     this.resizeComment();
@@ -531,6 +576,7 @@ export class AnnotationEditorPopover {
     this.updatePressedColor();
     this.commentDirty = false;
     this.persistCreatedDraft(job, annotation);
+    this.placeActive();
   }
 
   private persistCreatedDraft(job: AnnotationCreationJob, annotation: DocumentAnnotation): boolean {
@@ -562,12 +608,12 @@ export class AnnotationEditorPopover {
     this.commentDirty = true;
     if (request.target.kind === 'selection') {
       const comment = this.metadataComment();
-      if (!this.selectionCommitted && comment === this.commentSource) {
+      if (this.selectionCreationState === 'draft' && comment === this.commentSource) {
         this.commentDirty = false;
         return;
       }
       this.createSelection(comment);
-      if (this.selectionCommitted) {
+      if (this.selectionCreationState !== 'draft') {
         request.onSelectionPreview?.({
           color: this.activeColor,
           comment,
@@ -692,7 +738,8 @@ export class AnnotationEditorPopover {
     );
     if (replacement === null) return;
     this.commentInput.value = replacement.value;
-    this.resizeComment();
+    const resized = this.resizeComment();
+    if (resized) this.placeActive();
     this.commentInput.setSelectionRange(replacement.cursor, replacement.cursor);
     this.hideSuggestions();
     this.commentChanged();
@@ -810,22 +857,38 @@ export class AnnotationEditorPopover {
   }
 
   private dismissSelection(): void {
-    if (this.active?.target.kind !== 'selection' || this.selectionCommitted) return;
+    if (this.active?.target.kind !== 'selection') return;
+    if (this.selectionCreationState === 'pending' && this.selectionCreation !== null) {
+      this.selectionCreation.cancelled = true;
+      this.selectionCreationState = 'draft';
+    }
     this.close('external');
   }
 
   private place(x: number, y: number, target: AnnotationEditorTarget): void {
     const owner = ownerWindow(this.host);
     const viewport = fixedViewportBounds(owner, this.element);
+    this.applyViewportConstraints(viewport);
     const bounds = this.element.getBoundingClientRect();
     const anchorTop = target.kind === 'selection' ? selectionAnchorRect(target.selection).top : y;
     const placedY =
       y + bounds.height > viewport.bottom ? anchorTop - POPOVER_ANCHOR_GAP - bounds.height : y;
     this.element.dataset['overflow'] = 'scroll';
-    this.element.style.maxWidth = `${Math.min(304, Math.max(0, viewport.right - viewport.left))}px`;
-    this.element.style.maxHeight = `${Math.max(0, viewport.bottom - viewport.top)}px`;
     this.element.style.left = `${clamp(x, viewport.left, viewport.right - bounds.width) - viewport.originLeft}px`;
     this.element.style.top = `${clamp(placedY, viewport.top, viewport.bottom - bounds.height) - viewport.originTop}px`;
+  }
+
+  private placeActive(): void {
+    const placement = this.placement;
+    if (placement === null || this.active === null) return;
+    this.place(placement.x, placement.y, placement.target);
+  }
+
+  private applyViewportConstraints(
+    viewport = fixedViewportBounds(ownerWindow(this.host), this.element),
+  ): void {
+    this.element.style.maxWidth = `${Math.min(304, Math.max(0, viewport.right - viewport.left))}px`;
+    this.element.style.maxHeight = `${Math.max(0, viewport.bottom - viewport.top)}px`;
   }
 
   private listen<K extends keyof HTMLElementEventMap>(

@@ -1137,7 +1137,7 @@ export class AnnotationsPanel {
     this.root.dataset['annotationState'] = this.state;
     const hasControls = this.state === 'content' || this.state === 'filtered-empty';
     this.controls.hidden = !hasControls;
-    this.footer.hidden = !hasControls;
+    this.footer.hidden = !hasControls || this.displayColors.length === 0;
     this.query.hidden = !hasControls;
     this.list.hidden = this.state !== 'content';
     this.status.hidden =

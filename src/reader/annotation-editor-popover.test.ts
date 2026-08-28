@@ -75,13 +75,16 @@ function selection(): PdfTextSelection {
 
 function deferred<T>(): {
   readonly promise: Promise<T>;
+  readonly reject: (reason: unknown) => void;
   readonly resolve: (value: T) => void;
 } {
+  let reject!: (reason: unknown) => void;
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
+  const promise = new Promise<T>((next, fail) => {
+    reject = fail;
     resolve = next;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function editComment(popover: AnnotationEditorPopover, value: string): void {
@@ -105,6 +108,109 @@ describe('AnnotationEditorPopover', () => {
 
     expect(comment.rows).toBe(2);
     expect(comment.style.getPropertyValue('--abyss-annotation-comment-height')).toBe('96px');
+    popover.destroy();
+    host.remove();
+  });
+
+  it('measures a long existing comment only after viewport constraints make it visible', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationEditorPopover(host);
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected the comment textarea.');
+    const measurements: Array<{ hidden: boolean; maxWidth: string }> = [];
+    Object.defineProperty(comment, 'scrollHeight', {
+      configurable: true,
+      get: () => {
+        measurements.push({
+          hidden: popover.element.hidden,
+          maxWidth: popover.element.style.maxWidth,
+        });
+        return 220;
+      },
+    });
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        measurements.push({
+          hidden: popover.element.hidden,
+          maxWidth: popover.element.style.maxWidth,
+        });
+        return new DOMRect(0, 0, 244, 120);
+      },
+    });
+    Object.defineProperty(host.win, 'visualViewport', {
+      configurable: true,
+      value: { height: 160, offsetLeft: 0, offsetTop: 0, width: 260 },
+    });
+
+    popover.open({
+      ...editorRequest({
+        annotation: editableAnnotation({ comment: 'One\nTwo\nThree\nFour\nFive\nSix' }),
+        kind: 'annotation',
+      }),
+      position: { x: 20, y: 140 },
+    });
+
+    expect(measurements.length).toBeGreaterThan(0);
+    expect(measurements.every(({ hidden, maxWidth }) => !hidden && maxWidth === '244px')).toBe(
+      true,
+    );
+    expect(comment.style.getPropertyValue('--abyss-annotation-comment-height')).toBe('220px');
+    expect(popover.element.style.top).toBe('14px');
+    Reflect.deleteProperty(host.win, 'visualViewport');
+    popover.destroy();
+    host.remove();
+  });
+
+  it('re-places a bottom-edge draft after textarea growth and viewport resize', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationEditorPopover(host);
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected the comment textarea.');
+    let scrollHeight = 36;
+    let viewportHeight = 200;
+    Object.defineProperty(comment, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        const measured = Number.parseFloat(
+          comment.style.getPropertyValue('--abyss-annotation-comment-height'),
+        );
+        const height = Number.isFinite(measured) && measured > 0 ? measured : 36;
+        return new DOMRect(0, 0, 244, Math.min(height, 112) + 24);
+      },
+    });
+    Object.defineProperty(host.win, 'visualViewport', {
+      configurable: true,
+      get: () => ({ height: viewportHeight, offsetLeft: 0, offsetTop: 0, width: 260 }),
+    });
+    const selected = selection();
+    const edgeSelection: PdfTextSelection = {
+      ...selected,
+      clientRect: { ...selected.clientRect, bottom: 186, top: 170 },
+      clientRects: [{ ...selected.clientRect, bottom: 186, top: 170 }],
+    };
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: edgeSelection }),
+      position: undefined,
+    });
+    expect(popover.element.style.top).toBe('104px');
+
+    scrollHeight = 200;
+    comment.value = 'One\nTwo\nThree\nFour\nFive\nSix';
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(popover.element.style.top).toBe('28px');
+
+    viewportHeight = 120;
+    host.win.dispatchEvent(new Event('resize'));
+    expect({ maxHeight: popover.element.style.maxHeight, top: popover.element.style.top }).toEqual({
+      maxHeight: '104px',
+      top: '8px',
+    });
+    Reflect.deleteProperty(host.win, 'visualViewport');
     popover.destroy();
     host.remove();
   });
@@ -242,6 +348,59 @@ describe('AnnotationEditorPopover', () => {
     expect(onClose).toHaveBeenCalledWith('external');
     expect(popover.element.hidden).toBe(true);
     expect(document.getSelection()?.rangeCount).toBe(0);
+    popover.destroy();
+    host.remove();
+  });
+
+  it('lets X cancel pending creation and ignores its late resolution', async () => {
+    const host = document.body.createDiv();
+    const quote = host.createSpan({ text: 'Selected passage' });
+    const range = document.createRange();
+    range.selectNodeContents(quote);
+    document.getSelection()?.addRange(range);
+    const creation = deferred<DocumentAnnotation>();
+    const onClose = vi.fn();
+    const onUpdate = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onClose,
+      onCreate: () => creation.promise,
+      onUpdate,
+    });
+    editComment(popover, 'Pending draft');
+
+    popover.element.querySelector<HTMLButtonElement>('[data-action="dismiss-selection"]')?.click();
+    expect(popover.element.hidden).toBe(true);
+    expect(document.getSelection()?.rangeCount).toBe(0);
+    expect(onClose).toHaveBeenCalledWith('external');
+
+    creation.resolve(editableAnnotation({ comment: 'Pending draft' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(popover.element.hidden).toBe(true);
+    expect(onUpdate).not.toHaveBeenCalled();
+    popover.destroy();
+    host.remove();
+  });
+
+  it('handles a late rejection after X cancels pending creation', async () => {
+    const host = document.body.createDiv();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const creation = deferred<DocumentAnnotation>();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onCreate: () => creation.promise,
+    });
+    editComment(popover, 'Pending draft');
+    popover.element.querySelector<HTMLButtonElement>('[data-action="dismiss-selection"]')?.click();
+
+    creation.reject(new Error('late failure'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(popover.element.hidden).toBe(true);
+    expect(log).not.toHaveBeenCalled();
     popover.destroy();
     host.remove();
   });
@@ -1241,6 +1400,7 @@ describe('AnnotationEditorPopover', () => {
       ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
       onClose,
     });
+    const samePopover = popover.element;
     oldEditor.focus();
     oldEditor.remove();
     document.body.tabIndex = -1;
@@ -1250,6 +1410,17 @@ describe('AnnotationEditorPopover', () => {
     replacement.focus();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
 
+    expect({
+      newFocused: host.ownerDocument.activeElement === replacement,
+      newIsDistinct: replacement !== oldEditor,
+      oldDisconnected: !oldEditor.isConnected,
+      sameConnectedPopover: popover.element === samePopover && samePopover.isConnected,
+    }).toEqual({
+      newFocused: true,
+      newIsDistinct: true,
+      oldDisconnected: true,
+      sameConnectedPopover: true,
+    });
     expect(popover.isOpen).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
     popover.destroy();

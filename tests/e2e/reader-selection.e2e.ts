@@ -1944,10 +1944,6 @@ describe('reader selection-first annotations', () => {
         if (input === null) throw new Error('Task 4 comment editor is unavailable.');
         input.value = 'Review #to … see [[Ta after';
         input.setSelectionRange(10, 10);
-        input.dataset['task4Composite'] = '';
-        input
-          .closest<HTMLElement>('[data-annotation-editor-popover]')
-          ?.setAttribute('data-task4-composite', '');
         input.dispatchEvent(new Event('input', { bubbles: true }));
         input.focus();
       }, commentSelector);
@@ -1971,21 +1967,113 @@ describe('reader selection-first annotations', () => {
       await browser.keys(Key.Enter);
       await expect(comment).toHaveValue('Review #topic … see [[Task 4 autocomplete]]');
       await expect($$('.highlightEditor')).toBeElementsArrayOfSize(1);
-      expect(
-        await browser.execute(
-          () =>
-            document.querySelector('[data-task4-composite]')?.isConnected === true &&
-            document
-              .querySelector('[data-task4-composite] textarea')
-              ?.hasAttribute('data-task4-composite') === true,
-        ),
-      ).toBe(true);
 
+      await browser.waitUntil(
+        async () => {
+          const snapshot = await readAnnotationSaveLifecycleSnapshot();
+          return (
+            snapshot.saves > 0 &&
+            !snapshot.isDirty &&
+            !snapshot.inFlight &&
+            snapshot.activeSerializations === 0 &&
+            snapshot.activeWrites === 0
+          );
+        },
+        { timeout: 15_000, timeoutMsg: 'Initial Task 4 annotation save did not settle.' },
+      );
+      await browser.execute((selector) => {
+        const native = document.querySelector<HTMLElement>('.highlightEditor');
+        const custom = document.querySelector<HTMLElement>(selector);
+        if (native === null || custom === null)
+          throw new Error('Task 4 replacement baseline is incomplete.');
+        (
+          window as Window & {
+            __abyssTask4Replacement?: {
+              readonly custom: HTMLElement;
+              readonly native: HTMLElement;
+              readonly nativeId: string;
+            };
+          }
+        ).__abyssTask4Replacement = { custom, native, nativeId: native.id };
+      }, selectionEditorSelector);
+
+      const replacementSave = await captureAnnotationSaveBaseline();
       await popover.$('[data-editor-color="#5fb236"]').click();
       await expect(popover.$('[data-editor-color="#5fb236"]')).toHaveAttribute(
         'aria-pressed',
         'true',
       );
+      await browser.waitUntil(
+        async () =>
+          isVerifiedAnnotationSaveSettled(
+            await readAnnotationSaveLifecycleSnapshot(),
+            replacementSave,
+          ),
+        { timeout: 15_000, timeoutMsg: 'Task 4 native-editor restart save did not settle.' },
+      );
+      await browser.waitUntil(
+        async () =>
+          browser.execute(() => {
+            const state = (
+              window as Window & {
+                __abyssTask4Replacement?: {
+                  readonly native: HTMLElement;
+                  readonly nativeId: string;
+                };
+              }
+            ).__abyssTask4Replacement;
+            const replacement = document.querySelector<HTMLElement>('.highlightEditor');
+            return (
+              state !== undefined &&
+              !state.native.isConnected &&
+              replacement !== null &&
+              replacement !== state.native
+            );
+          }),
+        {
+          timeout: 10_000,
+          timeoutMsg: 'Native PDF.js editor was not replaced by the supported save workflow.',
+        },
+      );
+      await $('.highlightEditor').click();
+      expect(
+        await browser.execute((selector) => {
+          const state = (
+            window as Window & {
+              __abyssTask4Replacement?: {
+                readonly custom: HTMLElement;
+                readonly native: HTMLElement;
+                readonly nativeId: string;
+              };
+            }
+          ).__abyssTask4Replacement;
+          const replacement = document.querySelector<HTMLElement>('.highlightEditor');
+          const custom = document.querySelector<HTMLElement>(selector);
+          return {
+            customInteractable:
+              state !== undefined &&
+              custom !== null &&
+              state.custom.isSameNode(custom) &&
+              custom.isConnected &&
+              custom.hidden === false &&
+              custom.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.disabled ===
+                false,
+            newDistinct:
+              state !== undefined && replacement !== null && !state.native.isSameNode(replacement),
+            newFocused: replacement?.classList.contains('selectedEditor') ?? false,
+            newId: replacement?.id ?? null,
+            oldDisconnected: state?.native.isConnected === false,
+            oldId: state?.nativeId ?? null,
+          };
+        }, selectionEditorSelector),
+      ).toEqual({
+        customInteractable: true,
+        newDistinct: true,
+        newFocused: true,
+        newId: expect.any(String),
+        oldDisconnected: true,
+        oldId: expect.any(String),
+      });
       await browser.execute((selector) => {
         const input = document.querySelector<HTMLTextAreaElement>(selector);
         if (input === null) throw new Error('Task 4 comment editor is unavailable.');
@@ -2010,6 +2098,13 @@ describe('reader selection-first annotations', () => {
       await popover.$('[data-action="delete-annotation"]').click();
       await expect($$('.highlightEditor')).toBeElementsArrayOfSize(0);
     } finally {
+      await browser.execute(() => {
+        delete (
+          window as Window & {
+            __abyssTask4Replacement?: unknown;
+          }
+        ).__abyssTask4Replacement;
+      });
       await removeTask4AutocompleteNote();
     }
   });

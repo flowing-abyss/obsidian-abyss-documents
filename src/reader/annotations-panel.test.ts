@@ -271,7 +271,7 @@ describe('AnnotationsPanel', () => {
     expect(root.querySelector('[data-section="tags"]')).toBeNull();
   });
 
-  it('hides the whole filter footer only when the document has no annotations', () => {
+  it('hides the color footer when annotations have no display or retained active color', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
     const footer = annotationFooter(root);
@@ -279,8 +279,15 @@ describe('AnnotationsPanel', () => {
     panel.setAnnotations([]);
     expect(footer.hidden).toBe(true);
 
+    panel.setAnnotations([annotation(0, { color: null })]);
+    expect(footer.hidden).toBe(true);
+
     panel.setAnnotations([annotation(0)]);
     panel.setFilter({ query: 'absent', colors: new Set() });
+    expect(footer.hidden).toBe(false);
+
+    panel.setAnnotations([annotation(0, { color: null })]);
+    panel.setFilter({ query: '', colors: new Set(['#5fb236']) });
     expect(footer.hidden).toBe(false);
   });
 
