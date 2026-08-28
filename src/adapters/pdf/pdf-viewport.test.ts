@@ -887,9 +887,16 @@ describe('PdfDocumentViewport', () => {
       first.id = 'multi-first';
       const second = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
       second.id = 'multi-second';
+      const activationOrder: string[] = [];
+      second.addEventListener('click', () => {
+        activationOrder.push('pdfjs-target');
+      });
       const focusAnnotation = vi
         .spyOn(interaction, 'focusAnnotation')
-        .mockResolvedValue('editable');
+        .mockImplementation(async () => {
+          activationOrder.push('abyss-capture');
+          return 'editable';
+        });
       const dirty = vi.fn();
       editor.onDirty(dirty);
       const gesture = new MouseEvent('click', { bubbles: true, cancelable: true, ...keys });
@@ -901,6 +908,7 @@ describe('PdfDocumentViewport', () => {
         kind: 'root-click',
         preserveNativeSelection: true,
       });
+      expect(activationOrder).toEqual(['abyss-capture', 'pdfjs-target']);
       expect(dirty).not.toHaveBeenCalled();
       expect(viewer.annotationEditorRequests).toEqual([]);
     },

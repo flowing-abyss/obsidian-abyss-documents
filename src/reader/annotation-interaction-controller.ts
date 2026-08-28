@@ -242,9 +242,10 @@ export class AnnotationInteractionController {
     focus: PdfAnnotationFocus,
     first: DocumentAnnotation,
   ): AnnotationEditorTarget {
-    return !focus.editable || focus.annotations.length > 1
-      ? { annotation: first, kind: 'readonly' }
-      : { annotation: first, kind: 'annotation' };
+    if (focus.annotations.length > 1) return { annotations: focus.annotations, kind: 'multiple' };
+    return focus.editable
+      ? { annotation: first, kind: 'annotation' }
+      : { annotation: first, kind: 'readonly' };
   }
 
   private async createSelection(

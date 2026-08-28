@@ -716,12 +716,12 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private registerRootListeners(root: HTMLElement): void {
-    root.addEventListener('click', this.onRootClick);
+    root.addEventListener('click', this.onRootClick, { capture: true });
     root.addEventListener('contextmenu', this.onRootContextMenu);
   }
 
   private unregisterRootListeners(root: HTMLElement): void {
-    root.removeEventListener('click', this.onRootClick);
+    root.removeEventListener('click', this.onRootClick, { capture: true });
     root.removeEventListener('contextmenu', this.onRootContextMenu);
   }
 

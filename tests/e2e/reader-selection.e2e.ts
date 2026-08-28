@@ -8,9 +8,14 @@ import {
 } from './annotation-save-oracle.js';
 
 const pluginId = 'abyss-documents';
+const activeReaderSelector = '.workspace-leaf.mod-active [data-abyss-document]';
 const selectionEditorSelector =
   '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
 const nativeEditorSelector = selectionEditorSelector;
+
+function activeReaderDescendant(selector: string): string {
+  return `${activeReaderSelector} ${selector}`;
+}
 
 async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<void> {
   await browser.executeObsidian(
@@ -34,11 +39,159 @@ async function openPdf(path: string): Promise<void> {
     },
     { path, pluginId },
   );
-  await $('[data-abyss-document]').waitForDisplayed({ timeout: 15_000 });
-  await $('[data-page-number="1"] .textLayer span').waitForExist({ timeout: 15_000 });
+  await $(activeReaderSelector).waitForDisplayed({ timeout: 15_000 });
+  await $(activeReaderDescendant('[data-page-number="1"] .textLayer span')).waitForExist({
+    timeout: 15_000,
+  });
+}
+
+async function captureReaderLifecycleIdentity(): Promise<void> {
+  await browser.executeObsidian(({ app }) => {
+    const leaf = app.workspace.getMostRecentLeaf();
+    const view = leaf?.view as unknown as {
+      containerEl?: HTMLElement;
+      controller?: {
+        viewport?: {
+          annotationEditorInstance?: { manager?: unknown };
+          commentBridge?: unknown;
+        };
+      };
+    };
+    const controller = view.controller;
+    const viewport = controller?.viewport;
+    const editor = viewport?.annotationEditorInstance;
+    const bridge = viewport?.commentBridge;
+    const readerNode = view.containerEl?.querySelector<HTMLElement>('[data-abyss-document]');
+    const pageNode = readerNode?.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (
+      controller === undefined ||
+      viewport === undefined ||
+      editor === undefined ||
+      bridge === undefined ||
+      readerNode === null ||
+      readerNode === undefined ||
+      pageNode === null ||
+      pageNode === undefined
+    )
+      throw new Error('Current reader lifecycle identity is incomplete.');
+    (
+      window as Window & {
+        __abyssTask3OldReader?: {
+          bridge: unknown;
+          controller: unknown;
+          editor: unknown;
+          manager: unknown;
+          pageNode: HTMLElement;
+          readerNode: HTMLElement;
+          viewport: unknown;
+        };
+      }
+    ).__abyssTask3OldReader = {
+      bridge,
+      controller,
+      editor,
+      manager: editor.manager,
+      pageNode,
+      readerNode,
+      viewport,
+    };
+  });
+}
+
+async function assertReaderLifecycleReplaced(): Promise<void> {
+  expect(
+    await browser.executeObsidian(({ app }) => {
+      const old = (
+        window as Window & {
+          __abyssTask3OldReader?: {
+            bridge: {
+              bindings?: Map<unknown, unknown>;
+              disposed?: boolean;
+              focusReadinessChecks?: Set<unknown>;
+              sidebarUiManager?: unknown;
+            };
+            controller: { viewport?: unknown };
+            editor: { destroyed?: boolean; manager?: unknown };
+            manager: unknown;
+            pageNode: HTMLElement;
+            readerNode: HTMLElement;
+            viewport: { destroyPromise?: Promise<void> | null };
+          };
+        }
+      ).__abyssTask3OldReader;
+      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+        containerEl?: HTMLElement;
+        controller?: {
+          viewport?: {
+            annotationEditorInstance?: { manager?: unknown };
+            commentBridge?: unknown;
+          };
+        };
+      };
+      const controller = view.controller;
+      const viewport = controller?.viewport;
+      const editor = viewport?.annotationEditorInstance;
+      const bridge = viewport?.commentBridge;
+      const readerNode = view.containerEl?.querySelector<HTMLElement>('[data-abyss-document]');
+      if (
+        old === undefined ||
+        controller === undefined ||
+        viewport === undefined ||
+        editor === undefined ||
+        bridge === undefined ||
+        readerNode === null ||
+        readerNode === undefined
+      )
+        throw new Error('Reader replacement identity is incomplete.');
+      const result = {
+        bridgeBindingsReleased: old.bridge.bindings?.size === 0,
+        bridgeDisposed: old.bridge.disposed === true,
+        bridgeManagerReleased: old.bridge.sidebarUiManager == null,
+        controllerDistinct: old.controller !== controller,
+        controllerReleasedViewport: old.controller.viewport == null,
+        editorDestroyed: old.editor.destroyed === true,
+        editorDistinct: old.editor !== editor,
+        editorManagerReleased: old.editor.manager == null,
+        managerDistinct: old.manager !== editor.manager,
+        oldPageDisconnected: !old.pageNode.isConnected,
+        oldReaderDisconnected: !old.readerNode.isConnected,
+        readinessReleased: old.bridge.focusReadinessChecks?.size === 0,
+        readerNodeConnected: readerNode.isConnected,
+        viewportDestroyed: old.viewport.destroyPromise instanceof Promise,
+        viewportDistinct: !Object.is(old.viewport, viewport),
+        bridgeDistinct: old.bridge !== bridge,
+      };
+      delete (window as Window & { __abyssTask3OldReader?: unknown }).__abyssTask3OldReader;
+      return result;
+    }),
+  ).toEqual({
+    bridgeBindingsReleased: true,
+    bridgeDisposed: true,
+    bridgeDistinct: true,
+    bridgeManagerReleased: true,
+    controllerDistinct: true,
+    controllerReleasedViewport: true,
+    editorDestroyed: true,
+    editorDistinct: true,
+    editorManagerReleased: true,
+    managerDistinct: true,
+    oldPageDisconnected: true,
+    oldReaderDisconnected: true,
+    readinessReleased: true,
+    readerNodeConnected: true,
+    viewportDestroyed: true,
+    viewportDistinct: true,
+  });
 }
 
 async function closeReaders(): Promise<void> {
+  await browser.execute(() => {
+    const host = window as Window & {
+      __abyssTask3ActivationTrace?: { cleanup(): void };
+    };
+    host.__abyssTask3ActivationTrace?.cleanup();
+    delete host.__abyssTask3ActivationTrace;
+  });
   await browser.executeObsidian(async ({ app }) => {
     for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
       const controller = (leaf.view as unknown as { controller?: { close(): Promise<void> } })
@@ -321,8 +474,10 @@ async function waitForPdfBytesToChange(path: string, previous: string): Promise<
 }
 
 async function reopenPdf(path: string): Promise<void> {
+  await captureReaderLifecycleIdentity();
   await closeReaders();
   await openPdf(path);
+  await assertReaderLifecycleReplaced();
 }
 
 async function nativePageOneAnnotations(): Promise<
@@ -442,7 +597,7 @@ async function createPersistedWritableAnnotation(fixture: PersistedWritableFixtu
   if (fixture.kind === 'highlight') {
     await $('[data-annotation-tool="highlight"]').click();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
-    await selectFixtureText(1);
+    await dragFixtureTextWhileInspectingPalette({ endRatio: 0.42, startRatio: 0.12 });
     await $(fixture.editorSelector).waitForExist({ timeout: 10_000 });
     await browser.keys(Key.Escape);
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
@@ -462,22 +617,113 @@ async function createPersistedWritableAnnotation(fixture: PersistedWritableFixtu
   await expect($('[data-annotation-tool="freetext"]')).toHaveAttribute('aria-pressed', 'true');
   const layer = $('[data-page-number="1"] .annotationEditorLayer');
   await layer.waitForDisplayed({ timeout: 5_000 });
-  await browser.execute(() => {
+  const placement = await browser.execute(() => {
     const editorLayer = document.querySelector<HTMLElement>(
       '[data-page-number="1"] .annotationEditorLayer',
     );
     if (editorLayer === null) throw new Error('FreeText editor layer unavailable.');
-    editorLayer.focus();
+    const bounds = editorLayer.getBoundingClientRect();
+    return {
+      x: Math.round(bounds.left + bounds.width * 0.45),
+      y: Math.round(bounds.top + 80),
+    };
   });
-  await browser.keys(Key.Enter);
+  await browser
+    .action('pointer')
+    .move({ origin: 'viewport', ...placement })
+    .down()
+    .up()
+    .perform();
   const input = $('.freeTextEditor [contenteditable="true"]');
   await input.waitForExist({ timeout: 5_000 });
   await input.click();
   await browser.keys('Persisted FreeText');
   await browser.keys(Key.Escape);
   const freeTextTool = $('[data-annotation-tool="freetext"]');
-  if ((await freeTextTool.getAttribute('aria-pressed')) === 'true') await freeTextTool.click();
+  if ((await freeTextTool.getAttribute('aria-pressed')) === 'true')
+    await $('[data-annotation-tool="highlight"]').click();
   await expect(freeTextTool).toHaveAttribute('aria-pressed', 'false');
+}
+
+async function installPersistedActivationTrace(fixture: PersistedWritableFixture): Promise<void> {
+  await browser.execute(
+    (readerSelector, editorSelector, popoverSelector) => {
+      const reader = document.querySelector<HTMLElement>(readerSelector);
+      if (reader === null) throw new Error('Active reader unavailable for activation trace.');
+      const trace = {
+        cleanup: () => undefined,
+        events: [] as string[],
+        prematureFocus: 0,
+        readerRemounts: 0,
+        readonlyVisible: 0,
+      };
+      const sample = (event: string): void => {
+        const currentReader = document.querySelector<HTMLElement>(readerSelector);
+        if (currentReader !== reader || !reader.isConnected) trace.readerRemounts += 1;
+        const selected = reader.querySelectorAll(`${editorSelector}.selectedEditor`).length;
+        const popover = document.querySelector<HTMLElement>(popoverSelector);
+        const visible = popover !== null && !popover.hidden;
+        if (visible && popover.innerText.includes('Read-only')) trace.readonlyVisible += 1;
+        if (visible && popover.contains(document.activeElement) && selected === 0)
+          trace.prematureFocus += 1;
+        trace.events.push(`${event}:${String(selected)}:${visible ? 'visible' : 'hidden'}`);
+      };
+      const observer = new MutationObserver(() => {
+        sample('mutation');
+      });
+      const onFocus = (): void => {
+        sample('focus');
+      };
+      observer.observe(reader, {
+        attributes: true,
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      document.addEventListener('focusin', onFocus, true);
+      trace.cleanup = () => {
+        observer.disconnect();
+        document.removeEventListener('focusin', onFocus, true);
+      };
+      (
+        window as Window & { __abyssTask3ActivationTrace?: typeof trace }
+      ).__abyssTask3ActivationTrace = trace;
+      sample('installed');
+    },
+    activeReaderSelector,
+    fixture.editorSelector,
+    nativeEditorSelector,
+  );
+}
+
+async function assertPersistedActivationTrace(): Promise<void> {
+  const trace = await browser.execute(() => {
+    const host = window as Window & {
+      __abyssTask3ActivationTrace?: {
+        cleanup(): void;
+        events: string[];
+        prematureFocus: number;
+        readerRemounts: number;
+        readonlyVisible: number;
+      };
+    };
+    const current = host.__abyssTask3ActivationTrace;
+    if (current === undefined) throw new Error('Persisted activation trace was not installed.');
+    current.cleanup();
+    delete host.__abyssTask3ActivationTrace;
+    return {
+      eventCount: current.events.length,
+      prematureFocus: current.prematureFocus,
+      readerRemounts: current.readerRemounts,
+      readonlyVisible: current.readonlyVisible,
+    };
+  });
+  expect(trace.eventCount).toBeGreaterThan(1);
+  expect(trace).toMatchObject({
+    prematureFocus: 0,
+    readerRemounts: 0,
+    readonlyVisible: 0,
+  });
 }
 
 async function drawPersistedInk(selector: string): Promise<void> {
@@ -506,27 +752,32 @@ async function drawPersistedInk(selector: string): Promise<void> {
 }
 
 async function assertFreshNeutralReader(fixture: PersistedWritableFixture): Promise<void> {
-  await $(fixture.persistedSelector).waitForExist({ timeout: 10_000 });
+  await $(activeReaderDescendant(fixture.persistedSelector)).waitForExist({ timeout: 10_000 });
   expect(
     await browser.execute(
-      (editorSelector) => ({
-        liveEditors: document.querySelectorAll(`.annotationEditorLayer ${editorSelector}`).length,
-        mode:
-          (
-            window as Window & {
-              app?: {
-                workspace?: {
-                  getMostRecentLeaf?(): {
-                    view?: {
-                      controller?: { viewport?: { viewer?: { annotationEditorMode?: number } } };
-                    };
-                  } | null;
+      (readerSelector, editorSelector) => {
+        const reader = document.querySelector<HTMLElement>(readerSelector);
+        if (reader === null) throw new Error('Active reader unavailable after reopen.');
+        return {
+          liveEditors: reader.querySelectorAll(`.annotationEditorLayer ${editorSelector}`).length,
+          mode:
+            (
+              window as Window & {
+                app?: {
+                  workspace?: {
+                    getMostRecentLeaf?(): {
+                      view?: {
+                        controller?: { viewport?: { viewer?: { annotationEditorMode?: number } } };
+                      };
+                    } | null;
+                  };
                 };
-              };
-            }
-          ).app?.workspace?.getMostRecentLeaf?.()?.view?.controller?.viewport?.viewer
-            ?.annotationEditorMode ?? null,
-      }),
+              }
+            ).app?.workspace?.getMostRecentLeaf?.()?.view?.controller?.viewport?.viewer
+              ?.annotationEditorMode ?? null,
+        };
+      },
+      activeReaderSelector,
       fixture.editorSelector,
     ),
   ).toEqual({ liveEditors: 0, mode: 0 });
@@ -537,11 +788,14 @@ async function assertFreshNeutralReader(fixture: PersistedWritableFixture): Prom
 }
 
 async function assertEditablePersistedActivation(fixture: PersistedWritableFixture): Promise<void> {
-  await $(`${fixture.editorSelector}.selectedEditor`).waitForExist({ timeout: 20_000 });
+  await $(activeReaderDescendant(`${fixture.editorSelector}.selectedEditor`)).waitForExist({
+    timeout: 20_000,
+  });
   const popover = $(nativeEditorSelector);
   await popover.waitForDisplayed({ timeout: 5_000 });
   await expect(popover.$('.abyss-annotation-editor-palette')).toBeDisplayed();
   await expect(popover).not.toHaveText(expect.stringContaining('Read-only'));
+  await assertPersistedActivationTrace();
 }
 
 async function updateActivatedPersistedAnnotation(comment: string): Promise<void> {
@@ -1571,7 +1825,8 @@ describe('reader selection-first annotations', () => {
 
       await reopenPdf(workingPath);
       await assertFreshNeutralReader(fixture);
-      await $(fixture.persistedSelector).click();
+      await installPersistedActivationTrace(fixture);
+      await $(activeReaderDescendant(fixture.persistedSelector)).click();
       await assertEditablePersistedActivation(fixture);
       const comment = `Persisted ${fixture.kind} activation`;
       await updateActivatedPersistedAnnotation(comment);
@@ -1586,19 +1841,45 @@ describe('reader selection-first annotations', () => {
       await $('[data-control="sidebar"]').click();
       await $('[data-tab="annotations"]').click();
       await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
+      await installPersistedActivationTrace(fixture);
       await $('.abyss-annotation-card').click();
       await assertEditablePersistedActivation(fixture);
       await expect($(`${nativeEditorSelector} [aria-label="Comment"]`)).toHaveValue(comment);
+      const deletedId = await $('.abyss-annotation-card').getAttribute('data-annotation-id');
+      expect(deletedId).not.toBeNull();
       await $(nativeEditorSelector).$('[data-action="delete-annotation"]').click();
       await waitForPdfBytesToChange(workingPath, hash);
 
       await reopenPdf(workingPath);
-      await expect($(fixture.persistedSelector)).not.toExist();
+      await expect($(activeReaderDescendant(fixture.persistedSelector))).not.toExist();
       expect(
         (await nativePageOneAnnotations()).filter(
           ({ annotationType }) => annotationType === fixture.nativeType,
         ),
       ).toHaveLength(0);
+      await $('[data-control="sidebar"]').click();
+      await $('[data-tab="annotations"]').click();
+      await expect($(activeReaderDescendant('[data-annotations-status]'))).toHaveText(
+        'No annotations',
+      );
+      await browser.waitUntil(
+        async () =>
+          browser.execute(
+            (readerSelector, removedId) => {
+              const reader = document.querySelector<HTMLElement>(readerSelector);
+              if (reader === null) return false;
+              return Array.from(
+                reader.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+              ).every((card) => !Object.is(card.dataset['annotationId'], removedId));
+            },
+            activeReaderSelector,
+            deletedId,
+          ),
+        {
+          timeout: 10_000,
+          timeoutMsg: 'Deleted annotation card survived destroyed-reader reopen.',
+        },
+      );
     });
 
     it(`materializes a persisted ${fixture.kind} through one sidebar-card activation`, async () => {
@@ -1611,6 +1892,7 @@ describe('reader selection-first annotations', () => {
       await $('[data-control="sidebar"]').click();
       await $('[data-tab="annotations"]').click();
       await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
+      await installPersistedActivationTrace(fixture);
       await $('.abyss-annotation-card').click();
 
       await assertEditablePersistedActivation(fixture);
@@ -1985,14 +2267,48 @@ describe('reader selection-first annotations', () => {
           ),
           paletteHidden:
             editor?.querySelector<HTMLElement>('.abyss-annotation-editor-palette')?.hidden ?? true,
+          nativeToolbarVisible: Array.from(
+            document.querySelectorAll<HTMLElement>('.selectedEditor .editToolbar'),
+          ).some(
+            (toolbar) =>
+              !toolbar.hidden &&
+              getComputedStyle(toolbar).display !== 'none' &&
+              getComputedStyle(toolbar).visibility !== 'hidden',
+          ),
           readOnly: editor?.innerText.includes('Read-only') ?? false,
+          status: editor?.querySelector<HTMLElement>('[role="status"]')?.textContent ?? '',
         };
       }, nativeEditorSelector);
-    expect(await batchMutationState()).toEqual({
-      actionLabels: [],
-      paletteHidden: true,
-      readOnly: true,
-    });
+    const assertFailClosedBatchContract = async (): Promise<void> => {
+      expect(await batchMutationState()).toEqual({
+        actionLabels: ['Delete annotations'],
+        nativeToolbarVisible: false,
+        paletteHidden: false,
+        readOnly: false,
+        status: '2 annotations selected',
+      });
+      const green = $(`${nativeEditorSelector} [data-editor-color="#5fb236"]`);
+      await browser.execute((selector) => {
+        const button = document.querySelector<HTMLButtonElement>(
+          `${selector} [data-editor-color="#5fb236"]`,
+        );
+        if (button === null || button.hidden || button.disabled)
+          throw new Error('Unified batch palette action is unavailable.');
+        button.click();
+      }, nativeEditorSelector);
+      await expect(green).toHaveAttribute('aria-pressed', 'false');
+      await browser.execute((selector) => {
+        const button = document.querySelector<HTMLButtonElement>(
+          `${selector} [data-action="delete-annotation"]`,
+        );
+        if (button === null || button.hidden || button.disabled)
+          throw new Error('Unified batch delete action is unavailable.');
+        button.click();
+      }, nativeEditorSelector);
+      await expect($(nativeEditorSelector)).toBeDisplayed();
+      await expect($$('.highlightEditor.selectedEditor')).toBeElementsArrayOfSize(2);
+    };
+    await assertFailClosedBatchContract();
 
     await reopenPdf(workingPath);
     await browser.waitUntil(
@@ -2024,10 +2340,6 @@ describe('reader selection-first annotations', () => {
         ),
       { timeout: 5_000, timeoutMsg: 'The platform-modifier gesture did not select two editors.' },
     );
-    expect(await batchMutationState()).toEqual({
-      actionLabels: [],
-      paletteHidden: true,
-      readOnly: true,
-    });
+    await assertFailClosedBatchContract();
   });
 });

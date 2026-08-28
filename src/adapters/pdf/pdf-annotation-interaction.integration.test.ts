@@ -247,6 +247,7 @@ describe('PDF annotation interaction integration', () => {
           manager.getEditor.mockImplementation((id) =>
             id === 'runtime-highlight' ? native : undefined,
           );
+          bridge.toggleCommentPopup(native, true, true, false);
           window.setTimeout(() => {
             activationOrder.push('pdfjs-focus');
           }, 0);
@@ -287,7 +288,7 @@ describe('PDF annotation interaction integration', () => {
     const annotation = nativeAnnotation('', 'persisted-highlight');
     editor.setAnnotationProjection([{ annotation, stableId: 'persisted-highlight' }]);
     const focusKinds: boolean[] = [];
-    bridge.onAnnotationFocus((focus) => {
+    editor.onAnnotationFocus((focus) => {
       if (focus !== null) {
         activationOrder.push('bridge-focus');
         focusKinds.push(focus.editable);

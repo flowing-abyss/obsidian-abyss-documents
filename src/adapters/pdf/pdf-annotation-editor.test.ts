@@ -184,7 +184,11 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
         id: string,
         signal?: AbortSignal,
         projected?: DocumentAnnotation,
-        options?: { readonly editableOnly?: boolean; readonly preserveSelection?: boolean },
+        options?: {
+          readonly editableOnly?: boolean;
+          readonly forceReadonly?: boolean;
+          readonly preserveSelection?: boolean;
+        },
       ) => Promise<boolean>
     >(async () => true),
     nativeEditorIds: vi.fn(() => {
@@ -944,35 +948,49 @@ describe('PdfAnnotationEditor lifecycle', () => {
   });
 
   it('normalizes an authoritative modifier selection without replacing the native selection', async () => {
-    const current = fixture();
-    const annotation = createdAnnotation('', { id: 'selected-highlight' });
-    current.editor.setAnnotationProjection([{ annotation, stableId: 'selected-highlight' }]);
-    current.eventBus.dispatch('annotationeditoruimanager', {
-      source: current.viewer,
-      uiManager: manager(selectedEditor('selected-highlight', 9)),
-    });
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      const annotation = createdAnnotation('', { id: 'selected-highlight' });
+      current.editor.setAnnotationProjection([{ annotation, stableId: 'selected-highlight' }]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(selectedEditor('selected-highlight', 9)),
+      });
+      let nativeSelectionSettled = false;
+      window.setTimeout(() => {
+        nativeSelectionSettled = true;
+      }, 0);
+      current.commentBridge.focusAnnotation.mockImplementation(async () => {
+        expect(nativeSelectionSettled).toBe(true);
+        return true;
+      });
 
-    await expect(
-      current.editor.focusAnnotation('selected-highlight', {
+      const activation = current.editor.focusAnnotation('selected-highlight', {
         kind: 'root-click',
         preserveNativeSelection: true,
-      }),
-    ).resolves.toBe('editable');
+      });
+      await vi.runOnlyPendingTimersAsync();
 
-    expect(current.modeRequests).toEqual([]);
-    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
-      'selected-highlight',
-      expect.any(AbortSignal),
-      annotation,
-      { editableOnly: true, preserveSelection: true },
-    );
+      await expect(activation).resolves.toBe('editable');
+      expect(current.modeRequests).toEqual([]);
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+        'selected-highlight',
+        expect.any(AbortSignal),
+        annotation,
+        { editableOnly: true, preserveSelection: true },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('suppresses the duplicate PDF.js toolbar while unified controls are active and restores it on teardown', async () => {
     const current = fixture();
     const annotation = createdAnnotation('', { id: 'toolbar-highlight' });
     current.editor.setAnnotationProjection([{ annotation, stableId: 'toolbar-highlight' }]);
-    const anchor = document.body.createDiv({ cls: 'highlightEditor selectedEditor' });
+    const layer = document.body.createDiv({ cls: 'annotationEditorLayer' });
+    const anchor = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
     const toolbar = anchor.createDiv({ cls: 'editToolbar' });
     toolbar.setCssProps({ display: 'flex' });
     for (const label of ['color', 'comment', 'delete'])
@@ -992,14 +1010,24 @@ describe('PdfAnnotationEditor lifecycle', () => {
       current.editor.focusAnnotation('toolbar-highlight', { kind: 'root-click' }),
     ).resolves.toBe('editable');
 
+    const secondAnchor = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    const secondToolbar = secondAnchor.createDiv({ cls: 'editToolbar' });
+    secondToolbar.setCssProps({ display: 'grid' });
+    await vi.waitFor(() => {
+      expect(secondToolbar.hidden).toBe(true);
+      expect(secondToolbar.style.getPropertyValue('display')).toBe('none');
+    });
+
     current.editor.detachFromDocument();
     expect(toolbar.hidden).toBe(false);
     expect(toolbar.style.getPropertyValue('display')).toBe('flex');
     expect(toolbar.style.getPropertyPriority('display')).toBe('');
-    anchor.remove();
+    expect(secondToolbar.hidden).toBe(false);
+    expect(secondToolbar.style.getPropertyValue('display')).toBe('grid');
+    layer.remove();
   });
 
-  it('allows persisted deserialization to outlive the short creation timeout', async () => {
+  it('uses one activation deadline when pinned PDF.js dispatches mode after deserialization', async () => {
     vi.useFakeTimers();
     try {
       const current = fixture();
@@ -1010,17 +1038,138 @@ describe('PdfAnnotationEditor lifecycle', () => {
         source: current.viewer,
         uiManager,
       });
-      window.setTimeout(() => {
-        uiManager.firstSelectedEditor = selectedEditor('slow-ink', 15);
-        current.eventBus.dispatch('editorsrendered', { pageNumber: 1, source: {} });
-      }, 12_500);
+      Object.defineProperty(current.viewer, 'annotationEditorMode', {
+        configurable: true,
+        get: () => current.viewer.currentMode,
+        set: (request: { readonly mode: number }) => {
+          current.modeRequests.push({ ...request });
+          window.setTimeout(() => {
+            current.viewer.currentMode = request.mode;
+            if (request.mode === 15) {
+              uiManager.firstSelectedEditor = selectedEditor('slow-ink', 15);
+              current.eventBus.dispatch('editorsrendered', { pageNumber: 1, source: {} });
+            }
+            current.eventBus.dispatch('annotationeditormodechanged', {
+              mode: request.mode,
+              source: current.viewer,
+            });
+          }, 12_500);
+        },
+      });
 
       const activation = current.editor.focusAnnotation('slow-ink', { kind: 'root-click' });
       await vi.advanceTimersByTimeAsync(12_500);
       await vi.runOnlyPendingTimersAsync();
 
       await expect(activation).resolves.toBe('editable');
+      expect(current.modeRequests).toEqual([{ editComment: false, editId: 'slow-ink', mode: 15 }]);
+      expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps one absolute activation timeout and removes mode readiness resources', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture({ dispatchModeChanges: false });
+      const annotation = createdAnnotation('', { id: 'timed-out-highlight' });
+      current.editor.setAnnotationProjection([{ annotation, stableId: 'timed-out-highlight' }]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+      Object.defineProperty(current.viewer, 'annotationEditorMode', {
+        configurable: true,
+        get: () => current.viewer.currentMode,
+        set: (request: { readonly mode: number }) => {
+          current.modeRequests.push({ ...request });
+          current.viewer.currentMode = request.mode;
+          if (request.mode === 0)
+            queueMicrotask(() => {
+              current.eventBus.dispatch('annotationeditormodechanged', {
+                mode: request.mode,
+                source: current.viewer,
+              });
+            });
+        },
+      });
+      current.commentBridge.focusAnnotation.mockResolvedValue(true);
+      let result: string | null = null;
+      const activation = current.editor
+        .focusAnnotation('timed-out-highlight', { kind: 'root-click' })
+        .then((value) => {
+          result = value;
+          return value;
+        });
+
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(result).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.runOnlyPendingTimersAsync();
+
+      await expect(activation).resolves.toBe('readonly');
+      expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('aborts delayed mode readiness immediately and removes its timer and listener', async () => {
+    vi.useFakeTimers();
+    const current = fixture({ dispatchModeChanges: false });
+    let activation: Promise<'cancelled' | 'editable' | 'readonly'> | null = null;
+    try {
+      const annotation = createdAnnotation('', { id: 'aborted-highlight' });
+      current.editor.setAnnotationProjection([{ annotation, stableId: 'aborted-highlight' }]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+      Object.defineProperty(current.viewer, 'annotationEditorMode', {
+        configurable: true,
+        get: () => current.viewer.currentMode,
+        set: (request: { readonly mode: number }) => {
+          current.modeRequests.push({ ...request });
+          current.viewer.currentMode = request.mode;
+          if (request.mode === 0)
+            queueMicrotask(() => {
+              current.eventBus.dispatch('annotationeditormodechanged', {
+                mode: request.mode,
+                source: current.viewer,
+              });
+            });
+        },
+      });
+      const external = new AbortController();
+      let settled = false;
+      activation = current.editor
+        .focusAnnotation('aborted-highlight', {
+          kind: 'root-click',
+          signal: external.signal,
+        })
+        .finally(() => {
+          settled = true;
+        });
+      await Promise.resolve();
+
+      external.abort(new DOMException('Navigation superseded activation.', 'AbortError'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(settled).toBe(true);
+      await expect(activation).resolves.toBe('cancelled');
+      expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      current.eventBus.dispatch('annotationeditormodechanged', {
+        mode: current.viewer.currentMode,
+        source: current.viewer,
+      });
+      current.editor.detachFromDocument();
+      await activation?.catch(() => 'cancelled');
+      vi.clearAllTimers();
       vi.useRealTimers();
     }
   });
@@ -1114,7 +1263,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     );
   });
 
-  it('retries materialization after an earlier activation failure', async () => {
+  it('falls back read-only exactly once after current materialization failure then retries', async () => {
     const current = fixture();
     const annotation = createdAnnotation('', { id: 'retry' });
     current.editor.setAnnotationProjection([{ annotation, stableId: 'retry' }]);
@@ -1122,16 +1271,72 @@ describe('PdfAnnotationEditor lifecycle', () => {
       source: current.viewer,
       uiManager: manager(selectedEditor('retry', 9)),
     });
-    current.commentBridge.focusAnnotation.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    let editableAttempts = 0;
+    current.commentBridge.focusAnnotation.mockImplementation(
+      async (
+        _id,
+        _signal,
+        _projected,
+        options?: {
+          readonly editableOnly?: boolean;
+          readonly forceReadonly?: boolean;
+          readonly preserveSelection?: boolean;
+        },
+      ) => {
+        if (options?.forceReadonly === true) return true;
+        editableAttempts += 1;
+        return editableAttempts > 1;
+      },
+    );
 
     await expect(current.editor.focusAnnotation('retry', { kind: 'root-click' })).resolves.toBe(
-      'cancelled',
+      'readonly',
     );
     await expect(current.editor.focusAnnotation('retry', { kind: 'root-context' })).resolves.toBe(
       'editable',
     );
 
     expect(current.modeRequests.filter((request) => request['editId'] === 'retry')).toHaveLength(2);
+    expect(
+      current.commentBridge.focusAnnotation.mock.calls.filter(
+        ([, , , options]) =>
+          (options as { readonly forceReadonly?: boolean } | undefined)?.forceReadonly === true,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('cancels a deferred resolver before navigation, tool intent, or lifecycle replacement', async () => {
+    for (const lifecycle of ['abort', 'set-tool', 'detach', 'destroy', 'rebind'] as const) {
+      const current = fixture();
+      const uiManager = manager();
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      const resolved = deferred<DocumentAnnotation | null>();
+      current.editor.setAnnotationResolver(async () => resolved.promise);
+      const activation = current.editor.focusAnnotation(`resolver-${lifecycle}`, {
+        kind: 'sidebar',
+      });
+      await Promise.resolve();
+
+      if (lifecycle === 'abort') await current.editor.abortInteraction('Navigation closed reader.');
+      else if (lifecycle === 'set-tool') await current.editor.setTool('ink');
+      else if (lifecycle === 'detach') current.editor.detachFromDocument();
+      else if (lifecycle === 'destroy') current.editor.destroy();
+      else
+        current.eventBus.dispatch('annotationeditoruimanager', {
+          source: current.viewer,
+          uiManager: manager(),
+        });
+      const requestsAfterCancellation = [...current.modeRequests];
+      uiManager.firstSelectedEditor = selectedEditor(`resolver-${lifecycle}`, 9);
+      resolved.resolve(createdAnnotation('', { id: `resolver-${lifecycle}` }));
+
+      await expect(activation).resolves.toBe('cancelled');
+      expect(current.modeRequests).toEqual(requestsAfterCancellation);
+      expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+    }
   });
 
   it('neutralizes every creator mode before persisted activation', async () => {
@@ -1186,6 +1391,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       'locked-highlight',
       expect.any(AbortSignal),
       annotation,
+      { forceReadonly: true },
     );
   });
 

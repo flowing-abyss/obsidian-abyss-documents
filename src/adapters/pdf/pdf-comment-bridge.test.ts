@@ -57,6 +57,40 @@ function uiManager(selected: PdfCommentEditor | null = null) {
   };
 }
 
+function annotation(id: string, writable = true): DocumentAnnotation {
+  const unavailable = {
+    available: false as const,
+    reason: { code: 'document-read-only' as const, message: 'Locked.' },
+  };
+  const capability = writable ? ({ available: true } as const) : unavailable;
+  return {
+    anchor: {
+      coordinateSpace: 'page-points-top-left',
+      geometry: { kind: 'point', point: { x: 0, y: 0 } },
+      kind: 'fixed-page',
+      pageIndex: 0,
+    },
+    author: '',
+    capabilities: {
+      color: capability,
+      comment: capability,
+      conversions: { highlight: capability, underline: capability },
+      deletion: capability,
+      geometry: capability,
+      metadata: capability,
+    },
+    color: '#ffd400',
+    comment: '',
+    createdAt: null,
+    identity: { id: asAnnotationId(id), kind: 'stable' },
+    links: [],
+    modifiedAt: null,
+    selectedText: null,
+    tags: [],
+    type: 'highlight',
+  };
+}
+
 describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
   it('normalizes the new unselected native editor without adopting an older highlight', () => {
     const host = document.body.createDiv();
@@ -287,6 +321,48 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('observes PDF.js settled native selection and disconnects the observer on dispose', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'settled-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor' });
+    secondNode.id = 'settled-second';
+    const first = editor('First', { anchor: firstNode, uid: 'settled-first' });
+    const second = editor('Second', { anchor: secondNode, uid: 'settled-second' });
+    const manager = uiManager(first);
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'settled-first') return first;
+      if (id === 'settled-second') return second;
+      return undefined;
+    });
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+    bridge.toggleCommentPopup(first, true, true, true);
+
+    secondNode.addClass('selectedEditor');
+    await vi.waitFor(() => {
+      expect(focused[focused.length - 1]?.annotations).toHaveLength(2);
+    });
+
+    expect(focused[focused.length - 1]).toMatchObject({
+      annotations: [
+        { identity: { id: 'settled-first', kind: 'stable' } },
+        { identity: { id: 'settled-second', kind: 'stable' } },
+      ],
+      editable: true,
+    });
+    bridge.dispose();
+    expect(
+      (bridge as unknown as { selectionObserver: MutationObserver | null }).selectionObserver,
+    ).toBeNull();
+    host.remove();
+  });
+
   it('focuses selected FreeText when PDF.js has no comment data', async () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });
@@ -494,6 +570,47 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('forces an authoritative locked projection read-only despite a supported native editor', async () => {
+    const host = document.body.createDiv();
+    const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const nativeNode = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    nativeNode.id = 'pdfjs_internal_locked';
+    const native = editor('Native writable shape', {
+      anchor: nativeNode,
+      dataId: 'locked-highlight',
+      uid: 'pdfjs_internal_locked',
+    });
+    const manager = uiManager(native);
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+    const locked = annotation('locked-highlight', false);
+    const options = { forceReadonly: true } as Parameters<
+      PdfCommentBridge['focusAnnotation']
+    >[3] & { readonly forceReadonly: boolean };
+
+    await expect(
+      bridge.focusAnnotation('locked-highlight', undefined, locked, options),
+    ).resolves.toBe(true);
+
+    expect(focused).toHaveLength(1);
+    expect(focused[0]).toMatchObject({
+      annotations: [{ identity: { id: 'locked-highlight', kind: 'stable' } }],
+      editable: false,
+    });
+    expect(manager.setSelected).not.toHaveBeenCalled();
+    const normalized = focused[0]?.annotations[0];
+    if (normalized === undefined) throw new Error('Expected one locked annotation focus.');
+    expect(bridge.updateAnnotations({ annotations: [normalized], color: '#5fb236' })).toBe(false);
+    expect(bridge.deleteAnnotations([normalized])).toBe(false);
+    bridge.dispose();
+    host.remove();
+  });
+
   it('focuses one exact imported annotation through its public annotation-layer id', async () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationLayer' });
@@ -629,6 +746,31 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     });
     bridge.dispose();
     host.remove();
+  });
+
+  it('bounds missing-editor readiness scans and cleans observation on abort', async () => {
+    vi.useFakeTimers();
+    const host = document.body.createDiv();
+    const query = vi.spyOn(host, 'querySelectorAll');
+    const bridge = new PdfCommentBridge(host);
+    const abort = new AbortController();
+    try {
+      const focus = bridge.focusAnnotation('never-mounted', abort.signal);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(query.mock.calls.length).toBeLessThanOrEqual(2);
+      abort.abort(new DOMException('Superseded readiness.', 'AbortError'));
+      await expect(focus).resolves.toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      const callsAfterAbort = query.mock.calls.length;
+      host.createDiv({ cls: 'annotationEditorLayer' });
+      await Promise.resolve();
+      expect(query).toHaveBeenCalledTimes(callsAfterAbort);
+    } finally {
+      bridge.dispose();
+      host.remove();
+      vi.useRealTimers();
+    }
   });
 
   it('degrades mixed or unsupported selections to read-only operations', () => {

@@ -346,7 +346,7 @@ describe('AnnotationInteractionController', () => {
     expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
   });
 
-  it('routes normalized native single focus into the unified editor and keeps batch focus readonly', () => {
+  it('routes normalized single and exact multiple identities into the unified editor', () => {
     const test = fixture();
     const first = nativeAnnotation('First');
     const second = {
@@ -372,7 +372,7 @@ describe('AnnotationInteractionController', () => {
       }),
       expect.objectContaining({
         position: { x: 56, y: 78 },
-        target: { annotation: first, kind: 'readonly' },
+        target: { annotations: [first, second], kind: 'multiple' },
       }),
     ]);
     expect(test.commitSelection).not.toHaveBeenCalled();

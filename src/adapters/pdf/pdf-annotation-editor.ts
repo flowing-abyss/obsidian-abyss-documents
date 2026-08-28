@@ -167,7 +167,7 @@ interface PdfAnnotationEditorDependencies {
     | 'reserveNextDialog'
     | 'updateAnnotations'
   > &
-    Partial<Pick<PdfCommentBridge, 'setSidebarUiManager'>>;
+    Partial<Pick<PdfCommentBridge, 'refreshAnnotationFocus' | 'setSidebarUiManager'>>;
   readonly selectionObserver: PdfSelectionObserver;
   readonly viewer: PdfAnnotationViewer;
 }
@@ -183,9 +183,15 @@ interface CallbackOwnership {
 
 interface PendingModeChange {
   readonly clearTimeout: () => void;
+  readonly removeAbort: () => void;
   readonly reject: (reason: Error) => void;
   readonly listener: (event: unknown) => void;
   readonly resolve: () => void;
+}
+
+interface PendingReadonlyFocus {
+  readonly focus: PdfAnnotationFocus;
+  readonly timeout: number;
 }
 
 interface SelectionHighlightReservation {
@@ -236,7 +242,9 @@ interface SuppressedNativeToolbar {
 }
 
 interface AnnotationActivation {
+  allowReadonlyFocus: boolean;
   readonly controller: AbortController;
+  readonly deadline: number;
   readonly epoch: number;
   readonly id: string;
   readonly lifecycleRevision: number;
@@ -259,6 +267,7 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 export class PdfAnnotationEditor {
+  private readonly annotationFocusListeners = new Set<(focus: PdfAnnotationFocus | null) => void>();
   private readonly colorListeners = new Set<(color: string) => void>();
   private readonly dirtyListeners = new Set<(dirty: boolean) => void>();
   private readonly editorAddedListeners = new Set<(type: number | null) => void>();
@@ -282,9 +291,14 @@ export class PdfAnnotationEditor {
   private activeActivation: AnnotationActivation | null = null;
   private annotationResolver: PdfAnnotationResolver | null = null;
   private readonly projectedAnnotations = new Map<string, DocumentAnnotation>();
+  private readonly removeBridgeFocusListener: () => void;
+  private pendingReadonlyFocus: PendingReadonlyFocus | null = null;
 
   constructor(private readonly dependencies: PdfAnnotationEditorDependencies) {
     this.storage = dependencies.pdf.annotationStorage;
+    this.removeBridgeFocusListener = dependencies.commentBridge.onAnnotationFocus(
+      this.onBridgeAnnotationFocus,
+    );
     dependencies.eventBus.on('annotationeditoruimanager', this.onManager);
     dependencies.eventBus.on('annotationeditormodechanged', this.onNativeMode);
     dependencies.eventBus.on('editingstateschanged', this.onEditingState);
@@ -292,6 +306,7 @@ export class PdfAnnotationEditor {
   }
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
+    this.cancelAnnotationActivation('The PDF annotation activation was superseded by a tool.');
     this.requireManager();
     const contextual = this.contextualEditSession;
     if (contextual !== null) await this.closeContextualEditSession(contextual);
@@ -343,7 +358,11 @@ export class PdfAnnotationEditor {
   }
 
   onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void {
-    return this.dependencies.commentBridge.onAnnotationFocus(listener);
+    if (this.destroyed) return () => undefined;
+    this.annotationFocusListeners.add(listener);
+    return () => {
+      this.annotationFocusListeners.delete(listener);
+    };
   }
 
   setAnnotationProjection(annotations: readonly PdfProjectedAnnotation[]): void {
@@ -370,36 +389,58 @@ export class PdfAnnotationEditor {
     return this.startAnnotationActivation(id, source.signal, async (activation) => {
       const projected = await this.resolveProjectedAnnotation(id, activation);
       if (!this.isCurrentActivation(activation) || projected === null) return 'cancelled';
-      const kind = editableKindForAnnotation(projected);
-      if (kind === null || !annotationIsWritable(projected)) {
-        const focused = await waitWithSignal(
-          this.dependencies.commentBridge.focusAnnotation(
-            id,
-            activation.controller.signal,
-            projected,
-          ),
-          activation.controller.signal,
-        );
-        return this.isCurrentActivation(activation) && focused ? 'readonly' : 'cancelled';
-      }
-      if (source.preserveNativeSelection === true) {
-        const focused = await waitWithSignal(
-          this.dependencies.commentBridge.focusAnnotation(
-            id,
-            activation.controller.signal,
-            projected,
-            { editableOnly: true, preserveSelection: true },
-          ),
-          activation.controller.signal,
-        );
-        return this.isCurrentActivation(activation) && focused ? 'editable' : 'cancelled';
-      }
-      return this.activateWithinEpoch(
-        { anchor: projected.anchor, editComment: false, id, kind },
-        projected,
-        activation,
-      );
+      return this.focusResolvedAnnotation(id, source, projected, activation);
     });
+  }
+
+  private focusResolvedAnnotation(
+    id: string,
+    source: PdfAnnotationActivationSource,
+    projected: DocumentAnnotation,
+    activation: AnnotationActivation,
+  ): Promise<PdfAnnotationActivationResult> {
+    const kind = editableKindForAnnotation(projected);
+    if (kind === null || !annotationIsWritable(projected))
+      return this.focusReadonlyProjected(id, projected, activation);
+    if (source.preserveNativeSelection === true)
+      return this.focusPreservedNativeSelection(id, projected, activation);
+    return this.activateWithinEpoch(
+      { anchor: projected.anchor, editComment: false, id, kind },
+      projected,
+      activation,
+    );
+  }
+
+  private async focusReadonlyProjected(
+    id: string,
+    projected: DocumentAnnotation,
+    activation: AnnotationActivation,
+  ): Promise<PdfAnnotationActivationResult> {
+    activation.allowReadonlyFocus = true;
+    const focused = await waitWithSignal(
+      this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+        forceReadonly: true,
+      }),
+      activation.controller.signal,
+    );
+    return this.isCurrentActivation(activation) && focused ? 'readonly' : 'cancelled';
+  }
+
+  private async focusPreservedNativeSelection(
+    id: string,
+    projected: DocumentAnnotation,
+    activation: AnnotationActivation,
+  ): Promise<PdfAnnotationActivationResult> {
+    await waitWithSignal(nextTask(), activation.controller.signal);
+    if (!this.isCurrentActivation(activation)) return 'cancelled';
+    const focused = await waitWithSignal(
+      this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+        editableOnly: true,
+        preserveSelection: true,
+      }),
+      activation.controller.signal,
+    );
+    return this.isCurrentActivation(activation) && focused ? 'editable' : 'cancelled';
   }
 
   activateAnnotation(request: {
@@ -434,7 +475,9 @@ export class PdfAnnotationEditor {
     externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
     const settled = deferred<PdfAnnotationActivationResult>();
     const activation: AnnotationActivation = {
+      allowReadonlyFocus: false,
       controller,
+      deadline: Date.now() + ANNOTATION_ACTIVATION_TIMEOUT_MS,
       epoch: ++this.activationEpoch,
       id,
       lifecycleRevision: this.lifecycleRevision,
@@ -488,14 +531,14 @@ export class PdfAnnotationEditor {
       if (!(await this.prepareContextualActivation(activation))) return 'cancelled';
       session = this.beginContextualActivation(request, activation);
       if (!(await this.selectContextualEditor(request, session, activation)))
-        return this.failContextualActivation(session);
+        return this.failContextualActivation(session, projected, activation);
       if (!(await this.focusContextualEditor(request.id, projected, session, activation)))
-        return this.failContextualActivation(session);
+        return this.failContextualActivation(session, projected, activation);
       return 'editable';
     } catch {
-      if (session !== null && this.contextualEditSession === session)
-        await this.containFailedContextualEntry(session);
-      return 'cancelled';
+      return session === null
+        ? 'cancelled'
+        : this.failContextualActivation(session, projected, activation);
     }
   }
 
@@ -512,9 +555,13 @@ export class PdfAnnotationEditor {
       this.logicalMode !== 'neutral' ||
       this.dependencies.viewer.annotationEditorMode !== this.dependencies.annotationEditorType.NONE
     ) {
-      await waitWithSignal(
-        this.changeMode(this.dependencies.annotationEditorType.NONE),
-        activation.controller.signal,
+      await this.changeMode(
+        this.dependencies.annotationEditorType.NONE,
+        {},
+        {
+          deadline: activation.deadline,
+          signal: activation.controller.signal,
+        },
       );
       if (!this.isCurrentActivation(activation)) return false;
     }
@@ -546,12 +593,20 @@ export class PdfAnnotationEditor {
     session: ContextualEditSession,
     activation: AnnotationActivation,
   ): Promise<boolean> {
-    await waitWithSignal(
-      this.changeMode(session.mode, { editComment: request.editComment, editId: request.id }),
-      activation.controller.signal,
+    await this.changeMode(
+      session.mode,
+      { editComment: request.editComment, editId: request.id },
+      { deadline: activation.deadline, signal: activation.controller.signal },
     );
     if (!this.isActiveContextualSession(session, activation)) return false;
-    if (!(await this.waitForRequestedEditor(session, activation.controller.signal))) return false;
+    if (
+      !(await this.waitForRequestedEditor(
+        session,
+        activation.controller.signal,
+        activation.deadline,
+      ))
+    )
+      return false;
     if (!this.isCurrentActivation(activation)) return false;
     await waitWithSignal(nextTask(), activation.controller.signal);
     if (!this.isActiveContextualSession(session, activation)) return false;
@@ -586,21 +641,39 @@ export class PdfAnnotationEditor {
 
   private async failContextualActivation(
     session: ContextualEditSession,
+    projected: DocumentAnnotation | undefined,
+    activation: AnnotationActivation,
   ): Promise<PdfAnnotationActivationResult> {
-    await this.containFailedContextualEntry(session);
-    return 'cancelled';
+    try {
+      await this.containFailedContextualEntry(session);
+    } catch {
+      return 'cancelled';
+    }
+    if (!this.isCurrentActivation(activation)) return 'cancelled';
+    activation.allowReadonlyFocus = true;
+    const focused = await waitWithSignal(
+      this.dependencies.commentBridge.focusAnnotation(
+        activation.id,
+        activation.controller.signal,
+        projected,
+        { forceReadonly: true },
+      ),
+      activation.controller.signal,
+    );
+    return this.isCurrentActivation(activation) && focused ? 'readonly' : 'cancelled';
   }
 
   private waitForRequestedEditor(
     session: ContextualEditSession,
     signal: AbortSignal,
+    deadline: number,
   ): Promise<boolean> {
     if (this.isRequestedEditorSelected(session)) return Promise.resolve(true);
     return new Promise((resolve) => {
       let settled = false;
       let timeoutId: number | null = window.setTimeout(() => {
         finish(false);
-      }, ANNOTATION_ACTIVATION_TIMEOUT_MS);
+      }, remainingDeadlineMs(deadline));
       const finish = (selected: boolean): void => {
         if (settled) return;
         settled = true;
@@ -870,6 +943,7 @@ export class PdfAnnotationEditor {
   }
 
   async abortInteraction(message: string): Promise<void> {
+    this.cancelAnnotationActivation(message);
     const transaction = this.pendingSelectionTransaction;
     if (transaction !== null) {
       await this.abortAndWaitForTransaction(transaction, new DOMException(message, 'AbortError'));
@@ -880,20 +954,31 @@ export class PdfAnnotationEditor {
     await this.closeContextualEditSession(contextual);
   }
 
-  private async changeMode(mode: number, options: PdfAnnotationModeOptions = {}): Promise<void> {
+  private async changeMode(
+    mode: number,
+    options: PdfAnnotationModeOptions = {},
+    wait: { readonly deadline?: number; readonly signal?: AbortSignal } = {},
+  ): Promise<void> {
+    if (wait.signal?.aborted === true) throw abortReason(wait.signal);
     if (this.dependencies.viewer.annotationEditorMode === mode) return;
     this.cancelPendingModeChange('The PDF annotation tool change was superseded.');
     await new Promise<void>((resolve, reject) => {
-      let timeoutId: number | null = window.setTimeout(() => {
-        const pending = this.pendingModeChange;
-        if (pending?.listener !== listener) return;
-        this.pendingModeChange = null;
-        this.dependencies.eventBus.off('annotationeditormodechanged', listener);
-        timeoutId = null;
-        reject(
-          new DOMException('Changing the PDF annotation editor mode timed out.', 'TimeoutError'),
-        );
-      }, SELECTION_TRANSACTION_TIMEOUT_MS);
+      let timeoutId: number | null = window.setTimeout(
+        () => {
+          const pending = this.pendingModeChange;
+          if (pending?.listener !== listener) return;
+          this.pendingModeChange = null;
+          this.dependencies.eventBus.off('annotationeditormodechanged', listener);
+          removeAbort();
+          timeoutId = null;
+          reject(
+            new DOMException('Changing the PDF annotation editor mode timed out.', 'TimeoutError'),
+          );
+        },
+        wait.deadline === undefined
+          ? SELECTION_TRANSACTION_TIMEOUT_MS
+          : remainingDeadlineMs(wait.deadline),
+      );
       const clearTimeout = (): void => {
         const currentTimeout = timeoutId;
         timeoutId = null;
@@ -904,12 +989,26 @@ export class PdfAnnotationEditor {
         if (data?.['source'] !== this.dependencies.viewer || data['mode'] !== mode) return;
         this.dependencies.eventBus.off('annotationeditormodechanged', listener);
         clearTimeout();
+        removeAbort();
         const pending = this.pendingModeChange;
         if (pending !== null && pending.listener === listener) this.pendingModeChange = null;
         resolve();
       };
-      this.pendingModeChange = { clearTimeout, listener, reject, resolve };
+      const onAbort = (): void => {
+        const pending = this.pendingModeChange;
+        if (pending?.listener !== listener || wait.signal === undefined) return;
+        this.pendingModeChange = null;
+        this.dependencies.eventBus.off('annotationeditormodechanged', listener);
+        clearTimeout();
+        removeAbort();
+        reject(abortReason(wait.signal));
+      };
+      const removeAbort = (): void => {
+        wait.signal?.removeEventListener('abort', onAbort);
+      };
+      this.pendingModeChange = { clearTimeout, listener, reject, removeAbort, resolve };
       this.dependencies.eventBus.on('annotationeditormodechanged', listener);
+      wait.signal?.addEventListener('abort', onAbort, { once: true });
       try {
         this.dependencies.viewer.annotationEditorMode = {
           mode,
@@ -926,6 +1025,7 @@ export class PdfAnnotationEditor {
       } catch (cause) {
         this.dependencies.eventBus.off('annotationeditormodechanged', listener);
         clearTimeout();
+        removeAbort();
         this.pendingModeChange = null;
         reject(cause instanceof Error ? cause : new Error(String(cause)));
       }
@@ -1215,6 +1315,39 @@ export class PdfAnnotationEditor {
     this.projectedAnnotations.clear();
     this.annotationResolver = null;
     this.releaseContextualEditSession();
+    this.clearPendingReadonlyFocus();
+    this.removeBridgeFocusListener();
+    this.annotationFocusListeners.clear();
+  }
+
+  private readonly onBridgeAnnotationFocus = (focus: PdfAnnotationFocus | null): void => {
+    this.clearPendingReadonlyFocus();
+    if (focus?.editable !== false) {
+      this.emitAnnotationFocus(focus);
+      return;
+    }
+    const pending: PendingReadonlyFocus = {
+      focus,
+      timeout: window.setTimeout(() => {
+        if (this.pendingReadonlyFocus !== pending) return;
+        this.pendingReadonlyFocus = null;
+        const activation = this.activeActivation;
+        if (activation !== null && !activation.allowReadonlyFocus) return;
+        this.emitAnnotationFocus(pending.focus);
+      }, 0),
+    };
+    this.pendingReadonlyFocus = pending;
+  };
+
+  private emitAnnotationFocus(focus: PdfAnnotationFocus | null): void {
+    for (const listener of this.annotationFocusListeners) listener(focus);
+  }
+
+  private clearPendingReadonlyFocus(): void {
+    const pending = this.pendingReadonlyFocus;
+    if (pending === null) return;
+    window.clearTimeout(pending.timeout);
+    this.pendingReadonlyFocus = null;
   }
 
   private readonly onManager = (event: unknown): void => {
@@ -1287,12 +1420,19 @@ export class PdfAnnotationEditor {
   }
 
   private readonly onEditingState = (event: unknown): void => {
-    const session = this.contextualEditSession;
-    if (this.destroyed || session === null) return;
+    if (this.destroyed) return;
     const data = record(event);
-    if (data?.['source'] !== session.manager) return;
-    const details = record(data['details']);
-    const hasSelectedEditor = details?.['hasSelectedEditor'];
+    if (data?.['source'] !== this.manager) return;
+    this.dependencies.commentBridge.refreshAnnotationFocus?.();
+    const session = this.contextualEditSession;
+    if (session === null) return;
+    this.applyContextualEditingState(session, record(data['details'])?.['hasSelectedEditor']);
+  };
+
+  private applyContextualEditingState(
+    session: ContextualEditSession,
+    hasSelectedEditor: unknown,
+  ): void {
     if (hasSelectedEditor === true) {
       if (this.isRequestedEditorSelected(session)) session.phase = 'selected';
       return;
@@ -1301,7 +1441,7 @@ export class PdfAnnotationEditor {
     void this.closeContextualEditSession(session).catch((cause: unknown) => {
       console.error('[abyss-documents] Failed to close the PDF annotation editor', { cause });
     });
-  };
+  }
 
   private isRequestedEditorSelected(session: ContextualEditSession): boolean {
     const selected = session.manager.firstSelectedEditor;
@@ -1361,14 +1501,17 @@ export class PdfAnnotationEditor {
   }
 
   private suppressContextualToolbar(session: ContextualEditSession): void {
+    if (session.toolbarObserver !== null) return;
     const editor = session.manager.firstSelectedEditor;
     if (nativeEditorAnnotationId(editor) !== session.id) return;
     const anchor = editor?.elementBeforePopup;
     const owner = anchor?.ownerDocument.defaultView;
     if (anchor === undefined || anchor === null || owner === null || owner === undefined) return;
+    const root = anchor.closest<HTMLElement>('.annotationEditorLayer') ?? anchor;
     const suppress = (): void => {
       if (this.contextualEditSession !== session || session.phase === 'closing') return;
-      for (const toolbar of Array.from(anchor.querySelectorAll<HTMLElement>('.editToolbar'))) {
+      const selector = root === anchor ? '.editToolbar' : '.selectedEditor .editToolbar';
+      for (const toolbar of Array.from(root.querySelectorAll<HTMLElement>(selector))) {
         if (!session.suppressedToolbars.has(toolbar)) {
           session.suppressedToolbars.set(toolbar, {
             display: toolbar.style.getPropertyValue('display'),
@@ -1381,9 +1524,13 @@ export class PdfAnnotationEditor {
       }
     };
     suppress();
-    if (session.toolbarObserver !== null) return;
     session.toolbarObserver = new owner.MutationObserver(suppress);
-    session.toolbarObserver.observe(anchor, { childList: true, subtree: true });
+    session.toolbarObserver.observe(root, {
+      attributeFilter: ['class'],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
   }
 
   private closeContextualEditSession(session: ContextualEditSession): Promise<void> {
@@ -1742,6 +1889,7 @@ export class PdfAnnotationEditor {
     this.pendingModeChange = null;
     this.dependencies.eventBus.off('annotationeditormodechanged', pending.listener);
     pending.clearTimeout();
+    pending.removeAbort();
     pending.reject(new DOMException(message, 'AbortError'));
   }
 
@@ -1751,6 +1899,7 @@ export class PdfAnnotationEditor {
     this.pendingModeChange = null;
     this.dependencies.eventBus.off('annotationeditormodechanged', pending.listener);
     pending.clearTimeout();
+    pending.removeAbort();
     pending.resolve();
   }
 
@@ -1828,6 +1977,10 @@ function abortReason(signal: AbortSignal): Error {
     return reason as Error;
   }
   return new DOMException('The PDF annotation interaction was cancelled.', 'AbortError');
+}
+
+function remainingDeadlineMs(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
 }
 
 function deferred<T>(): {
