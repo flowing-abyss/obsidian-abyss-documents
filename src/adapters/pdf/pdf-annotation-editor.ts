@@ -1703,16 +1703,9 @@ export class PdfAnnotationEditor {
   ): Promise<void> {
     if (this.contextualEditSession !== session) return;
     this.guardContextualEditSession(session);
-    try {
-      await this.closeContextualEditSession(session, signal === undefined ? {} : { signal });
-    } catch {
-      if (
-        signal?.aborted === true &&
-        this.dependencies.viewer.annotationEditorMode ===
-          this.dependencies.annotationEditorType.NONE
-      )
-        this.releaseContextualEditSession(session);
-    }
+    await this.closeContextualEditSession(session, signal === undefined ? {} : { signal }).catch(
+      () => undefined,
+    );
   }
 
   private readonly onContextualEditorsRendered = (event: unknown): void => {
@@ -1786,7 +1779,11 @@ export class PdfAnnotationEditor {
       },
     );
     const closing = transition.finally(() => {
-      if (session.closing === closing) session.closing = null;
+      if (
+        session.closing === closing &&
+        (this.contextualEditSession !== session || wait.signal?.aborted !== true)
+      )
+        session.closing = null;
     });
     session.closing = closing;
     return closing;

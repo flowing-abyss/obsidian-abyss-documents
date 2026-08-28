@@ -1308,12 +1308,13 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
-  it('does not start a fresh timeout when NONE containment cannot be confirmed', async () => {
+  it('keeps getter-only NONE containment guarded until a late confirmed NONE releases once', async () => {
     vi.useFakeTimers();
     const layer = document.body.createDiv({ cls: 'annotationEditorLayer' });
     const anchor = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
     const toolbar = anchor.createDiv({ cls: 'editToolbar' });
     toolbar.setCssProps({ display: 'flex' });
+    const disconnect = vi.spyOn(MutationObserver.prototype, 'disconnect');
     try {
       const current = fixture({ dispatchModeChanges: false });
       const projected = createdAnnotation('', { id: 'containment-deadline' });
@@ -1356,23 +1357,39 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect(outcome).toBe('pending');
       await vi.advanceTimersByTimeAsync(1);
 
-      const result = await activation;
-      expect(current.editor.hasContextualEdit).toBe(false);
+      await expect(activation).resolves.toBe('cancelled');
+      expect(current.editor.hasContextualEdit).toBe(true);
       expect(current.viewer.annotationEditorMode).toBe(0);
-      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalledWith(
         'containment-deadline',
         expect.any(AbortSignal),
         projected,
         { forceReadonly: true },
       );
-      expect(result).toBe('readonly');
       expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(1);
+      expect(uiManager.disableUserSelect.mock.calls).toEqual([[true]]);
+      expect(toolbar.hidden).toBe(true);
+      expect(disconnect).not.toHaveBeenCalled();
+
+      current.eventBus.dispatch('annotationeditormodechanged', {
+        mode: 0,
+        source: current.viewer,
+      });
+      current.eventBus.dispatch('annotationeditormodechanged', {
+        mode: 0,
+        source: current.viewer,
+      });
+
+      expect(current.editor.hasContextualEdit).toBe(false);
       expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
       expect(uiManager.disableUserSelect.mock.calls).toEqual([[true], [false]]);
       expect(toolbar.hidden).toBe(false);
       expect(toolbar.style.getPropertyValue('display')).toBe('flex');
+      expect(disconnect).toHaveBeenCalledTimes(1);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
+      disconnect.mockRestore();
       layer.remove();
       vi.clearAllTimers();
       vi.useRealTimers();

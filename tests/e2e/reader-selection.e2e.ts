@@ -710,8 +710,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         card,
         cardDisconnects: 0,
         cardRemounts: 0,
-        canvas,
-        canvasDisconnects: 0,
+        canvasIdentities: new Set<HTMLCanvasElement>([canvas]),
         canvasReplacements: 0,
         canvasWrapper,
         canvasWrapperDisconnects: 0,
@@ -720,6 +719,8 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         canvasWrapperRemounts: 0,
         events: [] as string[],
         hiddenAfterVisible: 0,
+        initialCanvas: canvas,
+        initialCanvasDisconnects: 0,
         lastPopoverVisible: false,
         page,
         pageDisconnects: 0,
@@ -731,6 +732,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         readerDisconnects: 0,
         readerRemounts: 0,
         readonlyVisible: 0,
+        replacementCanvas: null as HTMLCanvasElement | null,
         viewer,
         viewerDisconnects: 0,
         viewerRemounts: 0,
@@ -739,6 +741,49 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         target !== null &&
         (node === target ||
           (node.nodeType === Node.ELEMENT_NODE && (node as Element).contains(target)));
+      const canvasesWithin = (node: Node): HTMLCanvasElement[] => {
+        if (node.nodeType !== Node.ELEMENT_NODE) return [];
+        const element = node as Element;
+        return [
+          ...(element.matches('canvas') ? [element as HTMLCanvasElement] : []),
+          ...Array.from(element.querySelectorAll<HTMLCanvasElement>('canvas')),
+        ];
+      };
+      const processCanvasRecords = (
+        canvasTrace: {
+          canvasIdentities: Set<HTMLCanvasElement>;
+          canvasReplacements: number;
+          canvasWrapper: HTMLElement;
+          initialCanvas: HTMLCanvasElement;
+          initialCanvasDisconnects: number;
+          replacementCanvas: HTMLCanvasElement | null;
+        },
+        records: MutationRecord[],
+      ): void => {
+        for (const record of records) {
+          if (record.type !== 'childList') continue;
+          for (const removed of Array.from(record.removedNodes)) {
+            if (removedTarget(removed, canvasTrace.initialCanvas))
+              canvasTrace.initialCanvasDisconnects += 1;
+          }
+          const addedWithinWrapper =
+            record.target === canvasTrace.canvasWrapper ||
+            canvasTrace.canvasWrapper.contains(record.target);
+          if (!addedWithinWrapper) continue;
+          for (const added of Array.from(record.addedNodes)) {
+            for (const addedCanvas of canvasesWithin(added)) {
+              if (
+                addedCanvas === canvasTrace.initialCanvas ||
+                canvasTrace.canvasIdentities.has(addedCanvas)
+              )
+                continue;
+              canvasTrace.canvasIdentities.add(addedCanvas);
+              canvasTrace.canvasReplacements += 1;
+              canvasTrace.replacementCanvas ??= addedCanvas;
+            }
+          }
+        }
+      };
       const styleHides = (value: string | null): boolean =>
         /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)(?:\s*!important)?\s*(?:;|$)/iu.test(
           value ?? '',
@@ -762,6 +807,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         return popover.getAttribute(attributeName);
       };
       const processRecords = (records: MutationRecord[]): void => {
+        processCanvasRecords(trace, records);
         const firstHidden = records.find(
           (record) =>
             record.type === 'attributes' &&
@@ -783,7 +829,6 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
             if (removedTarget(removed, reader)) trace.readerDisconnects += 1;
             if (removedTarget(removed, viewer)) trace.viewerDisconnects += 1;
             if (removedTarget(removed, page)) trace.pageDisconnects += 1;
-            if (removedTarget(removed, trace.canvas)) trace.canvasDisconnects += 1;
             if (removedTarget(removed, canvasWrapper)) trace.canvasWrapperDisconnects += 1;
             if (removedTarget(removed, popover)) trace.popoverDisconnects += 1;
             if (removedTarget(removed, card)) trace.cardDisconnects += 1;
@@ -820,10 +865,6 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
           trace.canvasWrapperRemounts += 1;
         const currentCanvas = canvasWrapper.querySelector<HTMLCanvasElement>('canvas');
         if (currentCanvas === null) trace.canvasWrapperEmpty += 1;
-        else if (currentCanvas !== trace.canvas) {
-          trace.canvas = currentCanvas;
-          trace.canvasReplacements += 1;
-        }
         if (canvasWrapper.hidden || getComputedStyle(canvasWrapper).display === 'none')
           trace.canvasWrapperHidden += 1;
         if (leaf.querySelector(popoverSelector) !== popover || !popover.isConnected)
@@ -892,7 +933,46 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         trace.events.splice(0);
         trace.lastPopoverVisible = false;
       };
+      const verifyTwoPhaseCanvasTrace = (): void => {
+        const testWrapper = document.body.createDiv();
+        const testInitialCanvas = testWrapper.createEl('canvas');
+        const testReplacementCanvas = testWrapper.createEl('canvas');
+        testReplacementCanvas.remove();
+        const testTrace = {
+          canvasIdentities: new Set<HTMLCanvasElement>([testInitialCanvas]),
+          canvasReplacements: 0,
+          canvasWrapper: testWrapper,
+          initialCanvas: testInitialCanvas,
+          initialCanvasDisconnects: 0,
+          replacementCanvas: null as HTMLCanvasElement | null,
+        };
+        const childListRecord = (addedNodes: Node[], removedNodes: Node[]): MutationRecord =>
+          ({
+            addedNodes,
+            removedNodes,
+            target: testWrapper,
+            type: 'childList',
+          }) as unknown as MutationRecord;
+        try {
+          testWrapper.prepend(testReplacementCanvas);
+          processCanvasRecords(testTrace, [childListRecord([testReplacementCanvas], [])]);
+          testInitialCanvas.remove();
+          processCanvasRecords(testTrace, [childListRecord([], [testInitialCanvas])]);
+          if (
+            testTrace.canvasReplacements !== 1 ||
+            testTrace.initialCanvasDisconnects !== 1 ||
+            testTrace.canvasIdentities.size !== 2 ||
+            testTrace.replacementCanvas !== testReplacementCanvas ||
+            testInitialCanvas.isConnected ||
+            !testReplacementCanvas.isConnected
+          )
+            throw new Error('Persisted activation trace missed two-phase canvas replacement.');
+        } finally {
+          testWrapper.remove();
+        }
+      };
       verifySynchronousHideTrace();
+      verifyTwoPhaseCanvasTrace();
       (
         window as Window & { __abyssTask3ActivationTrace?: typeof trace }
       ).__abyssTask3ActivationTrace = trace;
@@ -911,8 +991,7 @@ async function assertPersistedActivationTrace(): Promise<void> {
         card: HTMLElement | null;
         cardDisconnects: number;
         cardRemounts: number;
-        canvas: HTMLCanvasElement;
-        canvasDisconnects: number;
+        canvasIdentities: Set<HTMLCanvasElement>;
         canvasReplacements: number;
         canvasWrapper: HTMLElement;
         canvasWrapperDisconnects: number;
@@ -922,6 +1001,8 @@ async function assertPersistedActivationTrace(): Promise<void> {
         cleanup(): void;
         events: string[];
         hiddenAfterVisible: number;
+        initialCanvas: HTMLCanvasElement;
+        initialCanvasDisconnects: number;
         page: HTMLElement;
         pageDisconnects: number;
         pageRemounts: number;
@@ -932,6 +1013,7 @@ async function assertPersistedActivationTrace(): Promise<void> {
         readerDisconnects: number;
         readerRemounts: number;
         readonlyVisible: number;
+        replacementCanvas: HTMLCanvasElement | null;
         viewer: HTMLElement;
         viewerDisconnects: number;
         viewerRemounts: number;
@@ -945,8 +1027,7 @@ async function assertPersistedActivationTrace(): Promise<void> {
       cardConnected: current.card?.isConnected ?? true,
       cardDisconnects: current.cardDisconnects,
       cardRemounts: current.cardRemounts,
-      canvasConnected: current.canvas.isConnected,
-      canvasDisconnects: current.canvasDisconnects,
+      canvasIdentityCount: current.canvasIdentities.size,
       canvasReplacements: current.canvasReplacements,
       canvasWrapperConnected: current.canvasWrapper.isConnected,
       canvasWrapperDisconnects: current.canvasWrapperDisconnects,
@@ -956,6 +1037,8 @@ async function assertPersistedActivationTrace(): Promise<void> {
       eventCount: current.events.length,
       events: current.events,
       hiddenAfterVisible: current.hiddenAfterVisible,
+      initialCanvasConnected: current.initialCanvas.isConnected,
+      initialCanvasDisconnects: current.initialCanvasDisconnects,
       pageConnected: current.page.isConnected,
       pageDisconnects: current.pageDisconnects,
       pageRemounts: current.pageRemounts,
@@ -966,6 +1049,10 @@ async function assertPersistedActivationTrace(): Promise<void> {
       readerDisconnects: current.readerDisconnects,
       readerRemounts: current.readerRemounts,
       readonlyVisible: current.readonlyVisible,
+      replacementCanvasConnected: current.replacementCanvas?.isConnected ?? false,
+      replacementCanvasOwned:
+        current.replacementCanvas !== null &&
+        current.canvasWrapper.contains(current.replacementCanvas),
       viewerConnected: current.viewer.isConnected,
       viewerDisconnects: current.viewerDisconnects,
       viewerRemounts: current.viewerRemounts,
@@ -978,8 +1065,7 @@ async function assertPersistedActivationTrace(): Promise<void> {
     cardConnected: true,
     cardDisconnects: 0,
     cardRemounts: 0,
-    canvasConnected: true,
-    canvasDisconnects: 1,
+    canvasIdentityCount: 2,
     canvasReplacements: 1,
     canvasWrapperConnected: true,
     canvasWrapperDisconnects: 0,
@@ -987,6 +1073,8 @@ async function assertPersistedActivationTrace(): Promise<void> {
     canvasWrapperHidden: 0,
     canvasWrapperRemounts: 0,
     hiddenAfterVisible: 0,
+    initialCanvasConnected: false,
+    initialCanvasDisconnects: 1,
     pageConnected: true,
     pageDisconnects: 0,
     pageRemounts: 0,
@@ -997,6 +1085,8 @@ async function assertPersistedActivationTrace(): Promise<void> {
     readerDisconnects: 0,
     readerRemounts: 0,
     readonlyVisible: 0,
+    replacementCanvasConnected: true,
+    replacementCanvasOwned: true,
     viewerConnected: true,
     viewerDisconnects: 0,
     viewerRemounts: 0,
