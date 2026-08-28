@@ -203,6 +203,62 @@ describe('extractAnnotations', () => {
     expect(pdf.getPage).toHaveBeenCalledTimes(1);
   });
 
+  it('propagates sink failures instead of diagnosing them as page-read failures', async () => {
+    const cause = new Error('annotation sink failed');
+    const onPageError = vi.fn();
+    const pdf = {
+      numPages: 2,
+      getPage: vi.fn(async () => page([{ annotationType: 1, id: 'one' }])),
+    };
+
+    await expect(
+      extractAnnotations(
+        pdf,
+        new AbortController().signal,
+        () => {
+          throw cause;
+        },
+        onPageError,
+      ),
+    ).rejects.toBe(cause);
+    expect(onPageError).not.toHaveBeenCalled();
+    expect(pdf.getPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('budgets structural-only pages and observes cancellation at an owned yield', async () => {
+    const controller = new AbortController();
+    const onBatch = vi.fn();
+    let tick = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => (tick += 30));
+    let yieldCount = 0;
+    const timeout = vi.spyOn(window, 'setTimeout').mockImplementation((callback) => {
+      yieldCount += 1;
+      if (yieldCount === 2) controller.abort();
+      callback();
+      return yieldCount as unknown as ReturnType<typeof window.setTimeout>;
+    });
+
+    await expect(
+      extractAnnotations(
+        {
+          numPages: 1,
+          getPage: vi.fn(async () =>
+            page(
+              Array.from({ length: 10 }, (_, index) => ({
+                annotationType: 2,
+                id: `link-${String(index)}`,
+              })),
+            ),
+          ),
+        },
+        controller.signal,
+        onBatch,
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(timeout).toHaveBeenCalledTimes(2);
+    expect(onBatch).not.toHaveBeenCalled();
+  });
+
   it('flushes a large page in time-bounded batches without rendering it', async () => {
     beginPluginActivation();
     endPluginActivation();

@@ -324,10 +324,47 @@ describe('AnnotationProjection', () => {
         comment: 'Editor comment',
         tags: [],
         links: [],
-        capabilities: { deletion: { available: false } },
+        capabilities: { deletion: { available: true } },
       },
       writable: false,
     });
+  });
+
+  it('does not let live writability escalate a verified capability matrix', () => {
+    const projection = new AnnotationProjection();
+    const unavailableConversion = {
+      available: false as const,
+      reason: {
+        code: 'lossy-conversion' as const,
+        message: 'Annotation browsing never converts PDF annotations.',
+      },
+    };
+    const verified = {
+      ...verifiedAnnotation('stable-id'),
+      capabilities: {
+        geometry: { available: true as const },
+        comment: { available: true as const },
+        color: { available: true as const },
+        deletion: { available: true as const },
+        metadata: { available: true as const },
+        conversions: {
+          highlight: unavailableConversion,
+          underline: unavailableConversion,
+        },
+      },
+    };
+    projection.reconcile([verified]);
+
+    projection.upsert({
+      ...viewportAnnotation('stable-id'),
+      writable: true,
+    });
+
+    expect(projection.snapshot()[0]).toMatchObject({
+      annotation: { capabilities: verified.capabilities },
+      writable: true,
+    });
+    expect(projection.snapshot()[0]?.annotation.capabilities).toBe(verified.capabilities);
   });
 
   it('binds exact native identities before geometry fallback candidates', () => {

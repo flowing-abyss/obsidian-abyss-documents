@@ -99,21 +99,35 @@ export async function extractAnnotations(
 ): Promise<void> {
   let deadline = performance.now() + 50;
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    let source: Awaited<ReturnType<typeof readPageAnnotations>>;
     try {
-      deadline = await extractPageAnnotations(pdf, pageNumber, {
-        deadline,
-        onBatch,
-        signal,
-      });
+      source = await readPageAnnotations(pdf, pageNumber, signal);
     } catch (cause) {
       if (signal.aborted || isAbortFailure(cause)) throw cause;
       onPageError(pageNumber, cause);
+      continue;
     }
+    deadline = await extractPageAnnotations(source, pageNumber, { deadline, onBatch, signal });
   }
 }
 
-async function extractPageAnnotations(
+async function readPageAnnotations(
   pdf: Parameters<typeof extractAnnotations>[0],
+  pageNumber: number,
+  signal: AbortSignal,
+): Promise<{
+  readonly page: Pick<PDFPageProxy, 'getAnnotations' | 'view'>;
+  readonly raw: PdfAnnotationData[];
+}> {
+  throwIfAborted(signal);
+  const page = await pdf.getPage(pageNumber);
+  throwIfAborted(signal);
+  const raw = (await page.getAnnotations({ intent: 'display' })) as PdfAnnotationData[];
+  return { page, raw };
+}
+
+async function extractPageAnnotations(
+  source: Awaited<ReturnType<typeof readPageAnnotations>>,
   pageNumber: number,
   context: {
     readonly deadline: number;
@@ -123,18 +137,15 @@ async function extractPageAnnotations(
 ): Promise<number> {
   const { onBatch, signal } = context;
   let nextDeadline = context.deadline;
-  throwIfAborted(signal);
-  const page = await pdf.getPage(pageNumber);
-  throwIfAborted(signal);
-  const raw = (await page.getAnnotations({ intent: 'display' })) as PdfAnnotationData[];
   let batch: DocumentAnnotation[] = [];
   let batchStartedAt = performance.now();
-  for (const [index, annotation] of raw.entries()) {
+  for (const [index, annotation] of source.raw.entries()) {
     throwIfAborted(signal);
-    if (isStructuralAnnotation(annotation.annotationType)) continue;
-    batch.push(mapPdfAnnotation(annotation, page, pageNumber - 1, index));
+    if (!isStructuralAnnotation(annotation.annotationType)) {
+      batch.push(mapPdfAnnotation(annotation, source.page, pageNumber - 1, index));
+    }
     if (performance.now() < nextDeadline) continue;
-    flushBatch(batch, onBatch, batchStartedAt);
+    if (batch.length > 0) flushBatch(batch, onBatch, batchStartedAt);
     batch = [];
     await yieldToMainThread(signal);
     batchStartedAt = performance.now();

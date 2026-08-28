@@ -323,7 +323,7 @@ function retainVerifiedMetadata(
       current.selectedText,
     ),
     tags: retainDerivedList(viewport.tags, current.tags, snapshot.comment),
-    capabilities: retainOptional(snapshot.writable, viewport.capabilities, current.capabilities),
+    capabilities: current.capabilities,
   });
 }
 
