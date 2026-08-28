@@ -39,6 +39,7 @@ import {
   readerPerformanceSnapshot,
 } from '../reader-performance.js';
 import { DEFAULT_SETTINGS } from '../settings.js';
+import type { AnnotationProjectionRow } from './annotation-projection.js';
 import {
   ReaderController,
   type ReaderProfileState,
@@ -87,6 +88,22 @@ function resolved(colors: (typeof BUILTIN_PROFILES)[keyof typeof BUILTIN_PROFILE
     contrast: colors.contrast,
     imageDim: colors.imageDim,
   };
+}
+
+function projectedAnnotationMatrix(controller: ReaderController) {
+  const projection = (
+    controller as unknown as {
+      annotationProjection: { snapshot(): readonly AnnotationProjectionRow[] };
+    }
+  ).annotationProjection;
+  return projection.snapshot().map((row) => ({
+    key: row.key,
+    nativeId: row.nativeId,
+    provisionalId: row.provisionalId,
+    color: row.annotation.color,
+    comment: row.annotation.comment,
+    writable: row.writable,
+  }));
 }
 
 function captureMenuChoices() {
@@ -637,13 +654,12 @@ describe('ReaderController', () => {
     extraction.resolve();
   });
 
-  it('discards and retries verified extraction that races a newer live edit', async () => {
+  it('accepts one ordinary extraction and replays a newer live edit', async () => {
     const [pdf] = files('Books/Stale-edit-race.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const createdViewport = viewport();
     const createdSession = session(pdf.path, createdViewport);
     const staleGate = deferred<void>();
-    const retryGate = deferred<void>();
     const staleReturned = deferred<void>();
     const stale = {
       ...annotationRecord('same-native-id', 0, {
@@ -652,28 +668,40 @@ describe('ReaderController', () => {
       }),
       comment: 'Stale verified comment',
     };
-    const fresh = { ...stale, comment: 'New live comment' };
     const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
-      if (listAnnotations.mock.calls.length === 1) {
-        await staleGate.promise;
-        sink([stale]);
-        staleReturned.resolve();
-        return;
-      }
-      await retryGate.promise;
-      sink([fresh]);
+      await staleGate.promise;
+      sink([stale]);
+      staleReturned.resolve();
     });
-    Object.assign(createdSession.value, { listAnnotations });
+    let pendingRevision = 0;
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      committedRevision: 0,
+      get pendingRevision() {
+        return pendingRevision;
+      },
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      listAnnotations,
+      createNativeEditableSession: () => source,
+    });
     const shell = capturingShellFactory();
     const controller = new ReaderController(
       new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
       shell.createShell,
+      undefined,
+      { saveCoordinator: { save: vi.fn() } },
     );
     await controller.open(pdf, createDiv());
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
     await vi.waitFor(() => {
       expect(listAnnotations).toHaveBeenCalledOnce();
     });
+    pendingRevision = 1;
     createdViewport.emit({
       type: 'annotation-change',
       change: {
@@ -696,10 +724,97 @@ describe('ReaderController', () => {
     staleGate.resolve();
     await staleReturned.promise;
     await vi.waitFor(() => {
-      expect(listAnnotations).toHaveBeenCalledTimes(2);
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['same-native-id']);
     });
+    expect(listAnnotations).toHaveBeenCalledOnce();
     expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain('New live comment');
-    retryGate.resolve();
+  });
+
+  it('resolves a deep link from one captured-revision extraction during render churn', async () => {
+    const [pdf] = files('Books/Deep-link-render-churn.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const extractionGate = deferred<void>();
+    const verified = annotationRecord('verified-target', 0, {
+      kind: 'point',
+      point: { x: 4, y: 5 },
+    });
+    const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
+      await extractionGate.promise;
+      sink([verified]);
+    });
+    let committedRevision = 0;
+    let pendingRevision = 0;
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      get committedRevision() {
+        return committedRevision;
+      },
+      get pendingRevision() {
+        return pendingRevision;
+      },
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      listAnnotations,
+      createNativeEditableSession: () => source,
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { saveCoordinator: { save: vi.fn() } },
+    );
+    await controller.open(pdf, createDiv());
+
+    const navigation = controller.resolveAnnotationLink({
+      id: 'verified-target',
+      page: 1,
+      fingerprint: 'highlight:point:4,5',
+    });
+    await vi.waitFor(() => {
+      expect(listAnnotations).toHaveBeenCalledOnce();
+    });
+    pendingRevision = 1;
+    for (let index = 0; index < 20; index += 1) {
+      createdViewport.emit({
+        type: 'annotation-snapshot',
+        annotations: [
+          {
+            nativeId: 'live-id',
+            pageIndex: 0,
+            type: 'highlight',
+            rects: [{ x: 20, y: 30, width: 40, height: 8 }],
+            selectedText: 'Live row',
+            color: index % 2 === 0 ? '#ff6666' : '#2f80ed',
+            comment: index === 19 ? 'Final live comment' : `Render ${String(index)}`,
+            tags: [],
+            links: [],
+            writable: index % 2 === 0,
+          },
+        ],
+      });
+      controller.refreshReadingSettings();
+    }
+    committedRevision = 1;
+    extractionGate.resolve();
+    await navigation;
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    expect(listAnnotations).toHaveBeenCalledOnce();
+    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([
+      'verified-target',
+      'live-id',
+    ]);
+    expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain(
+      'Final live comment',
+    );
+    expect(createdViewport.goTo).toHaveBeenCalledWith({ pageIndex: 0, x: 4, y: 5 });
   });
 
   it('does not let a theme refresh starve extraction during a pending mutation', async () => {
@@ -764,6 +879,10 @@ describe('ReaderController', () => {
       expect(adapter.open).toHaveBeenCalledTimes(2);
     });
     pendingRevision = 2;
+    const rowMatrix: Array<{
+      event: string;
+      rows: ReturnType<typeof projectedAnnotationMatrix>;
+    }> = [];
     createdViewport.emit({
       type: 'annotation-change',
       change: {
@@ -781,6 +900,10 @@ describe('ReaderController', () => {
           writable: true,
         },
       },
+    });
+    rowMatrix.push({
+      event: 'revision-2 upsert',
+      rows: projectedAnnotationMatrix(controller),
     });
     createdViewport.setReadingColors.mockImplementationOnce(() => {
       createdViewport.emit({
@@ -802,14 +925,69 @@ describe('ReaderController', () => {
       });
     });
     controller.refreshReadingSettings();
+    rowMatrix.push({
+      event: 'theme snapshot',
+      rows: projectedAnnotationMatrix(controller),
+    });
     extractionGate.resolve();
 
     await vi.waitFor(() => {
       expect(reopened.close).toHaveBeenCalledOnce();
     });
     await Promise.resolve();
-    expect(adapter.open).toHaveBeenCalledTimes(2);
-    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['created-at-revision-2']);
+    rowMatrix.push({
+      event: 'revision-1 extraction',
+      rows: projectedAnnotationMatrix(controller),
+    });
+    expect({
+      opens: adapter.open.mock.calls.length,
+      rowMatrix,
+      visibleIds: shell.created.sidebar?.annotationsPanel.visibleIds(),
+    }).toEqual({
+      opens: 2,
+      rowMatrix: [
+        {
+          event: 'revision-2 upsert',
+          rows: [
+            {
+              color: '#ffd400',
+              comment: '',
+              key: 'annotation-row-0',
+              nativeId: 'created-at-revision-2',
+              provisionalId: undefined,
+              writable: true,
+            },
+          ],
+        },
+        {
+          event: 'theme snapshot',
+          rows: [
+            {
+              color: '#ffd400',
+              comment: '',
+              key: 'annotation-row-0',
+              nativeId: 'created-at-revision-2',
+              provisionalId: undefined,
+              writable: false,
+            },
+          ],
+        },
+        {
+          event: 'revision-1 extraction',
+          rows: [
+            {
+              color: '#ffd400',
+              comment: '',
+              key: 'annotation-row-0',
+              nativeId: 'created-at-revision-2',
+              provisionalId: undefined,
+              writable: false,
+            },
+          ],
+        },
+      ],
+      visibleIds: ['created-at-revision-2'],
+    });
   });
 
   it('does not resurrect an unseen annotation removed during verified extraction', async () => {
@@ -823,18 +1001,31 @@ describe('ReaderController', () => {
       rectangle: { x: 10, y: 20, width: 30, height: 8 },
     });
     const listAnnotations = vi.fn(async (_signal: AbortSignal, sink: AnnotationSink) => {
-      if (listAnnotations.mock.calls.length === 1) {
-        await staleGate.promise;
-        sink([stale]);
-        return;
-      }
-      sink([]);
+      await staleGate.promise;
+      sink([stale]);
     });
-    Object.assign(createdSession.value, { listAnnotations });
+    let pendingRevision = 0;
+    const source = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+      committedRevision: 0,
+      get pendingRevision() {
+        return pendingRevision;
+      },
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, {
+      listAnnotations,
+      createNativeEditableSession: () => source,
+    });
     const shell = capturingShellFactory();
     const controller = new ReaderController(
       new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
       shell.createShell,
+      undefined,
+      { saveCoordinator: { save: vi.fn() } },
     );
     await controller.open(pdf, createDiv());
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
@@ -842,6 +1033,7 @@ describe('ReaderController', () => {
       expect(listAnnotations).toHaveBeenCalledOnce();
     });
 
+    pendingRevision = 1;
     createdViewport.emit({
       type: 'annotation-change',
       change: { operation: 'remove', nativeId: 'deleted-native-id' },
@@ -849,9 +1041,9 @@ describe('ReaderController', () => {
     staleGate.resolve();
 
     await vi.waitFor(() => {
-      expect(listAnnotations).toHaveBeenCalledTimes(2);
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
     });
-    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    expect(listAnnotations).toHaveBeenCalledOnce();
   });
 
   it('carries projection row identity through controller provisional reconciliation', async () => {
@@ -4368,7 +4560,7 @@ describe('ReaderController', () => {
     expect(reopened.close).toHaveBeenCalledOnce();
   });
 
-  it('suppresses an older verified annotation refresh when a newer save finishes first', async () => {
+  it('serializes verified extraction and discards superseded rows before newer acceptance', async () => {
     const [pdf] = files('Books/Race.pdf');
     if (pdf === undefined) throw new Error('Expected PDF.');
     const active = session(pdf.path);
@@ -4389,16 +4581,28 @@ describe('ReaderController', () => {
     Object.assign(active.value, { createNativeEditableSession: () => source });
     const first = session(pdf.path);
     const firstGate = deferred<void>();
+    const older = {
+      ...annotationRecord('older-id', 0, { kind: 'point', point: { x: 1, y: 1 } }),
+      color: '#ff6666',
+      comment: 'Revision 1',
+    };
     Object.assign(first.value, {
-      listAnnotations: async (_signal: AbortSignal, _sink: AnnotationSink) => {
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
         await firstGate.promise;
-        throw new Error('The stale adapter ignored cancellation.');
+        sink([older]);
       },
     });
     const second = session(pdf.path);
+    const secondGate = deferred<void>();
+    const newer = {
+      ...annotationRecord('newest-id', 0, { kind: 'point', point: { x: 2, y: 2 } }),
+      color: '#2f80ed',
+      comment: 'Revision 2',
+    };
     Object.assign(second.value, {
       listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
-        sink([annotationRecord('newest-id', 0, { kind: 'point', point: { x: 2, y: 2 } })]);
+        await secondGate.promise;
+        sink([newer]);
       },
     });
     const adapter = adapterFor(pdf.path, active);
@@ -4441,13 +4645,60 @@ describe('ReaderController', () => {
     });
     const saveTwo = broadcast({ sha256: 'c'.repeat(64), byteSize: 6, mtime: 3 }, 2, source);
     await saveTwo;
+    const rowMatrix = [
+      {
+        event: 'revision-2 broadcast while revision-1 extraction is pending',
+        rows: projectedAnnotationMatrix(controller),
+      },
+    ];
     firstGate.resolve();
     await saveOne;
     await vi.waitFor(() => {
+      expect(adapter.open).toHaveBeenCalledTimes(3);
+    });
+    rowMatrix.push({
+      event: 'superseded revision-1 extraction discarded',
+      rows: projectedAnnotationMatrix(controller),
+    });
+    secondGate.resolve();
+    await vi.waitFor(() => {
       expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['newest-id']);
     });
-    expect(first.close).toHaveBeenCalledOnce();
-    expect(second.close).toHaveBeenCalledOnce();
+    rowMatrix.push({
+      event: 'revision-2 extraction accepted',
+      rows: projectedAnnotationMatrix(controller),
+    });
+    expect({
+      firstClosed: first.close.mock.calls.length,
+      rowMatrix,
+      secondClosed: second.close.mock.calls.length,
+    }).toEqual({
+      firstClosed: 1,
+      rowMatrix: [
+        {
+          event: 'revision-2 broadcast while revision-1 extraction is pending',
+          rows: [],
+        },
+        {
+          event: 'superseded revision-1 extraction discarded',
+          rows: [],
+        },
+        {
+          event: 'revision-2 extraction accepted',
+          rows: [
+            {
+              color: '#2f80ed',
+              comment: 'Revision 2',
+              key: 'annotation-row-0',
+              nativeId: 'newest-id',
+              provisionalId: undefined,
+              writable: false,
+            },
+          ],
+        },
+      ],
+      secondClosed: 1,
+    });
   });
 
   it('keeps dirty edits conflicted and reloads a clean peer after explicit recovery broadcasts', async () => {
@@ -4933,16 +5184,34 @@ describe('ReaderController', () => {
       beginPluginActivation();
       const [pdf] = files('Books/First.pdf');
       if (pdf === undefined) throw new Error('Expected a PDF fixture.');
-      const createdSession = session(pdf.path);
+      const createdViewport = viewport();
+      const createdSession = session(pdf.path, createdViewport);
+      const original = {
+        ...annotationRecord('stable-id', 0, { kind: 'point', point: { x: 1, y: 2 } }),
+        comment: 'Original comment',
+      };
+      Object.assign(createdSession.value, {
+        listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+          sink([original]);
+        },
+      });
+      const reopened = session(pdf.path);
+      Object.assign(reopened.value, {
+        listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+          sink([{ ...original, comment: 'Confirmed retry comment' }]);
+        },
+      });
       const listeners: Array<(revision: number) => void> = [];
       const source = {
         baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+        committedRevision: 0,
         pendingRevision: 1,
         isDirty: true,
         prepare: vi.fn(),
         commit: vi.fn(),
         destroy: vi.fn(),
-      } satisfies NativeEditableSaveSession;
+        acceptVerifiedReload: vi.fn(),
+      } satisfies NativeEditableSaveSession & { acceptVerifiedReload(token: BaseToken): void };
       Object.assign(createdSession.value, {
         createNativeEditableSession(onRevision: (revision: number) => void) {
           listeners.push(onRevision);
@@ -4950,15 +5219,51 @@ describe('ReaderController', () => {
         },
       });
       const save = vi.fn().mockRejectedValueOnce(new Error('disk full')).mockResolvedValueOnce({});
+      let broadcast: VerifiedReloadListener | undefined;
       const notice = vi.spyOn(Notice.prototype, 'constructor__');
       vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const adapter = adapterFor(pdf.path, createdSession);
+      adapter.open
+        .mockResolvedValueOnce(createdSession.value)
+        .mockResolvedValueOnce(reopened.value);
+      const shell = capturingShellFactory();
       const controller = new ReaderController(
-        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        new DocumentAdapterRegistry([adapter.value]),
+        shell.createShell,
         undefined,
-        undefined,
-        { saveCoordinator: { save } },
+        {
+          saveCoordinator: {
+            save,
+            register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+              broadcast = listener;
+              return vi.fn();
+            }),
+          },
+        },
       );
       await controller.open(pdf, createDiv());
+      shell.send({ type: 'open-sidebar', tab: 'annotations' });
+      await vi.waitFor(() => {
+        expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['stable-id']);
+      });
+      createdViewport.emit({
+        type: 'annotation-change',
+        change: {
+          operation: 'upsert',
+          annotation: {
+            nativeId: 'stable-id',
+            pageIndex: 0,
+            type: 'highlight',
+            rects: [{ x: 1, y: 2, width: 1, height: 1 }],
+            selectedText: 'stable-id',
+            color: '#ffd400',
+            comment: 'Pending retry comment',
+            tags: [],
+            links: [],
+            writable: true,
+          },
+        },
+      });
       listeners[0]?.(1);
       await vi.advanceTimersByTimeAsync(750);
       const message = notice.mock.calls[0]?.[0];
@@ -4969,6 +5274,10 @@ describe('ReaderController', () => {
         annotationSaveFailures: 1,
         annotationSaves: 0,
       });
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['stable-id']);
+      expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain(
+        'Pending retry comment',
+      );
 
       retry?.click();
       await vi.waitFor(() => {
@@ -4978,6 +5287,17 @@ describe('ReaderController', () => {
           annotationSaves: 1,
         });
       });
+      if (broadcast === undefined) throw new Error('Expected verified-save listener.');
+      await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 20 }, 1, source);
+      await vi.waitFor(() => {
+        expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain(
+          'Confirmed retry comment',
+        );
+      });
+      expect({
+        ids: shell.created.sidebar?.annotationsPanel.visibleIds(),
+        opens: adapter.open.mock.calls.length,
+      }).toEqual({ ids: ['stable-id'], opens: 2 });
     } finally {
       endPluginActivation();
       vi.useRealTimers();

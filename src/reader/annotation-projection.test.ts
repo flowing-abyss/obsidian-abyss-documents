@@ -198,6 +198,108 @@ describe('AnnotationProjection', () => {
     expect(projection.snapshot().map((row) => row.annotation.comment)).toEqual(['Confirmed retry']);
   });
 
+  it('bounds replay work for alternating snapshots at one pending revision', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+    for (let index = 0; index < 50_000; index += 1) {
+      projection.upsert(
+        {
+          ...viewportAnnotation('stable-id'),
+          comment: index % 2 === 0 ? 'Even snapshot' : 'Odd snapshot',
+        },
+        2,
+      );
+    }
+
+    const startedAt = performance.now();
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+    const elapsed = performance.now() - startedAt;
+
+    expect({
+      elapsedUnder50Ms: elapsed < 50,
+      rows: projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        nativeId: row.nativeId,
+      })),
+    }).toEqual({
+      elapsedUnder50Ms: true,
+      rows: [{ comment: 'Odd snapshot', nativeId: 'stable-id' }],
+    });
+  });
+
+  it('preserves cross-kind transition order while coalescing one revision', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([], 1);
+    projection.upsert(viewportAnnotation('stable-id'), 2);
+    projection.remove('stable-id', undefined, 2);
+    projection.upsert({ ...viewportAnnotation('stable-id'), comment: 'Final upsert' }, 2);
+
+    projection.reconcile([], 1);
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        nativeId: row.nativeId,
+      })),
+    ).toEqual([{ comment: 'Final upsert', nativeId: 'stable-id' }]);
+  });
+
+  it('reconciles a large initial verified set with indexed fallback work', () => {
+    const projection = new AnnotationProjection();
+    const annotations = Array.from({ length: 2_000 }, (_, index) => ({
+      ...verifiedAnnotation(`stable-${String(index)}`),
+      anchor: {
+        ...verifiedAnnotation(`stable-${String(index)}`).anchor,
+        geometry: { kind: 'point' as const, point: { x: index, y: index } },
+      },
+    }));
+
+    const startedAt = performance.now();
+    projection.reconcile(annotations, 1);
+    const elapsed = performance.now() - startedAt;
+
+    expect({ elapsedUnder250Ms: elapsed < 250, rows: projection.snapshot().length }).toEqual({
+      elapsedUnder250Ms: true,
+      rows: 2_000,
+    });
+  });
+
+  it('keeps comment and color previews through same-revision extraction until commit or revert', () => {
+    const projection = new AnnotationProjection();
+    const verified = { ...verifiedAnnotation('stable-id'), comment: 'Original' };
+    projection.reconcile([verified], 1);
+
+    projection.applyEditorPreview({
+      annotations: [verified],
+      color: '#2f80ed',
+      comment: 'Draft comment',
+    });
+    projection.reconcile([verified], 1);
+    expect(
+      projection.snapshot().map((row) => ({
+        color: row.annotation.color,
+        comment: row.annotation.comment,
+      })),
+    ).toEqual([{ color: '#2f80ed', comment: 'Draft comment' }]);
+
+    projection.applyEditorPreview({
+      annotations: [verified],
+      color: verified.color ?? '#ffd400',
+      comment: verified.comment,
+    });
+    expect(
+      projection.snapshot().map((row) => ({
+        color: row.annotation.color,
+        comment: row.annotation.comment,
+      })),
+    ).toEqual([{ color: '#ffd400', comment: 'Original' }]);
+
+    projection.applyEditorPreview({ annotations: [verified], comment: 'Committed draft' });
+    projection.applyEditorUpdate({ annotations: [verified], comment: 'Committed draft' }, 2);
+    projection.reconcile([{ ...verified, comment: 'Committed draft' }], 2);
+    expect(projection.snapshot().map((row) => row.annotation.comment)).toEqual(['Committed draft']);
+  });
+
   it('replays a live create made during extraction of an older revision', () => {
     const projection = new AnnotationProjection();
     projection.reconcile([], 1);
@@ -268,7 +370,7 @@ describe('AnnotationProjection', () => {
     ]);
   });
 
-  it('reconciles one unique provisional row when saved PDF geometry is normalized', () => {
+  it('does not infer provisional identity when saved PDF geometry is normalized', () => {
     const projection = new AnnotationProjection();
     projection.upsert(viewportAnnotation('pdfjs_internal_editor_0', 'selection-1'));
     const verified = {
@@ -284,10 +386,10 @@ describe('AnnotationProjection', () => {
 
     expect(projection.snapshot()).toHaveLength(1);
     expect(projection.snapshot()[0]).toMatchObject({
-      key: 'annotation-row-0',
+      key: 'annotation-row-1',
       nativeId: '29R',
-      provisionalId: 'pdfjs_internal_editor_0',
     });
+    expect(projection.snapshot()[0]).not.toHaveProperty('provisionalId');
   });
 
   it('binds a committed stable identity before a viewport snapshot drops the selection token', () => {
@@ -498,6 +600,56 @@ describe('AnnotationProjection', () => {
 
     expect(projection.snapshot()).toMatchObject([
       { key: initialKey, nativeId: 'stable-id', provisionalId: 'selection-token' },
+    ]);
+  });
+
+  it('does not bind an older same-page annotation to a newer selection preview', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(
+      {
+        ...viewportAnnotation('selection-token', 'selection-token'),
+        comment: 'New selection',
+        rects: [{ x: 100, y: 200, width: 30, height: 8 }],
+      },
+      2,
+    );
+    const previewKey = projection.snapshot()[0]?.key;
+    const older = {
+      ...verifiedAnnotation('older-id'),
+      comment: 'Older annotation',
+      anchor: {
+        ...verifiedAnnotation('older-id').anchor,
+        geometry: { kind: 'point' as const, point: { x: 1, y: 2 } },
+      },
+    };
+
+    projection.reconcile([older], 1);
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+        provisionalId: row.provisionalId,
+      })),
+    ).toEqual([
+      {
+        comment: 'Older annotation',
+        key: 'annotation-row-1',
+        nativeId: 'older-id',
+        provisionalId: undefined,
+      },
+      {
+        comment: 'New selection',
+        key: previewKey,
+        nativeId: 'selection-token',
+        provisionalId: 'selection-token',
+      },
+    ]);
+
+    projection.bindCommittedSelection('selection-token', verifiedAnnotation('new-id'), 2);
+    expect(projection.snapshot().map((row) => ({ key: row.key, nativeId: row.nativeId }))).toEqual([
+      { key: 'annotation-row-1', nativeId: 'older-id' },
+      { key: previewKey, nativeId: 'new-id' },
     ]);
   });
 
