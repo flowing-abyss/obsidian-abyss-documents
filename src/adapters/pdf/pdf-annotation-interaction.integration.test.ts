@@ -409,7 +409,12 @@ describe('PDF annotation interaction integration', () => {
     };
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
     const controller = new AnnotationInteractionController(editor, shell, palette);
-    eventBus.dispatch('annotationeditormodechanged', { mode: 9, source: viewer });
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'autosave-target',
+      kind: 'highlight',
+    });
+    expect(editor.hasContextualEdit).toBe(true);
     let revision = 0;
     const scheduler = new AutosaveScheduler(async () => {
       await editor.save(new AbortController().signal);
@@ -418,6 +423,7 @@ describe('PDF annotation interaction integration', () => {
       if (dirty) scheduler.markDirty(++revision);
     });
     bridge.focusFromPointer(nativeNode);
+    await vi.advanceTimersByTimeAsync(0);
     const element = host.querySelector<HTMLElement>('[data-annotation-editor-popover]');
     if (element === null) throw new Error('Expected the shell-owned native editor.');
     const comment = element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
@@ -440,6 +446,7 @@ describe('PDF annotation interaction integration', () => {
     await scheduler.flush();
     expect(nativeModeRequests).toEqual([0, 9]);
     expect(viewer.currentMode).toBe(9);
+    expect(editor.hasContextualEdit).toBe(true);
     expect(manager.setSelected).toHaveBeenCalledWith(native);
     expect(host.querySelector('[data-annotation-editor-popover]')).toBe(element);
     expect(element.isConnected).toBe(true);

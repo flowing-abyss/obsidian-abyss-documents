@@ -6,8 +6,12 @@ import {
   endPluginActivation,
   readerPerformanceSnapshot,
 } from '../../reader-performance.js';
-import { PdfAnnotationEditor, type PdfAnnotationToolOptions } from './pdf-annotation-editor.js';
-import type { PdfCommentDialogReservation } from './pdf-comment-bridge.js';
+import {
+  PdfAnnotationEditor,
+  type PdfAnnotationActivationResult,
+  type PdfAnnotationToolOptions,
+} from './pdf-annotation-editor.js';
+import type { PdfAnnotationFocus, PdfCommentDialogReservation } from './pdf-comment-bridge.js';
 
 type Listener = (event: unknown) => void;
 
@@ -49,6 +53,18 @@ function createdAnnotation(
     selectedText: null,
     tags: [],
     type: options.type ?? 'highlight',
+  };
+}
+
+function annotationFocus(
+  id: string,
+  editable: boolean,
+  options: { readonly writable?: boolean } = {},
+): PdfAnnotationFocus {
+  return {
+    annotations: [createdAnnotation('', { id, writable: options.writable ?? editable })],
+    editable,
+    position: { x: 10, y: 20 },
   };
 }
 
@@ -175,6 +191,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     validate: vi.fn<(token: string) => 'current' | 'stale'>(() => 'current'),
   };
   let editorAddBaseline = 0;
+  let annotationFocusListener: ((focus: PdfAnnotationFocus | null) => void) | null = null;
   const commentBridge = {
     beginPersistence: vi.fn(),
     deleteAnnotations: vi.fn(() => true),
@@ -205,7 +222,12 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
         ? createdAnnotation()
         : null,
     ),
-    onAnnotationFocus: vi.fn(() => () => undefined),
+    onAnnotationFocus: vi.fn((listener: (focus: PdfAnnotationFocus | null) => void) => {
+      annotationFocusListener = listener;
+      return () => {
+        if (annotationFocusListener === listener) annotationFocusListener = null;
+      };
+    }),
     reserveNextDialog: vi.fn<(seed: string, signal?: AbortSignal) => PdfCommentDialogReservation>(
       () => ({
         closed: Promise.resolve('external' as const),
@@ -238,6 +260,9 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     changedModes,
     commentBridge,
     editor,
+    emitBridgeFocus: (focus: PdfAnnotationFocus | null) => {
+      annotationFocusListener?.(focus);
+    },
     eventBus,
     modeRequests,
     pdf,
@@ -1117,10 +1142,194 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('settles a never-resolving authoritative lookup at the one activation deadline', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const resolver = deferred<DocumentAnnotation | null>();
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      const locked = createdAnnotation('', { id: 'deadline-locked', writable: false });
+      current.editor.setAnnotationProjection([{ annotation: locked, stableId: 'deadline-locked' }]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+      let resolverSignal: AbortSignal | null = null;
+      current.editor.setAnnotationResolver(async (_id, signal) => {
+        resolverSignal = signal;
+        return resolver.promise;
+      });
+      let outcome: string = 'pending';
+      activation = current.editor
+        .focusAnnotation('deadline-locked', { kind: 'sidebar' })
+        .then((result) => {
+          outcome = result;
+          return result;
+        });
+
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(outcome).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(activation).resolves.toBe('readonly');
+      expect((resolverSignal as AbortSignal | null)?.aborted).toBe(true);
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledExactlyOnceWith(
+        'deadline-locked',
+        expect.any(AbortSignal),
+        locked,
+        { forceReadonly: true },
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      resolver.resolve(null);
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels an unresolved descriptor at deadline and ignores its late resolution', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const resolver = deferred<DocumentAnnotation | null>();
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+      current.editor.setAnnotationResolver(async () => resolver.promise);
+      activation = current.editor.focusAnnotation('late-unprojected', { kind: 'sidebar' });
+
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      await expect(activation).resolves.toBe('cancelled');
+      const requestsAtDeadline = [...current.modeRequests];
+      resolver.resolve(createdAnnotation('', { id: 'late-unprojected' }));
+      await vi.runOnlyPendingTimersAsync();
+      expect(current.modeRequests).toEqual(requestsAtDeadline);
+      expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      resolver.resolve(null);
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not renew the budget while closing a previous contextual session', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      const uiManager = manager(selectedEditor('previous', 9));
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      await current.editor.editAnnotation({
+        editComment: false,
+        id: 'previous',
+        kind: 'highlight',
+      });
+      const projected = createdAnnotation('', { id: 'after-previous' });
+      current.editor.setAnnotationProjection([
+        { annotation: projected, stableId: 'after-previous' },
+      ]);
+      Object.defineProperty(current.viewer, 'annotationEditorMode', {
+        configurable: true,
+        get: () => current.viewer.currentMode,
+        set: (request: { readonly mode: number }) => {
+          current.modeRequests.push({ ...request });
+          current.viewer.currentMode = request.mode;
+          if (request.mode !== 0) return;
+          window.setTimeout(() => {
+            current.eventBus.dispatch('annotationeditormodechanged', {
+              mode: request.mode,
+              source: current.viewer,
+            });
+          }, 19_999);
+        },
+      });
+      let outcome: string = 'pending';
+      const activation = current.editor
+        .focusAnnotation('after-previous', { kind: 'root-click' })
+        .then((result) => {
+          outcome = result;
+          return result;
+        });
+
+      await vi.advanceTimersByTimeAsync(19_998);
+      expect(outcome).toBe('pending');
+      await vi.advanceTimersByTimeAsync(2);
+
+      await expect(activation).resolves.toBe('readonly');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not start a fresh timeout when NONE containment cannot be confirmed', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture({ dispatchModeChanges: false });
+      const projected = createdAnnotation('', { id: 'containment-deadline' });
+      current.editor.setAnnotationProjection([
+        { annotation: projected, stableId: 'containment-deadline' },
+      ]);
+      const uiManager = manager();
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      current.commentBridge.focusAnnotation.mockImplementation(
+        async (_id, _signal, _annotation, options) => options?.forceReadonly === true,
+      );
+      Object.defineProperty(current.viewer, 'annotationEditorMode', {
+        configurable: true,
+        get: () => current.viewer.currentMode,
+        set: (request: { readonly mode: number }) => {
+          current.modeRequests.push({ ...request });
+          current.viewer.currentMode = request.mode;
+          if (request.mode === 0) return;
+          window.setTimeout(() => {
+            uiManager.firstSelectedEditor = selectedEditor('containment-deadline', 9);
+            current.eventBus.dispatch('annotationeditormodechanged', {
+              mode: request.mode,
+              source: current.viewer,
+            });
+          }, 19_999);
+        },
+      });
+      let outcome: string = 'pending';
+      const activation = current.editor
+        .focusAnnotation('containment-deadline', { kind: 'root-click' })
+        .then((result) => {
+          outcome = result;
+          return result;
+        });
+
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(outcome).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(activation).resolves.toBe('readonly');
+      expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('aborts delayed mode readiness immediately and removes its timer and listener', async () => {
     vi.useFakeTimers();
     const current = fixture({ dispatchModeChanges: false });
-    let activation: Promise<'cancelled' | 'editable' | 'readonly'> | null = null;
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
     try {
       const annotation = createdAnnotation('', { id: 'aborted-highlight' });
       current.editor.setAnnotationProjection([{ annotation, stableId: 'aborted-highlight' }]);
@@ -1337,6 +1546,218 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect(current.modeRequests).toEqual(requestsAfterCancellation);
       expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
     }
+  });
+
+  it('drops the reviewer-probe readonly relay when its activation is cancelled', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+      const resolver = deferred<DocumentAnnotation | null>();
+      current.editor.setAnnotationResolver(async () => resolver.promise);
+      const relayed: Array<PdfAnnotationFocus | null> = [];
+      current.editor.onAnnotationFocus((focus) => relayed.push(focus));
+      const activation = current.editor.focusAnnotation('cancelled-relay', { kind: 'sidebar' });
+      await Promise.resolve();
+
+      current.emitBridgeFocus(annotationFocus('cancelled-relay', false, { writable: false }));
+      await current.editor.abortInteraction('Navigation cancelled the activation.');
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).resolves.toBe('cancelled');
+      expect(relayed).toEqual([]);
+      resolver.resolve(null);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops a provisional pre-click readonly focus when activation starts in the same task', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      const projected = createdAnnotation('', { id: 'hover-then-activate' });
+      current.editor.setAnnotationProjection([
+        { annotation: projected, stableId: 'hover-then-activate' },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(selectedEditor('hover-then-activate', 9)),
+      });
+      const relayed: Array<PdfAnnotationFocus | null> = [];
+      current.editor.onAnnotationFocus((focus) => relayed.push(focus));
+
+      current.emitBridgeFocus(annotationFocus('hover-then-activate', false, { writable: false }));
+      const activation = current.editor.focusAnnotation('hover-then-activate', {
+        kind: 'root-click',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).resolves.toBe('editable');
+      expect(relayed).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('retains selected contextual focus through native FreeText edit-mode null events', async () => {
+    const current = fixture();
+    const projected = createdAnnotation('', {
+      id: 'native-freetext-edit',
+      type: 'free-text',
+    });
+    current.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'native-freetext-edit' },
+    ]);
+    const uiManager = manager(selectedEditor('native-freetext-edit', 3));
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    const relayed: Array<PdfAnnotationFocus | null> = [];
+    current.editor.onAnnotationFocus((focus) => relayed.push(focus));
+
+    await expect(
+      current.editor.focusAnnotation('native-freetext-edit', { kind: 'root-click' }),
+    ).resolves.toBe('editable');
+    current.emitBridgeFocus(annotationFocus('native-freetext-edit', true));
+    relayed.splice(0);
+
+    for (let index = 0; index < 5; index += 1) current.emitBridgeFocus(null);
+
+    expect(relayed).toEqual([]);
+    uiManager.firstSelectedEditor = undefined;
+    current.emitBridgeFocus(null);
+    expect(relayed).toEqual([null]);
+  });
+
+  it('drops editable and null bridge events that are not owned by the current activation', async () => {
+    const current = fixture();
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(),
+    });
+    const resolver = deferred<DocumentAnnotation | null>();
+    current.editor.setAnnotationResolver(async () => resolver.promise);
+    const relayed: Array<PdfAnnotationFocus | null> = [];
+    current.editor.onAnnotationFocus((focus) => relayed.push(focus));
+    const activation = current.editor.focusAnnotation('owned-focus', { kind: 'sidebar' });
+    await Promise.resolve();
+
+    current.emitBridgeFocus(annotationFocus('different-focus', true));
+    current.emitBridgeFocus(null);
+    await current.editor.abortInteraction('Activation superseded.');
+    resolver.resolve(null);
+
+    await expect(activation).resolves.toBe('cancelled');
+    expect(relayed).toEqual([]);
+  });
+
+  it('does not release A readonly focus after B completes', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+      const resolver = deferred<DocumentAnnotation | null>();
+      current.editor.setAnnotationResolver(async () => resolver.promise);
+      const relayed: Array<PdfAnnotationFocus | null> = [];
+      current.editor.onAnnotationFocus((focus) => relayed.push(focus));
+      const activationA = current.editor.focusAnnotation('focus-a', { kind: 'sidebar' });
+      await Promise.resolve();
+      current.emitBridgeFocus(annotationFocus('focus-a', false, { writable: false }));
+
+      const lockedB = createdAnnotation('', { id: 'focus-b', writable: false });
+      current.editor.setAnnotationProjection([{ annotation: lockedB, stableId: 'focus-b' }]);
+      current.editor.setAnnotationResolver(async (id) =>
+        id === 'focus-a' ? resolver.promise : lockedB,
+      );
+      const activationB = current.editor.focusAnnotation('focus-b', { kind: 'sidebar' });
+
+      await expect(activationB).resolves.toBe('readonly');
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(activationA).resolves.toBe('cancelled');
+      expect(relayed).toEqual([]);
+      resolver.resolve(null);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases the verified current readonly fallback exactly once', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      const projected = createdAnnotation('', { id: 'verified-fallback' });
+      current.editor.setAnnotationProjection([
+        { annotation: projected, stableId: 'verified-fallback' },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(selectedEditor('verified-fallback', 9)),
+      });
+      const relayed: Array<PdfAnnotationFocus | null> = [];
+      current.editor.onAnnotationFocus((focus) => relayed.push(focus));
+      current.commentBridge.focusAnnotation.mockImplementation(
+        async (_id, _signal, _projected, options) => {
+          if (options?.forceReadonly !== true) return false;
+          current.emitBridgeFocus(annotationFocus('verified-fallback', false, { writable: false }));
+          return true;
+        },
+      );
+
+      const activation = current.editor.focusAnnotation('verified-fallback', {
+        kind: 'root-click',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(activation).resolves.toBe('readonly');
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(relayed).toEqual([annotationFocus('verified-fallback', false, { writable: false })]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending activation and its staged focus before deleting', async () => {
+    const current = fixture();
+    const uiManager = manager();
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    const resolver = deferred<DocumentAnnotation | null>();
+    current.editor.setAnnotationResolver(async () => resolver.promise);
+    const relayed: Array<PdfAnnotationFocus | null> = [];
+    current.editor.onAnnotationFocus((focus) => relayed.push(focus));
+    const activation = current.editor.focusAnnotation('delete-pending', { kind: 'sidebar' });
+    await Promise.resolve();
+    current.emitBridgeFocus(annotationFocus('delete-pending', true));
+
+    const projected = createdAnnotation('', { id: 'delete-pending' });
+    expect(current.editor.deleteAnnotations([projected])).toBe(true);
+    uiManager.firstSelectedEditor = selectedEditor('delete-pending', 9);
+    resolver.resolve(projected);
+
+    await expect(activation).resolves.toBe('cancelled');
+    expect(relayed).toEqual([]);
+    expect(current.commentBridge.deleteAnnotations).toHaveBeenCalledExactlyOnceWith([projected]);
+    expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+    expect(current.modeRequests).toEqual([]);
   });
 
   it('neutralizes every creator mode before persisted activation', async () => {
@@ -1577,7 +1998,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     });
   });
 
-  it('does not re-arm a contextual annotation tool after autosave', async () => {
+  it('re-arms the same contextual annotation target after autosave', async () => {
     const { editor, eventBus, modeRequests, viewer } = fixture();
     const uiManager = manager(selectedEditor('highlight-1', 9));
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
@@ -1592,6 +2013,38 @@ describe('PdfAnnotationEditor lifecycle', () => {
     });
 
     await editor.save(new AbortController().signal);
+
+    expect(viewer.annotationEditorMode).toBe(9);
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: 'highlight-1', mode: 9 },
+      { mode: 0 },
+      { editComment: false, editId: 'highlight-1', mode: 9 },
+    ]);
+  });
+
+  it('does not restore a save-owned contextual target after navigation aborts it', async () => {
+    const { editor, eventBus, modeRequests, saveDocument, viewer } = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    saveDocument.mockReturnValue(pending.promise);
+    const uiManager = manager(selectedEditor('highlight-1', 9));
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'highlight-1',
+      kind: 'highlight',
+    });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+
+    const saving = editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(saveDocument).toHaveBeenCalledOnce();
+    });
+    await editor.abortInteraction('Navigation cancelled the saved contextual target.');
+    pending.resolve(new Uint8Array([37, 80, 68, 70]));
+    await saving;
 
     expect(viewer.annotationEditorMode).toBe(0);
     expect(modeRequests).toEqual([

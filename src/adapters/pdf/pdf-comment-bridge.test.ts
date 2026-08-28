@@ -53,6 +53,7 @@ function uiManager(selected: PdfCommentEditor | null = null) {
     firstSelectedEditor: selected ?? undefined,
     getEditor: vi.fn<(id: string) => PdfCommentEditor | undefined>(),
     setSelected: vi.fn<(editor: PdfCommentEditor) => void>(),
+    toggleSelected: vi.fn<(editor: PdfCommentEditor) => void>(),
     updateParams: vi.fn<(type: number, value: unknown) => void>(),
   };
 }
@@ -234,6 +235,37 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('retains a selected FreeText binding across PDF.js edit-mode hover hides', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'freeTextEditor selectedEditor' });
+    node.id = 'selected-freetext';
+    const native = editor('Edit me', { anchor: node, mode: 3, uid: 'selected-freetext' });
+    const manager = uiManager(native);
+    manager.getEditor.mockImplementation((id) => (id === 'selected-freetext' ? native : undefined));
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    bridge.toggleCommentPopup(native, true, true, true);
+    const annotation = focused[0]?.annotations[0];
+    if (annotation === undefined) throw new Error('Expected selected FreeText focus.');
+
+    for (let index = 0; index < 5; index += 1)
+      bridge.toggleCommentPopup(native, false, false, true);
+    await Promise.resolve();
+
+    expect(focused).toHaveLength(1);
+    expect(bridge.updateAnnotations({ annotations: [annotation], color: '#5fb236' })).toBe(true);
+    expect(manager.updateParams).toHaveBeenCalled();
+    node.removeClass('selectedEditor');
+    bridge.destroyPopup();
+    expect(focused).toHaveLength(2);
+    expect(focused[1]).toBeNull();
+    bridge.dispose();
+    host.remove();
+  });
+
   it('disables batch recolor before a failure in the second native editor can leave partial state', () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });
@@ -317,6 +349,60 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       { id: 'preserved-second', kind: 'stable' },
     ]);
     expect(manager.setSelected).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('restores the exact selected native batch after persistence neutralizes PDF.js', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'persisted-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    secondNode.id = 'persisted-second';
+    const first = editor('First', { anchor: firstNode, uid: 'persisted-first' });
+    const second = editor('Second', { anchor: secondNode, uid: 'persisted-second' });
+    const manager = uiManager(first);
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'persisted-first') return first;
+      if (id === 'persisted-second') return second;
+      return undefined;
+    });
+    manager.setSelected.mockImplementation((selected) => {
+      firstNode.toggleClass('selectedEditor', selected === first);
+      secondNode.toggleClass('selectedEditor', selected === second);
+    });
+    manager.toggleSelected.mockImplementation((selected) => {
+      selected.elementBeforePopup?.toggleClass('selectedEditor', true);
+    });
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    await expect(
+      bridge.focusAnnotation('persisted-second', undefined, undefined, {
+        editableOnly: true,
+        preserveSelection: true,
+      }),
+    ).resolves.toBe(true);
+
+    bridge.beginPersistence();
+    firstNode.removeClass('selectedEditor');
+    secondNode.removeClass('selectedEditor');
+    bridge.destroyPopup();
+    bridge.endPersistence();
+
+    expect(manager.setSelected).toHaveBeenCalledOnce();
+    expect(manager.setSelected).toHaveBeenCalledWith(first);
+    expect(manager.toggleSelected).toHaveBeenCalledOnce();
+    expect(manager.toggleSelected).toHaveBeenCalledWith(second);
+    expect(firstNode.hasClass('selectedEditor')).toBe(true);
+    expect(secondNode.hasClass('selectedEditor')).toBe(true);
+    expect(focused).toHaveLength(1);
+    expect(focused[0]?.annotations.map((annotation) => annotation.identity)).toEqual([
+      { id: 'persisted-first', kind: 'stable' },
+      { id: 'persisted-second', kind: 'stable' },
+    ]);
     bridge.dispose();
     host.remove();
   });
@@ -607,6 +693,58 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     if (normalized === undefined) throw new Error('Expected one locked annotation focus.');
     expect(bridge.updateAnnotations({ annotations: [normalized], color: '#5fb236' })).toBe(false);
     expect(bridge.deleteAnnotations([normalized])).toBe(false);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('clears request-scoped readonly state when the authoritative projection becomes writable', async () => {
+    const host = document.body.createDiv();
+    const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const nativeNode = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    nativeNode.id = 'pdfjs_internal_upgrade';
+    const native = editor('Writable after projection refresh', {
+      anchor: nativeNode,
+      dataId: 'upgraded-highlight',
+      uid: 'pdfjs_internal_upgrade',
+    });
+    const manager = uiManager(native);
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    await expect(
+      bridge.focusAnnotation(
+        'upgraded-highlight',
+        undefined,
+        annotation('upgraded-highlight', false),
+        {
+          forceReadonly: true,
+        },
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      bridge.focusAnnotation('upgraded-highlight', undefined, annotation('upgraded-highlight'), {
+        editableOnly: true,
+        preserveSelection: true,
+      }),
+    ).resolves.toBe(true);
+
+    const upgraded = focused[focused.length - 1];
+    expect(focused.map((focus) => focus.editable)).toEqual([false, true]);
+    expect(upgraded).toMatchObject({
+      annotations: [{ identity: { id: 'upgraded-highlight', kind: 'stable' } }],
+      editable: true,
+    });
+    const writable = upgraded?.annotations[0];
+    if (writable === undefined) throw new Error('Expected one upgraded writable annotation.');
+    expect(bridge.updateAnnotations({ annotations: [writable], comment: 'Updated' })).toBe(true);
+    expect(native.comment).toBe('Updated');
+    expect(bridge.deleteAnnotations([writable])).toBe(true);
+    expect(manager.delete).toHaveBeenCalledOnce();
     bridge.dispose();
     host.remove();
   });

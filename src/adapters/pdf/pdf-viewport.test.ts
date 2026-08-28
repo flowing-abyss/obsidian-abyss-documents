@@ -914,6 +914,96 @@ describe('PdfDocumentViewport', () => {
     },
   );
 
+  it('leaves persisted FreeText contenteditable clicks entirely to PDF.js', async () => {
+    const fixture = await mountedViewport(3);
+    document.body.append(fixture.host);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const interaction = fixture.viewport.annotationInteraction;
+    if (eventBus === undefined || viewer === undefined || interaction === null)
+      throw new Error('Expected mounted annotation interaction.');
+    const native = nativeHighlight('persisted-freetext-editor');
+    Object.assign(native, { editorType: 'freetext', mode: 3 });
+    const manager = annotationManager(native, [['persisted-freetext-editor', native]]);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const nativeNode = root
+      .createDiv({ cls: 'annotationEditorLayer' })
+      .createDiv({ cls: 'freeTextEditor selectedEditor' });
+    nativeNode.id = 'persisted-freetext-editor';
+    const editable = nativeNode.createDiv({ cls: 'internal' });
+    editable.tabIndex = 0;
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const nativeClick = vi.fn(() => {
+      editable.focus();
+    });
+    editable.addEventListener('click', nativeClick);
+
+    editable.click();
+    editable.setAttribute('contenteditable', 'true');
+    editable.click();
+
+    expect(nativeClick).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(editable);
+    expect(focusAnnotation).not.toHaveBeenCalled();
+    expect(viewer.annotationEditorRequests).toEqual([]);
+    fixture.host.remove();
+  });
+
+  it('still activates an imported FreeText contenteditable surface', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const imported = root
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'freeTextAnnotation' });
+    imported.dataset['annotationId'] = 'imported-freetext';
+    const content = imported.createDiv({ cls: 'internal' });
+    content.setAttribute('contenteditable', 'true');
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+
+    content.click();
+
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('imported-freetext', {
+      kind: 'root-click',
+    });
+  });
+
+  it('owns a persisted FreeText pointer gesture before PDF.js and coalesces its click', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const imported = root
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'freeTextAnnotation' });
+    imported.dataset['annotationId'] = 'pointer-freetext';
+    const order: string[] = [];
+    const focusAnnotation = vi
+      .spyOn(interaction, 'focusAnnotation')
+      .mockImplementation(async () => {
+        order.push('abyss-capture');
+        return 'editable';
+      });
+    imported.addEventListener('pointerdown', () => {
+      order.push('pdfjs-target');
+    });
+
+    imported.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 7 }),
+    );
+    imported.click();
+
+    expect(order).toEqual(['abyss-capture', 'pdfjs-target']);
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('pointer-freetext', {
+      kind: 'root-click',
+    });
+  });
+
   it.each([
     ['Ctrl', { ctrlKey: true }],
     ['Cmd', { metaKey: true }],
@@ -1305,6 +1395,9 @@ describe('PdfDocumentViewport', () => {
     (
       viewer.options.commentManager as { focusFromPointer(target: EventTarget | null): void }
     ).focusFromPointer(nativeNode);
+    await vi.waitFor(() => {
+      expect(focused).toHaveLength(1);
+    });
     const annotations = focused[0];
     if (annotations === undefined) throw new Error('Expected normalized native focus.');
     expect(

@@ -188,9 +188,12 @@ async function closeReaders(): Promise<void> {
   await browser.execute(() => {
     const host = window as Window & {
       __abyssTask3ActivationTrace?: { cleanup(): void };
+      __abyssTask3FreeTextProbe?: { cleanup(): void };
     };
     host.__abyssTask3ActivationTrace?.cleanup();
     delete host.__abyssTask3ActivationTrace;
+    host.__abyssTask3FreeTextProbe?.cleanup();
+    delete host.__abyssTask3FreeTextProbe;
   });
   await browser.executeObsidian(async ({ app }) => {
     for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
@@ -646,35 +649,151 @@ async function createPersistedWritableAnnotation(fixture: PersistedWritableFixtu
 }
 
 async function installPersistedActivationTrace(fixture: PersistedWritableFixture): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      browser.executeObsidian(({ app }) => {
+        const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+          controller?: {
+            viewport?: {
+              viewer?: {
+                getPageView?(pageIndex: number): {
+                  div?: HTMLElement;
+                  renderingState?: number;
+                } | null;
+              };
+            };
+          };
+        };
+        const pageView = view.controller?.viewport?.viewer?.getPageView?.(0);
+        const canvas =
+          pageView?.div?.querySelector<HTMLCanvasElement>('.canvasWrapper canvas') ?? null;
+        const host = window as Window & {
+          __abyssTask3StableCanvas?: { canvas: HTMLCanvasElement; since: number };
+        };
+        if (pageView?.renderingState !== 3 || canvas?.isConnected !== true) {
+          delete host.__abyssTask3StableCanvas;
+          return false;
+        }
+        const previous = host.__abyssTask3StableCanvas;
+        if (previous?.canvas !== canvas) {
+          host.__abyssTask3StableCanvas = { canvas, since: performance.now() };
+          return false;
+        }
+        if (performance.now() - previous.since < 100) return false;
+        delete host.__abyssTask3StableCanvas;
+        return true;
+      }),
+    { timeout: 15_000, timeoutMsg: 'Persisted activation canvas did not settle.' },
+  );
   await browser.execute(
     (readerSelector, editorSelector, popoverSelector) => {
       const reader = document.querySelector<HTMLElement>(readerSelector);
       if (reader === null) throw new Error('Active reader unavailable for activation trace.');
+      const leaf = reader.closest<HTMLElement>('.workspace-leaf.mod-active');
+      const viewer = reader.querySelector<HTMLElement>('.pdfViewerContainer');
+      const page = viewer?.querySelector<HTMLElement>('[data-page-number="1"]') ?? null;
+      const canvasWrapper = page?.querySelector<HTMLElement>('.canvasWrapper') ?? null;
+      const canvas = canvasWrapper?.querySelector<HTMLCanvasElement>('canvas') ?? null;
+      const popover = leaf?.querySelector<HTMLElement>(popoverSelector) ?? null;
+      const card = leaf?.querySelector<HTMLElement>('.abyss-annotation-card') ?? null;
+      if (
+        leaf === null ||
+        viewer === null ||
+        page === null ||
+        canvasWrapper === null ||
+        canvas === null ||
+        popover === null
+      )
+        throw new Error('Persisted activation trace targets are incomplete.');
       const trace = {
         cleanup: () => undefined,
+        card,
+        cardDisconnects: 0,
+        cardRemounts: 0,
+        canvas,
+        canvasDisconnects: 0,
+        canvasReplacements: 0,
+        canvasWrapper,
+        canvasWrapperDisconnects: 0,
+        canvasWrapperEmpty: 0,
+        canvasWrapperHidden: 0,
+        canvasWrapperRemounts: 0,
         events: [] as string[],
+        hiddenAfterVisible: 0,
+        lastPopoverVisible: false,
+        page,
+        pageDisconnects: 0,
+        pageRemounts: 0,
+        popover,
+        popoverDisconnects: 0,
+        popoverRemounts: 0,
         prematureFocus: 0,
+        readerDisconnects: 0,
         readerRemounts: 0,
         readonlyVisible: 0,
+        viewer,
+        viewerDisconnects: 0,
+        viewerRemounts: 0,
+      };
+      const removedTarget = (node: Node, target: Node | null): boolean =>
+        target !== null &&
+        (node === target ||
+          (node.nodeType === Node.ELEMENT_NODE && (node as Element).contains(target)));
+      const processRecords = (records: MutationRecord[]): void => {
+        for (const record of records) {
+          for (const removed of Array.from(record.removedNodes)) {
+            if (removedTarget(removed, reader)) trace.readerDisconnects += 1;
+            if (removedTarget(removed, viewer)) trace.viewerDisconnects += 1;
+            if (removedTarget(removed, page)) trace.pageDisconnects += 1;
+            if (removedTarget(removed, trace.canvas)) trace.canvasDisconnects += 1;
+            if (removedTarget(removed, canvasWrapper)) trace.canvasWrapperDisconnects += 1;
+            if (removedTarget(removed, popover)) trace.popoverDisconnects += 1;
+            if (removedTarget(removed, card)) trace.cardDisconnects += 1;
+          }
+        }
       };
       const sample = (event: string): void => {
         const currentReader = document.querySelector<HTMLElement>(readerSelector);
         if (currentReader !== reader || !reader.isConnected) trace.readerRemounts += 1;
+        if (reader.querySelector('.pdfViewerContainer') !== viewer || !viewer.isConnected)
+          trace.viewerRemounts += 1;
+        if (viewer.querySelector('[data-page-number="1"]') !== page || !page.isConnected)
+          trace.pageRemounts += 1;
+        if (page.querySelector('.canvasWrapper') !== canvasWrapper || !canvasWrapper.isConnected)
+          trace.canvasWrapperRemounts += 1;
+        const currentCanvas = canvasWrapper.querySelector<HTMLCanvasElement>('canvas');
+        if (currentCanvas === null) trace.canvasWrapperEmpty += 1;
+        else if (currentCanvas !== trace.canvas) {
+          trace.canvas = currentCanvas;
+          trace.canvasReplacements += 1;
+        }
+        if (canvasWrapper.hidden || getComputedStyle(canvasWrapper).display === 'none')
+          trace.canvasWrapperHidden += 1;
+        if (leaf.querySelector(popoverSelector) !== popover || !popover.isConnected)
+          trace.popoverRemounts += 1;
+        if (
+          card !== null &&
+          (leaf.querySelector('.abyss-annotation-card') !== card || !card.isConnected)
+        )
+          trace.cardRemounts += 1;
         const selected = reader.querySelectorAll(`${editorSelector}.selectedEditor`).length;
-        const popover = document.querySelector<HTMLElement>(popoverSelector);
-        const visible = popover !== null && !popover.hidden;
+        const visible =
+          popover.isConnected && !popover.hidden && getComputedStyle(popover).display !== 'none';
+        if (trace.lastPopoverVisible && !visible) trace.hiddenAfterVisible += 1;
+        trace.lastPopoverVisible = visible;
         if (visible && popover.innerText.includes('Read-only')) trace.readonlyVisible += 1;
         if (visible && popover.contains(document.activeElement) && selected === 0)
           trace.prematureFocus += 1;
         trace.events.push(`${event}:${String(selected)}:${visible ? 'visible' : 'hidden'}`);
       };
-      const observer = new MutationObserver(() => {
+      const observer = new MutationObserver((records) => {
+        processRecords(records);
         sample('mutation');
       });
       const onFocus = (): void => {
         sample('focus');
       };
-      observer.observe(reader, {
+      observer.observe(leaf, {
         attributes: true,
         childList: true,
         characterData: true,
@@ -682,6 +801,8 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
       });
       document.addEventListener('focusin', onFocus, true);
       trace.cleanup = () => {
+        processRecords(observer.takeRecords());
+        sample('drain');
         observer.disconnect();
         document.removeEventListener('focusin', onFocus, true);
       };
@@ -692,7 +813,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
     },
     activeReaderSelector,
     fixture.editorSelector,
-    nativeEditorSelector,
+    '[data-annotation-editor-popover]',
   );
 }
 
@@ -700,11 +821,33 @@ async function assertPersistedActivationTrace(): Promise<void> {
   const trace = await browser.execute(() => {
     const host = window as Window & {
       __abyssTask3ActivationTrace?: {
+        card: HTMLElement | null;
+        cardDisconnects: number;
+        cardRemounts: number;
+        canvas: HTMLCanvasElement;
+        canvasDisconnects: number;
+        canvasReplacements: number;
+        canvasWrapper: HTMLElement;
+        canvasWrapperDisconnects: number;
+        canvasWrapperEmpty: number;
+        canvasWrapperHidden: number;
+        canvasWrapperRemounts: number;
         cleanup(): void;
         events: string[];
+        hiddenAfterVisible: number;
+        page: HTMLElement;
+        pageDisconnects: number;
+        pageRemounts: number;
+        popover: HTMLElement;
+        popoverDisconnects: number;
+        popoverRemounts: number;
         prematureFocus: number;
+        readerDisconnects: number;
         readerRemounts: number;
         readonlyVisible: number;
+        viewer: HTMLElement;
+        viewerDisconnects: number;
+        viewerRemounts: number;
       };
     };
     const current = host.__abyssTask3ActivationTrace;
@@ -712,17 +855,64 @@ async function assertPersistedActivationTrace(): Promise<void> {
     current.cleanup();
     delete host.__abyssTask3ActivationTrace;
     return {
+      cardConnected: current.card?.isConnected ?? true,
+      cardDisconnects: current.cardDisconnects,
+      cardRemounts: current.cardRemounts,
+      canvasConnected: current.canvas.isConnected,
+      canvasDisconnects: current.canvasDisconnects,
+      canvasReplacements: current.canvasReplacements,
+      canvasWrapperConnected: current.canvasWrapper.isConnected,
+      canvasWrapperDisconnects: current.canvasWrapperDisconnects,
+      canvasWrapperEmpty: current.canvasWrapperEmpty,
+      canvasWrapperHidden: current.canvasWrapperHidden,
+      canvasWrapperRemounts: current.canvasWrapperRemounts,
       eventCount: current.events.length,
+      events: current.events,
+      hiddenAfterVisible: current.hiddenAfterVisible,
+      pageConnected: current.page.isConnected,
+      pageDisconnects: current.pageDisconnects,
+      pageRemounts: current.pageRemounts,
+      popoverConnected: current.popover.isConnected,
+      popoverDisconnects: current.popoverDisconnects,
+      popoverRemounts: current.popoverRemounts,
       prematureFocus: current.prematureFocus,
+      readerDisconnects: current.readerDisconnects,
       readerRemounts: current.readerRemounts,
       readonlyVisible: current.readonlyVisible,
+      viewerConnected: current.viewer.isConnected,
+      viewerDisconnects: current.viewerDisconnects,
+      viewerRemounts: current.viewerRemounts,
     };
   });
   expect(trace.eventCount).toBeGreaterThan(1);
+  if (trace.readonlyVisible > 0 || trace.hiddenAfterVisible > 0)
+    throw new Error(`Persisted activation flashed: ${JSON.stringify(trace)}`);
   expect(trace).toMatchObject({
+    cardConnected: true,
+    cardDisconnects: 0,
+    cardRemounts: 0,
+    canvasConnected: true,
+    canvasDisconnects: 1,
+    canvasReplacements: 1,
+    canvasWrapperConnected: true,
+    canvasWrapperDisconnects: 0,
+    canvasWrapperEmpty: 0,
+    canvasWrapperHidden: 0,
+    canvasWrapperRemounts: 0,
+    hiddenAfterVisible: 0,
+    pageConnected: true,
+    pageDisconnects: 0,
+    pageRemounts: 0,
+    popoverConnected: true,
+    popoverDisconnects: 0,
+    popoverRemounts: 0,
     prematureFocus: 0,
+    readerDisconnects: 0,
     readerRemounts: 0,
     readonlyVisible: 0,
+    viewerConnected: true,
+    viewerDisconnects: 0,
+    viewerRemounts: 0,
   });
 }
 
@@ -788,14 +978,220 @@ async function assertFreshNeutralReader(fixture: PersistedWritableFixture): Prom
 }
 
 async function assertEditablePersistedActivation(fixture: PersistedWritableFixture): Promise<void> {
-  await $(activeReaderDescendant(`${fixture.editorSelector}.selectedEditor`)).waitForExist({
-    timeout: 20_000,
-  });
+  try {
+    await $(activeReaderDescendant(`${fixture.editorSelector}.selectedEditor`)).waitForExist({
+      timeout: 20_000,
+    });
+  } catch (cause) {
+    const diagnostics = await browser.executeObsidian(({ app }) => {
+      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+        controller?: {
+          annotationAbort?: AbortController | null;
+          annotationProjection?: {
+            snapshot?(): Array<{ nativeId?: string; writable?: boolean }>;
+          };
+          annotationsLoadedFor?: unknown;
+          annotationsLoadingFor?: unknown;
+          session?: unknown;
+          verifiedAnnotationMarker?: unknown;
+          viewport?: {
+            annotationEditorInstance?: {
+              activeActivation?: { controller?: { signal?: AbortSignal }; id?: string } | null;
+              contextualEditSession?: { id?: string; phase?: string } | null;
+              manager?: { firstSelectedEditor?: { mode?: number; uid?: string } };
+            };
+            viewer?: { annotationEditorMode?: number };
+          };
+        };
+      };
+      const viewport = view.controller?.viewport;
+      const annotationEditor = viewport?.annotationEditorInstance;
+      const controller = view.controller;
+      const popover = document.querySelector<HTMLElement>('[data-annotation-editor-popover]');
+      return {
+        activationAborted: annotationEditor?.activeActivation?.controller?.signal?.aborted ?? null,
+        activationId: annotationEditor?.activeActivation?.id ?? null,
+        annotationLoadAborted: controller?.annotationAbort?.signal.aborted ?? null,
+        annotationRows: controller?.annotationProjection?.snapshot?.() ?? [],
+        annotationsLoaded: controller?.annotationsLoadedFor === controller?.session,
+        annotationsLoading: controller?.annotationsLoadingFor === controller?.session,
+        contextualId: annotationEditor?.contextualEditSession?.id ?? null,
+        contextualPhase: annotationEditor?.contextualEditSession?.phase ?? null,
+        editorClasses: Array.from(
+          document.querySelectorAll<HTMLElement>('.annotationEditorLayer [id]'),
+          (node) => ({ className: node.className, id: node.id }),
+        ),
+        mode: viewport?.viewer?.annotationEditorMode ?? null,
+        popoverHidden: popover?.hidden ?? null,
+        popoverText: popover?.innerText ?? null,
+        selectedMode: annotationEditor?.manager?.firstSelectedEditor?.mode ?? null,
+        selectedUid: annotationEditor?.manager?.firstSelectedEditor?.uid ?? null,
+        verifiedAnnotationMarker: controller?.verifiedAnnotationMarker ?? null,
+      };
+    });
+    throw new Error(
+      `Persisted activation unavailable: ${JSON.stringify(diagnostics)}; ${String(cause)}`,
+    );
+  }
   const popover = $(nativeEditorSelector);
   await popover.waitForDisplayed({ timeout: 5_000 });
   await expect(popover.$('.abyss-annotation-editor-palette')).toBeDisplayed();
   await expect(popover).not.toHaveText(expect.stringContaining('Read-only'));
   await assertPersistedActivationTrace();
+}
+
+async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
+  const editorSelector = activeReaderDescendant('.freeTextEditor.selectedEditor');
+  const controlSelector = `${editorSelector} .internal`;
+  const inputSelector = activeReaderDescendant(
+    '.freeTextEditor.selectedEditor [contenteditable="true"]',
+  );
+  await browser.executeObsidian(
+    ({ app }, input) => {
+      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+        controller?: {
+          viewport?: {
+            annotationEditorInstance?: {
+              focusAnnotation: (...args: [string, unknown]) => Promise<unknown>;
+              manager?: { firstSelectedEditor?: unknown } | null;
+              onAnnotationFocus(
+                listener: (focus: { editable?: boolean } | null) => void,
+              ): () => void;
+            };
+            commentBridge?: {
+              activeBinding?: { editor?: unknown } | null;
+              activeSelectedEditors?: unknown[];
+              activeSource?: unknown;
+              bindings?: Map<string, unknown>;
+            };
+            viewer?: { annotationEditorMode?: number };
+          };
+        };
+      };
+      const viewport = view.controller?.viewport;
+      const interaction = viewport?.annotationEditorInstance;
+      const bridge = viewport?.commentBridge;
+      const native = interaction?.manager?.firstSelectedEditor;
+      const editor = document.querySelector<HTMLElement>(input.editorSelector);
+      const control = document.querySelector<HTMLElement>(input.controlSelector);
+      if (
+        interaction === undefined ||
+        bridge === undefined ||
+        native === undefined ||
+        viewport?.viewer === undefined ||
+        editor === null ||
+        control === null
+      )
+        throw new Error('Persisted FreeText edit probe targets are incomplete.');
+      const original = interaction.focusAnnotation;
+      const focusEvents: Array<boolean | null> = [];
+      const stopFocus = interaction.onAnnotationFocus((focus) => {
+        focusEvents.push(focus?.editable ?? null);
+      });
+      const state = {
+        calls: 0,
+        bridge,
+        cleanup: () => {
+          interaction.focusAnnotation = original;
+          stopFocus();
+        },
+        control,
+        editor,
+        focusEvents,
+        interaction,
+        mode: viewport.viewer.annotationEditorMode ?? null,
+        native,
+        viewer: viewport.viewer,
+      };
+      interaction.focusAnnotation = function (...args: [string, unknown]): Promise<unknown> {
+        state.calls += 1;
+        return original.apply(this, args);
+      };
+      (window as Window & { __abyssTask3FreeTextProbe?: typeof state }).__abyssTask3FreeTextProbe =
+        state;
+    },
+    { controlSelector, editorSelector },
+  );
+
+  await $(controlSelector).doubleClick();
+  const editable = $(inputSelector);
+  await editable.waitForExist({ timeout: 5_000 });
+  await editable.click();
+  await browser.keys(Key.End);
+  await browser.keys(' caret');
+
+  const result = await browser.execute(() => {
+    const host = window as Window & {
+      __abyssTask3FreeTextProbe?: {
+        calls: number;
+        bridge: {
+          activeBinding?: { editor?: unknown } | null;
+          activeSelectedEditors?: unknown[];
+          activeSource?: unknown;
+          bindings?: Map<string, unknown>;
+        };
+        cleanup(): void;
+        control: HTMLElement;
+        editor: HTMLElement;
+        focusEvents: Array<boolean | null>;
+        interaction: unknown;
+        mode: number | null;
+        native: unknown;
+        viewer: { annotationEditorMode?: number };
+      };
+    };
+    const state = host.__abyssTask3FreeTextProbe;
+    if (state === undefined) throw new Error('Persisted FreeText edit probe was not installed.');
+    const editable = state.editor.querySelector<HTMLElement>('[contenteditable="true"]');
+    if (editable === null) throw new Error('Persisted FreeText did not enter native edit mode.');
+    const active = document.activeElement;
+    const innerText = editable.innerText;
+    const result = {
+      calls: state.calls,
+      bridgeActiveBinding: state.bridge.activeBinding?.editor === state.native,
+      bridgeActiveSource: state.bridge.activeSource === state.native,
+      bridgeBindingCount: state.bridge.bindings?.size ?? -1,
+      bridgeSelected: state.bridge.activeSelectedEditors?.includes(state.native) ?? false,
+      editorConnected: state.editor.isConnected,
+      focused: active === editable || (active !== null && editable.contains(active)),
+      mode: state.viewer.annotationEditorMode ?? null,
+      modeBefore: state.mode,
+      focusEvents: state.focusEvents,
+      popoverVisible:
+        document.querySelector<HTMLElement>(
+          '.workspace-leaf.mod-active [data-annotation-editor-popover]:not([hidden])',
+        ) !== null,
+      sameEditor:
+        document.querySelector('.workspace-leaf.mod-active .freeTextEditor.selectedEditor') ===
+        state.editor,
+      selected: state.editor.classList.contains('selectedEditor'),
+      text: innerText.length > 0 ? innerText : editable.textContent,
+    };
+    state.cleanup();
+    delete host.__abyssTask3FreeTextProbe;
+    return result;
+  });
+  expect(result).toMatchObject({
+    calls: 0,
+    bridgeActiveBinding: true,
+    bridgeActiveSource: true,
+    bridgeBindingCount: 1,
+    bridgeSelected: true,
+    editorConnected: true,
+    focused: true,
+    mode: 3,
+    modeBefore: 3,
+    focusEvents: [],
+    popoverVisible: true,
+    sameEditor: true,
+    selected: true,
+  });
+  expect(result.text).toContain(' caret');
+  await browser.keys(Key.Escape);
+  await browser.waitUntil(async () => !(await editable.isExisting()), {
+    timeout: 5_000,
+    timeoutMsg: 'Persisted FreeText did not commit native text editing on Escape.',
+  });
 }
 
 async function updateActivatedPersistedAnnotation(comment: string): Promise<void> {
@@ -1831,6 +2227,14 @@ describe('reader selection-first annotations', () => {
       const comment = `Persisted ${fixture.kind} activation`;
       await updateActivatedPersistedAnnotation(comment);
       hash = await waitForPdfBytesToChange(workingPath, hash);
+      if (fixture.kind === 'freetext') {
+        await browser.keys(Key.Escape);
+        await $(nativeEditorSelector).waitForDisplayed({ reverse: true, timeout: 5_000 });
+        await installPersistedActivationTrace(fixture);
+        await $(activeReaderDescendant(fixture.persistedSelector)).click();
+        await assertEditablePersistedActivation(fixture);
+        await assertNativeFreeTextEditingUnaffected();
+      }
 
       await reopenPdf(workingPath);
       const native = (await nativePageOneAnnotations()).filter(
@@ -2280,6 +2684,69 @@ describe('reader selection-first annotations', () => {
         };
       }, nativeEditorSelector);
     const assertFailClosedBatchContract = async (): Promise<void> => {
+      try {
+        await browser.waitUntil(
+          async () => (await batchMutationState()).status === '2 annotations selected',
+          {
+            timeout: 5_000,
+            timeoutMsg: 'The exact persisted overlap selection did not reach the unified target.',
+          },
+        );
+      } catch (cause) {
+        const diagnostics = await browser.executeObsidian(({ app }) => {
+          const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+            controller?: {
+              annotationSaveLifecycleSnapshot?(): unknown;
+              currentAnnotationTool?: string;
+              viewport?: {
+                annotationEditorInstance?: {
+                  activeActivation?: { id?: string } | null;
+                  contextualEditSession?: { id?: string; phase?: string } | null;
+                  logicalMode?: string;
+                  pendingAnnotationFocus?: {
+                    focus?: { annotations?: Array<{ identity?: { id?: string } }> } | null;
+                  } | null;
+                };
+                viewer?: { annotationEditorMode?: number };
+                commentBridge?: {
+                  activeSelectedEditors?: Array<{ annotationElementId?: string; uid?: string }>;
+                  activeSource?: { annotationElementId?: string; uid?: string } | null;
+                };
+              };
+            };
+          };
+          const viewport = view.controller?.viewport;
+          const interaction = viewport?.annotationEditorInstance;
+          const bridge = viewport?.commentBridge;
+          return {
+            activationId: interaction?.activeActivation?.id ?? null,
+            activeSelectedIds: bridge?.activeSelectedEditors?.map(
+              (editor) => editor.annotationElementId ?? editor.uid ?? '',
+            ),
+            activeSourceId:
+              bridge?.activeSource?.annotationElementId ?? bridge?.activeSource?.uid ?? null,
+            contextualId: interaction?.contextualEditSession?.id ?? null,
+            contextualPhase: interaction?.contextualEditSession?.phase ?? null,
+            logicalMode: interaction?.logicalMode ?? null,
+            pendingFocusIds:
+              interaction?.pendingAnnotationFocus?.focus?.annotations?.map(
+                (annotation) => annotation.identity?.id ?? '',
+              ) ?? [],
+            selectedDomIds: Array.from(
+              document.querySelectorAll<HTMLElement>('.highlightEditor.selectedEditor'),
+              (editor) => editor.id,
+            ),
+            saveLifecycle: view.controller?.annotationSaveLifecycleSnapshot?.() ?? null,
+            tool: view.controller?.currentAnnotationTool ?? null,
+            viewerMode: viewport?.viewer?.annotationEditorMode ?? null,
+          };
+        });
+        throw new Error(
+          `The exact persisted overlap selection did not reach the unified target: ${JSON.stringify(
+            { batch: await batchMutationState(), diagnostics },
+          )}; ${String(cause)}`,
+        );
+      }
       expect(await batchMutationState()).toEqual({
         actionLabels: ['Delete annotations'],
         nativeToolbarVisible: false,

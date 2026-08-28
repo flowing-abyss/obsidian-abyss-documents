@@ -132,6 +132,16 @@ function isElementTarget(target: EventTarget | null): target is Element {
   return target !== null && 'closest' in target && typeof target.closest === 'function';
 }
 
+function isNativeFreeTextEditingTarget(target: Element): boolean {
+  if (target.closest('.annotationEditorLayer .freeTextEditor.selectedEditor .internal') !== null)
+    return true;
+  return (
+    (target
+      .closest('[contenteditable]:not([contenteditable="false"])')
+      ?.closest('.annotationEditorLayer .freeTextEditor') ?? null) !== null
+  );
+}
+
 function hasNativeSelectionModifier(event: MouseEvent | PointerEvent): boolean {
   return event.ctrlKey || event.metaKey || event.shiftKey;
 }
@@ -257,6 +267,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private selectionObserverInstance: PdfDomSelectionObserver | null = null;
   private selectionSnapshotUnsubscribe: (() => void) | null = null;
   private annotationMutationUnsubscribe: (() => void) | null = null;
+  private pendingPointerActivation: { readonly id: string; readonly timeout: number } | null = null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
@@ -716,13 +727,16 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private registerRootListeners(root: HTMLElement): void {
+    root.addEventListener('pointerdown', this.onRootPointerDown, { capture: true });
     root.addEventListener('click', this.onRootClick, { capture: true });
     root.addEventListener('contextmenu', this.onRootContextMenu);
   }
 
   private unregisterRootListeners(root: HTMLElement): void {
+    root.removeEventListener('pointerdown', this.onRootPointerDown, { capture: true });
     root.removeEventListener('click', this.onRootClick, { capture: true });
     root.removeEventListener('contextmenu', this.onRootContextMenu);
+    this.clearPendingPointerActivation();
   }
 
   private createAnnotationEditor(
@@ -1279,13 +1293,11 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (!isElementTarget(target)) return;
     const annotationId = this.annotationActivationId(target);
     if (annotationId !== null) {
+      const pending = this.pendingPointerActivation;
+      this.clearPendingPointerActivation();
+      if (pending?.id === annotationId) return;
       const preserveNativeSelection = hasNativeSelectionModifier(event);
-      this.annotationInteraction
-        ?.focusAnnotation(annotationId, {
-          kind: 'root-click',
-          ...(preserveNativeSelection ? { preserveNativeSelection: true } : {}),
-        })
-        .catch(() => undefined);
+      this.activateRootAnnotation(annotationId, preserveNativeSelection);
       return;
     }
     const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
@@ -1295,6 +1307,41 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (page === null || pageNumber === null || this.viewer === null) return;
     this.retryPage(this.viewer, page, pageNumber, retry);
   };
+
+  private readonly onRootPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0) return;
+    const target = event.target;
+    if (!isElementTarget(target)) return;
+    const annotationId = this.annotationActivationId(target);
+    if (annotationId === null) return;
+    this.clearPendingPointerActivation();
+    const owner = target.ownerDocument.defaultView;
+    if (owner === null) return;
+    const pending = {
+      id: annotationId,
+      timeout: owner.setTimeout(() => {
+        if (this.pendingPointerActivation === pending) this.pendingPointerActivation = null;
+      }, 0),
+    };
+    this.pendingPointerActivation = pending;
+    this.activateRootAnnotation(annotationId, hasNativeSelectionModifier(event));
+  };
+
+  private activateRootAnnotation(id: string, preserveNativeSelection: boolean): void {
+    this.annotationInteraction
+      ?.focusAnnotation(id, {
+        kind: 'root-click',
+        ...(preserveNativeSelection ? { preserveNativeSelection: true } : {}),
+      })
+      .catch(() => undefined);
+  }
+
+  private clearPendingPointerActivation(): void {
+    const pending = this.pendingPointerActivation;
+    if (pending === null) return;
+    this.root?.ownerDocument.defaultView?.clearTimeout(pending.timeout);
+    this.pendingPointerActivation = null;
+  }
 
   private readonly onRootContextMenu = (event: MouseEvent): void => {
     const target = event.target;
@@ -1310,6 +1357,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private annotationActivationId(target: Element): string | null {
     if (target.closest('a, button, input, select, textarea') !== null) return null;
+    if (isNativeFreeTextEditingTarget(target)) return null;
     const node = target.closest<HTMLElement>(
       '.annotationLayer [data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
     );
