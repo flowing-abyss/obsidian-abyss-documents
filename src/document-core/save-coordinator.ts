@@ -87,6 +87,7 @@ export type VerifiedReloadSource = NativeSaveSource | NativeRecoverySource;
 
 export interface NativeEditableSaveSession extends NativeSaveSource {
   readonly baseToken: BaseToken;
+  readonly committedRevision?: number;
   readonly pendingRevision: number;
   readonly isDirty: boolean;
   destroy(): void;

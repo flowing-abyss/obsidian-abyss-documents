@@ -411,6 +411,52 @@ describe('PdfDomSelectionObserver', () => {
     expect(selections).toEqual([first, null, second, null]);
   });
 
+  it('restores the owned text range after metadata focus clears browser selection', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const selections: Array<PdfTextSelection | null> = [];
+    observer.onSelection((selection) => selections.push(selection));
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'pointer');
+    await nextFrame();
+    const owned = selections.find((selection): selection is PdfTextSelection => selection !== null);
+    if (owned === undefined) throw new Error('Expected the owned selection.');
+
+    document.getSelection()?.removeAllRanges();
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(observer.validate(owned.token)).toBe('stale');
+    expect(observer.restore(owned.token)).toBe('current');
+    expect(document.getSelection()?.toString()).toBe(owned.text);
+    observer.invalidate();
+    expect(observer.restore(owned.token)).toBe('stale');
+  });
+
+  it('does not invalidate the owned range when the annotation popover receives pointer input', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const popover = root.createDiv();
+    popover.dataset['annotationEditorPopover'] = '';
+    const swatch = popover.createEl('button');
+    const observer = new PdfDomSelectionObserver(root);
+    const selections: Array<PdfTextSelection | null> = [];
+    observer.onSelection((selection) => selections.push(selection));
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'pointer');
+    await nextFrame();
+    const owned = selections.find((selection): selection is PdfTextSelection => selection !== null);
+    if (owned === undefined) throw new Error('Expected the owned selection.');
+
+    primaryPointer(swatch, 'pointerdown');
+
+    expect(observer.validate(owned.token)).toBe('current');
+    expect(selections).toEqual([owned]);
+  });
+
   it('uses ownerDocument and ownerWindow in popouts', async () => {
     const popup = document.implementation.createHTMLDocument('PDF popout');
     const frames: FrameRequestCallback[] = [];

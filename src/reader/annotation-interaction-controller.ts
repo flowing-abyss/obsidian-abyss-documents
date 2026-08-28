@@ -11,6 +11,7 @@ import type {
   AnnotationEditorCreation,
   AnnotationEditorPopoverRequest,
   AnnotationEditorTarget,
+  AnnotationEditorUpdate,
 } from './annotation-editor-popover.js';
 
 export interface QuickHighlightState {
@@ -35,6 +36,16 @@ export interface AnnotationInteractionControllerOptions {
     context: Readonly<Record<string, unknown>>,
   ) => void;
   readonly onModeChange?: (mode: PdfAnnotationLogicalMode) => void;
+  readonly onAnnotationPreview?: (update: AnnotationEditorUpdate) => void;
+  readonly onAnnotationDelete?: (annotations: readonly DocumentAnnotation[]) => void;
+  readonly onAnnotationUpdate?: (update: AnnotationEditorUpdate) => void;
+  readonly onSelectionCreateCommit?: (
+    creation: AnnotationEditorCreation,
+    annotation: DocumentAnnotation,
+  ) => void;
+  readonly onSelectionCreateDiscard?: (creation: AnnotationEditorCreation) => void;
+  readonly onSelectionCreatePreview?: (creation: AnnotationEditorCreation) => void;
+  readonly onSelectionCreateStart?: (creation: AnnotationEditorCreation) => void;
 }
 
 const DEFAULT_COLOR = '#ffd400';
@@ -44,6 +55,7 @@ export class AnnotationInteractionController {
   private activeAbort: AbortController | null = null;
   private activeColor: string;
   private activeSelectionRevision = 0;
+  private ownedSelectionRevision: number | null = null;
   private destroyed = false;
   private mode: PdfAnnotationLogicalMode = 'neutral';
   private palette: readonly AnnotationPaletteEntry[];
@@ -153,6 +165,8 @@ export class AnnotationInteractionController {
   }
 
   private handleSelection(selection: PdfTextSelection | null): void {
+    if (this.activeAbort !== null) return;
+    if (selection === null && this.ownedSelectionRevision === this.activeSelectionRevision) return;
     if (this.destroyed || this.mode !== 'neutral' || selection === null) {
       this.closeActiveSelection();
       return;
@@ -162,16 +176,23 @@ export class AnnotationInteractionController {
       color: this.activeColor,
       onClose: () => {
         if (revision !== this.activeSelectionRevision) return;
+        this.ownedSelectionRevision = null;
         this.activeSelectionRevision += 1;
         this.abortCommit('The PDF annotation selection editor was closed.');
       },
       onCreate: (creation) => this.createSelection(revision, creation),
-      onDelete: (annotations) => this.interaction.deleteAnnotations(annotations),
-      onUpdate: (update) => this.interaction.updateAnnotations(update),
+      onDelete: (annotations) => this.deleteAnnotations(annotations),
+      onPreviewRevert: (update) => this.options.onAnnotationPreview?.(update),
+      onPreviewUpdate: (update) => this.options.onAnnotationPreview?.(update),
+      onSelectionPreview: (creation) => this.options.onSelectionCreatePreview?.(creation),
+      onUpdate: (update) => this.updateAnnotations(update),
       palette: this.palette,
       target: { kind: 'selection', selection },
     });
-    if (opened) this.activeSelectionRevision = revision;
+    if (opened) {
+      this.activeSelectionRevision = revision;
+      this.ownedSelectionRevision = revision;
+    }
   }
 
   private handleAnnotationFocus(focus: PdfAnnotationFocus | null): void {
@@ -185,17 +206,27 @@ export class AnnotationInteractionController {
     if (!focus.editable) target = { annotation: first, kind: 'readonly' };
     else if (focus.annotations.length === 1) target = { annotation: first, kind: 'annotation' };
     else target = { annotations: focus.annotations, kind: 'multiple' };
+    const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
       color: first.color ?? undefined,
-      onClose: () => undefined,
+      onClose: () => {
+        if (revision !== this.activeSelectionRevision) return;
+        this.ownedSelectionRevision = null;
+        this.activeSelectionRevision += 1;
+      },
       onCreate: () => 'dismissed' as const,
-      onDelete: (annotations) => this.interaction.deleteAnnotations(annotations),
-      onUpdate: (update) => this.interaction.updateAnnotations(update),
+      onDelete: (annotations) => this.deleteAnnotations(annotations),
+      onPreviewRevert: (update) => this.options.onAnnotationPreview?.(update),
+      onPreviewUpdate: (update) => this.options.onAnnotationPreview?.(update),
+      onUpdate: (update) => this.updateAnnotations(update),
       palette: this.palette,
       position: focus.position,
       target,
     });
-    if (opened) this.activeSelectionRevision += 1;
+    if (opened) {
+      this.activeSelectionRevision = revision;
+      this.ownedSelectionRevision = revision;
+    }
   }
 
   private async createSelection(
@@ -209,6 +240,7 @@ export class AnnotationInteractionController {
     this.abortCommit('The PDF annotation selection was superseded.');
     this.activeAbort = abort;
     try {
+      this.options.onSelectionCreateStart?.(creation);
       const result = await this.interaction.commitSelection(
         creation.selection.token,
         creation.comment.length === 0
@@ -216,23 +248,59 @@ export class AnnotationInteractionController {
           : { color: creation.color, kind: 'comment', seed: creation.comment },
         abort.signal,
       );
-      if (this.activeAbort === abort) {
-        this.activeAbort = null;
-        this.publishQuickHighlightState();
-      }
+      this.finishSelectionCreation(revision, creation, abort, result);
       return result;
     } catch (cause) {
-      if (this.activeAbort === abort) {
-        this.activeAbort = null;
-        this.publishQuickHighlightState();
-        if (!isAbortFailure(cause)) {
-          this.options.onFailure?.('create selection annotation', cause, {
-            token: creation.selection.token,
-          });
-        }
-      }
+      this.failSelectionCreation(creation, abort, cause);
       throw cause;
     }
+  }
+
+  private deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean {
+    if (!this.interaction.deleteAnnotations(annotations)) return false;
+    this.options.onAnnotationDelete?.(annotations);
+    return true;
+  }
+
+  private finishSelectionCreation(
+    revision: number,
+    creation: AnnotationEditorCreation,
+    abort: AbortController,
+    result: DocumentAnnotation | 'dismissed',
+  ): void {
+    if (this.activeAbort === abort) {
+      this.activeAbort = null;
+      this.publishQuickHighlightState();
+    }
+    if (result === 'dismissed') {
+      this.options.onSelectionCreateDiscard?.(creation);
+      return;
+    }
+    if (revision !== this.activeSelectionRevision) return;
+    this.options.onSelectionCreateCommit?.(creation, result);
+    this.ownedSelectionRevision = revision;
+  }
+
+  private failSelectionCreation(
+    creation: AnnotationEditorCreation,
+    abort: AbortController,
+    cause: unknown,
+  ): void {
+    this.options.onSelectionCreateDiscard?.(creation);
+    if (this.activeAbort !== abort) return;
+    this.activeAbort = null;
+    this.publishQuickHighlightState();
+    if (isAbortFailure(cause)) return;
+    this.options.onFailure?.('create selection annotation', cause, {
+      token: creation.selection.token,
+    });
+  }
+
+  private updateAnnotations(update: AnnotationEditorUpdate): boolean {
+    const updated = this.interaction.updateAnnotations(update);
+    if (updated === false) return false;
+    this.options.onAnnotationUpdate?.(update);
+    return true;
   }
 
   private async applyQuickHighlight(enabled: boolean, revision: number): Promise<void> {
@@ -254,6 +322,7 @@ export class AnnotationInteractionController {
   private closeActiveSelection(): boolean {
     const revision = this.activeSelectionRevision;
     if (!this.host.closeAnnotationEditor()) return false;
+    this.ownedSelectionRevision = null;
     if (this.activeSelectionRevision === revision) this.activeSelectionRevision += 1;
     return true;
   }

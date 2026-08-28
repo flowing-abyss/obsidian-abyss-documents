@@ -270,6 +270,7 @@ describe('ReaderToolbar', () => {
     fit.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
     fit.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'F10', shiftKey: true }));
     fit.dispatchEvent(new OwnerMouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    fit.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, button: 2 }));
     fitMenu.dispatchEvent(new OwnerKeyboardEvent('keydown', { key: 'ArrowDown' }));
     fitMenu.click();
 
@@ -278,6 +279,7 @@ describe('ReaderToolbar', () => {
       { type: 'set-scale', scale: 'page-width' },
       { type: 'zoom-step', direction: 1 },
     ]);
+    expect(intents).toHaveLength(3);
     expect(entries.map((entry) => entry.title)).toEqual([
       'Fit width',
       'Fit page',
@@ -303,6 +305,8 @@ describe('ReaderToolbar', () => {
     try {
       const entries = captureMenuItems();
       const { host, intents, toolbar } = fixture();
+      const bubbledClicks = vi.fn();
+      host.addEventListener('click', bubbledClicks);
       const fit = host.querySelector<HTMLButtonElement>('[data-control="fit"]');
       if (fit === null) throw new Error('Expected Fit.');
       const capturedPointers = new Set<number>();
@@ -336,6 +340,7 @@ describe('ReaderToolbar', () => {
       fit.dispatchEvent(pointer('pointerup', 10));
       fit.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
       expect(intents).toEqual([]);
+      expect(bubbledClicks).not.toHaveBeenCalled();
 
       fit.dispatchEvent(pointer('pointerdown', 10));
       vi.advanceTimersByTime(500);
@@ -343,6 +348,7 @@ describe('ReaderToolbar', () => {
       vi.advanceTimersByTime(1_001);
       fit.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
       expect(intents).toEqual([{ type: 'set-scale', scale: 'page-width' }]);
+      expect(bubbledClicks).toHaveBeenCalledTimes(1);
 
       fit.dispatchEvent(pointer('pointerdown', 10));
       fit.dispatchEvent(pointer('pointercancel', 10));
@@ -364,6 +370,8 @@ describe('ReaderToolbar', () => {
     try {
       const entries = captureMenuItems();
       const { host, intents, toolbar } = fixture();
+      const bubbledContexts = vi.fn();
+      host.addEventListener('contextmenu', bubbledContexts);
       const fit = host.querySelector<HTMLButtonElement>('[data-control="fit"]');
       if (fit === null) throw new Error('Expected Fit.');
       const OwnerPointerEvent = (fit.win as Window & { PointerEvent: typeof PointerEvent })
@@ -387,6 +395,7 @@ describe('ReaderToolbar', () => {
       vi.advanceTimersByTime(200);
       fit.dispatchEvent(contextmenu());
       expect(entries).toHaveLength(3);
+      expect(bubbledContexts).not.toHaveBeenCalled();
       vi.advanceTimersByTime(600);
       expect(entries).toHaveLength(3);
       fit.dispatchEvent(pointer('pointerup', 21));
@@ -398,6 +407,7 @@ describe('ReaderToolbar', () => {
       expect(entries).toHaveLength(6);
       fit.dispatchEvent(contextmenu());
       expect(entries).toHaveLength(6);
+      expect(bubbledContexts).not.toHaveBeenCalled();
       fit.dispatchEvent(pointer('pointerup', 22));
       fit.dispatchEvent(click());
       expect(intents).toEqual([]);

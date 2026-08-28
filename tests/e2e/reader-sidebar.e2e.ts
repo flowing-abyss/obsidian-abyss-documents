@@ -217,6 +217,7 @@ describe('PDF reader sidebar', () => {
   it('filters a searchable outline while retaining its ancestor path', async () => {
     await openOutline();
 
+    await $('[data-action="toggle-outline-search"]').click();
     const search = $('[data-outline-search]');
     await expect(search).toHaveAttribute('placeholder', 'Find a heading…');
     await search.setValue('SECTION 2');
@@ -277,34 +278,6 @@ describe('PDF reader sidebar', () => {
       const narrowWidth = '260px';
       sidebar.style.width = narrowWidth;
       sidebar.style.maxWidth = narrowWidth;
-      const canvas = document.querySelector<HTMLCanvasElement>('[data-page-number="1"] canvas');
-      if (canvas === null) throw new Error('Initial page canvas is missing.');
-      const state = {
-        badFrame: false,
-        canvas,
-        consecutivePopulatedFrames: 0,
-        frame: 0,
-        maxConsecutivePopulatedFrames: 0,
-        stopped: false,
-      };
-      (window as Window & { __abyssTask7Continuity?: typeof state }).__abyssTask7Continuity = state;
-      const sample = (): void => {
-        if (state.stopped) return;
-        const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
-        const status = panel?.querySelector<HTMLElement>('[data-annotations-status]') ?? null;
-        const populated =
-          panel?.dataset['annotationState'] === 'content' &&
-          panel.querySelectorAll('.abyss-annotation-card').length > 0 &&
-          status?.hidden === true;
-        state.badFrame ||= !populated;
-        state.consecutivePopulatedFrames = populated ? state.consecutivePopulatedFrames + 1 : 0;
-        state.maxConsecutivePopulatedFrames = Math.max(
-          state.maxConsecutivePopulatedFrames,
-          state.consecutivePopulatedFrames,
-        );
-        state.frame = requestAnimationFrame(sample);
-      };
-      state.frame = requestAnimationFrame(sample);
     });
 
     await browser.execute(() => {
@@ -577,7 +550,7 @@ describe('PDF reader sidebar', () => {
     expect(expanded.footerHeight).toBeGreaterThan(expanded.summaryHeight + 32);
     expect(expanded.footerHeight).toBeLessThanOrEqual(expanded.maxHeight + 1);
     expect(expanded.tagOverflowY).toBe('auto');
-    expect(expanded.chipRoles).toHaveLength(25);
+    expect(expanded.chipRoles).toHaveLength(26);
     expect(
       expanded.chipRoles.every(({ pressed, tag }) => pressed === 'false' && tag === 'BUTTON'),
     ).toBe(true);
@@ -734,22 +707,49 @@ describe('PDF reader sidebar', () => {
       )
         throw new Error('Narrow annotation containment target is incomplete.');
       const panelRect = panel.getBoundingClientRect();
-      const bounded = [card, meaning, comment, link, tag].every(
-        (element) => element.getBoundingClientRect().right <= panelRect.right + 1,
+      const elementBounds = Object.fromEntries(
+        Object.entries({ card, comment, link, meaning, tag }).map(([name, element]) => {
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return [
+            name,
+            {
+              display: style.display,
+              flexBasis: style.flexBasis,
+              flexShrink: style.flexShrink,
+              left: rect.left,
+              maxWidth: style.maxWidth,
+              minWidth: style.minWidth,
+              overflow: style.overflow,
+              right: rect.right,
+              width: rect.width,
+              widthStyle: style.width,
+            },
+          ];
+        }),
+      );
+      const bounded = Object.values(elementBounds).every(
+        ({ right }) => right <= panelRect.right + 1,
       );
       return {
         bounded,
         colorOverflowX: getComputedStyle(colorRows).overflowX,
         colorScrollable: colorRows.scrollWidth > colorRows.clientWidth,
         footerOrder: footer.firstElementChild === colors && footer.lastElementChild === tags,
+        elementBounds,
+        panelBounds: { left: panelRect.left, right: panelRect.right, width: panelRect.width },
         panelHasHorizontalOverflow: panel.scrollWidth > panel.clientWidth + 1,
       };
     });
+    if (!containment.bounded)
+      throw new Error(`Narrow annotation content escaped: ${JSON.stringify(containment)}`);
     expect(containment).toEqual({
       bounded: true,
       colorOverflowX: 'auto',
       colorScrollable: true,
+      elementBounds: containment.elementBounds,
       footerOrder: true,
+      panelBounds: containment.panelBounds,
       panelHasHorizontalOverflow: false,
     });
 
@@ -761,7 +761,9 @@ describe('PDF reader sidebar', () => {
       expect.stringContaining('Annotation 00001'),
     );
     await browser.keys(Key.Escape);
-    await $('[data-annotation-search]').setValue('');
+    await $('[data-annotation-search]').click();
+    await browser.keys([process.platform === 'darwin' ? Key.Command : Key.Control, 'a']);
+    await browser.keys(Key.Backspace);
     await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '10000');
 
     await browser.execute(() => {
@@ -798,18 +800,23 @@ describe('PDF reader sidebar', () => {
       document.querySelector<HTMLButtonElement>('.abyss-annotation-card[tabindex="0"]')?.focus();
     });
     await browser.keys(Key.Home);
+    await waitForAnnotationWindowToSettle();
+    await browser.execute(() => {
+      const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+      if (scrollHost === null) throw new Error('Annotation scroll host is missing.');
+      const viewport = scrollHost.getBoundingClientRect();
+      const cards = Array.from(document.querySelectorAll<HTMLElement>('.abyss-annotation-card'));
+      const visible = cards.find((card) => {
+        const rect = card.getBoundingClientRect();
+        return rect.top >= viewport.top && rect.bottom <= viewport.bottom;
+      });
+      if (visible === undefined)
+        throw new Error('No visible annotation card for pointer geometry.');
+      visible.dataset['annotationHoverProbe'] = '';
+    });
     const restingGeometry = await annotationCardGeometry();
 
-    const cardCenter = await browser.execute(() => {
-      const card = document.querySelector<HTMLElement>('.abyss-annotation-card');
-      if (card === null) throw new Error('Annotation card is missing for pointer geometry.');
-      const rect = card.getBoundingClientRect();
-      return {
-        x: Math.round(rect.left + rect.width / 2),
-        y: Math.round(rect.top + rect.height / 2),
-      };
-    });
-    await movePointerTo(cardCenter.x, cardCenter.y);
+    await $('[data-annotation-hover-probe]').moveTo();
     expect(await annotationCardGeometry()).toEqual(restingGeometry);
 
     const contextResult = await browser.execute(() => {
@@ -820,9 +827,10 @@ describe('PDF reader sidebar', () => {
       return {
         actionFocused: document.activeElement?.hasAttribute('data-action') === true,
         focusPreserved: document.activeElement === before,
+        rowId: row.dataset['annotationRowId'],
       };
     });
-    expect(contextResult).toEqual({ actionFocused: false, focusPreserved: true });
+    expect(contextResult).toMatchObject({ actionFocused: false, focusPreserved: true });
     expect(await annotationCardGeometry()).toEqual(restingGeometry);
     expect(
       await browser.execute(() => {
@@ -838,10 +846,36 @@ describe('PDF reader sidebar', () => {
       insert.focus();
       window.dispatchEvent(new Event('resize'));
     });
-    await expect($('[data-action="insert-annotation"]')).toBeFocused();
-    expect(await annotationCardGeometry()).toEqual(restingGeometry);
+    const resizeFocus = await browser.execute(() => ({
+      activeAction:
+        document.activeElement?.closest<HTMLElement>('[data-action]')?.dataset['action'],
+      activeRow: document.activeElement?.closest<HTMLElement>('[data-annotation-row-id]')?.dataset[
+        'annotationRowId'
+      ],
+      activeTag: document.activeElement?.tagName,
+    }));
+    expect(resizeFocus.activeAction).toBe('insert-annotation');
+    expect(resizeFocus.activeRow).toBe(contextResult.rowId);
+    expect(resizeFocus.activeTag).toBe('BUTTON');
+    const resizedGeometry = await annotationCardGeometry();
+    expect(resizedGeometry).toMatchObject({
+      cardHeight: restingGeometry.cardHeight,
+      cardWidth: restingGeometry.cardWidth,
+      commentHeight: restingGeometry.commentHeight,
+      commentWidth: restingGeometry.commentWidth,
+      headerHeight: restingGeometry.headerHeight,
+      rowHeight: restingGeometry.rowHeight,
+      rowWidth: restingGeometry.rowWidth,
+    });
+    expect(
+      await browser.execute(
+        () => document.activeElement?.closest<HTMLElement>('[data-action]')?.dataset['action'],
+      ),
+    ).toBe('insert-annotation');
     await browser.keys(Key.Escape);
-    await expect($('.abyss-annotation-card')).toBeFocused();
+    expect(
+      await browser.execute(() => document.activeElement?.matches('.abyss-annotation-card')),
+    ).toBe(true);
     expect(
       await browser.execute(() => {
         const actions = document.querySelector('.abyss-annotation-card-actions');
@@ -849,12 +883,13 @@ describe('PDF reader sidebar', () => {
         return getComputedStyle(actions).opacity;
       }),
     ).toBe('0');
-    expect(await annotationCardGeometry()).toEqual(restingGeometry);
+    expect(await annotationCardGeometry()).toEqual(resizedGeometry);
     await movePointerTo(1, 1);
     await browser.execute(() => {
       document.querySelector<HTMLElement>('[data-annotation-search]')?.focus();
     });
     await setCoarseAnnotationGeometry(true);
+    await waitForAnnotationWindowToSettle();
     const coarseFooter = await browser.execute(() => {
       const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
       const colors = panel?.querySelector<HTMLElement>('[data-section="colors"]') ?? null;
@@ -898,7 +933,7 @@ describe('PDF reader sidebar', () => {
     });
     await setCoarseAnnotationGeometry(false);
 
-    const firstColor = $('[data-annotation-color]');
+    const firstColor = $('[data-sidebar-panel="annotations"] [data-annotation-color]');
     await firstColor.moveTo();
     await browser.pause(350);
     await expect($('.tooltip')).toBeDisplayed();
@@ -908,65 +943,117 @@ describe('PDF reader sidebar', () => {
       timeoutMsg: 'Color meaning tooltip did not close after pointer exit.',
     });
 
-    await $('[data-annotation-color]').click();
-    await browser.waitUntil(
-      async () => Number(await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) < 1000,
-      { timeout: 5_000, timeoutMsg: 'Semantic color facet did not filter the data model.' },
-    );
-    await expect($$('[data-annotation-color]')).toBeElementsArrayOfSize(12);
-    await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 48 });
-    await $('[data-annotation-color][aria-pressed="true"]').click();
-
-    await $('[data-action="toggle-document-tags"]').click();
-    await $('[data-annotation-tag="topic-1"]').click();
-    await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '400');
-
-    await $('[data-annotation-search]').setValue('Annotation 07501');
-    await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
-    await expect($('[data-annotation-page]')).toHaveText('Page 76');
-    await expect($('[data-control="page-field"]')).toHaveValue('1');
-    await browser.waitUntil(
-      async () =>
-        browser
-          .execute(
-            () =>
-              (
-                window as Window & {
-                  __abyssTask7Continuity?: { readonly maxConsecutivePopulatedFrames: number };
-                }
-              ).__abyssTask7Continuity?.maxConsecutivePopulatedFrames ?? 0,
-          )
-          .then((frames) => frames >= 5),
-      { timeout: 2_000, timeoutMsg: 'Annotation panel did not sustain five populated frames.' },
-    );
-    const continuity = await browser.execute(() => {
-      const state = (
-        window as Window & {
-          __abyssTask7Continuity?: {
-            badFrame: boolean;
-            readonly canvas: HTMLCanvasElement;
-            readonly frame: number;
-            readonly maxConsecutivePopulatedFrames: number;
-            stopped: boolean;
-          };
-        }
-      ).__abyssTask7Continuity;
-      const currentCanvas = document.querySelector<HTMLCanvasElement>(
-        '[data-page-number="1"] canvas',
-      );
-      if (state === undefined || currentCanvas === null)
-        throw new Error('Annotation continuity probe is incomplete.');
-      state.stopped = true;
-      cancelAnimationFrame(state.frame);
-      return {
-        badFrame: state.badFrame,
-        maxConsecutivePopulatedFrames: state.maxConsecutivePopulatedFrames,
-        sameCanvas: state.canvas === currentCanvas,
+    await browser.execute(() => {
+      const canvas = document.querySelector<HTMLCanvasElement>('[data-page-number="1"] canvas');
+      if (canvas === null) throw new Error('Initial page canvas is missing.');
+      const state = {
+        badFrame: false,
+        canvas,
+        consecutivePopulatedFrames: 0,
+        frame: 0,
+        maxConsecutivePopulatedFrames: 0,
+        stopped: false,
       };
+      const host = window as Window & { __abyssTask9Continuity?: typeof state };
+      host.__abyssTask9Continuity = state;
+      const sample = (): void => {
+        if (state.stopped) return;
+        const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+        const status = panel?.querySelector<HTMLElement>('[data-annotations-status]') ?? null;
+        const populated =
+          panel?.dataset['annotationState'] === 'content' &&
+          panel.querySelectorAll('.abyss-annotation-card').length > 0 &&
+          status?.hidden === true;
+        state.badFrame ||= !populated;
+        state.consecutivePopulatedFrames = populated ? state.consecutivePopulatedFrames + 1 : 0;
+        state.maxConsecutivePopulatedFrames = Math.max(
+          state.maxConsecutivePopulatedFrames,
+          state.consecutivePopulatedFrames,
+        );
+        state.frame = requestAnimationFrame(sample);
+      };
+      state.frame = requestAnimationFrame(sample);
     });
-    expect(continuity.badFrame).toBe(false);
-    expect(continuity.maxConsecutivePopulatedFrames).toBeGreaterThanOrEqual(5);
-    expect(continuity.sameCanvas).toBe(true);
+    try {
+      await $('[data-sidebar-panel="annotations"] [data-annotation-color]').click();
+      await browser.waitUntil(
+        async () =>
+          Number(await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) < 1000,
+        { timeout: 5_000, timeoutMsg: 'Semantic color facet did not filter the data model.' },
+      );
+      const filteredColors = await browser.execute(() =>
+        Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '[data-sidebar-panel="annotations"] [data-annotation-color]',
+          ),
+        ).map((element) => element.dataset['annotationColor'] ?? ''),
+      );
+      expect(filteredColors).toHaveLength(12);
+      expect(filteredColors).not.toContain('');
+      await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize({ lte: 48 });
+      await $(
+        '[data-sidebar-panel="annotations"] [data-annotation-color][aria-pressed="true"]',
+      ).click();
+
+      await $('[data-action="toggle-document-tags"]').click();
+      await $('[data-annotation-tag="topic-1"]').click();
+      await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '400');
+
+      await $('[data-annotation-search]').setValue('Annotation 07501');
+      await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
+      await expect($('[data-annotation-page]')).toHaveText('Page 76');
+      await expect($('[data-control="page-field"]')).toHaveValue('1');
+      await browser.waitUntil(
+        async () =>
+          browser
+            .execute(
+              () =>
+                (
+                  window as Window & {
+                    __abyssTask9Continuity?: { readonly maxConsecutivePopulatedFrames: number };
+                  }
+                ).__abyssTask9Continuity?.maxConsecutivePopulatedFrames ?? 0,
+            )
+            .then((frames) => frames >= 5),
+        { timeout: 2_000, timeoutMsg: 'Annotation panel did not sustain five populated frames.' },
+      );
+      const continuity = await browser.execute(() => {
+        const state = (
+          window as Window & {
+            __abyssTask9Continuity?: {
+              badFrame: boolean;
+              readonly canvas: HTMLCanvasElement;
+              readonly maxConsecutivePopulatedFrames: number;
+            };
+          }
+        ).__abyssTask9Continuity;
+        const currentCanvas = document.querySelector<HTMLCanvasElement>(
+          '[data-page-number="1"] canvas',
+        );
+        if (state === undefined || currentCanvas === null)
+          throw new Error('Annotation continuity probe is incomplete.');
+        return {
+          badFrame: state.badFrame,
+          maxConsecutivePopulatedFrames: state.maxConsecutivePopulatedFrames,
+          sameCanvas: state.canvas === currentCanvas,
+        };
+      });
+      expect(continuity.badFrame).toBe(false);
+      expect(continuity.maxConsecutivePopulatedFrames).toBeGreaterThanOrEqual(5);
+      expect(continuity.sameCanvas).toBe(true);
+    } finally {
+      await browser.execute(() => {
+        const host = window as Window & {
+          __abyssTask9Continuity?: { frame: number; stopped: boolean };
+        };
+        const state = host.__abyssTask9Continuity;
+        if (state !== undefined) {
+          state.stopped = true;
+          cancelAnimationFrame(state.frame);
+        }
+        delete host.__abyssTask9Continuity;
+      });
+    }
     const actionTouch = await browser.execute(() => {
       const card = document.querySelector<HTMLButtonElement>('.abyss-annotation-card');
       const insert = document.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
@@ -984,7 +1071,9 @@ describe('PDF reader sidebar', () => {
       async () => Number(await $('[data-control="page-field"]').getValue()) > 1,
       { timeout: 5_000, timeoutMsg: 'Touching an action swallowed the next card activation.' },
     );
-    await $('[data-control="page-field"]').setValue('1');
+    await $('[data-control="page-field"]').click();
+    await browser.keys([process.platform === 'darwin' ? Key.Command : Key.Control, 'a']);
+    await browser.keys('1');
     await browser.keys(Key.Enter);
     await expect($('[data-control="page-field"]')).toHaveValue('1');
     const firstTouch = await browser.execute(() => {

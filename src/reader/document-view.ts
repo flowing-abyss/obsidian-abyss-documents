@@ -1,6 +1,10 @@
 import { FileView, Notice, Scope, type TFile, type WorkspaceLeaf } from 'obsidian';
 import { parseAnnotationHref, type AnnotationHrefReference } from './annotation-transfer.js';
 import { ownerWindow } from './owner-dom.js';
+import type {
+  AnnotationLoadTestFault,
+  AnnotationSaveLifecycleSnapshot,
+} from './reader-controller.js';
 
 export const DOCUMENT_VIEW_TYPE = 'abyss-document-view';
 export const ANNOTATION_LINK_RESOLVED_EVENT = 'abyss-documents:annotation-link-resolved';
@@ -15,6 +19,8 @@ declare global {
 }
 
 export interface ReaderViewController {
+  annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null;
+  setAnnotationLoadTestFault?(fault: AnnotationLoadTestFault | null): void;
   open(file: TFile, host: HTMLElement): Promise<void>;
   close(): Promise<void>;
   showOutline(): void;
@@ -26,6 +32,10 @@ export interface ReaderViewController {
 
 export interface AbyssDocumentViewServices {
   createController: () => ReaderViewController;
+}
+
+export interface AnnotationSaveLifecycleViewBoundary {
+  annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null;
 }
 
 export class AbyssDocumentView extends FileView {
@@ -121,6 +131,16 @@ export class AbyssDocumentView extends FileView {
 
   searchDocument(): void {
     this.controller.searchDocument();
+  }
+
+  annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null {
+    return this.controller.annotationSaveLifecycleSnapshot();
+  }
+
+  setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): void {
+    if (this.controller.setAnnotationLoadTestFault === undefined)
+      throw new DOMException('Annotation load test faults are unavailable.', 'NotSupportedError');
+    this.controller.setAnnotationLoadTestFault(fault);
   }
 
   refreshReadingSettings(): void {

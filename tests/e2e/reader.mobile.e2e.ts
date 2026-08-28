@@ -1,9 +1,10 @@
 import { $, $$, browser, expect } from '@wdio/globals';
 import { afterEach, describe, it } from 'mocha';
 import {
+  captureAnnotationSaveBaseline,
   isVerifiedAnnotationSaveSettled,
+  readAnnotationSaveLifecycleSnapshot,
   type AnnotationSaveBaseline,
-  type AnnotationSaveOracleSnapshot,
 } from './annotation-save-oracle.js';
 
 const pluginId = 'abyss-documents';
@@ -67,48 +68,10 @@ async function runtimeMetrics(): Promise<MobileRuntimeMetrics> {
   });
 }
 
-async function captureAnnotationSaveBaseline(): Promise<AnnotationSaveBaseline> {
-  const counters = (await runtimeMetrics()).counters;
-  return {
-    failures: counters.annotationSaveFailures,
-    minimumSaves: counters.annotationSaves + 1,
-    recoveries: counters.annotationSaveRecoveries,
-  };
-}
-
-async function annotationSaveSnapshot(): Promise<AnnotationSaveOracleSnapshot> {
-  return browser.executeObsidian(({ app }) => {
-    const metrics = (window as Window & { __abyssDocumentsPerformance?: MobileRuntimeMetrics })
-      .__abyssDocumentsPerformance;
-    const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
-      controller?: Record<string, unknown>;
-    };
-    const controller = view.controller;
-    const native = controller?.['nativeSaveSession'] as {
-      committedRevision?: number;
-      isDirty?: boolean;
-      pendingRevision?: number;
-    } | null;
-    const autosave = controller?.['autosave'] as Record<string, unknown> | null;
-    return {
-      activeSerializations: metrics?.activeAnnotationOperations.serializations ?? Number.NaN,
-      activeWrites: metrics?.activeAnnotationOperations.writes ?? Number.NaN,
-      committedRevision: native?.committedRevision ?? Number.NaN,
-      failures: metrics?.counters.annotationSaveFailures ?? Number.NaN,
-      isDirty: native?.isDirty ?? true,
-      newestGeneration: Number(autosave?.['newestGeneration'] ?? Number.NaN),
-      paused: autosave?.['paused'] !== false,
-      pendingRevision: native?.pendingRevision ?? Number.NaN,
-      recoveries: metrics?.counters.annotationSaveRecoveries ?? Number.NaN,
-      savedGeneration: Number(autosave?.['savedGeneration'] ?? Number.NaN),
-      saves: metrics?.counters.annotationSaves ?? Number.NaN,
-    };
-  });
-}
-
 async function waitForAnnotationSave(baseline: AnnotationSaveBaseline): Promise<void> {
   await browser.waitUntil(
-    async () => isVerifiedAnnotationSaveSettled(await annotationSaveSnapshot(), baseline),
+    async () =>
+      isVerifiedAnnotationSaveSettled(await readAnnotationSaveLifecycleSnapshot(), baseline),
     {
       timeout: 20_000,
       timeoutMsg: 'Android annotation save did not reach a verified settled state.',
@@ -161,7 +124,8 @@ describe('PDF reader foundation on Android', () => {
       await $$('[data-region="annotation-toolbar"] [data-annotation-tool]').map((button) =>
         button.getAttribute('data-annotation-tool'),
       ),
-    ).toEqual(['select', 'highlight', 'ink', 'freetext']);
+    ).toEqual(['highlight', 'ink', 'freetext']);
+    await expect($('[data-annotation-tool="select"]')).not.toExist();
     await expect($('[data-annotation-tool="underline"]')).not.toExist();
     await expect($('[data-annotation-tool="text-note"]')).not.toExist();
     const saveBaseline = await captureAnnotationSaveBaseline();

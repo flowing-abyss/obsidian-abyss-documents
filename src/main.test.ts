@@ -65,6 +65,7 @@ function pdfFile(app: App, path = 'Books/Guide.pdf'): TFile {
 
 function resolvingViewController(): ReaderViewController {
   return {
+    annotationSaveLifecycleSnapshot: () => null,
     close: vi.fn(async () => undefined),
     open: vi.fn(async () => undefined),
     refreshReadingSettings: vi.fn(),

@@ -77,6 +77,10 @@ const RETAINED_LIFECYCLE_MARKS: ReadonlySet<ReaderPerformanceMark> = new Set([
 export interface ReaderPerformanceSnapshot {
   readonly schemaVersion: 1;
   readonly activationMs: number | null;
+  readonly activeAnnotationOperations: {
+    readonly serializations: number;
+    readonly writes: number;
+  };
   readonly counters: Readonly<ReaderPerformanceCounters>;
   readonly samples: Readonly<ReaderPerformanceSamples>;
   readonly marks: ReadonlyArray<{
@@ -221,6 +225,7 @@ export function readerPerformanceSnapshot(): ReaderPerformanceSnapshot {
   return {
     schemaVersion: 1,
     activationMs: state.activationMs,
+    activeAnnotationOperations: { ...state.activeAnnotationOperations },
     counters: { ...state.counters },
     samples: {
       annotationFilterMs: [...state.samples.annotationFilterMs],

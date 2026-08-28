@@ -6,6 +6,7 @@ const settled = {
   activeWrites: 0,
   committedRevision: 1,
   failures: 1,
+  inFlight: false,
   isDirty: false,
   newestGeneration: 3,
   paused: false,
@@ -30,6 +31,7 @@ describe('annotation E2E save oracle', () => {
     expect(isVerifiedAnnotationSaveSettled({ ...settled, isDirty: true }, baseline)).toBe(false);
     expect(isVerifiedAnnotationSaveSettled({ ...settled, paused: true }, baseline)).toBe(false);
     expect(isVerifiedAnnotationSaveSettled({ ...settled, activeWrites: 1 }, baseline)).toBe(false);
+    expect(isVerifiedAnnotationSaveSettled({ ...settled, inFlight: true }, baseline)).toBe(false);
     expect(isVerifiedAnnotationSaveSettled({ ...settled, activeSerializations: 1 }, baseline)).toBe(
       false,
     );

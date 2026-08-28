@@ -7,6 +7,13 @@ export interface AutosaveSchedulerOptions {
   readonly window?: Pick<Window, 'setTimeout' | 'clearTimeout'>;
 }
 
+export interface AutosaveLifecycleSnapshot {
+  readonly inFlight: boolean;
+  readonly newestGeneration: number;
+  readonly paused: boolean;
+  readonly savedGeneration: number;
+}
+
 type SaveCallback = (generation: number, reason: SaveReason) => Promise<void>;
 
 export class AutosaveScheduler {
@@ -32,6 +39,15 @@ export class AutosaveScheduler {
 
   get isPaused(): boolean {
     return this.paused;
+  }
+
+  lifecycleSnapshot(): AutosaveLifecycleSnapshot {
+    return {
+      inFlight: this.inFlight !== null,
+      newestGeneration: this.newestGeneration,
+      paused: this.paused,
+      savedGeneration: this.savedGeneration,
+    };
   }
 
   markDirty(generation: number): void {

@@ -20,14 +20,24 @@ async function openPdf(): Promise<void> {
 async function closeReaders(): Promise<void> {
   await browser.executeObsidian(async ({ app }) => {
     const taskWindow = window as Window & {
-      __abyssTask6RenderMonitor?: { active: boolean; frame: number };
+      __abyssTask6RenderMonitor?: {
+        active: boolean;
+        frame: number;
+        observer?: MutationObserver;
+      };
+      __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+      __abyssTask6PointerTraceController?: AbortController;
     };
     const monitor = taskWindow.__abyssTask6RenderMonitor;
     if (monitor !== undefined) {
       monitor.active = false;
       cancelAnimationFrame(monitor.frame);
+      monitor.observer?.disconnect();
       delete taskWindow.__abyssTask6RenderMonitor;
     }
+    taskWindow.__abyssTask6PointerTraceController?.abort();
+    delete taskWindow.__abyssTask6PointerTraceController;
+    delete taskWindow.__abyssTask6PointerTrace;
     for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
       const controller = (leaf.view as unknown as { controller?: { close(): Promise<void> } })
         .controller;
@@ -57,13 +67,13 @@ async function chooseMenuOption(label: string): Promise<void> {
   await choice.click();
 }
 
-async function currentScaleValue(): Promise<unknown> {
-  return browser.executeObsidian(({ app }) => {
-    const view = app.workspace.getLeavesOfType('abyss-document-view')[0]?.view as unknown as {
-      controller?: { viewport?: { viewer?: { currentScaleValue?: unknown } } };
-    };
-    return view.controller?.viewport?.viewer?.currentScaleValue ?? null;
-  });
+async function displayedMenuOptionChecked(label: string): Promise<boolean> {
+  return browser.execute((expected) => {
+    const title = Array.from(document.querySelectorAll<HTMLElement>('.menu-item-title')).find(
+      (candidate) => candidate.offsetParent !== null && candidate.textContent.trim() === expected,
+    );
+    return title?.closest('.menu-item')?.classList.contains('mod-checked') ?? false;
+  }, label);
 }
 
 async function countDisplayedExactTooltips(expected: string): Promise<number> {
@@ -132,70 +142,183 @@ async function countMenusOpenedBy(action: () => Promise<void>): Promise<number> 
     monitorStopped = true;
     return additions;
   } finally {
-    await browser.releaseActions();
     if (!monitorStopped) await stopMenuMutationMonitor();
   }
 }
 
 async function longPressMenu(selector: string): Promise<number> {
+  const pointer = selector.includes('annotation-tool')
+    ? ({ id: 'task-6-context-pen', type: 'pen' } as const)
+    : ({ id: 'task-6-long-press-touch', type: 'touch' } as const);
+  await browser.execute((targetSelector) => {
+    const target = document.querySelector<HTMLElement>(targetSelector);
+    if (target === null) throw new Error(`Pointer target unavailable: ${targetSelector}`);
+    const taskWindow = window as Window & {
+      __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+      __abyssTask6PointerTraceController?: AbortController;
+    };
+    taskWindow.__abyssTask6PointerTraceController?.abort();
+    const controller = new AbortController();
+    taskWindow.__abyssTask6PointerTraceController = controller;
+    taskWindow.__abyssTask6PointerTrace = [];
+    for (const type of [
+      'pointerdown',
+      'pointermove',
+      'pointerup',
+      'pointercancel',
+      'lostpointercapture',
+      'contextmenu',
+      'click',
+    ]) {
+      document.addEventListener(
+        type,
+        (event) => {
+          const pointer = event as PointerEvent;
+          taskWindow.__abyssTask6PointerTrace?.push({
+            button: pointer.button,
+            isPrimary: pointer.isPrimary,
+            pointerId: pointer.pointerId,
+            pointerType: pointer.pointerType,
+            target: (event.target as Element | null)?.closest<HTMLElement>('[data-control]')
+              ?.dataset['control'],
+            timeStamp: event.timeStamp,
+            type: event.type,
+          });
+        },
+        { capture: true, signal: controller.signal },
+      );
+    }
+  }, selector);
   const point = await targetCenter(selector);
   const additions = await countMenusOpenedBy(async () => {
     await browser.performActions([
       {
         type: 'pointer',
-        id: 'task-6-long-press-touch',
-        parameters: { pointerType: 'touch' },
+        id: pointer.id,
+        parameters: { pointerType: pointer.type },
         actions: [
           { type: 'pointerMove', duration: 0, origin: 'viewport', ...point },
           { type: 'pointerDown', button: 0 },
-          { type: 'pause', duration: 550 },
-          { type: 'pointerUp', button: 0 },
         ],
       },
     ]);
+    // Split the hold into a separate WebDriver command so Chromium can service
+    // the reader's 500 ms timer while the genuine pointer remains depressed.
+    await browser.pause(550);
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: pointer.id,
+        parameters: { pointerType: pointer.type },
+        actions: [{ type: 'pointerUp', button: 0 }],
+      },
+    ]);
   });
-  await $('.menu').waitForDisplayed({ timeout: 3_000 });
+  try {
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+  } catch (error) {
+    const trace = await browser.execute(() => {
+      const taskWindow = window as Window & {
+        __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+      };
+      return taskWindow.__abyssTask6PointerTrace ?? [];
+    });
+    throw new Error(
+      `Long press did not open exactly one menu for ${selector}; trace=${JSON.stringify(trace)}; cause=${String(error)}`,
+    );
+  }
   return additions;
 }
 
-async function touchContextMenu(selector: string, contextDelay: number): Promise<number> {
+async function heldPointerContextMenu(selector: string, contextDelay: number): Promise<number> {
+  await browser.execute((targetSelector) => {
+    const target = document.querySelector<HTMLElement>(targetSelector);
+    if (target === null) throw new Error(`Pointer target unavailable: ${targetSelector}`);
+    const taskWindow = window as Window & {
+      __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+      __abyssTask6PointerTraceController?: AbortController;
+    };
+    taskWindow.__abyssTask6PointerTraceController?.abort();
+    const controller = new AbortController();
+    taskWindow.__abyssTask6PointerTraceController = controller;
+    taskWindow.__abyssTask6PointerTrace = [];
+    for (const type of [
+      'pointerdown',
+      'pointerup',
+      'pointercancel',
+      'lostpointercapture',
+      'contextmenu',
+      'click',
+    ]) {
+      document.addEventListener(
+        type,
+        (event) => {
+          const pointer = event as PointerEvent;
+          taskWindow.__abyssTask6PointerTrace?.push({
+            button: pointer.button,
+            isPrimary: pointer.isPrimary,
+            pointerId: pointer.pointerId,
+            pointerType: pointer.pointerType,
+            target: (event.target as Element | null)?.closest<HTMLElement>('[data-control]')
+              ?.dataset['control'],
+            timeStamp: event.timeStamp,
+            type: event.type,
+          });
+        },
+        { capture: true, signal: controller.signal },
+      );
+    }
+  }, selector);
   const point = await targetCenter(selector);
   const remainingHold = Math.max(0, 550 - contextDelay);
   const additions = await countMenusOpenedBy(async () => {
     await browser.performActions([
       {
         type: 'pointer',
-        id: 'task-6-context-touch',
-        parameters: { pointerType: 'touch' },
+        id: 'task-6-context-pen',
+        parameters: { pointerType: 'pen' },
         actions: [
           { type: 'pointerMove', duration: 0, origin: 'viewport', ...point },
           { type: 'pointerDown', button: 0 },
-          { type: 'pause', duration: contextDelay },
-          { type: 'pause', duration: 0 },
-          { type: 'pause', duration: 0 },
-          { type: 'pause', duration: 0 },
-          { type: 'pause', duration: remainingHold },
-          { type: 'pointerUp', button: 0 },
         ],
       },
+    ]);
+    await browser.pause(contextDelay);
+    await browser.performActions([
       {
         type: 'pointer',
         id: 'task-6-context-mouse',
         parameters: { pointerType: 'mouse' },
         actions: [
-          { type: 'pause', duration: 0 },
-          { type: 'pause', duration: 0 },
-          { type: 'pause', duration: contextDelay },
           { type: 'pointerMove', duration: 0, origin: 'viewport', ...point },
           { type: 'pointerDown', button: 2 },
           { type: 'pointerUp', button: 2 },
-          { type: 'pause', duration: remainingHold },
-          { type: 'pause', duration: 0 },
         ],
       },
     ]);
+    await browser.pause(remainingHold);
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'task-6-context-pen',
+        parameters: { pointerType: 'pen' },
+        actions: [{ type: 'pointerUp', button: 0 }],
+      },
+    ]);
   });
-  await $('.menu').waitForDisplayed({ timeout: 3_000 });
+  try {
+    await $('.menu').waitForDisplayed({ timeout: 3_000 });
+  } catch (error) {
+    const trace = await browser.execute(() => {
+      const taskWindow = window as Window & {
+        __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+      };
+      return taskWindow.__abyssTask6PointerTrace ?? [];
+    });
+    throw new Error(
+      `Held-pointer context did not retain exactly one menu for ${selector} at ${contextDelay}ms; additions=${additions}; trace=${JSON.stringify(trace)}; cause=${String(error)}`,
+    );
+  }
   return additions;
 }
 
@@ -336,6 +459,34 @@ describe('reader compact toolbar', () => {
       },
     );
 
+    const iconControls = await browser.execute(() =>
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          '.abyss-reader-toolbar button.clickable-icon:not([hidden])',
+        ),
+      )
+        .filter((button) => button.offsetParent !== null)
+        .map((button) => ({
+          annotationTool: button.dataset['annotationTool'] ?? null,
+          control: button.dataset['control'] ?? null,
+          label: button.getAttribute('aria-label') ?? '',
+        })),
+    );
+    expect(iconControls.length).toBeGreaterThanOrEqual(10);
+    for (const { annotationTool, control, label } of iconControls) {
+      expect(label).not.toBe('');
+      const selector =
+        control === null
+          ? `[data-annotation-tool=${JSON.stringify(annotationTool)}]`
+          : `[data-control=${JSON.stringify(control)}]`;
+      await $(selector).moveTo();
+      await browser.waitUntil(async () => (await countDisplayedExactTooltips(label)) > 0, {
+        interval: 50,
+        timeout: 1_500,
+        timeoutMsg: `Visible icon control missed its exact native tooltip: ${label}`,
+      });
+    }
+
     const geometry = await browser.execute(() => {
       const toolbar = document.querySelector<HTMLElement>('.abyss-reader-toolbar');
       const toolbarBounds = toolbar?.getBoundingClientRect();
@@ -435,18 +586,25 @@ describe('reader compact toolbar', () => {
     const fitPage = $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Fit page"]');
     await fitPage.waitForClickable({ timeout: 3_000 });
     await fitPage.click();
-    await browser.waitUntil(async () => (await currentScaleValue()) === 'page-fit', {
-      timeout: 3_000,
-      timeoutMsg: 'Fit page did not settle before the long-press route check.',
+    await fitMenu.click();
+    await fitPage.waitForDisplayed({ timeout: 3_000 });
+    expect(await displayedMenuOptionChecked('Fit page')).toBe(true);
+    await browser.keys(['Escape']);
+    await browser.execute(() => {
+      const taskWindow = window as Window & {
+        __abyssTask6Identity?: { canvas: Element | null };
+      };
+      if (taskWindow.__abyssTask6Identity !== undefined)
+        taskWindow.__abyssTask6Identity.canvas = document.querySelector('.pdfViewer canvas');
     });
     expect(await longPressMenu('[data-control="fit"]')).toBe(1);
     await expect($('.menu')).toHaveText(expect.stringContaining('Fit width'));
-    expect(await currentScaleValue()).toBe('page-fit');
+    expect(await displayedMenuOptionChecked('Fit page')).toBe(true);
     await browser.keys(['Escape']);
     for (const delay of [200, 550]) {
-      expect(await touchContextMenu('[data-control="fit"]', delay)).toBe(1);
+      expect(await heldPointerContextMenu('[data-control="fit"]', delay)).toBe(1);
       await expect($('.menu')).toHaveText(expect.stringContaining('Fit height'));
-      expect(await currentScaleValue()).toBe('page-fit');
+      expect(await displayedMenuOptionChecked('Fit page')).toBe(true);
       await browser.keys(['Escape']);
     }
 
@@ -456,21 +614,77 @@ describe('reader compact toolbar', () => {
     await quick.click();
     await expect(quick).toHaveAttribute('aria-pressed', 'true');
 
+    await browser.execute(() => {
+      const taskWindow = window as Window & {
+        __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+        __abyssTask6PointerTraceController?: AbortController;
+      };
+      taskWindow.__abyssTask6PointerTraceController?.abort();
+      const controller = new AbortController();
+      taskWindow.__abyssTask6PointerTraceController = controller;
+      taskWindow.__abyssTask6PointerTrace = [];
+      for (const type of ['pointerdown', 'contextmenu', 'pointerup', 'click']) {
+        document.addEventListener(
+          type,
+          (event) => {
+            const pointer = event as PointerEvent;
+            taskWindow.__abyssTask6PointerTrace?.push({
+              button: pointer.button,
+              detail: (event as MouseEvent).detail,
+              pointerType: pointer.pointerType,
+              target: (event.target as Element | null)?.closest<HTMLElement>(
+                '[data-annotation-tool], [data-control]',
+              )?.dataset['annotationTool'],
+              type: event.type,
+            });
+          },
+          { capture: true, signal: controller.signal },
+        );
+      }
+    });
     await quick.click({ button: 'right' });
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
     await expect($('.menu')).toHaveText(expect.stringContaining('Yellow'));
+    const quickBeforeContextEscape = await quick.getAttribute('aria-pressed');
+    if (quickBeforeContextEscape !== 'true')
+      throw new Error(`Quick context disarmed before Escape: ${quickBeforeContextEscape}`);
     await browser.keys(['Escape']);
+    const quickContextRoute = await browser.execute(() => {
+      const taskWindow = window as Window & {
+        __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+      };
+      return {
+        pressed: document
+          .querySelector('[data-annotation-tool="highlight"]')
+          ?.getAttribute('aria-pressed'),
+        trace: taskWindow.__abyssTask6PointerTrace ?? [],
+      };
+    });
+    if (quickContextRoute.pressed !== 'true')
+      throw new Error(`Quick context toggled the tool: ${JSON.stringify(quickContextRoute)}`);
 
     expect(await longPressMenu('[data-annotation-tool="highlight"]')).toBe(1);
     await expect($('.menu')).toHaveText(expect.stringContaining('Yellow'));
     await browser.keys(['Escape']);
-    await expect(quick).toHaveAttribute('aria-pressed', 'true');
+    const quickLongPress = await browser.execute(() => {
+      const taskWindow = window as Window & {
+        __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
+      };
+      return {
+        pressed: document
+          .querySelector('[data-annotation-tool="highlight"]')
+          ?.getAttribute('aria-pressed'),
+        trace: taskWindow.__abyssTask6PointerTrace ?? [],
+      };
+    });
+    expect(quickLongPress).toMatchObject({ pressed: 'true' });
     for (const delay of [200, 550]) {
-      expect(await touchContextMenu('[data-annotation-tool="highlight"]', delay)).toBe(1);
+      expect(await heldPointerContextMenu('[data-annotation-tool="highlight"]', delay)).toBe(1);
       await expect($('.menu')).toHaveText(expect.stringContaining('Yellow'));
       await browser.keys(['Escape']);
       await expect(quick).toHaveAttribute('aria-pressed', 'true');
     }
+    await browser.releaseActions();
 
     const quickMenu = $('[data-control="quick-highlight-menu"]');
     await browser.execute(() => {
@@ -606,7 +820,37 @@ describe('reader compact toolbar', () => {
     expect(identity).toEqual({ canvas: true, container: true, viewer: true });
   });
 
+  it('applies Default Light Dark and Sepia through the public appearance menu', async () => {
+    const root = $('[data-abyss-document]');
+    for (const [label, profile] of [
+      ['Light', 'light'],
+      ['Dark', 'dark'],
+      ['Sepia', 'sepia'],
+      ['Default', 'default'],
+    ] as const) {
+      await chooseMenuOption(label);
+      await expect(root).toHaveAttribute('data-reading-profile', profile);
+      await browser.waitUntil(
+        () =>
+          browser.execute(() => {
+            const canvas = document.querySelector<HTMLCanvasElement>('.pdfViewer canvas');
+            const bounds = canvas?.getBoundingClientRect();
+            return (
+              canvas?.isConnected === true &&
+              canvas.offsetParent !== null &&
+              canvas.width > 0 &&
+              canvas.height > 0 &&
+              (bounds?.height ?? 0) > 0 &&
+              (bounds?.width ?? 0) > 0
+            );
+          }),
+        { timeout: 3_000, timeoutMsg: `${label} did not retain a populated PDF surface.` },
+      );
+    }
+  });
+
   it('applies Fit page and explicit Two-page Continuous layout without an empty render frame', async () => {
+    await $('.pdfViewer canvas').waitForDisplayed({ timeout: 5_000 });
     await browser.execute(() => {
       const container = document.querySelector<HTMLElement>('.pdfViewerContainer');
       const viewer = document.querySelector<HTMLElement>('.pdfViewer');
@@ -618,53 +862,121 @@ describe('reader compact toolbar', () => {
         __abyssTask6RenderMonitor?: {
           active: boolean;
           canvas: HTMLCanvasElement;
+          consecutivePopulatedFrames: number;
           container: HTMLElement;
           emptyFrames: number;
           frame: number;
-          identityBreaks: number;
           loadingFrames: number;
+          maxPopulatedFrames: number;
+          observer: MutationObserver;
           page: HTMLElement;
+          removalWithoutPopulatedReplacement: number;
+          replacementCount: number;
           samples: number;
+          shellIdentityBreaks: number;
           viewer: HTMLElement;
         };
       };
       const monitor = {
         active: true,
         canvas,
+        consecutivePopulatedFrames: 0,
         container,
         emptyFrames: 0,
         frame: 0,
-        identityBreaks: 0,
         loadingFrames: 0,
+        maxPopulatedFrames: 0,
+        observer: new MutationObserver(() => undefined),
         page,
+        removalWithoutPopulatedReplacement: 0,
+        replacementCount: 0,
         samples: 0,
+        shellIdentityBreaks: 0,
         viewer,
       };
+      const currentSurface = (): {
+        canvas: HTMLCanvasElement | null;
+        page: HTMLElement | null;
+      } => {
+        const currentPage = document.querySelector<HTMLElement>('[data-page-number="1"]');
+        return {
+          canvas: currentPage?.querySelector<HTMLCanvasElement>('canvas') ?? null,
+          page: currentPage,
+        };
+      };
+      const isPopulated = (
+        currentPage: HTMLElement | null,
+        currentCanvas: HTMLCanvasElement | null,
+      ): boolean => {
+        if (
+          currentPage === null ||
+          currentCanvas === null ||
+          !currentPage.isConnected ||
+          !currentCanvas.isConnected ||
+          currentPage.offsetParent === null ||
+          currentCanvas.offsetParent === null ||
+          currentCanvas.width <= 0 ||
+          currentCanvas.height <= 0
+        )
+          return false;
+        const pageBounds = currentPage.getBoundingClientRect();
+        const canvasBounds = currentCanvas.getBoundingClientRect();
+        const pageStyle = getComputedStyle(currentPage);
+        const canvasStyle = getComputedStyle(currentCanvas);
+        return (
+          pageBounds.width > 0 &&
+          pageBounds.height > 0 &&
+          canvasBounds.width > 0 &&
+          canvasBounds.height > 0 &&
+          pageStyle.display !== 'none' &&
+          pageStyle.visibility !== 'hidden' &&
+          Number(pageStyle.opacity) > 0 &&
+          canvasStyle.display !== 'none' &&
+          canvasStyle.visibility !== 'hidden' &&
+          Number(canvasStyle.opacity) > 0
+        );
+      };
+      monitor.observer.disconnect();
+      monitor.observer = new MutationObserver((records) => {
+        const trackedSurfaceRemoved = records.some((record) =>
+          Array.from(record.removedNodes).some(
+            (removed) =>
+              removed === monitor.page ||
+              removed === monitor.canvas ||
+              (removed.instanceOf(Element) &&
+                (removed.contains(monitor.page) || removed.contains(monitor.canvas))),
+          ),
+        );
+        if (!trackedSurfaceRemoved) return;
+        const current = currentSurface();
+        if (!isPopulated(current.page, current.canvas))
+          monitor.removalWithoutPopulatedReplacement += 1;
+      });
+      monitor.observer.observe(viewer, { childList: true, subtree: true });
       const sample = (): void => {
         if (!monitor.active) return;
         monitor.samples += 1;
-        const currentPage = document.querySelector<HTMLElement>('[data-page-number="1"]');
-        const currentCanvas = currentPage?.querySelector<HTMLCanvasElement>('canvas') ?? null;
+        const current = currentSurface();
         if (
           document.querySelector('.pdfViewerContainer') !== monitor.container ||
-          document.querySelector('.pdfViewer') !== monitor.viewer ||
-          currentPage !== monitor.page ||
-          currentCanvas !== monitor.canvas
+          document.querySelector('.pdfViewer') !== monitor.viewer
         )
-          monitor.identityBreaks += 1;
-        const pageBounds = monitor.page.getBoundingClientRect();
-        const canvasBounds = monitor.canvas.getBoundingClientRect();
-        if (
-          !monitor.page.isConnected ||
-          !monitor.canvas.isConnected ||
-          monitor.page.offsetParent === null ||
-          monitor.canvas.offsetParent === null ||
-          pageBounds.width <= 0 ||
-          pageBounds.height <= 0 ||
-          canvasBounds.width <= 0 ||
-          canvasBounds.height <= 0
-        )
+          monitor.shellIdentityBreaks += 1;
+        if (current.page !== monitor.page || current.canvas !== monitor.canvas) {
+          monitor.replacementCount += 1;
+          if (current.page !== null) monitor.page = current.page;
+          if (current.canvas !== null) monitor.canvas = current.canvas;
+        }
+        if (!isPopulated(current.page, current.canvas)) {
           monitor.emptyFrames += 1;
+          monitor.consecutivePopulatedFrames = 0;
+        } else {
+          monitor.consecutivePopulatedFrames += 1;
+          monitor.maxPopulatedFrames = Math.max(
+            monitor.maxPopulatedFrames,
+            monitor.consecutivePopulatedFrames,
+          );
+        }
         if (
           document.querySelector(
             '[data-region="document"][aria-busy="true"], [data-reader-loading], [data-reader-error]',
@@ -681,44 +993,32 @@ describe('reader compact toolbar', () => {
     const fitPage = $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Fit page"]');
     await fitPage.waitForClickable({ timeout: 5_000 });
     await fitPage.click();
-    await browser.waitUntil(
-      () =>
-        browser.executeObsidian(({ app }) => {
-          const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
-            controller?: { viewport?: { viewer?: { currentScaleValue?: unknown } } };
-          };
-          return view.controller?.viewport?.viewer?.currentScaleValue === 'page-fit';
-        }),
-      { timeout: 5_000, timeoutMsg: 'Fit page did not reach PDF.js.' },
-    );
+    await $('[data-control="fit-menu"]').click();
+    await fitPage.waitForDisplayed({ timeout: 5_000 });
+    expect(await displayedMenuOptionChecked('Fit page')).toBe(true);
+    await browser.keys(['Escape']);
 
     await chooseMenuOption('Two pages');
     await chooseMenuOption('Continuous scrolling');
     await chooseMenuOption('Continuous scrolling');
-    await browser.waitUntil(
-      () =>
-        browser
-          .executeObsidian(({ app }) => {
-            const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
-              controller?: { currentLayout?: unknown };
-            };
-            return view.controller?.currentLayout;
-          })
-          .then(
-            (layout) =>
-              JSON.stringify(layout) ===
-              JSON.stringify({ pages: 'facing', scrolling: 'continuous' }),
-          ),
-      { timeout: 5_000, timeoutMsg: 'Two-page continuous layout did not settle.' },
-    );
+    await $('[data-control="overflow"]').click();
+    await $(
+      '//*[contains(@class, "menu-item-title") and normalize-space(.)="Two pages"]',
+    ).waitForDisplayed({ timeout: 5_000 });
+    expect(await displayedMenuOptionChecked('Single page')).toBe(false);
+    expect(await displayedMenuOptionChecked('Two pages')).toBe(true);
+    expect(await displayedMenuOptionChecked('Continuous scrolling')).toBe(true);
+    await browser.keys(['Escape']);
     await browser.execute(
       () =>
         new Promise<void>((resolve) => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              resolve();
-            });
-          });
+          let frames = 0;
+          const waitForFrames = (): void => {
+            frames += 1;
+            if (frames >= 6) resolve();
+            else requestAnimationFrame(waitForFrames);
+          };
+          requestAnimationFrame(waitForFrames);
         }),
     );
 
@@ -728,25 +1028,39 @@ describe('reader compact toolbar', () => {
           active: boolean;
           emptyFrames: number;
           frame: number;
-          identityBreaks: number;
           loadingFrames: number;
+          maxPopulatedFrames: number;
+          observer: MutationObserver;
+          removalWithoutPopulatedReplacement: number;
+          replacementCount: number;
           samples: number;
+          shellIdentityBreaks: number;
         };
       };
       const monitor = taskWindow.__abyssTask6RenderMonitor;
       if (monitor === undefined) throw new Error('Render monitor is unavailable.');
       monitor.active = false;
       cancelAnimationFrame(monitor.frame);
+      monitor.observer.disconnect();
       delete taskWindow.__abyssTask6RenderMonitor;
       return {
         emptyFrames: monitor.emptyFrames,
-        identityBreaks: monitor.identityBreaks,
         loadingFrames: monitor.loadingFrames,
+        maxPopulatedFrames: monitor.maxPopulatedFrames,
+        removalWithoutPopulatedReplacement: monitor.removalWithoutPopulatedReplacement,
+        replacementCount: monitor.replacementCount,
         samples: monitor.samples,
+        shellIdentityBreaks: monitor.shellIdentityBreaks,
       };
     });
-    expect(render.samples).toBeGreaterThan(0);
-    expect(render).toMatchObject({ emptyFrames: 0, identityBreaks: 0, loadingFrames: 0 });
+    expect(render.samples).toBeGreaterThanOrEqual(5);
+    expect(render.maxPopulatedFrames).toBeGreaterThanOrEqual(5);
+    expect(render).toMatchObject({
+      emptyFrames: 0,
+      loadingFrames: 0,
+      removalWithoutPopulatedReplacement: 0,
+      shellIdentityBreaks: 0,
+    });
   });
 
   it('adapts a 680px reader leaf inside a wide viewport without losing Fit or zoom', async () => {

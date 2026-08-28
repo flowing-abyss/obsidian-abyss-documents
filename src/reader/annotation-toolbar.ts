@@ -2,7 +2,7 @@ import { Menu, type IconName } from 'obsidian';
 import type { PdfAnnotationTool } from '../adapters/pdf/pdf-annotation-editor.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { createIconButton, updateIconButtonLabel } from './icon-button.js';
-import { shouldRestoreMenuTriggerFocus } from './menu-focus.js';
+import { markReaderMenuClosing, shouldRestoreMenuTriggerFocus } from './menu-focus.js';
 import { ownerWindow } from './owner-dom.js';
 import { LongPressMenuGesture } from './toolbar.js';
 
@@ -81,8 +81,14 @@ export class AnnotationToolbar {
     };
     const longPress = this.bindLongPressMenuTrigger(quickButton, showQuickMenu);
     this.listen(quickButton, 'click', (event) => {
+      if (event.button !== 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (longPress.consumeClick()) {
         event.preventDefault();
+        event.stopPropagation();
         return;
       }
       this.chooseTool(this.currentTool === 'highlight' ? 'select' : 'highlight');
@@ -183,6 +189,7 @@ export class AnnotationToolbar {
     for (const open of [...this.menus]) open.close();
     const menu = new Menu();
     menu.setUseNativeMenu(false);
+    menu.setParentElement(trigger);
     this.menus.add(menu);
     trigger.setAttribute('aria-expanded', 'true');
     for (const entry of this.palette) {
@@ -196,6 +203,7 @@ export class AnnotationToolbar {
       });
     }
     menu.onHide(() => {
+      markReaderMenuClosing(trigger);
       this.menus.delete(menu);
       trigger.setAttribute('aria-expanded', 'false');
       this.restoreMenuTriggerFocus(trigger);

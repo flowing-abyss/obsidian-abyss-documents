@@ -71,7 +71,7 @@ function toggleDocumentTags(root: HTMLElement): void {
 }
 
 describe('AnnotationsPanel', () => {
-  it('preserves projected row identity, focus, and scroll through provisional reconciliation', () => {
+  it('preserves the connected projected card, focus, and scroll through provisional reconciliation', async () => {
     const root = createDiv();
     root.doc.body.append(root);
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
@@ -89,23 +89,64 @@ describe('AnnotationsPanel', () => {
     } satisfies AnnotationProjectionRow;
     panel.setProjectedAnnotations([row]);
     const before = root.querySelector<HTMLElement>('.abyss-annotation-card');
-    before?.focus();
+    if (before === null) throw new Error('Expected the provisional card.');
+    const beforeRow = before.closest('.abyss-annotation-card-row');
+    if (beforeRow === null) throw new Error('Expected the provisional card row.');
+    const removedNodes: Node[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) removedNodes.push(...Array.from(record.removedNodes));
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    before.focus();
     const scrollHost = annotationScrollHost(root);
     scrollHost.scrollTop = 137;
 
     panel.setProjectedAnnotations([{ ...row, annotation: stable, nativeId: 'annotation-0' }]);
+    await Promise.resolve();
+    observer.disconnect();
 
     const after = root.querySelector<HTMLElement>('[data-annotation-id="annotation-0"]');
     expect({
+      exactCard: after === before,
+      cardWasRemoved: removedNodes.some(
+        (node) =>
+          node === before ||
+          node === beforeRow ||
+          (node.instanceOf(ownerWindow(root).Element) && node.contains(before)),
+      ),
       focusedRowId: root.doc.activeElement?.getAttribute('data-annotation-row-id'),
       rowId: after?.dataset['annotationRowId'],
       scrollTop: scrollHost.scrollTop,
     }).toEqual({
+      exactCard: true,
+      cardWasRemoved: false,
       focusedRowId: 'annotation-row-stable-key',
       rowId: 'annotation-row-stable-key',
       scrollTop: 137,
     });
     root.remove();
+  });
+
+  it('marks a projected row provisional until its native identity is reconciled', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const projected = annotation(0);
+    const row = {
+      annotation: projected,
+      key: 'selection-row',
+      nativeId: 'selection-token',
+      provisionalId: 'selection-token',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+
+    panel.setProjectedAnnotations([row]);
+    const provisionalCard = root.querySelector<HTMLElement>('.abyss-annotation-card');
+    expect(provisionalCard?.dataset['annotationProvisional']).toBe('true');
+
+    panel.setProjectedAnnotations([{ ...row, nativeId: 'annotation-0' }]);
+    const stableCard = root.querySelector<HTMLElement>('.abyss-annotation-card');
+    expect(stableCard).toBe(provisionalCard);
+    expect(stableCard?.hasAttribute('data-annotation-provisional')).toBe(false);
   });
 
   it('does not rerender an unchanged projected snapshot', () => {
@@ -438,6 +479,25 @@ describe('AnnotationsPanel', () => {
     expect(root.textContent).not.toContain('unavailable');
   });
 
+  it('can show terminal unavailable without misreporting live unverified rows as empty', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0)]);
+
+    panel.setUnavailable(false);
+
+    expect(
+      root.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]')?.dataset[
+        'annotationState'
+      ],
+    ).toBe('unavailable');
+    expect(root.querySelector('[data-annotations-status]')?.textContent).toBe(
+      'Couldn’t load annotations',
+    );
+    expect(root.querySelector<HTMLElement>('.abyss-annotations-list')?.hidden).toBe(true);
+    expect(root.textContent).not.toContain('No annotations');
+  });
+
   it('renders a quiet annotation failure without a button or technical jargon', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
@@ -651,6 +711,36 @@ describe('AnnotationsPanel', () => {
     });
   });
 
+  it('does not retain detached card buttons beyond the mounted virtual window', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const panel = new AnnotationsPanel(host, { onNavigate: vi.fn() });
+    panel.setProjectedAnnotations(
+      Array.from({ length: 10_000 }, (_, index) => ({
+        annotation: annotation(index),
+        key: `projection-${index}`,
+        nativeId: `annotation-${index}`,
+        writable: true,
+      })),
+    );
+    const firstCard = host.querySelector<HTMLElement>('[data-annotation-id="annotation-0"]');
+    expect(firstCard).not.toBeNull();
+
+    const scrollHost = annotationScrollHost(host);
+    scrollHost.scrollTop = 5000 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    expect(firstCard?.isConnected).toBe(false);
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
+
+    scrollHost.scrollTop = 0;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    const remountedFirstCard = host.querySelector<HTMLElement>(
+      '[data-annotation-id="annotation-0"]',
+    );
+    expect(remountedFirstCard).not.toBe(firstCard);
+    expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
+  });
+
   it('moves its bounded virtual window on scroll, resize, filters, and page sync', () => {
     const host = createDiv();
     host.doc.body.append(host);
@@ -780,6 +870,16 @@ describe('AnnotationsPanel', () => {
       '#00ff00',
       '#ffd400',
     ]);
+  });
+
+  it('does not expose an empty native color as an actionable color facet', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0, { color: '' })]);
+
+    expect(root.querySelector('[data-annotation-color]')).toBeNull();
+    expect(root.querySelector('[data-annotation-meaning]')?.textContent).toBe('highlight');
+    panel.destroy();
   });
 
   it('disambiguates duplicate semantic facet names without exposing hex', () => {
@@ -1066,7 +1166,7 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
-  it('preserves contextual action focus through virtual rerenders and restores the card on Escape', () => {
+  it('preserves contextual action focus through virtual rerenders and restores the card on Escape', async () => {
     const root = createDiv();
     root.doc.body.append(root);
     const panel = new AnnotationsPanel(root, {
@@ -1077,6 +1177,15 @@ describe('AnnotationsPanel', () => {
     panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
     const insert = root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
     insert?.focus();
+    expect(root.doc.activeElement).toBe(insert);
+
+    ownerWindow(root).dispatchEvent(new Event('resize'));
+    await new Promise<void>((resolve) => {
+      ownerWindow(root).requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+    expect(root.querySelector('[data-action="insert-annotation"]')).toBe(insert);
     expect(root.doc.activeElement).toBe(insert);
 
     panel.setCurrentPage(0);
@@ -1106,6 +1215,74 @@ describe('AnnotationsPanel', () => {
     outside.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     expect(root.querySelector('[data-actions-suppressed]')).toBeNull();
     outside.remove();
+    root.remove();
+  });
+
+  it('retains the focused contextual row while resize recalibrates a deep virtual window', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const owner = ownerWindow(root);
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(owner, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return DOMRect.fromRect({
+        height: this.classList.contains('abyss-annotation-card-row') ? 130 : 0,
+        width: 260,
+      });
+    });
+    const panel = new AnnotationsPanel(root, {
+      onNavigate: vi.fn(),
+      onCopy: vi.fn(),
+      onInsert: vi.fn(),
+    });
+    panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
+    for (let index = 0; index < 4; index += 1) {
+      frames.shift()?.(index);
+    }
+    const scrollHost = annotationScrollHost(root);
+    scrollHost.scrollTop = 600 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    for (let index = 4; index < 8; index += 1) {
+      frames.shift()?.(index);
+    }
+    const insert = root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
+    const rowId = insert?.closest<HTMLElement>('[data-annotation-row-id]')?.dataset[
+      'annotationRowId'
+    ];
+    insert?.focus();
+
+    scrollHost.scrollTop += 130;
+    scrollHost.dispatchEvent(new Event('scroll'));
+
+    expect(insert?.isConnected).toBe(true);
+    expect(owner.document.activeElement).toBe(insert);
+
+    const tagsToggle = root.querySelector<HTMLButtonElement>(
+      '[data-action="toggle-document-tags"]',
+    );
+    tagsToggle?.focus();
+    scrollHost.scrollTop += 130;
+    scrollHost.dispatchEvent(new Event('scroll'));
+
+    expect(insert?.isConnected).toBe(true);
+    expect(owner.document.activeElement).toBe(tagsToggle);
+
+    owner.dispatchEvent(new Event('resize'));
+    for (let index = 8; index < 12; index += 1) {
+      frames.shift()?.(index);
+    }
+
+    expect(insert?.isConnected).toBe(true);
+    expect(owner.document.activeElement).toBe(tagsToggle);
+    expect(
+      insert?.closest<HTMLElement>('[data-annotation-row-id]')?.dataset['annotationRowId'],
+    ).toBe(rowId);
+    panel.destroy();
     root.remove();
   });
 

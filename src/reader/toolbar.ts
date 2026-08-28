@@ -6,7 +6,7 @@ import {
   type ReadingProfileId,
 } from '../document-core/reading.js';
 import { createIconButton } from './icon-button.js';
-import { shouldRestoreMenuTriggerFocus } from './menu-focus.js';
+import { markReaderMenuClosing, shouldRestoreMenuTriggerFocus } from './menu-focus.js';
 
 export type ReaderToolbarIntent =
   | { readonly type: 'toggle-sidebar' }
@@ -121,6 +121,7 @@ export class LongPressMenuGesture {
   handleContextMenu(event: MouseEvent, showContextMenu: () => void): boolean {
     if (this.pointerId === null && !this.suppressClick) return false;
     event.preventDefault();
+    event.stopPropagation();
     this.clearTimer();
     if (!this.suppressClick) {
       this.suppressClick = true;
@@ -324,8 +325,14 @@ export class ReaderToolbar {
     };
     const longPress = this.bindLongPressMenuTrigger(fit, showFitMenu);
     this.listen(fit, 'click', (event) => {
+      if (event.button !== 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (longPress.consumeClick()) {
         event.preventDefault();
+        event.stopPropagation();
         return;
       }
       this.onIntent({ type: 'set-scale', scale: 'page-width' });
@@ -604,9 +611,11 @@ export class ReaderToolbar {
     for (const open of [...this.menus]) open.close();
     const menu = new Menu();
     menu.setUseNativeMenu(false);
+    menu.setParentElement(trigger);
     this.menus.add(menu);
     trigger.setAttribute('aria-expanded', 'true');
     menu.onHide(() => {
+      markReaderMenuClosing(trigger);
       this.menus.delete(menu);
       trigger.setAttribute('aria-expanded', 'false');
       this.restoreMenuTriggerFocus(trigger);

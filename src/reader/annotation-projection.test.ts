@@ -84,6 +84,62 @@ describe('AnnotationProjection', () => {
     ).toEqual([{ key: 'annotation-row-0', comment: 'Updated comment' }]);
   });
 
+  it('keeps a successful editor metadata update over stale viewport snapshots until verification', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('native-1', 'selection-1'));
+    const row = projection.snapshot()[0];
+    const annotation = verifiedAnnotation('native-1');
+
+    expect(
+      projection.applyEditorUpdate({
+        annotations: [annotation],
+        comment: 'Résumé — проверка #review [[Linked note]]',
+      }),
+    ).toBe(true);
+    expect(projection.snapshot()[0]).toMatchObject({
+      key: row?.key,
+      annotation: {
+        comment: 'Résumé — проверка #review [[Linked note]]',
+        links: ['Linked note'],
+        tags: ['review'],
+      },
+    });
+
+    projection.upsert(viewportAnnotation('native-1', 'selection-1'));
+    expect(projection.snapshot()[0]).toMatchObject({
+      key: row?.key,
+      annotation: {
+        comment: 'Résumé — проверка #review [[Linked note]]',
+        links: ['Linked note'],
+        tags: ['review'],
+      },
+    });
+
+    projection.reconcile([{ ...annotation, comment: 'Verified', links: [], tags: [] }]);
+    expect(projection.snapshot()[0]).toMatchObject({
+      key: row?.key,
+      annotation: { comment: 'Verified', links: [], tags: [] },
+    });
+  });
+
+  it('releases an optimistic editor overlay when its row is removed', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('native-1', 'selection-1'));
+    projection.applyEditorUpdate({
+      annotations: [verifiedAnnotation('native-1')],
+      comment: 'Temporary #review',
+    });
+    const removed = projection.snapshot()[0];
+
+    projection.remove('native-1', 'selection-1');
+    projection.upsert(viewportAnnotation('native-1', 'selection-1'));
+
+    expect(projection.snapshot()[0]).toMatchObject({
+      annotation: { comment: '', links: [], tags: [] },
+    });
+    expect(projection.snapshot()[0]).not.toBe(removed);
+  });
+
   it('preserves row object identity when a duplicate viewport snapshot changes nothing', () => {
     const projection = new AnnotationProjection();
     const annotation = viewportAnnotation('native-1', 'selection-1');
@@ -126,6 +182,46 @@ describe('AnnotationProjection', () => {
     ]);
   });
 
+  it('reconciles one unique provisional row when saved PDF geometry is normalized', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('pdfjs_internal_editor_0', 'selection-1'));
+    const verified = {
+      ...verifiedAnnotation('29R'),
+      anchor: {
+        ...verifiedAnnotation('29R').anchor,
+        geometry: { kind: 'point' as const, point: { x: 12, y: 24 } },
+      },
+      selectedText: null,
+    };
+
+    projection.reconcile([verified]);
+
+    expect(projection.snapshot()).toHaveLength(1);
+    expect(projection.snapshot()[0]).toMatchObject({
+      key: 'annotation-row-0',
+      nativeId: '29R',
+      provisionalId: 'pdfjs_internal_editor_0',
+    });
+  });
+
+  it('binds a committed stable identity before a viewport snapshot drops the selection token', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('selection-1', 'selection-1'));
+    const provisional = projection.snapshot()[0];
+
+    expect(projection.bindCommittedSelection('selection-1', verifiedAnnotation('stable-1'))).toBe(
+      true,
+    );
+    projection.upsert(viewportAnnotation('stable-1'));
+
+    expect(projection.snapshot()).toHaveLength(1);
+    expect(projection.snapshot()[0]).toMatchObject({
+      key: provisional?.key,
+      nativeId: 'stable-1',
+      provisionalId: 'selection-1',
+    });
+  });
+
   it('keeps the same snapshot when verified reconciliation changes nothing', () => {
     const projection = new AnnotationProjection();
     projection.reconcile([verifiedAnnotation('stable-id')]);
@@ -134,6 +230,26 @@ describe('AnnotationProjection', () => {
     projection.reconcile([verifiedAnnotation('stable-id')]);
 
     expect(projection.snapshot()).toBe(snapshot);
+  });
+
+  it('does not let a metadata-empty mounted snapshot degrade verified annotation metadata', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([
+      {
+        ...verifiedAnnotation('stable-id'),
+        comment: 'Résumé #review [[Linked note]]',
+        links: ['Linked note'],
+        tags: ['review'],
+      },
+    ]);
+
+    projection.upsert(viewportAnnotation('stable-id'));
+
+    expect(projection.snapshot()[0]?.annotation).toMatchObject({
+      comment: 'Résumé #review [[Linked note]]',
+      links: ['Linked note'],
+      tags: ['review'],
+    });
   });
 
   it('binds exact native identities before geometry fallback candidates', () => {
@@ -179,6 +295,34 @@ describe('AnnotationProjection', () => {
     expect(projection.snapshot().map((row) => ({ key: row.key, nativeId: row.nativeId }))).toEqual([
       { key: 'annotation-row-0', nativeId: 'stable-b' },
     ]);
+  });
+
+  it('coalesces one uniquely matching live editor with its verified provisional row', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('pdfjs_internal_editor_0', 'selection-1'));
+    projection.reconcile([verifiedAnnotation('stable-id')]);
+    const initial = projection.snapshot()[0];
+
+    projection.upsert(viewportAnnotation('pdfjs_internal_editor_0'));
+
+    expect(projection.snapshot()).toHaveLength(1);
+    expect(projection.snapshot()[0]).toMatchObject({
+      key: initial?.key,
+      nativeId: 'pdfjs_internal_editor_0',
+      provisionalId: 'pdfjs_internal_editor_0',
+      annotation: { identity: { id: 'stable-id', kind: 'stable' } },
+    });
+    expect(projection.remove('pdfjs_internal_editor_0')).toBe(true);
+    expect(projection.snapshot()).toHaveLength(0);
+  });
+
+  it('removes a verified row through its retained live editor alias', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('pdfjs_internal_editor_0', 'selection-1'));
+    projection.reconcile([verifiedAnnotation('stable-id')]);
+
+    expect(projection.remove('pdfjs_internal_editor_0')).toBe(true);
+    expect(projection.snapshot()).toHaveLength(0);
   });
 
   it('keeps every converted selection rectangle in provisional annotation geometry', () => {

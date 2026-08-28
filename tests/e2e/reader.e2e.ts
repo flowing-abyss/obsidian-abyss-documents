@@ -2,11 +2,32 @@ import { $, $$, browser, expect } from '@wdio/globals';
 import { afterEach, beforeEach, describe, it } from 'mocha';
 import { Key } from 'webdriverio';
 import {
+  captureAnnotationSaveBaseline,
   isVerifiedAnnotationSaveSettled,
+  readAnnotationSaveLifecycleSnapshot,
   type AnnotationSaveBaseline,
 } from './annotation-save-oracle.js';
 
 const pluginId = 'abyss-documents';
+
+interface AnnotationLoadTestFault {
+  readonly cacheRead?: 'fail';
+  readonly extractionDelayMs?: number;
+  readonly extractionFailure?: boolean;
+}
+
+async function setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): Promise<void> {
+  await browser.executeObsidian(({ app }, nextFault) => {
+    const view = app.workspace.getMostRecentLeaf()?.view;
+    if (
+      view === undefined ||
+      !('setAnnotationLoadTestFault' in view) ||
+      typeof view.setAnnotationLoadTestFault !== 'function'
+    )
+      throw new Error('Typed annotation-load test fault boundary is unavailable.');
+    (view.setAnnotationLoadTestFault as (value: AnnotationLoadTestFault | null) => void)(nextFault);
+  }, fault);
+}
 const nativeEditorSelector =
   '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
 
@@ -192,94 +213,12 @@ async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<
 async function waitForAnnotationSave(baseline: AnnotationSaveBaseline): Promise<void> {
   try {
     await browser.waitUntil(
-      async () => {
-        const snapshot = await browser.executeObsidian(({ app }) => {
-          const metrics = (
-            window as Window & {
-              __abyssDocumentsPerformance?: {
-                activeAnnotationOperations?: { serializations?: number; writes?: number };
-                counters?: {
-                  annotationSaveFailures?: number;
-                  annotationSaveRecoveries?: number;
-                  annotationSaves?: number;
-                };
-              };
-            }
-          ).__abyssDocumentsPerformance;
-          const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
-            controller?: Record<string, unknown>;
-          };
-          const controller = view.controller;
-          const native = controller?.['nativeSaveSession'] as {
-            committedRevision?: number;
-            isDirty?: boolean;
-            pendingRevision?: number;
-          } | null;
-          const autosave = controller?.['autosave'] as Record<string, unknown> | null;
-          return {
-            activeSerializations: metrics?.activeAnnotationOperations?.serializations ?? 0,
-            activeWrites: metrics?.activeAnnotationOperations?.writes ?? 0,
-            committedRevision: native?.committedRevision ?? Number.NaN,
-            failures: metrics?.counters?.annotationSaveFailures ?? 0,
-            isDirty: native?.isDirty ?? true,
-            newestGeneration: Number(autosave?.['newestGeneration'] ?? Number.NaN),
-            paused: autosave?.['paused'] !== false,
-            pendingRevision: native?.pendingRevision ?? Number.NaN,
-            recoveries: metrics?.counters?.annotationSaveRecoveries ?? 0,
-            savedGeneration: Number(autosave?.['savedGeneration'] ?? Number.NaN),
-            saves: metrics?.counters?.annotationSaves ?? 0,
-          };
-        });
-        return isVerifiedAnnotationSaveSettled(snapshot, baseline);
-      },
+      async () =>
+        isVerifiedAnnotationSaveSettled(await readAnnotationSaveLifecycleSnapshot(), baseline),
       { timeout: 15_000 },
     );
   } catch (cause) {
-    const diagnostics = await browser.executeObsidian(({ app }) => {
-      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
-        controller?: Record<string, unknown>;
-      };
-      const controller = view.controller;
-      const native = controller?.['nativeSaveSession'] as {
-        committedRevision?: number;
-        isDirty?: boolean;
-        pendingRevision?: number;
-      } | null;
-      const autosave = controller?.['autosave'] as Record<string, unknown> | null;
-      const viewport = controller?.['viewport'] as Record<string, unknown> | null;
-      const editor = viewport?.['annotationEditorInstance'] as Record<string, unknown> | null;
-      return {
-        autosave:
-          autosave === null
-            ? null
-            : {
-                inFlight: autosave['inFlight'] !== null,
-                newestGeneration: autosave['newestGeneration'],
-                paused: autosave['paused'],
-                savedGeneration: autosave['savedGeneration'],
-              },
-        editor:
-          editor === null
-            ? null
-            : {
-                hasManager: editor['manager'] !== null,
-                saving: editor['saving'],
-              },
-        native:
-          native === null
-            ? null
-            : {
-                committedRevision: native.committedRevision,
-                isDirty: native.isDirty,
-                pendingRevision: native.pendingRevision,
-              },
-        notices: Array.from(document.querySelectorAll<HTMLElement>('.notice')).map(
-          (notice) => notice.innerText,
-        ),
-        performance: (window as Window & { __abyssDocumentsPerformance?: unknown })
-          .__abyssDocumentsPerformance,
-      };
-    });
+    const diagnostics = await readAnnotationSaveLifecycleSnapshot().catch(() => null);
     throw new Error(
       `Expected at least ${baseline.minimumSaves} completed annotation save(s): ${JSON.stringify(diagnostics)}; ${String(cause)}`,
     );
@@ -292,28 +231,6 @@ async function vaultFileSha256(path: string): Promise<string> {
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
     return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('');
   }, path);
-}
-
-async function captureAnnotationSaveBaseline(): Promise<AnnotationSaveBaseline> {
-  const counters = await browser.execute(
-    () =>
-      (
-        window as Window & {
-          __abyssDocumentsPerformance?: {
-            counters?: {
-              annotationSaveFailures?: number;
-              annotationSaveRecoveries?: number;
-              annotationSaves?: number;
-            };
-          };
-        }
-      ).__abyssDocumentsPerformance?.counters,
-  );
-  return {
-    failures: counters?.annotationSaveFailures ?? 0,
-    minimumSaves: (counters?.annotationSaves ?? 0) + 1,
-    recoveries: counters?.annotationSaveRecoveries ?? 0,
-  };
 }
 
 async function createFreeText(text: string): Promise<void> {
@@ -1345,4 +1262,244 @@ describe('PDF reader foundation', () => {
     }
     await expect($('[data-control="page-field"]')).toHaveValue('1');
   });
+});
+
+it('projects annotates and searches a PDF from a long Unicode Cyrillic vault path', async () => {
+  const unicodePath =
+    'Documents/Юридические документы — очень длинный путь — Résumé Café — проверка.pdf';
+  await resetWorkingPdf('Documents/unicode-annotations.pdf', unicodePath);
+  await openPdf(unicodePath);
+  await waitForFirstPage();
+
+  await $('[data-control="sidebar"]').click();
+  await $('[data-tab="annotations"]').click();
+  await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
+  await $('[data-annotation-search]').setValue('Unicode annotation');
+  await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(1);
+  await $('.abyss-annotation-card').click();
+  await expect($('[data-control="page-field"]')).toHaveValue('1');
+
+  await $('[data-tab="search"]').click();
+  const query = $('[data-document-search]');
+  await query.setValue('café déjà');
+  await expect($('[data-search-count]')).toHaveText('1 result');
+  const exactMark = $('[data-search-result] mark[data-search-match]');
+  await expect(exactMark).toHaveText('Café déjà');
+  await $('[data-search-result]').click();
+  await browser.waitUntil(
+    async () =>
+      browser.execute(
+        () => document.querySelectorAll('[data-page-number="1"] .textLayer .highlight').length > 0,
+      ),
+    { timeout: 5_000, timeoutMsg: 'Native PDF search highlight did not become visible.' },
+  );
+
+  await query.setValue('Résumé');
+  await expect($('[data-search-result] mark[data-search-match]')).toHaveText('Résumé');
+  await expect($('[data-search-result] mark[data-search-match]')).not.toHaveText('Café déjà');
+  await query.click();
+  await browser.keys([process.platform === 'darwin' ? Key.Command : Key.Control, 'a']);
+  await browser.keys(Key.Backspace);
+  try {
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelectorAll('[data-search-result] mark[data-search-match]').length ===
+              0 &&
+            document.querySelectorAll('[data-page-number="1"] .textLayer .highlight').length === 0,
+        ),
+      { timeout: 5_000, timeoutMsg: 'Clearing search left stale sidebar or PDF highlights.' },
+    );
+  } catch (cause) {
+    const diagnostic = await browser.execute(() => ({
+      input: document.querySelector<HTMLInputElement>('[data-document-search]')?.value ?? null,
+      nativeHighlights: Array.from(
+        document.querySelectorAll<HTMLElement>('[data-page-number="1"] .textLayer .highlight'),
+        (highlight) => ({ className: highlight.className, text: highlight.textContent }),
+      ),
+      resultMarks: Array.from(
+        document.querySelectorAll<HTMLElement>('[data-search-result] mark[data-search-match]'),
+        (mark) => mark.textContent,
+      ),
+    }));
+    throw new Error(`${String(cause)}; diagnostic=${JSON.stringify(diagnostic)}`);
+  }
+});
+
+it('falls back from cache failure delays the quiet spinner and recovers from terminal extraction failure', async () => {
+  const fallbackPath = 'Documents/Сбой кэша — fallback annotations.pdf';
+  const delayPath = 'Documents/Задержка извлечения — quiet spinner.pdf';
+  const terminalPath = 'Documents/Сбой извлечения — terminal annotations.pdf';
+  await resetWorkingPdf('Documents/unicode-annotations.pdf', fallbackPath);
+  await resetWorkingPdf('Documents/text-12-pages.pdf', delayPath);
+  await resetWorkingPdf('Documents/unicode-annotations.pdf', terminalPath);
+  await openPdf(fallbackPath);
+  await waitForFirstPage();
+  let monitorInstalled = false;
+  try {
+    await setAnnotationLoadTestFault({ cacheRead: 'fail' });
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
+    await expect($('[data-sidebar-panel="annotations"]')).toHaveAttribute(
+      'data-annotation-state',
+      'content',
+    );
+
+    await openPdf(delayPath);
+    await waitForFirstPage();
+    await setAnnotationLoadTestFault({ cacheRead: 'fail', extractionDelayMs: 350 });
+    await $('[data-control="sidebar"]').click();
+    await browser.execute(() => {
+      const host = window as Window & {
+        __abyssTask9AnnotationLoading?: {
+          readonly cleanup: () => void;
+          readonly samples: Array<{
+            readonly at: number;
+            readonly spinner: boolean;
+            readonly state: string | null;
+            readonly status: string;
+          }>;
+          activatedAt: number | null;
+        };
+      };
+      const samples: Array<{
+        at: number;
+        spinner: boolean;
+        state: string | null;
+        status: string;
+      }> = [];
+      const record = (): void => {
+        const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+        samples.push({
+          at: performance.now(),
+          spinner: panel?.querySelector('[data-annotations-spinner]') !== null,
+          state: panel?.dataset['annotationState'] ?? null,
+          status: panel?.querySelector<HTMLElement>('[role="status"]')?.innerText.trim() ?? '',
+        });
+      };
+      const observer = new MutationObserver(record);
+      observer.observe(document.body, {
+        attributeFilter: ['data-annotation-state', 'hidden'],
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+      const onClick = (event: MouseEvent): void => {
+        const target = event.target;
+        if (!(target instanceof Element) || target.closest('[data-tab="annotations"]') === null)
+          return;
+        const monitor = host.__abyssTask9AnnotationLoading;
+        if (monitor !== undefined) monitor.activatedAt = performance.now();
+        record();
+      };
+      document.addEventListener('click', onClick, { capture: true });
+      host.__abyssTask9AnnotationLoading = {
+        activatedAt: null,
+        cleanup: () => {
+          observer.disconnect();
+          document.removeEventListener('click', onClick, { capture: true });
+        },
+        samples,
+      };
+    });
+    monitorInstalled = true;
+    await $('[data-tab="annotations"]').click();
+    await expect($('[data-sidebar-panel="annotations"] [role="status"]')).toHaveText(
+      'No annotations',
+      { wait: 10_000 },
+    );
+    const timing = await browser.execute(() => {
+      const monitor = (
+        window as Window & {
+          __abyssTask9AnnotationLoading?: {
+            readonly samples: ReadonlyArray<{
+              at: number;
+              spinner: boolean;
+              state: string | null;
+              status: string;
+            }>;
+            readonly activatedAt: number | null;
+          };
+        }
+      ).__abyssTask9AnnotationLoading;
+      if (monitor?.activatedAt === null || monitor?.activatedAt === undefined)
+        throw new Error('Annotation loading activation was not observed.');
+      const activatedAt = monitor.activatedAt;
+      return {
+        finalSpinner:
+          document.querySelector(
+            '[data-sidebar-panel="annotations"] [data-annotations-spinner]',
+          ) !== null,
+        finalState:
+          document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]')?.dataset[
+            'annotationState'
+          ] ?? null,
+        spinnerOffsets: monitor.samples
+          .filter((sample) => sample.spinner)
+          .map((sample) => sample.at - activatedAt),
+        timeline: monitor.samples.map((sample) => ({
+          offset: sample.at - activatedAt,
+          spinner: sample.spinner,
+          state: sample.state,
+          status: sample.status,
+        })),
+      };
+    });
+    if (timing.spinnerOffsets.length === 0)
+      throw new Error(`Delayed extraction never exposed its spinner: ${JSON.stringify(timing)}`);
+    expect(Math.min(...timing.spinnerOffsets)).toBeGreaterThanOrEqual(250);
+    expect(timing).toMatchObject({ finalSpinner: false, finalState: 'empty' });
+    await browser.execute(() => {
+      const host = window as Window & {
+        __abyssTask9AnnotationLoading?: { cleanup(): void };
+      };
+      host.__abyssTask9AnnotationLoading?.cleanup();
+      delete host.__abyssTask9AnnotationLoading;
+    });
+    monitorInstalled = false;
+
+    await openPdf(terminalPath);
+    await waitForFirstPage();
+    await setAnnotationLoadTestFault({ cacheRead: 'fail', extractionFailure: true });
+    await expect($('.annotationLayer .highlightAnnotation')).toExist();
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await expect($('[data-sidebar-panel="annotations"] [role="status"]')).toHaveText(
+      'Couldn’t load annotations',
+    );
+    expect(
+      await browser.execute(() => {
+        const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+        return {
+          native: document.querySelectorAll('.annotationLayer .highlightAnnotation').length,
+          retryButtons: panel?.querySelectorAll('[data-action*="retry"]').length ?? -1,
+          technicalCopy: /cache|extract|retry|page/iu.test(panel?.innerText ?? ''),
+        };
+      }),
+    ).toEqual({ native: 1, retryButtons: 0, technicalCopy: false });
+
+    await setAnnotationLoadTestFault(null);
+    await closeReaderLeaves();
+    await openPdf(terminalPath);
+    await waitForFirstPage();
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
+    await expect($('[data-sidebar-panel="annotations"]')).toHaveAttribute(
+      'data-annotation-state',
+      'content',
+    );
+  } finally {
+    if (monitorInstalled)
+      await browser.execute(() => {
+        const host = window as Window & {
+          __abyssTask9AnnotationLoading?: { cleanup(): void };
+        };
+        host.__abyssTask9AnnotationLoading?.cleanup();
+        delete host.__abyssTask9AnnotationLoading;
+      });
+    await setAnnotationLoadTestFault(null).catch(() => undefined);
+  }
 });

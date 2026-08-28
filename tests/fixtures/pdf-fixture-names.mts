@@ -8,4 +8,5 @@ export const PDF_FIXTURE_NAMES = [
   'annotation-qualification.pdf',
   'signed-document.pdf',
   'permission-restricted.pdf',
+  'unicode-annotations.pdf',
 ] as const;

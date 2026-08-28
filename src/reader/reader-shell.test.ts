@@ -256,12 +256,16 @@ describe('ReaderShell', () => {
       cancelable: true,
       key: 'Escape',
     });
+    trigger.addEventListener('keydown', () => {
+      trigger.setAttribute('aria-expanded', 'false');
+      trigger.dataset['abyssMenuClosing'] = '';
+      menu.remove();
+    });
 
     trigger.dispatchEvent(escape);
 
     expect(escape.defaultPrevented).toBe(false);
     expect(intents).toEqual([]);
-    menu.remove();
     shell.destroy();
     host.remove();
   });

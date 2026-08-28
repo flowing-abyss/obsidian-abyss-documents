@@ -14,6 +14,7 @@ import {
   DOCUMENT_VIEW_TYPE,
   type ReaderViewController,
 } from './document-view.js';
+import type { AnnotationSaveLifecycleSnapshot } from './reader-controller.js';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -35,6 +36,22 @@ function viewFixture(controller: ReaderViewController, path = 'Books/Guide.pdf')
 }
 
 function controller() {
+  const lifecycle: AnnotationSaveLifecycleSnapshot = {
+    activeSerializations: 0,
+    activeWrites: 0,
+    committedRevision: 3,
+    failures: 0,
+    inFlight: false,
+    isDirty: false,
+    newestGeneration: 2,
+    paused: false,
+    pendingRevision: 3,
+    recoveries: 0,
+    savedGeneration: 2,
+    saves: 1,
+  };
+  const annotationSaveLifecycleSnapshot = vi.fn(() => lifecycle);
+  const setAnnotationLoadTestFault = vi.fn();
   const open = vi.fn(async () => undefined);
   const close = vi.fn(async () => undefined);
   const showOutline = vi.fn();
@@ -43,6 +60,7 @@ function controller() {
   const saveDocument = vi.fn(async () => undefined);
   const resolveAnnotationLink = vi.fn(async (_reference: AnnotationHrefReference) => true);
   const reader: ReaderViewController = {
+    annotationSaveLifecycleSnapshot,
     open,
     close,
     refreshReadingSettings,
@@ -50,8 +68,10 @@ function controller() {
     saveDocument,
     searchDocument,
     showOutline,
+    setAnnotationLoadTestFault,
   };
   return {
+    annotationSaveLifecycleSnapshot,
     close,
     open,
     reader,
@@ -60,10 +80,33 @@ function controller() {
     saveDocument,
     searchDocument,
     showOutline,
+    setAnnotationLoadTestFault,
   };
 }
 
 describe('AbyssDocumentView', () => {
+  it('exposes only the typed read-only save lifecycle through the public view boundary', () => {
+    const reader = controller();
+    const fixture = viewFixture(reader.reader);
+
+    expect(fixture.view.annotationSaveLifecycleSnapshot()).toEqual(
+      reader.annotationSaveLifecycleSnapshot(),
+    );
+  });
+
+  it('forwards only the narrow typed annotation-load test fault through the public view', () => {
+    const reader = controller();
+    const fixture = viewFixture(reader.reader);
+
+    fixture.view.setAnnotationLoadTestFault({ cacheRead: 'fail', extractionDelayMs: 350 });
+    fixture.view.setAnnotationLoadTestFault(null);
+
+    expect(reader.setAnnotationLoadTestFault.mock.calls).toEqual([
+      [{ cacheRead: 'fail', extractionDelayMs: 350 }],
+      [null],
+    ]);
+  });
+
   it('forwards canonical deep-link state after the PDF is mounted and rejects malformed state', async () => {
     const reader = controller();
     const fixture = viewFixture(reader.reader);

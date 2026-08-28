@@ -1,4 +1,4 @@
-export interface PdfSelectionRect {
+interface PdfSelectionRect {
   readonly left: number;
   readonly top: number;
   readonly right: number;
@@ -19,6 +19,7 @@ export interface PdfTextSelection {
 export interface PdfSelectionObserver {
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void;
   validate(token: string): 'current' | 'stale';
+  restore?(token: string): 'current' | 'stale';
   invalidate(): void;
 }
 
@@ -89,6 +90,25 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     return 'current';
   }
 
+  restore(token: string): 'current' | 'stale' {
+    const active = this.active;
+    if (this.destroyed || token !== active?.token) return 'stale';
+    const selection = this.ownerDocument.getSelection();
+    if (selection === null || !active.anchorNode.isConnected || !active.focusNode.isConnected)
+      return 'stale';
+    try {
+      selection.setBaseAndExtent(
+        active.anchorNode,
+        active.anchorOffset,
+        active.focusNode,
+        active.focusOffset,
+      );
+    } catch {
+      return 'stale';
+    }
+    return this.validate(token);
+  }
+
   invalidate(): void {
     if (this.destroyed) return;
     this.revision += 1;
@@ -138,7 +158,7 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
-    if (!isPrimaryPointer(event)) return;
+    if (!isPrimaryPointer(event) || isAnnotationEditorEvent(event)) return;
     this.input = event.pointerType === 'touch' ? 'touch' : 'pointer';
     this.suppressPointerSelection = false;
     this.pointerGesture = {
@@ -149,7 +169,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     this.dismissPublishedSelection();
   };
 
-  private readonly onTouchStart = (): void => {
+  private readonly onTouchStart = (event: TouchEvent): void => {
+    if (isAnnotationEditorEvent(event)) return;
     this.input = 'touch';
     this.suppressPointerSelection = false;
     this.touchGesture = true;
@@ -219,7 +240,6 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     const identity = this.selectionIdentity();
     if (identity === null) {
       this.revision += 1;
-      this.active = null;
       this.emit(null);
       return;
     }
@@ -285,6 +305,20 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
 
 function isPrimaryPointer(event: PointerEvent): boolean {
   return event.button === 0 && event.isPrimary !== false;
+}
+
+function isAnnotationEditorEvent(event: Event): boolean {
+  return event
+    .composedPath()
+    .some(
+      (target) => hasClosest(target) && target.closest('[data-annotation-editor-popover]') !== null,
+    );
+}
+
+function hasClosest(
+  target: EventTarget | null,
+): target is EventTarget & { closest(selector: string): Element | null } {
+  return target !== null && 'closest' in target && typeof target.closest === 'function';
 }
 
 function samePointer(event: PointerEvent, pointerId: number): boolean {

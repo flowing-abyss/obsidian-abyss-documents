@@ -143,6 +143,7 @@ describe('reader benchmark summaries', () => {
       'signed-document.pdf': '2'.repeat(64),
       'text-12-pages.pdf': 'd'.repeat(64),
       'text-700-pages.pdf': 'e'.repeat(64),
+      'unicode-annotations.pdf': '3'.repeat(64),
     };
     const valid = {
       environment: { device: 'Pixel reference', os: 'Android 16' },
@@ -206,6 +207,7 @@ describe('reader benchmark summaries', () => {
           'signed-document.pdf': '2'.repeat(64),
           'text-12-pages.pdf': 'd'.repeat(64),
           'wrong.pdf': 'e'.repeat(64),
+          'unicode-annotations.pdf': '3'.repeat(64),
         },
       }),
       message: 'fixture name',
@@ -224,6 +226,7 @@ describe('reader benchmark summaries', () => {
           'signed-document.pdf': '2'.repeat(64),
           'text-12-pages.pdf': 'd'.repeat(64),
           'text-700-pages.pdf': 'e'.repeat(64),
+          'unicode-annotations.pdf': '3'.repeat(64),
         },
       }),
       message: 'SHA-256',
@@ -241,6 +244,7 @@ describe('reader benchmark summaries', () => {
         'signed-document.pdf': '2'.repeat(64),
         'text-12-pages.pdf': 'd'.repeat(64),
         'text-700-pages.pdf': 'e'.repeat(64),
+        'unicode-annotations.pdf': '3'.repeat(64),
       },
       iterationCount: 5,
       samples: {
@@ -266,6 +270,7 @@ describe('reader benchmark summaries', () => {
       'signed-document.pdf': '2'.repeat(64),
       'text-12-pages.pdf': 'd'.repeat(64),
       'text-700-pages.pdf': 'e'.repeat(64),
+      'unicode-annotations.pdf': '3'.repeat(64),
     };
     const input = {
       environment: { device: 'Pixel reference', os: 'Android 16' },
@@ -296,6 +301,7 @@ describe('reader benchmark summaries', () => {
       'signed-document.pdf': '2'.repeat(64),
       'text-12-pages.pdf': 'd'.repeat(64),
       'text-700-pages.pdf': 'e'.repeat(64),
+      'unicode-annotations.pdf': '3'.repeat(64),
     };
     const input = {
       environment: { device: 'Pixel reference', os: 'Android 16' },

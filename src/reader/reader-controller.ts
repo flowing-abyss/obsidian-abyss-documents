@@ -5,7 +5,9 @@ import type {
   PdfAnnotationLogicalMode,
   PdfAnnotationTool,
 } from '../adapters/pdf/pdf-annotation-editor.js';
+import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
+import { decodeAnnotationComment } from '../annotation-tokens.js';
 import { AutosaveScheduler, type SaveReason } from '../autosave-scheduler.js';
 import type {
   AnnotationExportRecord,
@@ -17,6 +19,7 @@ import type {
   DocumentLocation,
   DocumentSession,
   DocumentViewport,
+  PdfPageRect,
   SearchHit,
   ViewportEvent,
 } from '../document-core/document.js';
@@ -43,9 +46,14 @@ import {
   incrementReaderCounter,
   markReaderPerformance,
   markReaderPerformanceOnce,
+  readerPerformanceSnapshot,
   recordSuccessfulAnnotationSave,
 } from '../reader-performance.js';
 import { DEFAULT_SETTINGS, type PluginSettings } from '../settings.js';
+import type {
+  AnnotationEditorCreation,
+  AnnotationEditorUpdate,
+} from './annotation-editor-popover.js';
 import { AnnotationInteractionController } from './annotation-interaction-controller.js';
 import { AnnotationProjection } from './annotation-projection.js';
 import type { AnnotationToolbarIntent } from './annotation-toolbar.js';
@@ -74,6 +82,28 @@ export interface ReaderProfileState {
   readonly layoutByFingerprint: Readonly<Record<string, ReaderLayout>>;
   updateLayoutForFingerprint(fingerprint: string, layout: ReaderLayout): void | Promise<void>;
   updateProfileForFingerprint(fingerprint: string, profile: ReadingProfileId): void | Promise<void>;
+}
+
+export interface AnnotationSaveLifecycleSnapshot {
+  readonly activeSerializations: number;
+  readonly activeWrites: number;
+  readonly committedRevision: number;
+  readonly failures: number;
+  readonly inFlight: boolean;
+  readonly isDirty: boolean;
+  readonly newestGeneration: number;
+  readonly paused: boolean;
+  readonly pendingRevision: number;
+  readonly recoveries: number;
+  readonly savedGeneration: number;
+  readonly saves: number;
+}
+
+/** Narrow test-only fault contract for annotation cache/extraction acceptance scenarios. */
+export interface AnnotationLoadTestFault {
+  readonly cacheRead?: 'fail';
+  readonly extractionDelayMs?: number;
+  readonly extractionFailure?: boolean;
 }
 
 const DEFAULT_PROFILE_STATE: ReaderProfileState = {
@@ -119,6 +149,10 @@ interface AnnotationEditorViewport extends DocumentViewport {
 
 interface AnnotationInteractionViewport extends DocumentViewport {
   readonly annotationInteraction: PdfAnnotationInteraction | null;
+}
+
+interface AnnotationSelectionProjectionViewport extends DocumentViewport {
+  projectSelectionRects(selection: PdfTextSelection): readonly PdfPageRect[];
 }
 
 interface AnnotationToolRequest {
@@ -198,6 +232,7 @@ export class ReaderController {
   private annotationLiveRevision = 0;
   private annotationsLoadedFor: DocumentSession | null = null;
   private annotationsLoadingFor: DocumentSession | null = null;
+  private annotationTerminalFailureFor: DocumentSession | null = null;
   private currentAnnotations: readonly DocumentAnnotation[] = [];
   private verifiedAnnotationAbort: AbortController | null = null;
   private verifiedAnnotationFailureCause: unknown = null;
@@ -228,6 +263,7 @@ export class ReaderController {
   private currentFile: TFile | null = null;
   private currentHost: HTMLElement | null = null;
   private lifecycleFlushActive = false;
+  private annotationLoadTestFault: AnnotationLoadTestFault | null = null;
 
   constructor(
     private readonly registry: DocumentAdapterRegistry,
@@ -261,6 +297,28 @@ export class ReaderController {
     this.activeOpen?.abort();
     this.activeOpen = null;
     return this.enqueue(() => this.releaseCurrent());
+  }
+
+  annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null {
+    const native = this.nativeSaveSession;
+    const scheduler = this.autosave;
+    if (native === null || scheduler === null) return null;
+    const autosave = scheduler.lifecycleSnapshot();
+    const performance = readerPerformanceSnapshot();
+    return {
+      activeSerializations: performance.activeAnnotationOperations.serializations,
+      activeWrites: performance.activeAnnotationOperations.writes,
+      committedRevision: native.committedRevision ?? Number.NaN,
+      failures: performance.counters.annotationSaveFailures,
+      inFlight: autosave.inFlight,
+      isDirty: native.isDirty,
+      newestGeneration: autosave.newestGeneration,
+      paused: autosave.paused,
+      pendingRevision: native.pendingRevision,
+      recoveries: performance.counters.annotationSaveRecoveries,
+      savedGeneration: autosave.savedGeneration,
+      saves: performance.counters.annotationSaves,
+    };
   }
 
   showOutline(): void {
@@ -307,6 +365,21 @@ export class ReaderController {
         ),
       );
     return this.autosave?.flush() ?? Promise.resolve();
+  }
+
+  setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): void {
+    if (fault === null) {
+      this.annotationLoadTestFault = null;
+      return;
+    }
+    const delay = fault.extractionDelayMs ?? 0;
+    if (!Number.isFinite(delay) || delay < 0 || delay > 5_000)
+      throw new RangeError('Annotation extraction test delay must be between 0 and 5000 ms.');
+    this.annotationLoadTestFault = Object.freeze({
+      ...(fault.cacheRead === undefined ? {} : { cacheRead: fault.cacheRead }),
+      ...(delay === 0 ? {} : { extractionDelayMs: delay }),
+      ...(fault.extractionFailure === true ? { extractionFailure: true } : {}),
+    });
   }
 
   async resolveAnnotationLink(reference: AnnotationHrefReference): Promise<boolean> {
@@ -494,6 +567,7 @@ export class ReaderController {
     this.annotationIntentFor = null;
     this.annotationsLoadedFor = null;
     this.annotationsLoadingFor = null;
+    this.annotationTerminalFailureFor = null;
     this.currentAnnotations = [];
     this.annotationProjection.reset();
     this.annotationLiveRevision = 0;
@@ -548,8 +622,86 @@ export class ReaderController {
           this.currentAnnotationTool = tool;
           shell.annotationToolbar?.setTool(tool);
         },
+        onAnnotationPreview: (update) => {
+          this.projectAnnotationUpdate(viewport, shell, update);
+        },
+        onAnnotationDelete: (annotations) => {
+          if (this.viewport !== viewport || this.shell !== shell) return;
+          const changed = annotations.reduce((removed, annotation) => {
+            const id =
+              annotation.identity.kind === 'stable'
+                ? annotation.identity.id
+                : annotation.identity.fingerprint;
+            return this.annotationProjection.remove(id) || removed;
+          }, false);
+          if (changed) this.renderAnnotationProjection(shell);
+        },
+        onAnnotationUpdate: (update) => {
+          this.projectAnnotationUpdate(viewport, shell, update);
+        },
+        onSelectionCreateCommit: (creation, annotation) => {
+          if (this.viewport !== viewport || this.shell !== shell) return;
+          if (
+            !this.annotationProjection.bindCommittedSelection(creation.selection.token, annotation)
+          )
+            return;
+          this.annotationLiveRevision += 1;
+          this.renderAnnotationProjection(shell);
+        },
+        onSelectionCreateDiscard: (creation) => {
+          if (this.viewport !== viewport || this.shell !== shell) return;
+          if (this.annotationProjection.remove(creation.selection.token, creation.selection.token))
+            this.renderAnnotationProjection(shell);
+        },
+        onSelectionCreatePreview: (creation) => {
+          this.projectSelectionCreation(viewport, shell, creation);
+        },
+        onSelectionCreateStart: (creation) => {
+          this.projectSelectionCreation(viewport, shell, creation);
+        },
       },
     );
+  }
+
+  private projectAnnotationUpdate(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    update: AnnotationEditorUpdate,
+  ): void {
+    if (this.viewport !== viewport || this.shell !== shell) return;
+    if (!this.annotationProjection.applyEditorUpdate(update)) return;
+    this.annotationLiveRevision += 1;
+    this.renderAnnotationProjection(shell);
+  }
+
+  private projectSelectionCreation(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    creation: AnnotationEditorCreation,
+  ): void {
+    if (this.viewport !== viewport || this.shell !== shell) return;
+    const projector = annotationSelectionProjectionOf(viewport);
+    if (projector === null) return;
+    const selection = creation.selection;
+    const decoded = decodeAnnotationComment(creation.comment);
+    if (
+      !this.annotationProjection.upsert({
+        nativeId: selection.token,
+        provisionalId: selection.token,
+        pageIndex: selection.pageIndex,
+        type: 'highlight',
+        rects: projector.projectSelectionRects(selection),
+        selectedText: selection.text,
+        color: creation.color,
+        comment: creation.comment,
+        tags: decoded.tags,
+        links: decoded.links,
+        writable: true,
+      })
+    )
+      return;
+    this.annotationLiveRevision += 1;
+    this.renderAnnotationProjection(shell);
   }
 
   private async saveNativeRevision(
@@ -1555,7 +1707,12 @@ export class ReaderController {
         this.navigateToLocation(location);
       },
       onAnnotationActivate: (activation) => {
-        this.activateAnnotation(viewport, activation.location, activation.nativeId);
+        this.activateAnnotation(
+          viewport,
+          activation.location,
+          activation.nativeId,
+          activation.annotation,
+        );
       },
       ...transferCallbacks,
       onTabChange: (nextTab) => {
@@ -1609,6 +1766,7 @@ export class ReaderController {
           return;
         }
         this.annotationsLoadedFor = session;
+        this.annotationTerminalFailureFor = null;
         this.acceptVerifiedAnnotations(annotations, shell);
       })
       .catch((cause: unknown) => {
@@ -1620,7 +1778,8 @@ export class ReaderController {
         )
           return;
         this.annotationsLoadingFor = null;
-        shell.sidebar?.annotationsPanel.setUnavailable();
+        this.annotationTerminalFailureFor = session;
+        shell.sidebar?.annotationsPanel.setUnavailable(false);
         console.error('[abyss-documents] Failed to extract PDF annotations', {
           path: session.descriptor.path,
           page: annotationFailurePage(cause) ?? this.currentPageIndex + 1,
@@ -1703,25 +1862,14 @@ export class ReaderController {
     signal: AbortSignal,
   ): Promise<readonly DocumentAnnotation[]> {
     const path = session.descriptor.path;
-    let cacheGeneration = this.annotationCache?.generation(path);
-    let cached: readonly DocumentAnnotation[] | null | undefined;
-    try {
-      cached = await this.annotationCache?.read(
-        path,
-        session.descriptor.fingerprint,
-        cacheGeneration,
-      );
-    } catch (cause) {
-      if (cause instanceof StaleAnnotationCacheReadError) {
-        this.throwIfAnnotationCancelled(signal);
-        cacheGeneration = this.annotationCache?.generation(path);
-      } else {
-        console.error('[abyss-documents] Annotation cache read failed', { path, cause });
-      }
-      cached = null;
-    }
+    const { annotations: cached, generation: cacheGeneration } = await this.readAnnotationCache(
+      path,
+      session.descriptor.fingerprint,
+      signal,
+    );
     this.throwIfAnnotationCancelled(signal);
     if (cached !== null && cached !== undefined) return cached;
+    await this.applyAnnotationExtractionTestFault(signal);
     const annotations: DocumentAnnotation[] = [];
     await session.listAnnotations(signal, (batch) => {
       annotations.push(...batch);
@@ -1743,8 +1891,43 @@ export class ReaderController {
     return annotations;
   }
 
+  private async readAnnotationCache(
+    path: string,
+    fingerprint: string,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly annotations: readonly DocumentAnnotation[] | null | undefined;
+    readonly generation: number | undefined;
+  }> {
+    let generation = this.annotationCache?.generation(path);
+    try {
+      if (this.annotationLoadTestFault?.cacheRead === 'fail')
+        throw new Error('Injected annotation cache read failure.');
+      return {
+        annotations: await this.annotationCache?.read(path, fingerprint, generation),
+        generation,
+      };
+    } catch (cause) {
+      if (cause instanceof StaleAnnotationCacheReadError) {
+        this.throwIfAnnotationCancelled(signal);
+        generation = this.annotationCache?.generation(path);
+      } else console.error('[abyss-documents] Annotation cache read failed', { path, cause });
+      return { annotations: null, generation };
+    }
+  }
+
   private throwIfAnnotationCancelled(signal: AbortSignal): void {
     if (signal.aborted) throw new DOMException('Annotation loading was cancelled.', 'AbortError');
+  }
+
+  private async applyAnnotationExtractionTestFault(signal: AbortSignal): Promise<void> {
+    const fault = this.annotationLoadTestFault;
+    if (fault === null) return;
+    const delay = fault.extractionDelayMs ?? 0;
+    if (delay > 0) await abortableDelay(delay, signal);
+    this.throwIfAnnotationCancelled(signal);
+    if (fault.extractionFailure === true)
+      throw new Error('Injected annotation extraction failure.');
   }
 
   private loadOutline(session: DocumentSession, shell: ReaderShell): void {
@@ -1810,6 +1993,7 @@ export class ReaderController {
     viewport: DocumentViewport,
     location: DocumentLocation,
     nativeId: string,
+    projected: DocumentAnnotation,
   ): void {
     this.cancelAnnotationActivation();
     const abort = new AbortController();
@@ -1823,7 +2007,7 @@ export class ReaderController {
           return;
         }
         void interaction
-          .focusAnnotation(nativeId, abort.signal)
+          .focusAnnotation(nativeId, abort.signal, projected)
           .catch(() => false)
           .finally(() => {
             this.finishAnnotationActivation(abort);
@@ -1981,7 +2165,6 @@ export class ReaderController {
     }
     switch (event.type) {
       case 'page-change':
-        this.annotationInteractionController?.invalidate('navigation');
         this.handlePageChange(viewport, shell, event.pageIndex);
         return;
       case 'scale-change':
@@ -2042,6 +2225,7 @@ export class ReaderController {
 
   private renderAnnotationProjection(shell: ReaderShell): void {
     this.currentAnnotations = this.annotationProjection.annotations();
+    if (this.annotationTerminalFailureFor === this.session) return;
     shell.sidebar?.annotationsPanel.setProjectedAnnotations(this.annotationProjection.snapshot());
     shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
   }
@@ -2050,6 +2234,7 @@ export class ReaderController {
     annotations: readonly DocumentAnnotation[],
     shell: ReaderShell,
   ): readonly DocumentAnnotation[] {
+    this.annotationTerminalFailureFor = null;
     this.annotationProjection.reconcile(annotations);
     this.renderAnnotationProjection(shell);
     return this.currentAnnotations;
@@ -2291,6 +2476,14 @@ function annotationInteractionOf(
   return (viewport as AnnotationInteractionViewport).annotationInteraction;
 }
 
+function annotationSelectionProjectionOf(
+  viewport: DocumentViewport,
+): AnnotationSelectionProjectionViewport | null {
+  return 'projectSelectionRects' in viewport && typeof viewport.projectSelectionRects === 'function'
+    ? (viewport as AnnotationSelectionProjectionViewport)
+    : null;
+}
+
 function annotationToolForMode(mode: PdfAnnotationLogicalMode): PdfAnnotationTool {
   if (mode === 'quick-highlight') return 'highlight';
   if (mode === 'ink') return 'ink';
@@ -2343,4 +2536,21 @@ function isAnnotationToolbarIntent(intent: ReaderShellIntent): intent is Annotat
     intent.type === 'undo-annotation' ||
     intent.type === 'redo-annotation'
   );
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted)
+    return Promise.reject(new DOMException('Annotation loading was cancelled.', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      window.clearTimeout(timeout);
+      signal.removeEventListener('abort', onAbort);
+      reject(new DOMException('Annotation loading was cancelled.', 'AbortError'));
+    };
+    const timeout = window.setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }

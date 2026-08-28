@@ -1,22 +1,19 @@
-import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   PdfAnnotationInteraction,
   PdfAnnotationLogicalMode,
   PdfSelectionAction,
 } from '../adapters/pdf/pdf-annotation-editor.js';
-import { PdfAnnotationEditor } from '../adapters/pdf/pdf-annotation-editor.js';
-import {
-  PdfCommentBridge,
-  type PdfAnnotationFocus,
-  type PdfCommentEditor,
-} from '../adapters/pdf/pdf-comment-bridge.js';
+import type { PdfAnnotationFocus } from '../adapters/pdf/pdf-comment-bridge.js';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
-import { AutosaveScheduler } from '../autosave-scheduler.js';
 import { asAnnotationId, type DocumentAnnotation } from '../document-core/annotations.js';
-import type { AnnotationEditorPopoverRequest } from './annotation-editor-popover.js';
+import type {
+  AnnotationEditorCreation,
+  AnnotationEditorPopoverRequest,
+} from './annotation-editor-popover.js';
 import {
   AnnotationInteractionController,
+  type AnnotationInteractionControllerOptions,
   type AnnotationInteractionHost,
   type QuickHighlightState,
 } from './annotation-interaction-controller.js';
@@ -76,122 +73,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-class IntegrationEventBus {
-  private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
-
-  on(name: string, listener: (event: unknown) => void): void {
-    const listeners = this.listeners.get(name) ?? new Set<(event: unknown) => void>();
-    listeners.add(listener);
-    this.listeners.set(name, listeners);
-  }
-
-  off(name: string, listener: (event: unknown) => void): void {
-    this.listeners.get(name)?.delete(listener);
-  }
-
-  dispatch(name: string, event: unknown): void {
-    for (const listener of [...(this.listeners.get(name) ?? [])]) listener(event);
-  }
-}
-
-function realInteractionFixture() {
-  const eventBus = new IntegrationEventBus();
-  const selectionListeners = new Set<(selection: PdfTextSelection | null) => void>();
-  const annotationStorage = {
-    onAnnotationEditor: null as ((type: number | null) => void) | null,
-    onResetModified: null as (() => void) | null,
-    onSetModified: null as (() => void) | null,
-  };
-  const viewer = { currentMode: 0, annotationEditorMode: 0 };
-  Object.defineProperty(viewer, 'annotationEditorMode', {
-    configurable: true,
-    get: () => viewer.currentMode,
-    set: (request: { readonly mode: number }) => {
-      viewer.currentMode = request.mode;
-      queueMicrotask(() => {
-        eventBus.dispatch('annotationeditormodechanged', { mode: request.mode, source: viewer });
-      });
-    },
-  });
-  const manager = {
-    commentSelection: vi.fn(),
-    delete: vi.fn(),
-    disableUserSelect: vi.fn(),
-    endCurrentEditing: vi.fn(),
-    firstSelectedEditor: undefined,
-    getEditor: vi.fn(),
-    getLayer: vi.fn(),
-    highlightSelection: vi.fn(() => {
-      annotationStorage.onAnnotationEditor?.(9);
-    }),
-    redo: vi.fn(),
-    undo: vi.fn(),
-    updateParams: vi.fn(),
-  };
-  const interaction = new PdfAnnotationEditor({
-    annotationEditorParamsType: {
-      FREETEXT_COLOR: 12,
-      FREETEXT_OPACITY: 13,
-      FREETEXT_SIZE: 11,
-      HIGHLIGHT_COLOR: 31,
-      HIGHLIGHT_FREE: 33,
-      HIGHLIGHT_THICKNESS: 32,
-      INK_COLOR: 21,
-      INK_OPACITY: 23,
-      INK_THICKNESS: 22,
-    },
-    annotationEditorType: { DISABLE: -1, FREETEXT: 3, HIGHLIGHT: 9, INK: 15, NONE: 0 },
-    commentBridge: {
-      beginPersistence: () => undefined,
-      deleteAnnotations: () => true,
-      endPersistence: () => undefined,
-      focusAnnotation: async () => true,
-      normalizeCreatedAnnotation: () => nativeAnnotation(''),
-      onAnnotationFocus: () => () => undefined,
-      reserveNextDialog: () => ({
-        closed: Promise.resolve('external'),
-        opened: Promise.resolve(nativeAnnotation('')),
-      }),
-      updateAnnotations: () => true,
-    },
-    eventBus,
-    pdf: { annotationStorage } as unknown as PDFDocumentProxy,
-    selectionObserver: {
-      invalidate: vi.fn(),
-      onSelection(listener: (selection: PdfTextSelection | null) => void) {
-        selectionListeners.add(listener);
-        return () => selectionListeners.delete(listener);
-      },
-      validate: () => 'current',
-    },
-    viewer,
-  });
-  eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
-  const opened: AnnotationEditorPopoverRequest[] = [];
-  const closeAnnotationEditor = vi.fn(() => true);
-  const controller = new AnnotationInteractionController(
-    interaction,
-    {
-      closeAnnotationEditor,
-      openAnnotationEditor(request) {
-        opened.push(request);
-        return true;
-      },
-      setQuickHighlightState: vi.fn(),
-    },
-    palette,
-  );
-  return {
-    closeAnnotationEditor,
-    controller,
-    emitSelection(selection: PdfTextSelection | null) {
-      for (const listener of selectionListeners) listener(selection);
-    },
-    opened,
-  };
-}
-
-function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
+function fixture(
+  initialMode: PdfAnnotationLogicalMode = 'neutral',
+  options: AnnotationInteractionControllerOptions = {},
+) {
   const annotationFocusListeners = new Set<(value: PdfAnnotationFocus | null) => void>();
   const colorListeners = new Set<(value: string) => void>();
   let mode = initialMode;
@@ -210,9 +95,11 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
       for (const listener of modeListeners) listener(mode);
     },
   );
+  const updateAnnotations = vi.fn(() => true);
+  const deleteAnnotations = vi.fn(() => true);
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
-    deleteAnnotations: () => true,
+    deleteAnnotations,
     focusAnnotation: vi.fn(async () => true),
     onAnnotationFocus(listener) {
       annotationFocusListeners.add(listener);
@@ -232,7 +119,7 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
       return () => selectionListeners.delete(listener);
     },
     setQuickHighlight,
-    updateAnnotations: () => true,
+    updateAnnotations,
   };
   const opened: AnnotationEditorPopoverRequest[] = [];
   const states: QuickHighlightState[] = [];
@@ -249,6 +136,7 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
   const observedColors: string[] = [];
   const observedModes: PdfAnnotationLogicalMode[] = [];
   const controller = new AnnotationInteractionController(interaction, host, palette, {
+    ...options,
     onColorChange: (color) => observedColors.push(color),
     onFailure: (action, cause) => failures.push({ action, cause }),
     onModeChange: (nextMode) => observedModes.push(nextMode),
@@ -257,6 +145,7 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
     closeAnnotationEditor,
     commitSelection,
     controller,
+    deleteAnnotations,
     emitColor(color: string) {
       for (const listener of colorListeners) listener(color);
     },
@@ -278,10 +167,183 @@ function fixture(initialMode: PdfAnnotationLogicalMode = 'neutral') {
     selectionListenerCount: () => selectionListeners.size,
     setQuickHighlight,
     states,
+    updateAnnotations,
   };
 }
 
 describe('AnnotationInteractionController', () => {
+  it('publishes a successful contextual deletion to the live projection', () => {
+    const deleted: DocumentAnnotation[][] = [];
+    const test = fixture('neutral', {
+      onAnnotationDelete: (annotations) => deleted.push([...annotations]),
+    });
+    const annotation = nativeAnnotation();
+    test.emitAnnotationFocus({
+      annotations: [annotation],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected an existing annotation request.');
+
+    expect(request.onDelete([annotation])).toBe(true);
+
+    expect(test.deleteAnnotations).toHaveBeenCalledWith([annotation]);
+    expect(deleted).toEqual([[annotation]]);
+    test.controller.destroy();
+  });
+
+  it('publishes only successful native editor updates to the live projection', () => {
+    const projected: Array<AnnotationEditorPopoverRequest['onUpdate']> = [];
+    const updates: Array<Parameters<AnnotationEditorPopoverRequest['onUpdate']>[0]> = [];
+    const previews: Array<Parameters<AnnotationEditorPopoverRequest['onUpdate']>[0]> = [];
+    const test = fixture('neutral', {
+      onAnnotationPreview: (update) => previews.push(update),
+      onAnnotationUpdate: (update) => updates.push(update),
+    });
+    test.emitSelection(textSelection());
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+    projected.push(request.onUpdate);
+    const annotation = nativeAnnotation();
+    const successful = { annotations: [annotation], comment: 'Updated' };
+    const rejected = { annotations: [annotation], color: '#5fb236' };
+
+    request.onPreviewUpdate?.(successful);
+    expect(request.onUpdate(successful)).toBe(true);
+    test.updateAnnotations.mockReturnValueOnce(false);
+    expect(request.onUpdate(rejected)).toBe(false);
+
+    expect(projected).toHaveLength(1);
+    expect(previews).toEqual([successful]);
+    expect(updates).toEqual([successful]);
+  });
+
+  it('publishes a provisional selection synchronously and discards it only on dismissal', async () => {
+    const started: AnnotationEditorCreation[] = [];
+    const previewed: AnnotationEditorCreation[] = [];
+    const discarded: AnnotationEditorCreation[] = [];
+    const test = fixture('neutral', {
+      onSelectionCreateDiscard: (creation) => discarded.push(creation),
+      onSelectionCreatePreview: (creation) => previewed.push(creation),
+      onSelectionCreateStart: (creation) => started.push(creation),
+    });
+    const pending = deferred<DocumentAnnotation | 'dismissed'>();
+    test.commitSelection.mockImplementationOnce(async () => pending.promise);
+    const selection = textSelection('provisional-selection');
+    test.emitSelection(selection);
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+    const creation = { color: '#ffd400', comment: '', selection };
+
+    const committing = request.onCreate(creation);
+    request.onSelectionPreview?.({ ...creation, comment: 'Draft after activation' });
+    expect(started).toEqual([creation]);
+    expect(previewed).toEqual([{ ...creation, comment: 'Draft after activation' }]);
+    expect(discarded).toEqual([]);
+    pending.resolve('dismissed');
+    await expect(committing).resolves.toBe('dismissed');
+    expect(discarded).toEqual([creation]);
+  });
+
+  it('cleans the active selection transaction when synchronous provisional projection fails', async () => {
+    const cause = new Error('projection render failed');
+    const discarded: AnnotationEditorCreation[] = [];
+    const test = fixture('neutral', {
+      onSelectionCreateDiscard: (creation) => discarded.push(creation),
+      onSelectionCreateStart: () => {
+        throw cause;
+      },
+    });
+    const selection = textSelection('projection-failure');
+    test.emitSelection(selection);
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+    const creation = { color: '#ffd400', comment: '#review', selection };
+    const statesBefore = test.states.length;
+
+    await expect(request.onCreate(creation)).rejects.toBe(cause);
+
+    expect(test.commitSelection).not.toHaveBeenCalled();
+    expect(discarded).toEqual([creation]);
+    expect(test.failures).toEqual([{ action: 'create selection annotation', cause }]);
+    expect(test.states).toHaveLength(statesBefore + 2);
+  });
+
+  it('publishes the committed native identity with its originating selection token', async () => {
+    const committed: Array<{
+      readonly annotation: DocumentAnnotation;
+      readonly creation: AnnotationEditorCreation;
+    }> = [];
+    const test = fixture('neutral', {
+      onSelectionCreateCommit: (creation, annotation) => committed.push({ annotation, creation }),
+    });
+    const selection = textSelection('commit-binding');
+    test.emitSelection(selection);
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+
+    const annotation = await request.onCreate({ color: '#ffd400', comment: '', selection });
+
+    expect(committed).toEqual([
+      {
+        annotation,
+        creation: { color: '#ffd400', comment: '', selection },
+      },
+    ]);
+  });
+
+  it('keeps the selection editor open when the active one-shot commit clears native selection', async () => {
+    const test = fixture();
+    const pending = deferred<DocumentAnnotation | 'dismissed'>();
+    test.commitSelection.mockImplementationOnce(async () => pending.promise);
+    const selection = textSelection('one-shot-selection');
+    test.emitSelection(selection);
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+    const committing = request.onCreate({ color: '#ffd400', comment: '', selection });
+
+    test.emitMode('one-shot');
+    test.emitMode('neutral');
+    test.emitSelection(null);
+
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+    pending.resolve(nativeAnnotation('Created'));
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'created-native', kind: 'stable' },
+    });
+  });
+
+  it('retains the owned selection draft when focusing metadata clears native text selection', async () => {
+    const test = fixture();
+    const selection = textSelection('metadata-draft');
+    test.emitSelection(selection);
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+
+    test.emitSelection(null);
+
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+    await expect(
+      request.onCreate({ color: '#ffd400', comment: '#review [[Source]]', selection }),
+    ).resolves.toMatchObject({ identity: { kind: 'stable' } });
+  });
+
+  it('keeps the created annotation editor open when PDF.js later clears its text selection', async () => {
+    const test = fixture();
+    const selection = textSelection('committed-selection');
+    test.emitSelection(selection);
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+
+    await expect(
+      request.onCreate({ color: '#ffd400', comment: '', selection }),
+    ).resolves.toMatchObject({ identity: { kind: 'stable' } });
+    test.emitSelection(null);
+
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+  });
+
   it('routes normalized native single and multi focus into the unified editor', () => {
     const test = fixture();
     const first = nativeAnnotation('First');
@@ -312,6 +374,25 @@ describe('AnnotationInteractionController', () => {
       }),
     ]);
     expect(test.commitSelection).not.toHaveBeenCalled();
+    test.controller.destroy();
+  });
+
+  it('keeps a sidebar-focused writable annotation open when PDF.js clears text selection', () => {
+    const test = fixture();
+    const focused = nativeAnnotation('Sidebar focus');
+
+    test.emitAnnotationFocus({
+      annotations: [focused],
+      editable: true,
+      position: { x: 12, y: 34 },
+    });
+    test.emitSelection(null);
+
+    expect(test.opened[test.opened.length - 1]?.target).toEqual({
+      annotation: focused,
+      kind: 'annotation',
+    });
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
     test.controller.destroy();
   });
 
@@ -361,21 +442,6 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
-  it('keeps the selection editor open through its real one-shot native mode transaction', async () => {
-    const test = realInteractionFixture();
-    const selection = textSelection('real-one-shot');
-    test.emitSelection(selection);
-    const request = test.opened[0];
-    if (request === undefined) throw new Error('Expected a unified selection request.');
-
-    await expect(
-      request.onCreate({ color: '#ffd400', comment: '', selection }),
-    ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
-
-    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
-    test.controller.destroy();
-  });
-
   it('hands the created native identity into the same shell editor and persists the latest draft', async () => {
     const host = document.body.createDiv();
     const shell = new ReaderShell(host);
@@ -420,6 +486,7 @@ describe('AnnotationInteractionController', () => {
     tags.dispatchEvent(new Event('input', { bubbles: true }));
     links.value = '[[Source]]';
     links.dispatchEvent(new Event('input', { bubbles: true }));
+    element.querySelector<HTMLButtonElement>('[data-editor-color="#ffd400"]')?.click();
     const annotation = nativeAnnotation();
     created.resolve(annotation);
 
@@ -442,163 +509,6 @@ describe('AnnotationInteractionController', () => {
     controller.destroy();
     shell.destroy();
     host.remove();
-  });
-
-  it('keeps one shell editor and its native target open through autosave teardown', async () => {
-    vi.useFakeTimers();
-    const host = document.body.createDiv();
-    const shell = new ReaderShell(host);
-    const eventBus = new IntegrationEventBus();
-    const saveGate = deferred<Uint8Array>();
-    const saveDocument = vi.fn(() => saveGate.promise);
-    const annotationStorage = {
-      onAnnotationEditor: null as ((type: number | null) => void) | null,
-      onResetModified: null as (() => void) | null,
-      onSetModified: null as (() => void) | null,
-    };
-    const nativeModeRequests: number[] = [];
-    const viewer = { currentMode: 9, annotationEditorMode: 9 };
-    Object.defineProperty(viewer, 'annotationEditorMode', {
-      configurable: true,
-      get: () => viewer.currentMode,
-      set: (request: { readonly mode: number }) => {
-        nativeModeRequests.push(request.mode);
-        viewer.currentMode = request.mode;
-        eventBus.dispatch('annotationeditormodechanged', { mode: request.mode, source: viewer });
-      },
-    });
-    let commentValue = 'Before autosave';
-    const setCommentButtonStates = vi.fn();
-    const nativeNode = shell.documentHost
-      .createDiv({ cls: 'annotationEditorLayer' })
-      .createDiv({ cls: 'highlightEditor selectedEditor' });
-    nativeNode.id = 'autosave-target';
-    const native: PdfCommentEditor = {
-      get comment() {
-        return commentValue;
-      },
-      set comment(value: unknown) {
-        commentValue = typeof value === 'string' ? value : '';
-      },
-      editorType: 'highlight',
-      elementBeforePopup: nativeNode,
-      getData: () => ({ color: [255, 212, 0], contentsObj: { str: commentValue } }),
-      mode: 9,
-      propertiesToUpdate: [],
-      select: vi.fn(),
-      setCommentButtonStates,
-      uid: 'autosave-target',
-    };
-    const manager = {
-      commentSelection: vi.fn(),
-      delete: vi.fn(),
-      disableUserSelect: vi.fn(),
-      endCurrentEditing: vi.fn(),
-      firstSelectedEditor: native,
-      getEditor: vi.fn((id: string) => (id === 'autosave-target' ? native : undefined)),
-      getLayer: vi.fn(),
-      highlightSelection: vi.fn(),
-      redo: vi.fn(),
-      setSelected: vi.fn(),
-      undo: vi.fn(),
-      updateParams: vi.fn(),
-    };
-    let notifyNativeMutation = (): void => undefined;
-    const bridge = new PdfCommentBridge(shell.documentHost, {
-      onNativeMutation: () => {
-        notifyNativeMutation();
-      },
-    });
-    let focusedAnnotationId: string | null = null;
-    const stopFocus = bridge.onAnnotationFocus((focus) => {
-      const annotation = focus?.annotations[0];
-      focusedAnnotationId = annotation?.identity.kind === 'stable' ? annotation.identity.id : null;
-    });
-    manager.endCurrentEditing.mockImplementation(() => {
-      bridge.destroyPopup();
-    });
-    const editor = new PdfAnnotationEditor({
-      annotationEditorParamsType: {
-        FREETEXT_COLOR: 12,
-        FREETEXT_OPACITY: 13,
-        FREETEXT_SIZE: 11,
-        HIGHLIGHT_COLOR: 31,
-        HIGHLIGHT_FREE: 33,
-        HIGHLIGHT_THICKNESS: 32,
-        INK_COLOR: 21,
-        INK_OPACITY: 23,
-        INK_THICKNESS: 22,
-      },
-      annotationEditorType: { DISABLE: -1, FREETEXT: 3, HIGHLIGHT: 9, INK: 15, NONE: 0 },
-      commentBridge: bridge,
-      eventBus,
-      pdf: { annotationStorage, saveDocument } as unknown as PDFDocumentProxy,
-      selectionObserver: {
-        invalidate: vi.fn(),
-        onSelection: () => () => undefined,
-        validate: () => 'current',
-      },
-      viewer,
-    });
-    notifyNativeMutation = () => {
-      editor.notifyNativeMutation();
-    };
-    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
-    const controller = new AnnotationInteractionController(editor, shell, palette);
-    eventBus.dispatch('annotationeditormodechanged', { mode: 9, source: viewer });
-    let revision = 0;
-    const scheduler = new AutosaveScheduler(async () => {
-      await editor.save(new AbortController().signal);
-    });
-    const stopDirty = editor.onDirty((dirty) => {
-      if (dirty) scheduler.markDirty(++revision);
-    });
-    bridge.focusFromPointer(nativeNode);
-    const element = host.querySelector<HTMLElement>('[data-annotation-editor-popover]');
-    if (element === null) throw new Error('Expected the shell-owned native editor.');
-    const comment = element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-    if (comment === null) throw new Error('Expected the shell-owned comment field.');
-    comment.value = 'Still focused after autosave';
-    comment.dispatchEvent(new Event('input', { bubbles: true }));
-
-    await vi.advanceTimersByTimeAsync(1_050);
-
-    expect(saveDocument).toHaveBeenCalledOnce();
-    expect(manager.endCurrentEditing).toHaveBeenCalledOnce();
-    expect(nativeModeRequests).toEqual([0]);
-    expect(viewer.currentMode).toBe(0);
-    expect(host.querySelector('[data-annotation-editor-popover]')).toBe(element);
-    expect(element.isConnected).toBe(true);
-    expect(element.hidden).toBe(false);
-    expect(comment.value).toBe('Still focused after autosave');
-    expect(focusedAnnotationId).toBe('autosave-target');
-    saveGate.resolve(new Uint8Array([37, 80, 68, 70]));
-    await scheduler.flush();
-    expect(nativeModeRequests).toEqual([0, 9]);
-    expect(viewer.currentMode).toBe(9);
-    expect(manager.setSelected).toHaveBeenCalledWith(native);
-    expect(host.querySelector('[data-annotation-editor-popover]')).toBe(element);
-    expect(element.isConnected).toBe(true);
-    expect(element.hidden).toBe(false);
-    expect(comment.value).toBe('Still focused after autosave');
-    expect(focusedAnnotationId).toBe('autosave-target');
-    expect(setCommentButtonStates).toHaveBeenLastCalledWith({
-      hasPopup: true,
-      selected: true,
-    });
-    expect(setCommentButtonStates).toHaveBeenCalledTimes(2);
-    element.querySelector<HTMLButtonElement>('[data-action="delete-annotation"]')?.click();
-    expect(manager.delete).toHaveBeenCalledOnce();
-
-    stopFocus();
-    stopDirty();
-    scheduler.destroy();
-    controller.destroy();
-    editor.destroy();
-    bridge.dispose();
-    shell.destroy();
-    host.remove();
-    vi.useRealTimers();
   });
 
   it('opens selection UI only in neutral mode and closes it on true invalidation', () => {

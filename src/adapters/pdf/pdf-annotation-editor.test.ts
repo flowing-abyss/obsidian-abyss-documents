@@ -162,12 +162,26 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     onSelection: vi.fn(() => () => undefined),
     validate: vi.fn<(token: string) => 'current' | 'stale'>(() => 'current'),
   };
+  let editorAddBaseline = 0;
   const commentBridge = {
     beginPersistence: vi.fn(),
     deleteAnnotations: vi.fn(() => true),
     endPersistence: vi.fn(),
     focusAnnotation: vi.fn(async () => true),
-    normalizeCreatedAnnotation: vi.fn(() => createdAnnotation()),
+    nativeEditorIds: vi.fn(() => {
+      editorAddBaseline = annotationStorage.addEditor.mock.calls.length;
+      return new Set<string>();
+    }),
+    normalizeCreatedAnnotation: vi.fn<(_uiManager: unknown) => DocumentAnnotation | null>(() =>
+      annotationStorage.addEditor.mock.calls.length > editorAddBaseline
+        ? createdAnnotation()
+        : null,
+    ),
+    normalizeSelectionHighlight: vi.fn<(_uiManager: unknown) => DocumentAnnotation | null>(() =>
+      annotationStorage.addEditor.mock.calls.length > editorAddBaseline
+        ? createdAnnotation()
+        : null,
+    ),
     onAnnotationFocus: vi.fn(() => () => undefined),
     reserveNextDialog: vi.fn<(seed: string, signal?: AbortSignal) => PdfCommentDialogReservation>(
       () => ({
@@ -313,6 +327,101 @@ describe('PdfAnnotationEditor lifecycle', () => {
     });
   });
 
+  it('adopts exactly one highlight created while PDF.js enters highlight mode', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    fixtureValue.commentBridge.normalizeSelectionHighlight
+      .mockReturnValueOnce(null)
+      .mockReturnValue(createdAnnotation());
+    fixtureValue.eventBus.on('annotationeditormodechanged', (event: unknown) => {
+      if ((event as { readonly mode?: number }).mode !== 9) return;
+      fixtureValue.selectionObserver.validate.mockReturnValue('stale');
+      window.setTimeout(() => {
+        fixtureValue.annotationStorage.addEditor(9);
+      }, 0);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    await expect(
+      fixtureValue.editor.commitSelection('current', {
+        kind: 'highlight',
+        color: '#ffd400',
+      }),
+    ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
+
+    expect(fixtureValue.annotationStorage.addEditor).toHaveBeenCalledOnce();
+    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+  });
+
+  it('adopts the highlight even when PDF.js omits its editor-added callback', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    let created = false;
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() =>
+      created ? createdAnnotation() : null,
+    );
+    fixtureValue.eventBus.on('annotationeditormodechanged', (event: unknown) => {
+      if ((event as { readonly mode?: number }).mode !== 9) return;
+      fixtureValue.selectionObserver.validate.mockReturnValue('stale');
+      window.requestAnimationFrame(() => {
+        created = true;
+      });
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    await expect(
+      fixtureValue.editor.commitSelection('current', {
+        kind: 'highlight',
+        color: '#ffd400',
+      }),
+    ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
+
+    expect(fixtureValue.annotationStorage.addEditor).not.toHaveBeenCalled();
+    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+  });
+
+  it('applies a comment seed to the one highlight PDF.js creates while entering mode', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    fixtureValue.eventBus.on('annotationeditormodechanged', (event: unknown) => {
+      if ((event as { readonly mode?: number }).mode !== 9) return;
+      fixtureValue.selectionObserver.validate.mockReturnValue('stale');
+      fixtureValue.annotationStorage.addEditor(9);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    await expect(
+      fixtureValue.editor.commitSelection('current', {
+        kind: 'comment',
+        color: '#ffd400',
+        seed: 'Résumé — #review [[Source]]',
+      }),
+    ).resolves.toMatchObject({
+      comment: 'Résumé — #review [[Source]]',
+      identity: { id: 'created-native', kind: 'stable' },
+      links: ['Source'],
+      tags: ['review'],
+    });
+
+    expect(fixtureValue.annotationStorage.addEditor).toHaveBeenCalledOnce();
+    expect(uiManager.commentSelection).not.toHaveBeenCalled();
+    expect(fixtureValue.commentBridge.updateAnnotations).toHaveBeenCalledExactlyOnceWith({
+      annotations: [
+        expect.objectContaining({ identity: { id: 'created-native', kind: 'stable' } }),
+      ],
+      comment: 'Résumé — #review [[Source]]',
+    });
+  });
+
   it('resolves a created highlight when annotation storage was already dirty', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
@@ -396,7 +505,12 @@ describe('PdfAnnotationEditor lifecycle', () => {
     const fixtureValue = fixture();
     const uiManager = manager();
     uiManager.getEditor.mockImplementation((internalId: string) => {
-      if (internalId === 'valid') return selectedEditor('public-id', 9);
+      if (internalId === 'valid')
+        return {
+          ...selectedEditor('public-id', 9),
+          getData: () => ({ id: 'persisted-id' }),
+        };
+      if (internalId === 'uid-only') return selectedEditor('public-id', 9);
       if (internalId === 'blank-uid') return selectedEditor('   ', 9);
       if (internalId === 'unknown-mode') return selectedEditor('public-id', 99);
       if (internalId === 'invalid-mode') return { mode: '9', uid: 'public-id' };
@@ -411,6 +525,11 @@ describe('PdfAnnotationEditor lifecycle', () => {
       fixtureValue.editor.editAnnotation({ editComment: false, id: '   ', kind: 'highlight' }),
     ).rejects.toMatchObject({ name: 'InvalidStateError' });
     expect(fixtureValue.editor.resolveNativeEditor(' valid ')).toEqual({
+      id: 'persisted-id',
+      kind: 'highlight',
+      mode: 9,
+    });
+    expect(fixtureValue.editor.resolveNativeEditor('uid-only')).toEqual({
       id: 'public-id',
       kind: 'highlight',
       mode: 9,

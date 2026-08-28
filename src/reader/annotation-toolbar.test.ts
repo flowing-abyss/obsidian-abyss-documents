@@ -180,6 +180,7 @@ describe('AnnotationToolbar', () => {
     primary.dispatchEvent(context);
     expect(context.defaultPrevented).toBe(true);
     expect(addItem).toHaveBeenCalledTimes(palette.length * 2);
+    primary.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 2 }));
     expect(onIntent).not.toHaveBeenCalled();
 
     toolbar.destroy();
@@ -192,6 +193,8 @@ describe('AnnotationToolbar', () => {
       const addItem = vi.spyOn(Menu.prototype, 'addItem');
       const host = document.body.createDiv();
       const onIntent = vi.fn();
+      const bubbledClicks = vi.fn();
+      host.addEventListener('click', bubbledClicks);
       const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
       const primary = host.querySelector<HTMLButtonElement>('[data-annotation-tool="highlight"]');
       if (primary === null) throw new Error('Expected Quick Highlight.');
@@ -227,6 +230,7 @@ describe('AnnotationToolbar', () => {
       primary.dispatchEvent(pointer('pointerup', 10));
       primary.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
       expect(onIntent).not.toHaveBeenCalled();
+      expect(bubbledClicks).not.toHaveBeenCalled();
 
       primary.dispatchEvent(pointer('pointerdown', 10));
       vi.advanceTimersByTime(500);
@@ -234,6 +238,7 @@ describe('AnnotationToolbar', () => {
       vi.advanceTimersByTime(1_001);
       primary.dispatchEvent(new OwnerMouseEvent('click', { bubbles: true, detail: 1 }));
       expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-tool', tool: 'highlight' });
+      expect(bubbledClicks).toHaveBeenCalledTimes(1);
 
       primary.dispatchEvent(pointer('pointerdown', 10));
       primary.dispatchEvent(pointer('pointercancel', 10));

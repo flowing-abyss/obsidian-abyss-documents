@@ -127,9 +127,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   readonly dialogElement: HTMLElement;
 
   private readonly bindings = new Map<string, NativeAnnotationBinding>();
+  private readonly bindingIds = new WeakMap<PdfCommentEditor, string>();
   private readonly comments = new Map<string, PdfCommentData>();
   private readonly fallbackIds = new WeakMap<object, string>();
   private readonly focusListeners = new Set<(focus: PdfAnnotationFocus | null) => void>();
+  private readonly focusProjections = new Map<string, DocumentAnnotation>();
   private readonly focusReadinessChecks = new Set<() => void>();
   private activeSource: PdfCommentEditor | null = null;
   private activeBinding: NativeAnnotationBinding | null = null;
@@ -187,27 +189,43 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     const node = nativeEditorNode(target, owner);
     if (node === null) return;
     const manager = this.sidebarUiManager;
-    const id = selectedEditorId(node);
-    const editor = id.length === 0 ? undefined : manager?.getEditor?.(id);
+    const internalId = selectedEditorId(node);
+    const editor = internalId.length === 0 ? undefined : manager?.getEditor?.(internalId);
     if (editor !== undefined) {
       this.publishFocus(editor, true, true, node.getBoundingClientRect());
       return;
     }
+    const id = importedAnnotationId(node, internalId);
     if (id.length === 0 || !node.matches('.annotationLayer [data-annotation-id]')) return;
     const anchor = node.getBoundingClientRect();
     this.emitFocus({
-      annotations: [readOnlyAnnotationFromNode(node, id)],
+      annotations: [
+        mergeProjectedAnnotation(
+          readOnlyAnnotationFromNode(node, id),
+          this.focusProjections.get(id),
+        ),
+      ],
       editable: false,
       position: { x: anchor.left, y: anchor.bottom },
     });
   }
 
-  async focusAnnotation(nativeId: string, signal?: AbortSignal): Promise<boolean> {
+  async focusAnnotation(
+    nativeId: string,
+    signal?: AbortSignal,
+    projected?: DocumentAnnotation,
+  ): Promise<boolean> {
     if (this.disposed || signal?.aborted === true) return false;
     const id = nativeId.trim();
     if (id.length === 0) return false;
-    if (this.tryFocusAnnotation(id)) return true;
-    return this.waitForAnnotationFocus(id, signal);
+    if (projected !== undefined) this.focusProjections.set(id, projected);
+    try {
+      if (this.tryFocusAnnotation(id)) return true;
+      return await this.waitForAnnotationFocus(id, signal);
+    } finally {
+      if (projected !== undefined && this.focusProjections.get(id) === projected)
+        this.focusProjections.delete(id);
+    }
   }
 
   private waitForAnnotationFocus(id: string, signal?: AbortSignal): Promise<boolean> {
@@ -248,13 +266,21 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   private tryFocusAnnotation(id: string): boolean {
-    const nativeNode = Array.from(
-      this.host.querySelectorAll<HTMLElement>(NATIVE_EDITOR_SELECTOR),
-    ).find((node) => selectedEditorId(node) === id);
     const manager = this.sidebarUiManager;
-    const editor = nativeNode === undefined ? undefined : manager?.getEditor?.(id);
-    if (manager !== null && editor !== undefined)
-      return this.focusWritableAnnotation(editor, manager);
+    if (manager !== null) {
+      for (const node of Array.from(
+        this.host.querySelectorAll<HTMLElement>(NATIVE_EDITOR_SELECTOR),
+      )) {
+        const domId = selectedEditorId(node);
+        if (domId.length === 0) continue;
+        const editor = manager.getEditor?.(domId);
+        if (
+          editor !== undefined &&
+          (domId === id || editorRuntimeId(editor) === id || editorAnnotationId(editor) === id)
+        )
+          return this.focusWritableAnnotation(editor, manager, id);
+      }
+    }
     return this.focusImportedAnnotation(id);
   }
 
@@ -267,7 +293,12 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     return true;
   }
 
-  private focusWritableAnnotation(editor: PdfCommentEditor, manager: PdfCommentUiManager): boolean {
+  private focusWritableAnnotation(
+    editor: PdfCommentEditor,
+    manager: PdfCommentUiManager,
+    stableId: string,
+  ): boolean {
+    this.bindingIds.set(editor, stableId);
     manager.setSelected(editor);
     const editable = isSupportedNativeEditor(editor);
     const annotation = this.annotationFromEditor(
@@ -399,10 +430,33 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     this.closeReservation(reservation, 'external');
   }
 
+  nativeEditorIds(uiManager?: unknown): ReadonlySet<string> {
+    const ids = new Set<string>();
+    const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
+    const selected = manager?.firstSelectedEditor;
+    if (selected !== undefined) {
+      const selectedId = editorRuntimeId(selected);
+      if (selectedId.length > 0) ids.add(selectedId);
+    }
+    for (const node of Array.from(
+      this.host.querySelectorAll<HTMLElement>(NATIVE_EDITOR_SELECTOR),
+    )) {
+      const id = node.id.trim();
+      if (id.length === 0) continue;
+      ids.add(id);
+      const resolved = manager?.getEditor?.(id);
+      if (resolved !== undefined) ids.add(editorRuntimeId(resolved));
+    }
+    return ids;
+  }
+
   normalizeCreatedAnnotation(uiManager: unknown): DocumentAnnotation | null {
     const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
     if (manager === null) return null;
-    const editor = manager.firstSelectedEditor ?? this.firstSelectedEditor(manager);
+    const editor =
+      manager.firstSelectedEditor ??
+      this.firstSelectedEditor(manager) ??
+      this.uniqueSupportedNativeEditor(manager);
     if (editor === undefined || !isSupportedNativeEditor(editor)) return null;
     const annotation = this.annotationFromEditor(
       editor,
@@ -412,6 +466,59 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     );
     this.retainActiveBinding(editor, manager);
     return annotation;
+  }
+
+  normalizeSelectionHighlight(
+    uiManager: unknown,
+    existingIds: ReadonlySet<string> = new Set(),
+  ): DocumentAnnotation | null {
+    const manager = isPdfCommentUiManager(uiManager) ? uiManager : this.sidebarUiManager;
+    if (manager === null) return null;
+    const editor = this.createdSelectionHighlight(manager, existingIds);
+    if (editor === undefined) return null;
+    const annotation = this.annotationFromEditor(
+      editor,
+      editor.getData().contentsObj?.str ?? '',
+      true,
+      manager,
+    );
+    this.retainActiveBinding(editor, manager);
+    return annotation;
+  }
+
+  private createdSelectionHighlight(
+    manager: PdfCommentUiManager,
+    existingIds: ReadonlySet<string>,
+  ): PdfCommentEditor | undefined {
+    const candidates = new Map<string, PdfCommentEditor>();
+    const selected = manager.firstSelectedEditor ?? this.firstSelectedEditor(manager);
+    if (selected !== undefined) addSelectionHighlightCandidate(candidates, selected, existingIds);
+    if (manager.getEditor === undefined)
+      return candidates.size === 1 ? candidates.values().next().value : undefined;
+    for (const node of Array.from(
+      this.host.querySelectorAll<HTMLElement>(NATIVE_EDITOR_SELECTOR),
+    )) {
+      const id = node.id.trim();
+      if (id.length === 0 || existingIds.has(id)) continue;
+      const editor = manager.getEditor(id);
+      if (editor !== undefined) addSelectionHighlightCandidate(candidates, editor, existingIds);
+    }
+    return candidates.size === 1 ? candidates.values().next().value : undefined;
+  }
+
+  private uniqueSupportedNativeEditor(manager: PdfCommentUiManager): PdfCommentEditor | undefined {
+    if (manager.getEditor === undefined) return undefined;
+    const candidates = new Map<string, PdfCommentEditor>();
+    for (const node of Array.from(
+      this.host.querySelectorAll<HTMLElement>(NATIVE_EDITOR_SELECTOR),
+    )) {
+      const id = node.id.trim();
+      if (id.length === 0) continue;
+      const editor = manager.getEditor(id);
+      if (editor === undefined || !isSupportedNativeEditor(editor)) continue;
+      candidates.set(editorRuntimeId(editor), editor);
+    }
+    return candidates.size === 1 ? candidates.values().next().value : undefined;
   }
 
   updateAnnotations(update: PdfAnnotationUpdate): boolean {
@@ -633,30 +740,40 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   destroy(): void {
-    this.dispose();
+    if (this.disposed) return;
+    this.resetManagerLifecycle(new DOMException('PDF comment manager destroyed.', 'AbortError'));
   }
 
   dispose(): boolean {
     if (this.disposed) return true;
     try {
       const failure = new DOMException('PDF comment bridge disposed.', 'AbortError');
-      if (this.nextDialogReservation !== null)
-        this.cancelReservation(this.nextDialogReservation, failure);
-      if (this.activeDialogReservation !== null)
-        this.cancelReservation(this.activeDialogReservation, failure);
+      this.resetManagerLifecycle(failure);
       this.disposed = true;
       for (const check of [...this.focusReadinessChecks]) check();
-      this.releasePopupState();
-      this.emitFocus(null);
       this.focusListeners.clear();
-      this.bindings.clear();
-      this.persistenceDepth = 0;
-      this.persistenceFocusInvalidated = false;
       this.dialogElement.remove();
       return true;
     } catch {
       return false;
     }
+  }
+
+  private resetManagerLifecycle(failure: Error): void {
+    if (this.nextDialogReservation !== null)
+      this.cancelReservation(this.nextDialogReservation, failure);
+    if (this.activeDialogReservation !== null)
+      this.cancelReservation(this.activeDialogReservation, failure);
+    this.sidebarUiManager = null;
+    this.comments.clear();
+    this.updateCommentCount();
+    delete this.dialogElement.dataset['selectedCommentId'];
+    this.dialogElement.dataset['sidebarVisible'] = 'false';
+    this.releasePopupState();
+    this.emitFocus(null);
+    this.bindings.clear();
+    this.persistenceDepth = 0;
+    this.persistenceFocusInvalidated = false;
   }
 
   private closeReservation(
@@ -711,7 +828,9 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     manager: PdfCommentUiManager | null,
   ): DocumentAnnotation {
     const data = editor.getData();
-    const id = firstNonEmpty(editor.uid, data.id) ?? this.fallbackId(editor);
+    const id =
+      firstNonEmpty(this.bindingIds.get(editor), editorAnnotationId(editor)) ??
+      this.fallbackId(editor);
     const capability = writable
       ? ({ available: true } as const)
       : ({
@@ -747,8 +866,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       tags: [],
       type: annotationType(editor),
     };
-    if (writable && manager !== null) this.bindings.set(id, { editor, manager });
-    return annotation;
+    if (writable && manager !== null) {
+      this.bindings.set(id, { editor, manager });
+      this.bindingIds.set(editor, id);
+    }
+    return mergeProjectedAnnotation(annotation, this.focusProjections.get(id));
   }
 
   private fallbackId(editor: PdfCommentEditor): string {
@@ -775,6 +897,14 @@ function nativeEditorNode(
 
 function editorComment(editor: PdfCommentEditor): string {
   return editor.getData().contentsObj?.str ?? '';
+}
+
+function editorRuntimeId(editor: PdfCommentEditor): string {
+  return firstNonEmpty(editor.uid, editor.getData().id) ?? '';
+}
+
+function editorAnnotationId(editor: PdfCommentEditor): string {
+  return firstNonEmpty(editor.getData().id, editor.uid) ?? '';
 }
 
 function writableManager(
@@ -834,6 +964,26 @@ function readOnlyAnnotationFromNode(node: HTMLElement, id: string): DocumentAnno
   };
 }
 
+function mergeProjectedAnnotation(
+  native: DocumentAnnotation,
+  projected: DocumentAnnotation | undefined,
+): DocumentAnnotation {
+  if (projected === undefined) return native;
+  return {
+    ...native,
+    anchor: projected.anchor,
+    author: projected.author,
+    color: native.color ?? projected.color,
+    comment: native.comment.length > 0 ? native.comment : projected.comment,
+    createdAt: projected.createdAt,
+    links: native.links.length > 0 ? native.links : projected.links,
+    modifiedAt: projected.modifiedAt,
+    selectedText: native.selectedText ?? projected.selectedText,
+    tags: native.tags.length > 0 ? native.tags : projected.tags,
+    type: native.type === 'unsupported' ? projected.type : native.type,
+  };
+}
+
 function annotationTypeFromNode(node: HTMLElement): DocumentAnnotation['type'] {
   if (node.matches('.underlineAnnotation')) return 'underline';
   if (node.matches('.textAnnotation')) return 'text-note';
@@ -871,6 +1021,11 @@ function selectedEditorId(node: HTMLElement): string {
   const elementId = node.id.trim();
   if (elementId.length > 0) return elementId;
   return node.dataset['annotationId']?.trim() ?? '';
+}
+
+function importedAnnotationId(node: HTMLElement, fallback: string): string {
+  const annotationId = node.dataset['annotationId']?.trim();
+  return annotationId ?? fallback;
 }
 
 function stableAnnotationId(annotation: DocumentAnnotation): string | null {
@@ -928,6 +1083,22 @@ function isSupportedNativeEditor(editor: PdfCommentEditor): boolean {
       (editor.mode === 9 && editor.editorType === 'highlight') ||
       (editor.mode === 15 && editor.editorType === 'ink'))
   );
+}
+
+function addSelectionHighlightCandidate(
+  candidates: Map<string, PdfCommentEditor>,
+  editor: PdfCommentEditor,
+  existingIds: ReadonlySet<string>,
+): void {
+  const id = editorRuntimeId(editor);
+  if (
+    existingIds.has(id) ||
+    editor.mode !== 9 ||
+    editor.editorType !== 'highlight' ||
+    !isSupportedNativeEditor(editor)
+  )
+    return;
+  candidates.set(id, editor);
 }
 
 function rgbToHex(color: readonly number[] | undefined): string {

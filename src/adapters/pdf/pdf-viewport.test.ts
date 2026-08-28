@@ -349,6 +349,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
       this.options.viewer.replaceChildren();
       this.pageViews.length = 0;
       if (pdfDocument === null) {
+        (this.options.commentManager as { destroy?(): void } | undefined)?.destroy?.();
         this.currentPageNumber = 1;
         this.currentScale = 1;
         this.currentScaleValue = 'auto';
@@ -1579,6 +1580,28 @@ describe('PdfDocumentViewport', () => {
     eventBus.dispatch('pagesinit', {});
     expect(viewer.currentPageNumber).toBe(3);
     expect(viewer.currentScaleValue).toBe('page-fit');
+  });
+
+  it('keeps the owned comment bridge usable after PDF.js destroys a retiring UI manager', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined)
+      throw new Error('Expected viewer components.');
+    const commentManager = viewer.options.commentManager as {
+      reserveNextDialog(seed: string): unknown;
+    };
+    eventBus.dispatch('pagesinit', {});
+
+    fixture.viewport.setReadingColors({
+      pageColors: null,
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
+
+    expect(() => commentManager.reserveNextDialog('After profile rebind')).not.toThrow();
+    await fixture.viewport.destroy();
   });
 
   it('keeps every annotation operation unavailable until a new manager replaces the retired one', async () => {

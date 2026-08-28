@@ -45,7 +45,10 @@ export interface AnnotationEditorPopoverRequest {
     | null
     | void
     | Promise<DocumentAnnotation | 'created' | 'dismissed' | null | void>;
+  readonly onPreviewUpdate?: ((update: AnnotationEditorUpdate) => void) | undefined;
+  readonly onPreviewRevert?: ((update: AnnotationEditorUpdate) => void) | undefined;
   readonly onUpdate: (update: AnnotationEditorUpdate) => boolean | void;
+  readonly onSelectionPreview?: ((creation: AnnotationEditorCreation) => void) | undefined;
   readonly onDelete: (annotations: readonly DocumentAnnotation[]) => boolean | void;
   readonly onClose: (reason: AnnotationEditorCloseReason) => void;
 }
@@ -236,14 +239,27 @@ export class AnnotationEditorPopover {
       if (this.active === null) return;
       const target = event.target;
       if (target instanceof ownerWindow(this.host).Element && this.element.contains(target)) return;
+      if (this.isAnnotationOwnerTarget(target)) return;
       this.close('click-away');
     });
     this.listenDocument('focusin', (event) => {
       if (this.active === null) return;
       const target = event.target;
       if (target instanceof ownerWindow(this.host).Element && this.element.contains(target)) return;
+      if (this.isAnnotationOwnerTarget(target)) return;
+      if (this.active.target.kind === 'selection' && this.selectionCommitted) return;
       this.close('focus-away');
     });
+  }
+
+  private isAnnotationOwnerTarget(target: EventTarget | null): boolean {
+    return (
+      target instanceof ownerWindow(this.host).Element &&
+      (target.closest(
+        '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)',
+      ) !== null ||
+        target.closest('.abyss-annotation-card[aria-current="true"]') !== null)
+    );
   }
 
   get isOpen(): boolean {
@@ -530,9 +546,25 @@ export class AnnotationEditorPopover {
       return;
     this.dirtyMetadata.add(kind);
     if (request.target.kind === 'selection') {
-      this.createSelection(this.metadataComment());
+      const comment = this.metadataComment();
+      if (!this.selectionCommitted && comment === this.commentSource) {
+        this.dirtyMetadata.delete(kind);
+        return;
+      }
+      this.createSelection(comment);
+      if (this.selectionCommitted) {
+        request.onSelectionPreview?.({
+          color: this.activeColor,
+          comment,
+          selection: request.target.selection,
+        });
+      }
       return;
     }
+    request.onPreviewUpdate?.({
+      annotations: [request.target.annotation],
+      comment: this.metadataComment(),
+    });
     this.cancelMetadataTimer();
     this.metadataTimer = ownerWindow(this.host).setTimeout(() => {
       this.metadataTimer = null;
@@ -551,9 +583,23 @@ export class AnnotationEditorPopover {
   private persistMetadata(): boolean {
     const request = this.active;
     if (request?.target.kind !== 'annotation' || this.dirtyMetadata.size === 0) return true;
+    const annotation = request.target.annotation;
     const comment = this.metadataComment();
-    if (!this.persistUpdate(request, { annotations: [request.target.annotation], comment }))
-      return false;
+    const revert = (): void => {
+      request.onPreviewRevert?.({
+        annotations: [annotation],
+        comment: this.commentSource,
+      });
+    };
+    try {
+      if (!this.persistUpdate(request, { annotations: [annotation], comment })) {
+        revert();
+        return false;
+      }
+    } catch (cause) {
+      revert();
+      throw cause;
+    }
     this.commentSource = comment;
     this.dirtyMetadata.clear();
     return true;

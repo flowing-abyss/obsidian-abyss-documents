@@ -94,6 +94,13 @@ export async function generatePdfFixtures(outputDirectory: string): Promise<PdfF
       permissionRestrictedFixture(),
       1,
     ),
+    fixture(
+      PDF_FIXTURE_NAMES[9],
+      1,
+      'WinAnsi Unicode search text and one native highlight annotation.',
+      unicodeAnnotationFixture(),
+      1,
+    ),
   ]);
   const files: PdfFixtureMetadata[] = [];
   for (const entry of generated) {
@@ -402,6 +409,26 @@ async function textFixture(): Promise<Uint8Array> {
       : `This is fixture page ${pageNumber} with ordinary searchable text.`;
     drawPage(page, font, `Search fixture page ${pageNumber}`, phrase);
   }
+  return document.save({ addDefaultPage: false, useObjectStreams: false });
+}
+
+async function unicodeAnnotationFixture(): Promise<Uint8Array> {
+  const { document, font } = await createDocument('Unicode annotation and search fixture');
+  const page = document.addPage(PAGE_SIZE);
+  drawPage(page, font, 'Unicode annotation fixture', 'Résumé — Café déjà vu');
+  const highlight = document.context.register(
+    document.context.obj({
+      Type: 'Annot',
+      Subtype: 'Highlight',
+      Rect: [54, 672, 205, 690],
+      QuadPoints: [54, 690, 205, 690, 54, 672, 205, 672],
+      C: [1, 0.831, 0],
+      Contents: PDFHexString.fromText('Unicode annotation #résumé [[Café note]]'),
+      NM: PDFHexString.fromText('unicode-annotation'),
+      P: page.ref,
+    }),
+  );
+  page.node.set(PDFName.of('Annots'), document.context.obj([highlight]));
   return document.save({ addDefaultPage: false, useObjectStreams: false });
 }
 

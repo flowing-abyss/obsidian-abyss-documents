@@ -60,6 +60,7 @@ describe('generateDevVault', () => {
         'signed-document.pdf',
         'text-12-pages.pdf',
         'text-700-pages.pdf',
+        'unicode-annotations.pdf',
       ]);
       expect(await readdir(path.join(repository, 'artifacts', 'manual-qa'))).toEqual([]);
     },

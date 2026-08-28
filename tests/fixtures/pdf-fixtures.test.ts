@@ -543,6 +543,13 @@ describe('generatePdfFixtures', () => {
             pages: 1,
             sha256: 'f6926536e20e23bb9005257d95e3ec0d3e1ab5b804e6816391d501bd8e85a03f',
           },
+          {
+            annotations: 1,
+            bytes: 1_962,
+            name: 'unicode-annotations.pdf',
+            pages: 1,
+            sha256: 'a54fa5649b19d571773af972bbe04a703b8412cdc6a0323fb23a790e7a3992ff',
+          },
         ],
       });
       for (const entry of first.files) {

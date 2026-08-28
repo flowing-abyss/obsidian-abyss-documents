@@ -278,6 +278,7 @@ function editorTargetAnnotation(
 }
 
 function hasOpenReaderMenu(root: HTMLElement): boolean {
+  if (root.querySelector('[data-abyss-menu-closing]') !== null) return true;
   const trigger = root.querySelector<HTMLElement>(
     '[aria-haspopup="menu"][aria-expanded="true"]:not([disabled])',
   );

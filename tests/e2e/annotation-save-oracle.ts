@@ -1,3 +1,7 @@
+import { browser } from '@wdio/globals';
+import type { App } from 'obsidian';
+import type { AnnotationSaveLifecycleViewBoundary } from '../../src/reader/document-view.js';
+
 export interface AnnotationSaveBaseline {
   failures: number;
   minimumSaves: number;
@@ -10,12 +14,35 @@ export interface AnnotationSaveOracleSnapshot {
   committedRevision: number;
   failures: number;
   isDirty: boolean;
+  inFlight: boolean;
   newestGeneration: number;
   paused: boolean;
   pendingRevision: number;
   recoveries: number;
   savedGeneration: number;
   saves: number;
+}
+
+export async function readAnnotationSaveLifecycleSnapshot(): Promise<AnnotationSaveOracleSnapshot> {
+  const runner = browser as unknown as {
+    executeObsidian<T>(callback: (context: { app: App }) => T): Promise<T>;
+  };
+  const snapshot = await runner.executeObsidian(({ app }) => {
+    const view = app.workspace.getMostRecentLeaf()?.view as
+      AnnotationSaveLifecycleViewBoundary | undefined;
+    return view?.annotationSaveLifecycleSnapshot() ?? null;
+  });
+  if (snapshot === null) throw new Error('Annotation save lifecycle is unavailable.');
+  return snapshot;
+}
+
+export async function captureAnnotationSaveBaseline(): Promise<AnnotationSaveBaseline> {
+  const snapshot = await readAnnotationSaveLifecycleSnapshot();
+  return {
+    failures: snapshot.failures,
+    minimumSaves: snapshot.saves + 1,
+    recoveries: snapshot.recoveries,
+  };
 }
 
 export function isVerifiedAnnotationSaveSettled(
@@ -30,6 +57,7 @@ export function isVerifiedAnnotationSaveSettled(
     failureChainSettled &&
     snapshot.activeSerializations === 0 &&
     snapshot.activeWrites === 0 &&
+    !snapshot.inFlight &&
     !snapshot.paused &&
     snapshot.savedGeneration >= snapshot.newestGeneration &&
     !snapshot.isDirty &&

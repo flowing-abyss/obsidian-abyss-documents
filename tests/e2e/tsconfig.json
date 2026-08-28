@@ -4,5 +4,5 @@
     "types": ["node", "mocha", "webdriverio", "expect-webdriverio"],
     "noEmit": true
   },
-  "include": ["**/*.ts", "**/*.mts"]
+  "include": ["**/*.ts", "**/*.mts", "../../src/**/*.d.ts"]
 }

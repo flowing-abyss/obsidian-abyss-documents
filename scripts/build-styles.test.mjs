@@ -202,15 +202,15 @@ describe('PDF.js style build', () => {
     });
   });
 
-  it('keeps desktop outline chevrons in the compact native slot without enlarging their icons', async () => {
+  it('keeps desktop outline chevrons in a native 32px target without enlarging their icons', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
     expect(
       topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-chevron'),
     ).toMatchObject({
-      width: '18px',
-      'min-width': '18px',
-      height: '18px',
-      'min-height': '18px',
+      width: '32px',
+      'min-width': '32px',
+      height: '32px',
+      'min-height': '32px',
     });
     expect(
       topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-chevron .svg-icon'),
