@@ -54,7 +54,10 @@ import type {
   AnnotationEditorCreation,
   AnnotationEditorUpdate,
 } from './annotation-editor-popover.js';
-import { AnnotationInteractionController } from './annotation-interaction-controller.js';
+import {
+  AnnotationInteractionController,
+  type AnnotationInteractionControllerOptions,
+} from './annotation-interaction-controller.js';
 import { AnnotationProjection } from './annotation-projection.js';
 import type { AnnotationToolbarIntent } from './annotation-toolbar.js';
 import {
@@ -606,70 +609,117 @@ export class ReaderController {
       interaction,
       shell,
       palette,
-      {
-        color: this.currentAnnotationColor,
-        onColorChange: (color) => {
-          this.currentAnnotationColor = color;
-        },
-        onFailure: (action, cause, context) => {
-          this.reportAnnotationFailure(action, cause, context);
-        },
-        onModeChange: (mode) => {
-          if (this.viewport !== viewport || this.shell !== shell) return;
-          const tool = annotationToolForMode(mode);
-          this.currentAnnotationTool = tool;
-          shell.annotationToolbar?.setTool(tool);
-        },
-        onAnnotationPreview: (update) => {
-          this.projectAnnotationPreview(viewport, shell, update);
-        },
-        onAnnotationDelete: (annotations) => {
-          if (this.viewport !== viewport || this.shell !== shell) return;
-          const revision = this.annotationMutationRevision();
-          const changed = annotations.reduce((removed, annotation) => {
-            const id =
-              annotation.identity.kind === 'stable'
-                ? annotation.identity.id
-                : annotation.identity.fingerprint;
-            return this.annotationProjection.remove(id, undefined, revision) || removed;
-          }, false);
-          if (changed) this.renderAnnotationProjection(shell);
-        },
-        onAnnotationUpdate: (update) => {
-          this.projectAnnotationUpdate(viewport, shell, update);
-        },
-        onSelectionCreateCommit: (creation, annotation) => {
-          if (this.viewport !== viewport || this.shell !== shell) return;
-          if (
-            !this.annotationProjection.bindCommittedSelection(
-              creation.selection.token,
-              annotation,
-              this.annotationMutationRevision(),
-            )
-          )
-            return;
-          this.annotationLiveRevision += 1;
-          this.renderAnnotationProjection(shell);
-        },
-        onSelectionCreateDiscard: (creation) => {
-          if (this.viewport !== viewport || this.shell !== shell) return;
-          if (
-            this.annotationProjection.remove(
-              creation.selection.token,
-              creation.selection.token,
-              this.annotationMutationRevision(),
-            )
-          )
-            this.renderAnnotationProjection(shell);
-        },
-        onSelectionCreatePreview: (creation) => {
-          this.projectSelectionCreation(viewport, shell, creation);
-        },
-        onSelectionCreateStart: (creation) => {
-          this.projectSelectionCreation(viewport, shell, creation);
-        },
-      },
+      this.annotationInteractionOptions(viewport, shell),
     );
+    editor?.setAnnotationProjection([]);
+    editor?.setAnnotationResolver(async (stableId, signal) => {
+      if (this.annotationActivationIsStale(session, shell, signal)) return null;
+      if (hasAnnotationListing(session)) await this.ensureAnnotationsLoaded(session, shell);
+      if (this.annotationActivationIsStale(session, shell, signal)) return null;
+      return this.projectedAnnotationForStableId(stableId);
+    });
+  }
+
+  private annotationInteractionOptions(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+  ): AnnotationInteractionControllerOptions {
+    return {
+      color: this.currentAnnotationColor,
+      onColorChange: (color) => {
+        this.currentAnnotationColor = color;
+      },
+      onFailure: (action, cause, context) => {
+        this.reportAnnotationFailure(action, cause, context);
+      },
+      onModeChange: (mode) => {
+        if (this.viewport !== viewport || this.shell !== shell) return;
+        const tool = annotationToolForMode(mode);
+        this.currentAnnotationTool = tool;
+        shell.annotationToolbar?.setTool(tool);
+      },
+      onAnnotationPreview: (update) => {
+        this.projectAnnotationPreview(viewport, shell, update);
+      },
+      onAnnotationDelete: (annotations) => {
+        this.projectAnnotationDelete(viewport, shell, annotations);
+      },
+      onAnnotationUpdate: (update) => {
+        this.projectAnnotationUpdate(viewport, shell, update);
+      },
+      onSelectionCreateCommit: (creation, annotation) => {
+        this.commitProjectedSelection(viewport, shell, creation, annotation);
+      },
+      onSelectionCreateDiscard: (creation) => {
+        this.discardProjectedSelection(viewport, shell, creation);
+      },
+      onSelectionCreatePreview: (creation) => {
+        this.projectSelectionCreation(viewport, shell, creation);
+      },
+      onSelectionCreateStart: (creation) => {
+        this.projectSelectionCreation(viewport, shell, creation);
+      },
+    };
+  }
+
+  private annotationActivationIsStale(
+    session: DocumentSession,
+    shell: ReaderShell,
+    signal: AbortSignal,
+  ): boolean {
+    return signal.aborted || this.session !== session || this.shell !== shell;
+  }
+
+  private projectAnnotationDelete(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    annotations: readonly DocumentAnnotation[],
+  ): void {
+    if (this.viewport !== viewport || this.shell !== shell) return;
+    const revision = this.annotationMutationRevision();
+    const changed = annotations.reduce((removed, annotation) => {
+      const id =
+        annotation.identity.kind === 'stable'
+          ? annotation.identity.id
+          : annotation.identity.fingerprint;
+      return this.annotationProjection.remove(id, undefined, revision) || removed;
+    }, false);
+    if (changed) this.renderAnnotationProjection(shell);
+  }
+
+  private commitProjectedSelection(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    creation: AnnotationEditorCreation,
+    annotation: DocumentAnnotation,
+  ): void {
+    if (this.viewport !== viewport || this.shell !== shell) return;
+    if (
+      !this.annotationProjection.bindCommittedSelection(
+        creation.selection.token,
+        annotation,
+        this.annotationMutationRevision(),
+      )
+    )
+      return;
+    this.annotationLiveRevision += 1;
+    this.renderAnnotationProjection(shell);
+  }
+
+  private discardProjectedSelection(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    creation: AnnotationEditorCreation,
+  ): void {
+    if (this.viewport !== viewport || this.shell !== shell) return;
+    if (
+      this.annotationProjection.remove(
+        creation.selection.token,
+        creation.selection.token,
+        this.annotationMutationRevision(),
+      )
+    )
+      this.renderAnnotationProjection(shell);
   }
 
   private projectAnnotationUpdate(
@@ -1728,12 +1778,7 @@ export class ReaderController {
         this.navigateToLocation(location);
       },
       onAnnotationActivate: (activation) => {
-        this.activateAnnotation(
-          viewport,
-          activation.location,
-          activation.nativeId,
-          activation.annotation,
-        );
+        this.activateAnnotation(viewport, activation.location, activation.nativeId);
       },
       ...transferCallbacks,
       onTabChange: (nextTab) => {
@@ -2003,7 +2048,6 @@ export class ReaderController {
     viewport: DocumentViewport,
     location: DocumentLocation,
     nativeId: string,
-    projected: DocumentAnnotation,
   ): void {
     this.cancelAnnotationActivation();
     const abort = new AbortController();
@@ -2011,14 +2055,15 @@ export class ReaderController {
     this.navigateToLocation(
       location,
       () => {
-        const interaction = this.viewport === viewport ? annotationInteractionOf(viewport) : null;
-        if (abort.signal.aborted || interaction === null) {
+        const interactionController =
+          this.viewport === viewport ? this.annotationInteractionController : null;
+        if (abort.signal.aborted || interactionController === null) {
           this.finishAnnotationActivation(abort);
           return;
         }
-        void interaction
-          .focusAnnotation(nativeId, abort.signal, projected)
-          .catch(() => false)
+        void interactionController
+          .activateAnnotation(nativeId, { kind: 'sidebar', signal: abort.signal })
+          .catch(() => 'cancelled' as const)
           .finally(() => {
             this.finishAnnotationActivation(abort);
           });
@@ -2237,8 +2282,26 @@ export class ReaderController {
 
   private renderAnnotationProjection(shell: ReaderShell): void {
     this.currentAnnotations = this.annotationProjection.annotations();
+    annotationEditorOf(this.viewport)?.setAnnotationProjection(
+      this.annotationProjection.snapshot().map((row) => ({
+        annotation: annotationForActivation(row.annotation, row.writable),
+        stableId: row.nativeId,
+      })),
+    );
     shell.sidebar?.annotationsPanel.setProjectedAnnotations(this.annotationProjection.snapshot());
     shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
+  }
+
+  private projectedAnnotationForStableId(stableId: string): DocumentAnnotation | null {
+    const id = stableId.trim();
+    if (id.length === 0) return null;
+    const row = this.annotationProjection.snapshot().find((candidate) => {
+      if (candidate.nativeId === id || candidate.provisionalId === id) return true;
+      return candidate.annotation.identity.kind === 'stable'
+        ? candidate.annotation.identity.id === id
+        : candidate.annotation.identity.fingerprint === id;
+    });
+    return row === undefined ? null : annotationForActivation(row.annotation, row.writable);
   }
 
   private acceptVerifiedAnnotations(
@@ -2501,6 +2564,29 @@ function annotationSelectionProjectionOf(
   return 'projectSelectionRects' in viewport && typeof viewport.projectSelectionRects === 'function'
     ? (viewport as AnnotationSelectionProjectionViewport)
     : null;
+}
+
+function annotationForActivation(
+  annotation: DocumentAnnotation,
+  writable: boolean,
+): DocumentAnnotation {
+  if (writable) return annotation;
+  const reason = {
+    code: 'document-read-only' as const,
+    message: 'This annotation is read-only.',
+  };
+  const unavailable = { available: false as const, reason };
+  return {
+    ...annotation,
+    capabilities: {
+      color: unavailable,
+      comment: unavailable,
+      conversions: { highlight: unavailable, underline: unavailable },
+      deletion: unavailable,
+      geometry: unavailable,
+      metadata: unavailable,
+    },
+  };
 }
 
 function annotationToolForMode(mode: PdfAnnotationLogicalMode): PdfAnnotationTool {

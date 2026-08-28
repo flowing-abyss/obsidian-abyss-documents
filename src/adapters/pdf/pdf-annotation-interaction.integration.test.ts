@@ -25,7 +25,7 @@ function textSelection(token: string): PdfTextSelection {
   };
 }
 
-function nativeAnnotation(comment = ''): DocumentAnnotation {
+function nativeAnnotation(comment = '', id = 'created-native'): DocumentAnnotation {
   const available = { available: true } as const;
   return {
     anchor: {
@@ -46,7 +46,7 @@ function nativeAnnotation(comment = ''): DocumentAnnotation {
     color: '#ffd400',
     comment,
     createdAt: null,
-    identity: { id: asAnnotationId('created-native'), kind: 'stable' },
+    identity: { id: asAnnotationId(id), kind: 'stable' },
     links: [],
     modifiedAt: null,
     selectedText: 'Selected text',
@@ -194,6 +194,117 @@ describe('PDF annotation interaction integration', () => {
 
     expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
     test.controller.destroy();
+  });
+
+  it('publishes only editable focus while PDF.js materializes a persisted highlight', async () => {
+    const host = document.body.createDiv();
+    const annotationLayer = host.createDiv({ cls: 'annotationLayer' });
+    const imported = annotationLayer.createDiv({ cls: 'highlightAnnotation' });
+    imported.dataset['annotationId'] = 'persisted-highlight';
+    const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const eventBus = new IntegrationEventBus();
+    const annotationStorage = {
+      onAnnotationEditor: null as ((type: number | null) => void) | null,
+      onResetModified: null as (() => void) | null,
+      onSetModified: null as (() => void) | null,
+    };
+    const manager = {
+      commentSelection: vi.fn(),
+      delete: vi.fn(),
+      disableUserSelect: vi.fn(),
+      endCurrentEditing: vi.fn(),
+      firstSelectedEditor: undefined as PdfCommentEditor | undefined,
+      getEditor: vi.fn<(id: string) => PdfCommentEditor | undefined>(),
+      getLayer: vi.fn(),
+      highlightSelection: vi.fn(),
+      redo: vi.fn(),
+      setSelected: vi.fn(),
+      undo: vi.fn(),
+      updateParams: vi.fn(),
+    };
+    const activationOrder: string[] = [];
+    const viewer = { currentMode: 0, annotationEditorMode: 0 };
+    const bridge = new PdfCommentBridge(host);
+    Object.defineProperty(viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: () => viewer.currentMode,
+      set: (request: { readonly editId?: string; readonly mode: number }) => {
+        viewer.currentMode = request.mode;
+        if (request.editId === 'persisted-highlight') {
+          const node = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+          node.id = 'runtime-highlight';
+          const native: PdfCommentEditor = {
+            comment: '',
+            editorType: 'highlight',
+            elementBeforePopup: node,
+            getData: () => ({ id: 'persisted-highlight' }),
+            mode: 9,
+            propertiesToUpdate: [],
+            select: vi.fn(),
+            uid: 'persisted-highlight',
+          };
+          manager.firstSelectedEditor = native;
+          manager.getEditor.mockImplementation((id) =>
+            id === 'runtime-highlight' ? native : undefined,
+          );
+          window.setTimeout(() => {
+            activationOrder.push('pdfjs-focus');
+          }, 0);
+        }
+        queueMicrotask(() => {
+          eventBus.dispatch('annotationeditormodechanged', { mode: request.mode, source: viewer });
+          eventBus.dispatch('editingstateschanged', {
+            details: { hasSelectedEditor: manager.firstSelectedEditor !== undefined },
+            source: manager,
+          });
+        });
+      },
+    });
+    const editor = new PdfAnnotationEditor({
+      annotationEditorParamsType: {
+        FREETEXT_COLOR: 12,
+        FREETEXT_OPACITY: 13,
+        FREETEXT_SIZE: 11,
+        HIGHLIGHT_COLOR: 31,
+        HIGHLIGHT_FREE: 33,
+        HIGHLIGHT_THICKNESS: 32,
+        INK_COLOR: 21,
+        INK_OPACITY: 23,
+        INK_THICKNESS: 22,
+      },
+      annotationEditorType: { DISABLE: -1, FREETEXT: 3, HIGHLIGHT: 9, INK: 15, NONE: 0 },
+      commentBridge: bridge,
+      eventBus,
+      pdf: { annotationStorage, numPages: 1 } as unknown as PDFDocumentProxy,
+      selectionObserver: {
+        invalidate: vi.fn(),
+        onSelection: () => () => undefined,
+        validate: () => 'current',
+      },
+      viewer,
+    });
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
+    const annotation = nativeAnnotation('', 'persisted-highlight');
+    editor.setAnnotationProjection([{ annotation, stableId: 'persisted-highlight' }]);
+    const focusKinds: boolean[] = [];
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) {
+        activationOrder.push('bridge-focus');
+        focusKinds.push(focus.editable);
+      }
+    });
+
+    await expect(
+      editor.focusAnnotation('persisted-highlight', { kind: 'root-click' }),
+    ).resolves.toBe('editable');
+
+    expect(focusKinds).toEqual([true]);
+    expect(activationOrder).toEqual(['pdfjs-focus', 'bridge-focus']);
+    expect(manager.setSelected).not.toHaveBeenCalled();
+    expect(imported.isConnected).toBe(true);
+    editor.destroy();
+    bridge.dispose();
+    host.remove();
   });
 
   it('keeps one shell editor and its native target open through autosave teardown', async () => {

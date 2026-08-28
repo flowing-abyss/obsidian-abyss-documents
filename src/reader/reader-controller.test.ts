@@ -199,6 +199,8 @@ function editableViewport(pageCount = 3) {
   const deleteSelection = vi.fn(async (): Promise<void> => undefined);
   const redo = vi.fn(async (): Promise<void> => undefined);
   const setParameter = vi.fn(async (): Promise<void> => undefined);
+  const setAnnotationProjection = vi.fn<PdfAnnotationEditor['setAnnotationProjection']>();
+  const setAnnotationResolver = vi.fn<PdfAnnotationEditor['setAnnotationResolver']>();
   const setTool = vi.fn(async (_tool: PdfAnnotationTool): Promise<void> => undefined);
   const undo = vi.fn(async (): Promise<void> => undefined);
   const editor = {
@@ -206,12 +208,24 @@ function editableViewport(pageCount = 3) {
     redo,
     deleteSelection,
     save: vi.fn(async () => new Uint8Array([37, 80, 68, 70])),
+    setAnnotationProjection,
+    setAnnotationResolver,
     setParameter,
     setTool,
     undo,
   } as unknown as PdfAnnotationEditor;
   Object.assign(created.value, { annotationEditor: editor });
-  return { ...created, deleteSelection, editor, redo, setParameter, setTool, undo };
+  return {
+    ...created,
+    deleteSelection,
+    editor,
+    redo,
+    setAnnotationProjection,
+    setAnnotationResolver,
+    setParameter,
+    setTool,
+    undo,
+  };
 }
 
 function interactiveViewport(pageCount = 3) {
@@ -235,7 +249,9 @@ function interactiveViewport(pageCount = 3) {
     },
   );
   const updateAnnotations = vi.fn(() => true);
-  const focusAnnotation = vi.fn(async (_nativeId: string, _signal?: AbortSignal) => true);
+  const focusAnnotation = vi.fn<PdfAnnotationInteraction['focusAnnotation']>(
+    async () => 'editable',
+  );
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
     deleteAnnotations: () => true,
@@ -450,7 +466,7 @@ describe('ReaderController', () => {
         editable: true,
         position: { x: 20, y: 32 },
       });
-      return true;
+      return 'editable';
     });
 
     const openEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
@@ -463,14 +479,10 @@ describe('ReaderController', () => {
     secondCard?.click();
 
     await vi.waitFor(() => {
-      expect(createdViewport.focusAnnotation).toHaveBeenCalledWith(
-        'overlap-second',
-        expect.any(AbortSignal),
-        expect.objectContaining({
-          comment: 'Second editor',
-          identity: { id: 'overlap-second', kind: 'stable' },
-        }),
-      );
+      const call = createdViewport.focusAnnotation.mock.lastCall;
+      expect(call?.[0]).toBe('overlap-second');
+      expect(call?.[1].kind).toBe('sidebar');
+      expect(call?.[1].signal).toBeInstanceOf(AbortSignal);
     });
     expect(createdViewport.goTo).toHaveBeenCalledWith({ pageIndex: 0, x: 10, y: 20 });
     expect(
@@ -498,6 +510,85 @@ describe('ReaderController', () => {
     ).toBe('overlap-second editor');
     expect(openEditor).toHaveBeenCalledOnce();
     extraction.resolve();
+  });
+
+  it('preserves verified editability across an omitted mounted patch but honors explicit false', async () => {
+    const [pdf] = files('Books/Persisted-capability.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const available = { available: true } as const;
+    const verified: DocumentAnnotation = {
+      ...annotationRecord('verified-highlight', 0, {
+        kind: 'rectangle',
+        rectangle: { height: 12, width: 100, x: 10, y: 20 },
+      }),
+      capabilities: {
+        color: available,
+        comment: available,
+        conversions: { highlight: available, underline: available },
+        deletion: available,
+        geometry: available,
+        metadata: available,
+      },
+    };
+    Object.assign(createdSession.value, {
+      listAnnotations: async (
+        _signal: AbortSignal,
+        onBatch: (batch: readonly DocumentAnnotation[]) => void,
+      ) => {
+        onBatch([verified]);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(
+        createdViewport.setAnnotationProjection.mock.calls.some(
+          ([entries]) => entries[0]?.annotation.capabilities.color.available === true,
+        ),
+      ).toBe(true);
+    });
+
+    createdViewport.emit({
+      type: 'annotation-snapshot',
+      annotations: [
+        {
+          nativeId: 'verified-highlight',
+          links: [],
+          pageIndex: 0,
+          rects: [{ height: 12, width: 100, x: 10, y: 20 }],
+          type: 'highlight',
+          tags: [],
+        },
+      ],
+    });
+    const omittedProjection = createdViewport.setAnnotationProjection.mock.lastCall?.[0];
+    expect(omittedProjection?.[0]?.stableId).toBe('verified-highlight');
+    expect(omittedProjection?.[0]?.annotation.capabilities.color.available).toBe(true);
+
+    createdViewport.emit({
+      type: 'annotation-snapshot',
+      annotations: [
+        {
+          nativeId: 'verified-highlight',
+          links: [],
+          pageIndex: 0,
+          rects: [{ height: 12, width: 100, x: 10, y: 20 }],
+          type: 'highlight',
+          tags: [],
+          writable: false,
+        },
+      ],
+    });
+    const lockedProjection = createdViewport.setAnnotationProjection.mock.lastCall?.[0];
+    expect(lockedProjection?.[0]?.stableId).toBe('verified-highlight');
+    expect(lockedProjection?.[0]?.annotation.capabilities.color.available).toBe(false);
   });
 
   it('cancels stale far-page annotation readiness and opens only the latest exact target', async () => {
@@ -549,14 +640,14 @@ describe('ReaderController', () => {
       });
     }
     let firstSignal: AbortSignal | undefined;
-    createdViewport.focusAnnotation.mockImplementation(async (nativeId, signal) => {
+    createdViewport.focusAnnotation.mockImplementation(async (nativeId, source) => {
       if (nativeId === 'far-first') {
-        firstSignal = signal;
-        return new Promise<boolean>((resolve) => {
-          signal?.addEventListener(
+        firstSignal = source.signal;
+        return new Promise<'cancelled'>((resolve) => {
+          source.signal?.addEventListener(
             'abort',
             () => {
-              resolve(false);
+              resolve('cancelled');
             },
             { once: true },
           );
@@ -572,20 +663,16 @@ describe('ReaderController', () => {
         editable: false,
         position: { x: 10, y: 28 },
       });
-      return true;
+      return 'readonly';
     });
     const cards = shell.created.sidebar?.annotationsPanel.root;
     cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-first"]')?.click();
     firstNavigation.resolve();
     await vi.waitFor(() => {
-      expect(createdViewport.focusAnnotation).toHaveBeenCalledWith(
-        'far-first',
-        expect.any(AbortSignal),
-        expect.objectContaining({
-          comment: 'far-first',
-          identity: { id: 'far-first', kind: 'stable' },
-        }),
-      );
+      const call = createdViewport.focusAnnotation.mock.lastCall;
+      expect(call?.[0]).toBe('far-first');
+      expect(call?.[1].kind).toBe('sidebar');
+      expect(call?.[1].signal).toBeInstanceOf(AbortSignal);
     });
 
     cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-second"]')?.click();
@@ -593,14 +680,10 @@ describe('ReaderController', () => {
     secondNavigation.resolve();
 
     await vi.waitFor(() => {
-      expect(createdViewport.focusAnnotation).toHaveBeenLastCalledWith(
-        'far-second',
-        expect.any(AbortSignal),
-        expect.objectContaining({
-          comment: 'far-second',
-          identity: { id: 'far-second', kind: 'stable' },
-        }),
-      );
+      const call = createdViewport.focusAnnotation.mock.lastCall;
+      expect(call?.[0]).toBe('far-second');
+      expect(call?.[1].kind).toBe('sidebar');
+      expect(call?.[1].signal).toBeInstanceOf(AbortSignal);
       expect(
         shell.created.root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]')
           ?.value,

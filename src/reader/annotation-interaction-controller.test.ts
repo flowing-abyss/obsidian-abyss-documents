@@ -97,10 +97,11 @@ function fixture(
   );
   const updateAnnotations = vi.fn(() => true);
   const deleteAnnotations = vi.fn(() => true);
+  const focusAnnotation = vi.fn(async () => 'editable' as const);
   const interaction: PdfAnnotationInteraction = {
     commitSelection,
     deleteAnnotations,
-    focusAnnotation: vi.fn(async () => true),
+    focusAnnotation,
     onAnnotationFocus(listener) {
       annotationFocusListeners.add(listener);
       return () => annotationFocusListeners.delete(listener);
@@ -160,6 +161,7 @@ function fixture(
       for (const listener of selectionListeners) listener(selection);
     },
     failures,
+    focusAnnotation,
     modeListenerCount: () => modeListeners.size,
     observedColors,
     observedModes,
@@ -344,7 +346,7 @@ describe('AnnotationInteractionController', () => {
     expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
   });
 
-  it('routes normalized native single and multi focus into the unified editor', () => {
+  it('routes normalized native single focus into the unified editor and keeps batch focus readonly', () => {
     const test = fixture();
     const first = nativeAnnotation('First');
     const second = {
@@ -370,11 +372,30 @@ describe('AnnotationInteractionController', () => {
       }),
       expect.objectContaining({
         position: { x: 56, y: 78 },
-        target: { annotations: [first, second], kind: 'multiple' },
+        target: { annotation: first, kind: 'readonly' },
       }),
     ]);
     expect(test.commitSelection).not.toHaveBeenCalled();
     test.controller.destroy();
+  });
+
+  it('routes sidebar activation through the public interaction boundary exactly once', async () => {
+    const test = fixture();
+    test.emitSelection(textSelection('stale-selection'));
+    const abort = new AbortController();
+
+    await expect(
+      test.controller.activateAnnotation('persisted-highlight', {
+        kind: 'sidebar',
+        signal: abort.signal,
+      }),
+    ).resolves.toBe('editable');
+
+    expect(test.closeAnnotationEditor).toHaveBeenCalledTimes(1);
+    expect(test.focusAnnotation).toHaveBeenCalledExactlyOnceWith('persisted-highlight', {
+      kind: 'sidebar',
+      signal: abort.signal,
+    });
   });
 
   it('keeps a sidebar-focused writable annotation open when PDF.js clears text selection', () => {

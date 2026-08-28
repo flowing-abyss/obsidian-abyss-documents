@@ -1,4 +1,6 @@
 import type {
+  PdfAnnotationActivationResult,
+  PdfAnnotationActivationSource,
   PdfAnnotationInteraction,
   PdfAnnotationLogicalMode,
   PdfAnnotationTool,
@@ -103,6 +105,16 @@ export class AnnotationInteractionController {
     return true;
   }
 
+  async activateAnnotation(
+    stableId: string,
+    source: PdfAnnotationActivationSource,
+  ): Promise<PdfAnnotationActivationResult> {
+    if (this.destroyed || source.signal?.aborted === true) return 'cancelled';
+    if (!this.closeActiveSelection()) return 'cancelled';
+    this.abortCommit('The PDF annotation selection was superseded by annotation activation.');
+    return this.interaction.focusAnnotation(stableId, source);
+  }
+
   selectColor(color: string): boolean {
     if (
       this.destroyed ||
@@ -202,10 +214,7 @@ export class AnnotationInteractionController {
       this.closeActiveSelection();
       return;
     }
-    let target: AnnotationEditorTarget;
-    if (!focus.editable) target = { annotation: first, kind: 'readonly' };
-    else if (focus.annotations.length === 1) target = { annotation: first, kind: 'annotation' };
-    else target = { annotations: focus.annotations, kind: 'multiple' };
+    const target = this.annotationFocusTarget(focus, first);
     const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
       color: first.color ?? undefined,
@@ -227,6 +236,15 @@ export class AnnotationInteractionController {
       this.activeSelectionRevision = revision;
       this.ownedSelectionRevision = revision;
     }
+  }
+
+  private annotationFocusTarget(
+    focus: PdfAnnotationFocus,
+    first: DocumentAnnotation,
+  ): AnnotationEditorTarget {
+    return !focus.editable || focus.annotations.length > 1
+      ? { annotation: first, kind: 'readonly' }
+      : { annotation: first, kind: 'annotation' };
   }
 
   private async createSelection(

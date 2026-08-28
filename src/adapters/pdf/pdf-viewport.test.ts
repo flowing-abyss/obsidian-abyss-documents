@@ -732,11 +732,8 @@ describe('PdfDocumentViewport', () => {
     first.id = 'overlap-first';
     const second = layer.createDiv({ cls: 'highlightEditor' });
     second.id = 'overlap-second';
-    const focused: Array<readonly DocumentAnnotation[]> = [];
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
     const dirty = vi.fn();
-    interaction.onAnnotationFocus((focus) => {
-      if (focus !== null) focused.push(focus.annotations);
-    });
     editor.onDirty(dirty);
 
     first.click();
@@ -744,9 +741,9 @@ describe('PdfDocumentViewport', () => {
     second.addClass('selectedEditor');
     second.click();
 
-    expect(focused.map(([annotation]) => annotation?.identity)).toEqual([
-      { id: 'overlap-first', kind: 'stable' },
-      { id: 'overlap-second', kind: 'stable' },
+    expect(focusAnnotation.mock.calls).toEqual([
+      ['overlap-first', { kind: 'root-click' }],
+      ['overlap-second', { kind: 'root-click' }],
     ]);
     expect(dirty).not.toHaveBeenCalled();
     expect(viewer.annotationEditorRequests).toEqual([]);
@@ -774,24 +771,53 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'annotationEditorLayer' })
       .createDiv({ cls: 'highlightEditor selectedEditor' });
     nativeNode.id = 'no-comment';
-    const focused: unknown[] = [];
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
     const dirty = vi.fn();
     const focusFromPointer = vi.spyOn(commentManager, 'focusFromPointer');
-    interaction.onAnnotationFocus((focus) => focused.push(focus));
     editor.onDirty(dirty);
 
     nativeNode.click();
 
     expect(setSidebarUiManager).toHaveBeenCalledWith(manager);
-    expect(focusFromPointer).toHaveBeenCalledWith(nativeNode);
-    expect(focused).toEqual([
-      expect.objectContaining({
-        annotations: [expect.objectContaining({ identity: { id: 'no-comment', kind: 'stable' } })],
-        editable: true,
-      }),
-    ]);
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('no-comment', {
+      kind: 'root-click',
+    });
+    expect(focusFromPointer).not.toHaveBeenCalled();
     expect(dirty).not.toHaveBeenCalled();
     expect(viewer.annotationEditorRequests).toEqual([]);
+  });
+
+  it('routes root left-click and context-click exactly once through the interaction boundary', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    const viewer = fixture.runtime.state.viewer;
+    if (interaction === null || viewer === undefined)
+      throw new Error('Expected mounted annotation interaction.');
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const commentManager = viewer.options.commentManager as {
+      focusFromPointer(target: EventTarget | null): void;
+    };
+    const bridgeFocus = vi.spyOn(commentManager, 'focusFromPointer');
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const annotation = root
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'persisted-root';
+
+    annotation.click();
+    annotation.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, button: 2, cancelable: true }),
+    );
+
+    expect(focusAnnotation).toHaveBeenNthCalledWith(1, 'persisted-root', {
+      kind: 'root-click',
+    });
+    expect(focusAnnotation).toHaveBeenNthCalledWith(2, 'persisted-root', {
+      kind: 'root-context',
+    });
+    expect(focusAnnotation).toHaveBeenCalledTimes(2);
+    expect(bridgeFocus).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -817,25 +843,17 @@ describe('PdfDocumentViewport', () => {
         .createDiv({ cls: 'annotationLayer' })
         .createEl('section', { cls: className });
       imported.dataset['annotationId'] = id;
-      const focused: unknown[] = [];
+      const focusAnnotation = vi
+        .spyOn(interaction, 'focusAnnotation')
+        .mockResolvedValue('readonly');
       const dirty = vi.fn();
-      interaction.onAnnotationFocus((focus) => focused.push(focus));
       editor.onDirty(dirty);
 
       imported.click();
 
       expect(manager.getEditor).toHaveBeenCalledWith(id);
-      expect(focused).toEqual([
-        expect.objectContaining({
-          annotations: [
-            expect.objectContaining({
-              identity: { id, kind: 'stable' },
-              type,
-            }),
-          ],
-          editable: false,
-        }),
-      ]);
+      expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith(id, { kind: 'root-click' });
+      expect(type).toMatch(/underline|text-note/);
       expect(dirty).not.toHaveBeenCalled();
       expect(viewer.annotationEditorRequests).toEqual([]);
     },
@@ -869,24 +887,20 @@ describe('PdfDocumentViewport', () => {
       first.id = 'multi-first';
       const second = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
       second.id = 'multi-second';
-      const focused: unknown[] = [];
+      const focusAnnotation = vi
+        .spyOn(interaction, 'focusAnnotation')
+        .mockResolvedValue('editable');
       const dirty = vi.fn();
-      interaction.onAnnotationFocus((focus) => focused.push(focus));
       editor.onDirty(dirty);
       const gesture = new MouseEvent('click', { bubbles: true, cancelable: true, ...keys });
 
       second.dispatchEvent(gesture);
 
       expect(gesture.defaultPrevented).toBe(false);
-      expect(focused).toEqual([
-        expect.objectContaining({
-          annotations: [
-            expect.objectContaining({ identity: { id: 'multi-first', kind: 'stable' } }),
-            expect.objectContaining({ identity: { id: 'multi-second', kind: 'stable' } }),
-          ],
-          editable: true,
-        }),
-      ]);
+      expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('multi-second', {
+        kind: 'root-click',
+        preserveNativeSelection: true,
+      });
       expect(dirty).not.toHaveBeenCalled();
       expect(viewer.annotationEditorRequests).toEqual([]);
     },
@@ -1280,7 +1294,9 @@ describe('PdfDocumentViewport', () => {
       if (focus !== null) focused.push(focus.annotations);
     });
 
-    nativeNode.click();
+    (
+      viewer.options.commentManager as { focusFromPointer(target: EventTarget | null): void }
+    ).focusFromPointer(nativeNode);
     const annotations = focused[0];
     if (annotations === undefined) throw new Error('Expected normalized native focus.');
     expect(

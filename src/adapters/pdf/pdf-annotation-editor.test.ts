@@ -11,8 +11,19 @@ import type { PdfCommentDialogReservation } from './pdf-comment-bridge.js';
 
 type Listener = (event: unknown) => void;
 
-function createdAnnotation(comment = ''): DocumentAnnotation {
-  const available = { available: true } as const;
+function createdAnnotation(
+  comment = '',
+  options: {
+    readonly id?: string;
+    readonly type?: DocumentAnnotation['type'];
+    readonly writable?: boolean;
+  } = {},
+): DocumentAnnotation {
+  const reason = { code: 'document-read-only' as const, message: 'Locked.' };
+  const available =
+    options.writable === false
+      ? ({ available: false, reason } as const)
+      : ({ available: true } as const);
   return {
     anchor: {
       coordinateSpace: 'page-points-top-left',
@@ -32,12 +43,12 @@ function createdAnnotation(comment = ''): DocumentAnnotation {
     color: '#ffd400',
     comment,
     createdAt: null,
-    identity: { id: asAnnotationId('created-native'), kind: 'stable' },
+    identity: { id: asAnnotationId(options.id ?? 'created-native'), kind: 'stable' },
     links: [],
     modifiedAt: null,
     selectedText: null,
     tags: [],
-    type: 'highlight',
+    type: options.type ?? 'highlight',
   };
 }
 
@@ -96,12 +107,13 @@ function storage(): MutableAnnotationStorage {
   return value;
 }
 
-function selectedEditor(uid: string, mode: number) {
+function selectedEditor(uid: string, mode: number, elementBeforePopup?: Element) {
   let editorType = 'ink';
   if (mode === 3) editorType = 'freetext';
   else if (mode === 9) editorType = 'highlight';
   return {
     editorType,
+    elementBeforePopup,
     mode,
     uid,
   };
@@ -167,7 +179,14 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     beginPersistence: vi.fn(),
     deleteAnnotations: vi.fn(() => true),
     endPersistence: vi.fn(),
-    focusAnnotation: vi.fn(async () => true),
+    focusAnnotation: vi.fn<
+      (
+        id: string,
+        signal?: AbortSignal,
+        projected?: DocumentAnnotation,
+        options?: { readonly editableOnly?: boolean; readonly preserveSelection?: boolean },
+      ) => Promise<boolean>
+    >(async () => true),
     nativeEditorIds: vi.fn(() => {
       editorAddBaseline = annotationStorage.addEditor.mock.calls.length;
       return new Set<string>();
@@ -235,15 +254,6 @@ function deferred<T>() {
 }
 
 describe('PdfAnnotationEditor lifecycle', () => {
-  it('delegates exact annotation focus to the public comment-manager bridge', async () => {
-    const current = fixture();
-
-    await expect(current.editor.focusAnnotation('native-overlap-second')).resolves.toBe(true);
-    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
-      'native-overlap-second',
-      undefined,
-    );
-  });
   it('dismisses a stale token before requiring a live manager', async () => {
     const fixtureValue = fixture();
     fixtureValue.selectionObserver.validate.mockReturnValue('stale');
@@ -906,6 +916,277 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('editComment');
     expectTypeOf<PdfAnnotationToolOptions>().not.toHaveProperty('mustEnterInEditMode');
     expectTypeOf<PdfAnnotationToolOptions>().toHaveProperty('isFromKeyboard');
+  });
+
+  it('materializes a verified persisted annotation before publishing editable focus', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'persisted-highlight' });
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'persisted-highlight' }]);
+    const uiManager = manager(selectedEditor('persisted-highlight', 9));
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+
+    await expect(
+      current.editor.focusAnnotation('persisted-highlight', { kind: 'sidebar' }),
+    ).resolves.toBe('editable');
+
+    expect(current.modeRequests).toEqual([
+      { editComment: false, editId: 'persisted-highlight', mode: 9 },
+    ]);
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      'persisted-highlight',
+      expect.any(AbortSignal),
+      annotation,
+      { editableOnly: true, preserveSelection: true },
+    );
+  });
+
+  it('normalizes an authoritative modifier selection without replacing the native selection', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'selected-highlight' });
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'selected-highlight' }]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('selected-highlight', 9)),
+    });
+
+    await expect(
+      current.editor.focusAnnotation('selected-highlight', {
+        kind: 'root-click',
+        preserveNativeSelection: true,
+      }),
+    ).resolves.toBe('editable');
+
+    expect(current.modeRequests).toEqual([]);
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      'selected-highlight',
+      expect.any(AbortSignal),
+      annotation,
+      { editableOnly: true, preserveSelection: true },
+    );
+  });
+
+  it('suppresses the duplicate PDF.js toolbar while unified controls are active and restores it on teardown', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'toolbar-highlight' });
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'toolbar-highlight' }]);
+    const anchor = document.body.createDiv({ cls: 'highlightEditor selectedEditor' });
+    const toolbar = anchor.createDiv({ cls: 'editToolbar' });
+    toolbar.setCssProps({ display: 'flex' });
+    for (const label of ['color', 'comment', 'delete'])
+      toolbar.createEl('button', { attr: { 'aria-label': label } });
+    const uiManager = manager(selectedEditor('toolbar-highlight', 9, anchor));
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    current.commentBridge.focusAnnotation.mockImplementation(async () => {
+      expect(toolbar.hidden).toBe(true);
+      expect(toolbar.style.getPropertyValue('display')).toBe('none');
+      return true;
+    });
+
+    await expect(
+      current.editor.focusAnnotation('toolbar-highlight', { kind: 'root-click' }),
+    ).resolves.toBe('editable');
+
+    current.editor.detachFromDocument();
+    expect(toolbar.hidden).toBe(false);
+    expect(toolbar.style.getPropertyValue('display')).toBe('flex');
+    expect(toolbar.style.getPropertyPriority('display')).toBe('');
+    anchor.remove();
+  });
+
+  it('allows persisted deserialization to outlive the short creation timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      const annotation = createdAnnotation('', { id: 'slow-ink', type: 'ink' });
+      current.editor.setAnnotationProjection([{ annotation, stableId: 'slow-ink' }]);
+      const uiManager = manager();
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      window.setTimeout(() => {
+        uiManager.firstSelectedEditor = selectedEditor('slow-ink', 15);
+        current.eventBus.dispatch('editorsrendered', { pageNumber: 1, source: {} });
+      }, 12_500);
+
+      const activation = current.editor.focusAnnotation('slow-ink', { kind: 'root-click' });
+      await vi.advanceTimersByTimeAsync(12_500);
+      await vi.runOnlyPendingTimersAsync();
+
+      await expect(activation).resolves.toBe('editable');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels A when its bridge focus resolves after B', async () => {
+    const current = fixture();
+    const first = createdAnnotation('', { id: 'first' });
+    const second = createdAnnotation('', { id: 'second' });
+    current.editor.setAnnotationProjection([
+      { annotation: first, stableId: 'first' },
+      { annotation: second, stableId: 'second' },
+    ]);
+    const uiManager = manager(selectedEditor('first', 9));
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    const firstFocus = deferred<boolean>();
+    const secondFocus = deferred<boolean>();
+    current.commentBridge.focusAnnotation.mockImplementation((id: string) =>
+      id === 'first' ? firstFocus.promise : secondFocus.promise,
+    );
+
+    const activatingFirst = current.editor.focusAnnotation('first', { kind: 'root-click' });
+    await vi.waitFor(() => {
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+    });
+    uiManager.firstSelectedEditor = selectedEditor('second', 9);
+    const activatingSecond = current.editor.focusAnnotation('second', { kind: 'root-click' });
+    await vi.waitFor(() => {
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledTimes(2);
+    });
+    secondFocus.resolve(true);
+    await expect(activatingSecond).resolves.toBe('editable');
+    firstFocus.resolve(true);
+    await expect(activatingFirst).resolves.toBe('cancelled');
+  });
+
+  it('cancels activation after destroy or manager rebind', async () => {
+    for (const lifecycle of ['destroy', 'rebind'] as const) {
+      const current = fixture();
+      const annotation = createdAnnotation('', { id: `stale-${lifecycle}` });
+      current.editor.setAnnotationProjection([{ annotation, stableId: `stale-${lifecycle}` }]);
+      const uiManager = manager(selectedEditor(`stale-${lifecycle}`, 9));
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      const bridgeFocus = deferred<boolean>();
+      current.commentBridge.focusAnnotation.mockReturnValue(bridgeFocus.promise);
+      const activation = current.editor.focusAnnotation(`stale-${lifecycle}`, {
+        kind: 'sidebar',
+      });
+      await vi.waitFor(() => {
+        expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+      });
+
+      if (lifecycle === 'destroy') current.editor.destroy();
+      else
+        current.eventBus.dispatch('annotationeditoruimanager', {
+          source: current.viewer,
+          uiManager: manager(),
+        });
+      bridgeFocus.resolve(true);
+
+      await expect(activation).resolves.toBe('cancelled');
+    }
+  });
+
+  it('coalesces a double activation of the same persisted id', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'double' });
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'double' }]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('double', 9)),
+    });
+    const bridgeFocus = deferred<boolean>();
+    current.commentBridge.focusAnnotation.mockReturnValue(bridgeFocus.promise);
+
+    const first = current.editor.focusAnnotation('double', { kind: 'root-click' });
+    const second = current.editor.focusAnnotation('double', { kind: 'root-click' });
+    await vi.waitFor(() => {
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+    });
+    bridgeFocus.resolve(true);
+
+    await expect(Promise.all([first, second])).resolves.toEqual(['editable', 'editable']);
+    expect(current.modeRequests.filter((request) => request['editId'] === 'double')).toHaveLength(
+      1,
+    );
+  });
+
+  it('retries materialization after an earlier activation failure', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'retry' });
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'retry' }]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('retry', 9)),
+    });
+    current.commentBridge.focusAnnotation.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    await expect(current.editor.focusAnnotation('retry', { kind: 'root-click' })).resolves.toBe(
+      'cancelled',
+    );
+    await expect(current.editor.focusAnnotation('retry', { kind: 'root-context' })).resolves.toBe(
+      'editable',
+    );
+
+    expect(current.modeRequests.filter((request) => request['editId'] === 'retry')).toHaveLength(2);
+  });
+
+  it('neutralizes every creator mode before persisted activation', async () => {
+    for (const activeMode of [9, 15, 3] as const) {
+      const current = fixture();
+      const annotation = createdAnnotation('', { id: `from-${String(activeMode)}` });
+      current.editor.setAnnotationProjection([
+        { annotation, stableId: `from-${String(activeMode)}` },
+      ]);
+      const uiManager = manager(selectedEditor(`from-${String(activeMode)}`, 9));
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      current.viewer.currentMode = activeMode;
+      current.eventBus.dispatch('annotationeditormodechanged', {
+        source: current.viewer,
+        mode: activeMode,
+      });
+
+      await expect(
+        current.editor.focusAnnotation(`from-${String(activeMode)}`, {
+          kind: 'root-click',
+        }),
+      ).resolves.toBe('editable');
+
+      expect(current.modeRequests).toEqual([
+        { mode: 0 },
+        { editComment: false, editId: `from-${String(activeMode)}`, mode: 9 },
+      ]);
+    }
+  });
+
+  it('keeps a verified locked writable type read-only without materialization', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', {
+      id: 'locked-highlight',
+      writable: false,
+    });
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'locked-highlight' }]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(),
+    });
+
+    await expect(
+      current.editor.focusAnnotation('locked-highlight', { kind: 'sidebar' }),
+    ).resolves.toBe('readonly');
+
+    expect(current.modeRequests).toEqual([]);
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      'locked-highlight',
+      expect.any(AbortSignal),
+      annotation,
+    );
   });
 
   it('selects supported annotations from NONE', async () => {

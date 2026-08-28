@@ -339,6 +339,7 @@ async function nativePageOneAnnotations(): Promise<
                   annotationType?: number;
                   color?: ArrayLike<number>;
                   contentsObj?: { str?: string };
+                  defaultAppearanceData?: { fontColor?: ArrayLike<number> };
                 }>
               >;
             }>;
@@ -350,7 +351,7 @@ async function nativePageOneAnnotations(): Promise<
     const annotations = (await page?.getAnnotations()) ?? [];
     return annotations.map((annotation) => ({
       annotationType: annotation.annotationType ?? null,
-      color: Array.from(annotation.color ?? []),
+      color: Array.from(annotation.color ?? annotation.defaultAppearanceData?.fontColor ?? []),
       contents: annotation.contentsObj?.str ?? '',
     }));
   });
@@ -407,6 +408,147 @@ async function createSelectionComment(spanIndex: number, value: string): Promise
     { timeout: 10_000, timeoutMsg: 'Unified selection editor did not create one highlight.' },
   );
   await expect(popover).toBeDisplayed();
+}
+
+type PersistedWritableFixture = {
+  readonly editorSelector: string;
+  readonly kind: 'freetext' | 'highlight' | 'ink';
+  readonly nativeType: number;
+  readonly persistedSelector: string;
+};
+
+const persistedWritableFixtures: readonly PersistedWritableFixture[] = [
+  {
+    editorSelector: '.highlightEditor',
+    kind: 'highlight',
+    nativeType: 9,
+    persistedSelector: '.annotationLayer .highlightAnnotation[data-annotation-id]',
+  },
+  {
+    editorSelector: '.inkEditor',
+    kind: 'ink',
+    nativeType: 15,
+    persistedSelector: '.annotationLayer .inkAnnotation[data-annotation-id]',
+  },
+  {
+    editorSelector: '.freeTextEditor',
+    kind: 'freetext',
+    nativeType: 3,
+    persistedSelector: '.annotationLayer .freeTextAnnotation[data-annotation-id]',
+  },
+];
+
+async function createPersistedWritableAnnotation(fixture: PersistedWritableFixture): Promise<void> {
+  if (fixture.kind === 'highlight') {
+    await $('[data-annotation-tool="highlight"]').click();
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
+    await selectFixtureText(1);
+    await $(fixture.editorSelector).waitForExist({ timeout: 10_000 });
+    await browser.keys(Key.Escape);
+    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
+    return;
+  }
+  if (fixture.kind === 'ink') {
+    await $('[data-annotation-tool="ink"]').click();
+    await expect($('[data-annotation-tool="ink"]')).toHaveAttribute('aria-pressed', 'true');
+    await drawPersistedInk('[data-page-number="1"] .annotationEditorLayer');
+    await $('[data-annotation-tool="ink"]').click();
+    await expect($('[data-annotation-tool="ink"]')).toHaveAttribute('aria-pressed', 'false');
+    await $(fixture.editorSelector).waitForExist({ timeout: 10_000 });
+    return;
+  }
+
+  await $('[data-annotation-tool="freetext"]').click();
+  await expect($('[data-annotation-tool="freetext"]')).toHaveAttribute('aria-pressed', 'true');
+  const layer = $('[data-page-number="1"] .annotationEditorLayer');
+  await layer.waitForDisplayed({ timeout: 5_000 });
+  await browser.execute(() => {
+    const editorLayer = document.querySelector<HTMLElement>(
+      '[data-page-number="1"] .annotationEditorLayer',
+    );
+    if (editorLayer === null) throw new Error('FreeText editor layer unavailable.');
+    editorLayer.focus();
+  });
+  await browser.keys(Key.Enter);
+  const input = $('.freeTextEditor [contenteditable="true"]');
+  await input.waitForExist({ timeout: 5_000 });
+  await input.click();
+  await browser.keys('Persisted FreeText');
+  await browser.keys(Key.Escape);
+  const freeTextTool = $('[data-annotation-tool="freetext"]');
+  if ((await freeTextTool.getAttribute('aria-pressed')) === 'true') await freeTextTool.click();
+  await expect(freeTextTool).toHaveAttribute('aria-pressed', 'false');
+}
+
+async function drawPersistedInk(selector: string): Promise<void> {
+  await $(selector).waitForDisplayed({ timeout: 5_000 });
+  const points = await browser.execute((layerSelector) => {
+    const layer = document.querySelector<HTMLElement>(layerSelector);
+    if (layer === null) throw new Error(`Ink editor layer unavailable: ${layerSelector}`);
+    const bounds = layer.getBoundingClientRect();
+    return [
+      { x: Math.round(bounds.left + bounds.width * 0.3), y: Math.round(bounds.top + 30) },
+      { x: Math.round(bounds.left + bounds.width * 0.45), y: Math.round(bounds.top + 60) },
+      { x: Math.round(bounds.left + bounds.width * 0.6), y: Math.round(bounds.top + 35) },
+    ];
+  }, selector);
+  const [start, middle, end] = points;
+  if (start === undefined || middle === undefined || end === undefined)
+    throw new Error('Ink gesture points unavailable.');
+  await browser
+    .action('pointer')
+    .move({ origin: 'viewport', ...start })
+    .down()
+    .move({ duration: 120, origin: 'viewport', ...middle })
+    .move({ duration: 120, origin: 'viewport', ...end })
+    .up()
+    .perform();
+}
+
+async function assertFreshNeutralReader(fixture: PersistedWritableFixture): Promise<void> {
+  await $(fixture.persistedSelector).waitForExist({ timeout: 10_000 });
+  expect(
+    await browser.execute(
+      (editorSelector) => ({
+        liveEditors: document.querySelectorAll(`.annotationEditorLayer ${editorSelector}`).length,
+        mode:
+          (
+            window as Window & {
+              app?: {
+                workspace?: {
+                  getMostRecentLeaf?(): {
+                    view?: {
+                      controller?: { viewport?: { viewer?: { annotationEditorMode?: number } } };
+                    };
+                  } | null;
+                };
+              };
+            }
+          ).app?.workspace?.getMostRecentLeaf?.()?.view?.controller?.viewport?.viewer
+            ?.annotationEditorMode ?? null,
+      }),
+      fixture.editorSelector,
+    ),
+  ).toEqual({ liveEditors: 0, mode: 0 });
+  await expect($(`[data-annotation-tool="${fixture.kind}"]`)).toHaveAttribute(
+    'aria-pressed',
+    'false',
+  );
+}
+
+async function assertEditablePersistedActivation(fixture: PersistedWritableFixture): Promise<void> {
+  await $(`${fixture.editorSelector}.selectedEditor`).waitForExist({ timeout: 20_000 });
+  const popover = $(nativeEditorSelector);
+  await popover.waitForDisplayed({ timeout: 5_000 });
+  await expect(popover.$('.abyss-annotation-editor-palette')).toBeDisplayed();
+  await expect(popover).not.toHaveText(expect.stringContaining('Read-only'));
+}
+
+async function updateActivatedPersistedAnnotation(comment: string): Promise<void> {
+  const popover = $(nativeEditorSelector);
+  await inputValue(`${nativeEditorSelector} [aria-label="Comment"]`, comment);
+  await popover.$('[data-editor-color="#5fb236"]').click();
+  await expect(popover.$('[data-editor-color="#5fb236"]')).toHaveAttribute('aria-pressed', 'true');
 }
 
 async function installSelectionTimingProbe(): Promise<void> {
@@ -1421,6 +1563,61 @@ describe('reader selection-first annotations', () => {
     await expect($('[data-annotation-color="#5fb236"]')).toExist();
   });
 
+  for (const fixture of persistedWritableFixtures) {
+    it(`materializes, edits, verifies, and deletes a persisted ${fixture.kind} from a neutral click`, async () => {
+      let hash = await vaultFileSha256(workingPath);
+      await createPersistedWritableAnnotation(fixture);
+      hash = await waitForPdfBytesToChange(workingPath, hash);
+
+      await reopenPdf(workingPath);
+      await assertFreshNeutralReader(fixture);
+      await $(fixture.persistedSelector).click();
+      await assertEditablePersistedActivation(fixture);
+      const comment = `Persisted ${fixture.kind} activation`;
+      await updateActivatedPersistedAnnotation(comment);
+      hash = await waitForPdfBytesToChange(workingPath, hash);
+
+      await reopenPdf(workingPath);
+      const native = (await nativePageOneAnnotations()).filter(
+        ({ annotationType }) => annotationType === fixture.nativeType,
+      );
+      expect(native).toHaveLength(1);
+      expect(native[0]?.color).toEqual(fixture.kind === 'freetext' ? [94, 178, 54] : [95, 178, 54]);
+      await $('[data-control="sidebar"]').click();
+      await $('[data-tab="annotations"]').click();
+      await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
+      await $('.abyss-annotation-card').click();
+      await assertEditablePersistedActivation(fixture);
+      await expect($(`${nativeEditorSelector} [aria-label="Comment"]`)).toHaveValue(comment);
+      await $(nativeEditorSelector).$('[data-action="delete-annotation"]').click();
+      await waitForPdfBytesToChange(workingPath, hash);
+
+      await reopenPdf(workingPath);
+      await expect($(fixture.persistedSelector)).not.toExist();
+      expect(
+        (await nativePageOneAnnotations()).filter(
+          ({ annotationType }) => annotationType === fixture.nativeType,
+        ),
+      ).toHaveLength(0);
+    });
+
+    it(`materializes a persisted ${fixture.kind} through one sidebar-card activation`, async () => {
+      const hash = await vaultFileSha256(workingPath);
+      await createPersistedWritableAnnotation(fixture);
+      await waitForPdfBytesToChange(workingPath, hash);
+      await reopenPdf(workingPath);
+      await assertFreshNeutralReader(fixture);
+
+      await $('[data-control="sidebar"]').click();
+      await $('[data-tab="annotations"]').click();
+      await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
+      await $('.abyss-annotation-card').click();
+
+      await assertEditablePersistedActivation(fixture);
+      await expect($(`${fixture.editorSelector}.selectedEditor`)).toExist();
+    });
+  }
+
   it('recolors and enriches one writable annotation contextually then deletes it', async () => {
     let hash = await vaultFileSha256(workingPath);
     await selectFixtureText(1);
@@ -1697,7 +1894,7 @@ describe('reader selection-first annotations', () => {
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(2);
   });
 
-  it('uses the platform modifier plus Shift to select two writable annotations safely', async () => {
+  it('disables persisted overlap batches selected separately with Shift and the platform modifier', async () => {
     let hash = await vaultFileSha256(workingPath);
     await $('[data-control="sidebar"]').click();
     await $('[data-tab="annotations"]').click();
@@ -1742,7 +1939,7 @@ describe('reader selection-first annotations', () => {
             fixture.comment,
           ),
         {
-          timeout: 2_000,
+          timeout: 10_000,
           timeoutMsg: `${fixture.comment} did not reach its annotation card.`,
         },
       );
@@ -1751,44 +1948,75 @@ describe('reader selection-first annotations', () => {
       hash = await waitForPdfBytesToChange(workingPath, hash);
     }
 
-    await $('[data-annotation-tool="highlight"]').click();
-    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
-    await clickNativeHighlight(0);
-    try {
-      await browser.waitUntil(
-        async () =>
-          browser.execute(
-            () => document.querySelectorAll('.highlightEditor.selectedEditor').length === 1,
-          ),
-        { timeout: 5_000, timeoutMsg: 'The first native highlight was not selected.' },
-      );
-    } catch (cause) {
-      const diagnostic = await browser.execute(() => ({
-        editors: Array.from(
-          document.querySelectorAll<HTMLElement>('.highlightEditor'),
-          (editor) => ({
-            className: editor.className,
-            id: editor.id,
-            markup: editor.outerHTML.slice(0, 1_500),
-            rect: (() => {
-              const bounds = editor.getBoundingClientRect();
-              return {
-                height: bounds.height,
-                left: bounds.left,
-                top: bounds.top,
-                width: bounds.width,
-              };
-            })(),
-          }),
+    await reopenPdf(workingPath);
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelectorAll('.annotationLayer .highlightAnnotation').length === 2 &&
+            document.querySelectorAll('.highlightEditor').length === 0,
         ),
-        popover:
-          document.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.outerHTML ??
-          null,
-      }));
-      throw new Error(`${String(cause)}; diagnostic=${JSON.stringify(diagnostic)}`);
-    }
+      { timeout: 15_000, timeoutMsg: 'Persisted overlap annotations did not reopen neutrally.' },
+    );
+    await $$('.annotationLayer .highlightAnnotation')[0]?.click();
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () => document.querySelectorAll('.highlightEditor.selectedEditor').length === 1,
+        ),
+      { timeout: 5_000, timeoutMsg: 'The first native highlight was not selected.' },
+    );
+    await clickNativeHighlight(1, [Key.Shift]);
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () => document.querySelectorAll('.highlightEditor.selectedEditor').length === 2,
+        ),
+      { timeout: 5_000, timeoutMsg: 'The Shift gesture did not select two persisted editors.' },
+    );
+
+    const batchMutationState = async () =>
+      browser.execute((selector) => {
+        const editor = document.querySelector<HTMLElement>(selector);
+        return {
+          actionLabels: Array.from(
+            editor?.querySelectorAll('button[data-action]') ?? [],
+            (button) => button.getAttribute('aria-label'),
+          ),
+          paletteHidden:
+            editor?.querySelector<HTMLElement>('.abyss-annotation-editor-palette')?.hidden ?? true,
+          readOnly: editor?.innerText.includes('Read-only') ?? false,
+        };
+      }, nativeEditorSelector);
+    expect(await batchMutationState()).toEqual({
+      actionLabels: [],
+      paletteHidden: true,
+      readOnly: true,
+    });
+
+    await reopenPdf(workingPath);
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelectorAll('.annotationLayer .highlightAnnotation').length === 2 &&
+            document.querySelectorAll('.highlightEditor').length === 0,
+        ),
+      {
+        timeout: 15_000,
+        timeoutMsg: 'Persisted overlap annotations did not reopen for the platform gesture.',
+      },
+    );
+    await $$('.annotationLayer .highlightAnnotation')[0]?.click();
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () => document.querySelectorAll('.highlightEditor.selectedEditor').length === 1,
+        ),
+      { timeout: 5_000, timeoutMsg: 'The platform gesture baseline was not selected.' },
+    );
     const platformModifier = process.platform === 'darwin' ? Key.Command : Key.Control;
-    await clickNativeHighlight(1, [platformModifier, Key.Shift]);
+    await clickNativeHighlight(1, [platformModifier]);
     await browser.waitUntil(
       async () =>
         browser.execute(
@@ -1796,29 +2024,10 @@ describe('reader selection-first annotations', () => {
         ),
       { timeout: 5_000, timeoutMsg: 'The platform-modifier gesture did not select two editors.' },
     );
-
-    const popover = $(nativeEditorSelector);
-    await popover.waitForDisplayed({ timeout: 5_000 });
-    await expect(popover.$('[role="status"]')).toHaveText('2 annotations selected');
-    expect(
-      await browser.execute((selector) => {
-        const editor = document.querySelector<HTMLElement>(selector);
-        return {
-          actionLabels: Array.from(
-            editor?.querySelectorAll('button[data-action]') ?? [],
-            (button) => button.getAttribute('aria-label'),
-          ),
-          metadataHidden:
-            editor?.querySelector<HTMLElement>('.abyss-annotation-editor-metadata')?.hidden ??
-            false,
-          paletteHidden:
-            editor?.querySelector<HTMLElement>('.abyss-annotation-editor-palette')?.hidden ?? true,
-        };
-      }, nativeEditorSelector),
-    ).toEqual({
-      actionLabels: ['Delete annotations'],
-      metadataHidden: true,
-      paletteHidden: false,
+    expect(await batchMutationState()).toEqual({
+      actionLabels: [],
+      paletteHidden: true,
+      readOnly: true,
     });
   });
 });

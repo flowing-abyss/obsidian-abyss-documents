@@ -717,10 +717,12 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private registerRootListeners(root: HTMLElement): void {
     root.addEventListener('click', this.onRootClick);
+    root.addEventListener('contextmenu', this.onRootContextMenu);
   }
 
   private unregisterRootListeners(root: HTMLElement): void {
     root.removeEventListener('click', this.onRootClick);
+    root.removeEventListener('contextmenu', this.onRootContextMenu);
   }
 
   private createAnnotationEditor(
@@ -1275,8 +1277,17 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly onRootClick = (event: MouseEvent): void => {
     const target = event.target;
     if (!isElementTarget(target)) return;
-    this.commentBridge?.focusFromPointer(target);
-    if (hasNativeSelectionModifier(event)) return;
+    const annotationId = this.annotationActivationId(target);
+    if (annotationId !== null) {
+      const preserveNativeSelection = hasNativeSelectionModifier(event);
+      this.annotationInteraction
+        ?.focusAnnotation(annotationId, {
+          kind: 'root-click',
+          ...(preserveNativeSelection ? { preserveNativeSelection: true } : {}),
+        })
+        .catch(() => undefined);
+      return;
+    }
     const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
     if (retry === null) return;
     const page = target.closest<HTMLElement>('[data-page-number]');
@@ -1284,6 +1295,31 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (page === null || pageNumber === null || this.viewer === null) return;
     this.retryPage(this.viewer, page, pageNumber, retry);
   };
+
+  private readonly onRootContextMenu = (event: MouseEvent): void => {
+    const target = event.target;
+    if (!isElementTarget(target)) return;
+    const annotationId = this.annotationActivationId(target);
+    if (annotationId === null) return;
+    this.annotationInteraction
+      ?.focusAnnotation(annotationId, {
+        kind: 'root-context',
+      })
+      .catch(() => undefined);
+  };
+
+  private annotationActivationId(target: Element): string | null {
+    if (target.closest('a, button, input, select, textarea') !== null) return null;
+    const node = target.closest<HTMLElement>(
+      '.annotationLayer [data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
+    );
+    if (node === null) return null;
+    const internalId = annotationNodeInternalId(node);
+    if (internalId.length === 0) return null;
+    const binding = this.annotationEditorInstance?.resolveNativeEditor(internalId) ?? null;
+    const id = annotationNodeNativeId(node, binding?.id, internalId).trim();
+    return id.length === 0 ? null : id;
+  }
 
   private retryPage(
     viewer: PdfViewer,

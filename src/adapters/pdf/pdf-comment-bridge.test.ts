@@ -200,7 +200,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
-  it('resolves public selected DOM ids and preserves batch update/delete order', () => {
+  it('disables batch recolor before a failure in the second native editor can leave partial state', () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });
     const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
@@ -214,6 +214,13 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       if (id === 'first') return first;
       if (id === 'second') return second;
       return undefined;
+    });
+    let selected: PdfCommentEditor | undefined;
+    manager.setSelected.mockImplementation((next) => {
+      selected = next;
+    });
+    manager.updateParams.mockImplementation(() => {
+      if (selected === second) throw new Error('second recolor rejected');
     });
     const bridge = new PdfCommentBridge(host);
     const focused: PdfAnnotationFocus[] = [];
@@ -234,20 +241,166 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     });
     if (focus === undefined) throw new Error('Expected a normalized multi focus.');
     expect(bridge.updateAnnotations({ annotations: focus.annotations, color: '#5fb236' })).toBe(
-      true,
+      false,
     );
-    expect(manager.updateParams.mock.calls).toEqual([
-      [31, '#5fb236'],
-      [31, '#5fb236'],
+    expect(manager.setSelected).not.toHaveBeenCalled();
+    expect(manager.updateParams).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('normalizes a selected native batch without replacing its PDF.js selection', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'preserved-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    secondNode.id = 'preserved-second';
+    const first = editor('First', { anchor: firstNode, uid: 'preserved-first' });
+    const second = editor('Second', { anchor: secondNode, uid: 'preserved-second' });
+    const manager = uiManager(first);
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'preserved-first') return first;
+      if (id === 'preserved-second') return second;
+      return undefined;
+    });
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    await expect(
+      bridge.focusAnnotation('preserved-second', undefined, undefined, {
+        editableOnly: true,
+        preserveSelection: true,
+      }),
+    ).resolves.toBe(true);
+
+    expect(focused[0]?.annotations.map((annotation) => annotation.identity)).toEqual([
+      { id: 'preserved-first', kind: 'stable' },
+      { id: 'preserved-second', kind: 'stable' },
     ]);
-    expect(bridge.deleteAnnotations(focus.annotations)).toBe(true);
-    expect(manager.setSelected.mock.calls.map(([source]) => source)).toEqual([
-      first,
-      second,
-      first,
-      second,
-    ]);
-    expect(manager.delete).toHaveBeenCalledTimes(2);
+    expect(manager.setSelected).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('focuses selected FreeText when PDF.js has no comment data', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'freeTextEditor selectedEditor' });
+    node.id = 'pdfjs_internal_editor_0';
+    const native: PdfCommentEditor = {
+      annotationElementId: '30R',
+      comment: 'Persisted FreeText',
+      editorType: 'freetext',
+      elementBeforePopup: node,
+      getData: () => {
+        throw new TypeError("Cannot read properties of null (reading 'text')");
+      },
+      mode: 3,
+      propertiesToUpdate: [],
+      select: vi.fn(),
+      uid: 'pdfjs_internal_editor_0',
+    };
+    const manager = uiManager(native);
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+    bridge.setSidebarUiManager(manager);
+
+    const focused = bridge.focusAnnotation('30R', undefined, undefined, {
+      editableOnly: true,
+      preserveSelection: true,
+    });
+
+    await expect(focused).resolves.toBe(true);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('disables batch comment updates before a failure in the second editor can leave partial state', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'comment-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    secondNode.id = 'comment-second';
+    const first = editor('First', { anchor: firstNode, uid: 'comment-first' });
+    const second = editor('Second', { anchor: secondNode, uid: 'comment-second' });
+    Object.defineProperty(second, 'comment', {
+      configurable: true,
+      get: () => 'Second',
+      set: () => {
+        throw new Error('second comment rejected');
+      },
+    });
+    const manager = uiManager(first);
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'comment-first') return first;
+      if (id === 'comment-second') return second;
+      return undefined;
+    });
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    bridge.focusFromPointer(secondNode);
+
+    const focus = focused[0];
+    if (focus === undefined) throw new Error('Expected a normalized multi focus.');
+    expect(bridge.updateAnnotations({ annotations: focus.annotations, comment: 'After' })).toBe(
+      false,
+    );
+    expect(first.comment).toBe('First');
+    expect(second.comment).toBe('Second');
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('disables batch deletion before a failure in the second editor can leave partial state', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'delete-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    secondNode.id = 'delete-second';
+    const first = editor('First', { anchor: firstNode, uid: 'delete-first' });
+    const second = editor('Second', { anchor: secondNode, uid: 'delete-second' });
+    const manager = uiManager(first);
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'delete-first') return first;
+      if (id === 'delete-second') return second;
+      return undefined;
+    });
+    let selected: PdfCommentEditor | undefined;
+    const deleted: PdfCommentEditor[] = [];
+    manager.setSelected.mockImplementation((next) => {
+      selected = next;
+    });
+    manager.delete.mockImplementation(() => {
+      if (selected === second) throw new Error('second deletion rejected');
+      if (selected !== undefined) deleted.push(selected);
+    });
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    bridge.focusFromPointer(secondNode);
+
+    const focus = focused[0];
+    if (focus === undefined) throw new Error('Expected a normalized multi focus.');
+    expect(bridge.deleteAnnotations(focus.annotations)).toBe(false);
+    expect(deleted).toEqual([]);
+    expect(manager.setSelected).not.toHaveBeenCalled();
+    expect(manager.delete).not.toHaveBeenCalled();
     bridge.dispose();
     host.remove();
   });
