@@ -1,4 +1,4 @@
-import { setIcon } from 'obsidian';
+import { setIcon, setTooltip } from 'obsidian';
 import type { DocumentLocation, OutlineItem } from '../document-core/document.js';
 import { ownerWindow } from './owner-dom.js';
 
@@ -97,7 +97,7 @@ export class OutlinePanel {
     button.dataset['action'] = 'toggle-outline-search';
     button.setAttribute('aria-label', 'Find headings');
     button.setAttribute('aria-expanded', 'false');
-    button.title = 'Find headings';
+    setTooltip(button, 'Find headings', { delay: 250 });
     setIcon(button, 'search');
     const input = owner.createEl('input');
     input.type = 'search';

@@ -7074,7 +7074,9 @@
   width: 100%;
   min-width: 0;
   height: auto;
+  align-items: stretch;
   flex-direction: column;
+  justify-content: flex-start;
   gap: 4px;
   padding: 6px 8px;
   border: 0;
@@ -7160,6 +7162,7 @@
 
 .abyss-documents .abyss-annotation-card-header {
   display: flex;
+  width: 100%;
   min-width: 0;
   min-height: 20px;
   align-items: center;
@@ -7189,6 +7192,7 @@
 
 .abyss-documents .abyss-annotation-card-text {
   display: -webkit-box;
+  width: 100%;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;
@@ -7325,21 +7329,6 @@
   display: none;
 }
 
-@media (width <= 600px) {
-  .abyss-documents .abyss-reader-sidebar {
-    position: absolute;
-    z-index: var(--layer-modal);
-    inset-block: 0;
-    inset-inline-start: 0;
-    box-sizing: border-box;
-    width: min(var(--abyss-reader-sidebar-width), 90%);
-    max-width: 90%;
-    padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
-    padding-inline-start: env(safe-area-inset-left);
-    box-shadow: var(--shadow-l);
-  }
-}
-
 @container abyss-reader (inline-size <= 760px) {
   .abyss-documents .abyss-reader-toolbar-spacer {
     display: none;
@@ -7352,6 +7341,19 @@
 }
 
 @container abyss-reader (inline-size <= 600px) {
+  .abyss-documents .abyss-reader-sidebar {
+    position: absolute;
+    z-index: var(--layer-modal);
+    inset-block: 0;
+    inset-inline-start: 0;
+    box-sizing: border-box;
+    width: min(var(--abyss-reader-sidebar-width), 90%);
+    max-width: 90%;
+    padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
+    padding-inline-start: env(safe-area-inset-left);
+    box-shadow: var(--shadow-l);
+  }
+
   .abyss-documents .abyss-reader-toolbar {
     padding-inline: var(--size-4-1);
   }

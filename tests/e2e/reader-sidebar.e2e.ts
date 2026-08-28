@@ -85,6 +85,84 @@ async function annotationCardGeometry(): Promise<{
   });
 }
 
+type AnnotationContentName = 'header' | 'quote' | 'comment';
+
+interface AnnotationContentMetric {
+  readonly left: number;
+  readonly right: number;
+  readonly textAlign: string;
+  readonly width: number;
+}
+
+interface AnnotationContentGeometry {
+  readonly alignItems: string;
+  readonly content: Readonly<Record<AnnotationContentName, AnnotationContentMetric | null>>;
+  readonly innerLeft: number;
+  readonly innerRight: number;
+  readonly justifyContent: string;
+  readonly usableWidth: number;
+}
+
+async function annotationContentGeometry(): Promise<AnnotationContentGeometry> {
+  return browser.execute(() => {
+    const card = document.querySelector<HTMLElement>('.abyss-annotation-card');
+    if (card === null) throw new Error('Annotation card is missing.');
+    const cardRect = card.getBoundingClientRect();
+    const cardStyle = getComputedStyle(card);
+    const innerLeft = cardRect.left + Number.parseFloat(cardStyle.paddingLeft);
+    const innerRight = cardRect.right - Number.parseFloat(cardStyle.paddingRight);
+    const selectors = {
+      comment: '[data-annotation-comment]',
+      header: '[data-annotation-header]',
+      quote: '[data-annotation-quote]',
+    } as const;
+    const content = Object.fromEntries(
+      Object.entries(selectors).map(([name, selector]) => {
+        const element = card.querySelector<HTMLElement>(selector);
+        if (element === null) return [name, null];
+        const rect = element.getBoundingClientRect();
+        return [
+          name,
+          {
+            left: rect.left,
+            right: rect.right,
+            textAlign: getComputedStyle(element).textAlign,
+            width: rect.width,
+          },
+        ];
+      }),
+    ) as Record<AnnotationContentName, AnnotationContentMetric | null>;
+    return {
+      alignItems: cardStyle.alignItems,
+      content,
+      innerLeft,
+      innerRight,
+      justifyContent: cardStyle.justifyContent,
+      usableWidth: innerRight - innerLeft,
+    };
+  });
+}
+
+function expectAnnotationContentAligned(
+  geometry: AnnotationContentGeometry,
+  expected: readonly AnnotationContentName[],
+): void {
+  expect(geometry.alignItems).toBe('stretch');
+  expect(geometry.justifyContent).toBe('flex-start');
+  for (const name of ['header', 'quote', 'comment'] as const) {
+    const metric = geometry.content[name];
+    if (!expected.includes(name)) {
+      expect(metric).toBeNull();
+      continue;
+    }
+    if (metric === null) throw new Error(`Expected ${name} annotation content.`);
+    expect(Math.abs(metric.left - geometry.innerLeft)).toBeLessThanOrEqual(1);
+    expect(Math.abs(metric.right - geometry.innerRight)).toBeLessThanOrEqual(1);
+    expect(metric.width).toBeGreaterThanOrEqual(geometry.usableWidth - 1);
+    expect(metric.textAlign).toBe('start');
+  }
+}
+
 async function setCoarseAnnotationGeometry(enabled: boolean): Promise<void> {
   await browser.execute((coarse) => {
     const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
@@ -284,6 +362,70 @@ describe('PDF reader sidebar', () => {
     expect(Math.max(...geometry.iconWidths)).toBeLessThanOrEqual(16);
   });
 
+  it('overlays the sidebar from narrow reader width without squeezing the document', async () => {
+    await openOutline();
+    await $('[data-action="close-sidebar"]').click();
+    const auxiliaryLeafIds = await browser.executeObsidian(({ app }) => {
+      const readerLeaf = app.workspace.getMostRecentLeaf();
+      if (readerLeaf === null) throw new Error('Reader leaf is missing.');
+      const auxiliaryLeaves = [
+        app.workspace.createLeafBySplit(readerLeaf, 'vertical'),
+        app.workspace.createLeafBySplit(readerLeaf, 'vertical'),
+      ];
+      app.workspace.setActiveLeaf(readerLeaf, { focus: true });
+      return auxiliaryLeaves.map((leaf) => (leaf as unknown as { id: string }).id);
+    });
+    try {
+      await browser.waitUntil(
+        async () =>
+          (await browser.execute(
+            () => document.querySelector('.abyss-documents')?.getBoundingClientRect().width ?? 0,
+          )) <= 600,
+        { timeout: 3_000, timeoutMsg: 'Reader container did not become narrow.' },
+      );
+      const closedDocumentWidth = await browser.execute(
+        () =>
+          document.querySelector('[data-region="document"]')?.getBoundingClientRect().width ?? 0,
+      );
+
+      await $('[data-control="sidebar"]').click();
+
+      const geometry = await browser.execute(() => {
+        const reader = document.querySelector<HTMLElement>('.abyss-documents');
+        const body = document.querySelector<HTMLElement>('.abyss-reader-body');
+        const sidebar = document.querySelector<HTMLElement>('.abyss-reader-sidebar');
+        const documentHost = document.querySelector<HTMLElement>('[data-region="document"]');
+        if (reader === null || body === null || sidebar === null || documentHost === null)
+          throw new Error('Narrow-reader overlay geometry is incomplete.');
+        const bodyRect = body.getBoundingClientRect();
+        const sidebarRect = sidebar.getBoundingClientRect();
+        return {
+          bodyLeft: bodyRect.left,
+          documentWidth: documentHost.getBoundingClientRect().width,
+          readerWidth: reader.getBoundingClientRect().width,
+          sidebarLeft: sidebarRect.left,
+          sidebarPosition: getComputedStyle(sidebar).position,
+          sidebarWidth: sidebarRect.width,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      expect(geometry.viewportWidth).toBeGreaterThan(600);
+      expect(geometry.readerWidth).toBeLessThanOrEqual(600);
+      expect(geometry.sidebarPosition).toBe('absolute');
+      expect(Math.abs(geometry.sidebarLeft - geometry.bodyLeft)).toBeLessThanOrEqual(1);
+      expect(geometry.sidebarWidth).toBeLessThanOrEqual(geometry.readerWidth * 0.9 + 1);
+      expect(Math.abs(geometry.documentWidth - closedDocumentWidth)).toBeLessThanOrEqual(1);
+    } finally {
+      await browser.executeObsidian(({ app }, leafIds) => {
+        const leavesToDetach: Array<{ detach(): void }> = [];
+        app.workspace.iterateAllLeaves((leaf) => {
+          if (leafIds.includes((leaf as unknown as { id: string }).id)) leavesToDetach.push(leaf);
+        });
+        for (const leaf of leavesToDetach) leaf.detach();
+      }, auxiliaryLeafIds);
+    }
+  });
+
   it('shows one clean empty annotation state without inactive controls', async () => {
     await openAnnotations('Documents/outline-20-pages.pdf');
 
@@ -326,6 +468,15 @@ describe('PDF reader sidebar', () => {
     expect(geometry.footerOnlyColors).toBe(true);
     expect(geometry.headerHeight).toBeLessThanOrEqual(34);
     expect(geometry.cardHeight).toBeLessThanOrEqual(128);
+    expectAnnotationContentAligned(await annotationContentGeometry(), [
+      'header',
+      'quote',
+      'comment',
+    ]);
+    await browser.execute(() => {
+      document.querySelector('[data-annotation-comment]')?.remove();
+    });
+    expectAnnotationContentAligned(await annotationContentGeometry(), ['header', 'quote']);
   });
 
   it('keeps annotation controls above an independent virtual scroll host', async () => {
@@ -555,6 +706,7 @@ describe('PDF reader sidebar', () => {
     expect(initial.comment).toContain('Annotation 00000');
     expect(initial.cardRight).toBeLessThanOrEqual(initial.panelRight + 1);
     expect(initial.paddingInlineEnd).toBeLessThan(30);
+    expectAnnotationContentAligned(await annotationContentGeometry(), ['header', 'comment']);
     const containment = await browser.execute(() => {
       const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
       const footer = panel?.querySelector<HTMLElement>('[data-annotation-footer]') ?? null;

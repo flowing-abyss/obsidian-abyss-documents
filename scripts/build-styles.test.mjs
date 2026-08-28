@@ -232,10 +232,19 @@ describe('PDF.js style build', () => {
     ).toMatchObject({ width: 'var(--icon-xs)', height: 'var(--icon-xs)' });
   });
 
-  it('does not reserve resting annotation-card header space for contextual actions', async () => {
+  it('stretches left-aligned annotation content instead of inheriting centered button layout', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const card = topLevelDeclarations(root, '.abyss-documents .abyss-annotation-card');
     const header = topLevelDeclarations(root, '.abyss-documents .abyss-annotation-card-header');
+    const text = topLevelDeclarations(root, '.abyss-documents .abyss-annotation-card-text');
 
+    expect(card).toMatchObject({
+      'align-items': 'stretch',
+      'justify-content': 'flex-start',
+      'text-align': 'start',
+    });
+    expect(header).toMatchObject({ width: '100%' });
+    expect(text).toMatchObject({ width: '100%' });
     expect(header).not.toHaveProperty('padding-inline-end');
     expect(await readFile('styles.css', 'utf8')).not.toContain('--abyss-annotation-action-width');
   });
@@ -331,9 +340,15 @@ describe('PDF.js style build', () => {
     ).toEqual({});
   });
 
-  it('keeps the sidebar as a left mobile overlay and gives direct zoom controls 44px targets', async () => {
+  it('keys the left sidebar overlay to reader width and gives direct zoom controls 44px targets', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
-    const mobile = root.nodes.find(
+    const narrowReader = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' &&
+        node.name === 'container' &&
+        node.params === 'abyss-reader (inline-size <= 600px)',
+    );
+    const viewportMobile = root.nodes.find(
       (node) =>
         node.type === 'atrule' && node.name === 'media' && node.params === '(width <= 600px)',
     );
@@ -341,9 +356,16 @@ describe('PDF.js style build', () => {
       (node) =>
         node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
     );
-    expect(mobileDeclarations(mobile, '.abyss-documents .abyss-reader-sidebar')).toMatchObject({
+    expect(
+      mobileDeclarations(narrowReader, '.abyss-documents .abyss-reader-sidebar'),
+    ).toMatchObject({
+      position: 'absolute',
       'inset-inline-start': '0',
+      width: 'min(var(--abyss-reader-sidebar-width), 90%)',
     });
+    expect(mobileDeclarations(viewportMobile, '.abyss-documents .abyss-reader-sidebar')).toEqual(
+      {},
+    );
     expect(
       mobileDeclarations(touch, '.abyss-documents .abyss-reader-toolbar-button'),
     ).toMatchObject({

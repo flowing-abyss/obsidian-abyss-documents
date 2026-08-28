@@ -3,11 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { OutlineItem } from '../document-core/document.js';
 import { OutlinePanel } from './outline-panel.js';
 
-const mocks = vi.hoisted(() => ({ setIcon: vi.fn() }));
+const mocks = vi.hoisted(() => ({ setIcon: vi.fn(), setTooltip: vi.fn() }));
 
 vi.mock('obsidian', async (importOriginal) => {
   const original: typeof ObsidianModule = await importOriginal();
-  return { ...original, setIcon: mocks.setIcon };
+  return { ...original, setIcon: mocks.setIcon, setTooltip: mocks.setTooltip };
 });
 
 const outline: readonly OutlineItem[] = [
@@ -104,6 +104,8 @@ describe('OutlinePanel', () => {
     expect(searchButton?.getAttribute('aria-expanded')).toBe('true');
     expect(panel.root.doc.activeElement).toBe(searchInput);
     expect(mocks.setIcon).toHaveBeenCalledWith(searchButton, 'search');
+    expect(mocks.setTooltip).toHaveBeenCalledWith(searchButton, 'Find headings', { delay: 250 });
+    expect(searchButton?.hasAttribute('title')).toBe(false);
     host.remove();
   });
 
