@@ -1058,7 +1058,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         geometry: capability,
         metadata: capability,
       },
-      color: projectedAnnotationColor(data, snapshot),
+      color: projectedAnnotationColor(editor, snapshot),
       comment,
       createdAt: null,
       identity: { id: asAnnotationId(id), kind: 'stable' },
@@ -1363,11 +1363,11 @@ function selectionHighlightColor(editor: PdfCommentEditor): string | null {
 }
 
 function projectedAnnotationColor(
-  data: PdfCommentData | null,
+  editor: PdfCommentEditor,
   snapshot: AnnotationProjectionOptions['snapshot'],
 ): string | null {
   if (snapshot !== undefined) return snapshot.color;
-  return data?.color === undefined ? null : rgbToHex(data.color);
+  return selectionHighlightColor(editor);
 }
 
 function normalizedHexColor(color: string | undefined): string | null {

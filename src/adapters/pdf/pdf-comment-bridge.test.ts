@@ -98,6 +98,41 @@ function annotation(id: string, writable = true): DocumentAnnotation {
 }
 
 describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
+  it('uses the native annotation color instead of popup color in forced colors mode', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor' });
+    node.id = 'forced-colors-editor';
+    const native = {
+      annotationElementId: '363R',
+      color: '#ffffff',
+      comment: null,
+      editorType: 'highlight',
+      getData: () => ({
+        color: [1, 2, 3],
+        contentsObj: { str: '' },
+        id: '363R',
+      }),
+      getNonHCMColor: () => [255, 212, 0] as const,
+      mode: 9,
+      propertiesToUpdate: [],
+      select: vi.fn(),
+      uid: 'forced-colors-editor',
+    } satisfies PdfCommentEditor;
+    const manager = uiManager(native);
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+
+    expect(bridge.normalizeCreatedAnnotation(manager)).toMatchObject({
+      color: '#ffd400',
+      comment: '',
+      identity: { id: '363R', kind: 'stable' },
+    });
+
+    bridge.dispose();
+    host.remove();
+  });
+
   it('adopts the new highlight with a null comment without reading incomplete PDF.js data', () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });

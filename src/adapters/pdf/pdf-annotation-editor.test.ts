@@ -596,11 +596,13 @@ describe('PdfAnnotationEditor lifecycle', () => {
       fixtureValue.editor.editAnnotation({ editComment: false, id: '   ', kind: 'highlight' }),
     ).rejects.toMatchObject({ name: 'InvalidStateError' });
     expect(fixtureValue.editor.resolveNativeEditor(' valid ')).toEqual({
+      color: null,
       id: 'persisted-id',
       kind: 'highlight',
       mode: 9,
     });
     expect(fixtureValue.editor.resolveNativeEditor('uid-only')).toEqual({
+      color: null,
       id: 'public-id',
       kind: 'highlight',
       mode: 9,
@@ -2179,6 +2181,57 @@ describe('PdfAnnotationEditor lifecycle', () => {
     );
   });
 
+  it('treats native editor activation as not mutation before one real color change', async () => {
+    const current = fixture();
+    const projected = createdAnnotation('', { id: 'imported-highlight' });
+    const selected = selectedEditor('imported-highlight', 9);
+    const uiManager = manager(selected);
+    const mutations = vi.fn();
+    const dirty = vi.fn();
+    current.editor.onMutation(mutations);
+    current.editor.onDirty(dirty);
+    current.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'imported-highlight' },
+    ]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(current.viewer, 'annotationEditorMode');
+    if (descriptor?.get === undefined || descriptor.set === undefined)
+      throw new Error('Expected the fixture viewer mode accessor.');
+    const getMode = descriptor.get.bind(current.viewer);
+    const setMode = descriptor.set.bind(current.viewer);
+    Object.defineProperty(current.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: getMode,
+      set(request: { readonly editId?: string; readonly mode: number }) {
+        if (request.editId === 'imported-highlight') {
+          current.annotationStorage.onAnnotationEditor?.(9);
+          current.annotationStorage.onSetModified?.();
+        }
+        setMode(request);
+      },
+    });
+    uiManager.updateParams.mockImplementation(() => {
+      current.annotationStorage.onSetModified?.();
+    });
+
+    await expect(
+      current.editor.focusAnnotation('imported-highlight', { kind: 'sidebar' }),
+    ).resolves.toBe('editable');
+    await Promise.resolve();
+
+    expect(mutations).not.toHaveBeenCalled();
+    expect(dirty).not.toHaveBeenCalled();
+
+    await current.editor.setParameter('highlight-color', '#64d8cb');
+
+    expect(uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#64d8cb');
+    expect(mutations).toHaveBeenCalledOnce();
+    expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
   it('selects supported annotations from NONE', async () => {
     const cases = [
       ['highlight', 9],
@@ -2403,6 +2456,74 @@ describe('PdfAnnotationEditor lifecycle', () => {
       { editComment: false, editId: 'highlight-1', mode: 9 },
       { mode: 0 },
       { editComment: false, editId: 'highlight-1', mode: 9 },
+    ]);
+  });
+
+  it('returns captured bytes when the contextual target is missing during restore', async () => {
+    const { editor, eventBus, modeRequests, saveDocument, viewer } = fixture();
+    const selected = selectedEditor('missing-after-save', 9);
+    const uiManager = manager(selected);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'missing-after-save',
+      kind: 'highlight',
+    });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+    const captured = new Uint8Array([37, 80, 68, 70, 45, 49]);
+    saveDocument.mockImplementation(async () => {
+      (uiManager as { firstSelectedEditor: typeof selected | undefined }).firstSelectedEditor =
+        undefined;
+      return captured;
+    });
+
+    await expect(editor.save(new AbortController().signal)).resolves.toBe(captured);
+
+    expect(viewer.annotationEditorMode).toBe(0);
+    expect(editor.hasContextualEdit).toBe(false);
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: 'missing-after-save', mode: 9 },
+      { mode: 0 },
+      { editComment: false, editId: 'missing-after-save', mode: 9 },
+      { mode: 0 },
+    ]);
+  });
+
+  it('restores a renumbered target through its stable native editor uid', async () => {
+    const { editor, eventBus, modeRequests, saveDocument, viewer } = fixture();
+    let persistedId = '363R';
+    const selected = {
+      editorType: 'highlight',
+      elementBeforePopup: undefined,
+      getData: () => ({ id: persistedId }),
+      mode: 9,
+      uid: 'pdfjs_internal_editor_4',
+    };
+    const uiManager = manager(selected);
+    uiManager.getEditor.mockReturnValue(selected);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({ editComment: false, id: '363R', kind: 'highlight' });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+    const captured = new Uint8Array([37, 80, 68, 70, 45, 50]);
+    saveDocument.mockImplementation(async () => {
+      persistedId = '365R';
+      return captured;
+    });
+
+    await expect(editor.save(new AbortController().signal)).resolves.toBe(captured);
+
+    expect(editor.hasContextualEdit).toBe(true);
+    expect(editor.resolveNativeEditor('pdfjs_internal_editor_4')).toMatchObject({ id: '365R' });
+    expect(modeRequests).toEqual([
+      { editComment: false, editId: '363R', mode: 9 },
+      { mode: 0 },
+      { editComment: false, editId: '363R', mode: 9 },
     ]);
   });
 
@@ -3217,6 +3338,42 @@ describe('PdfAnnotationEditor save boundary', () => {
     await expect(toolOutcome).resolves.toBe('resolved');
     expect(fixtureValue.viewer.annotationEditorMode).toBe(3);
     expect(fixtureValue.modeRequests).toEqual([{ mode: 0 }, { mode: 3 }]);
+  });
+
+  it('returns captured bytes while rejecting a queued tool whose restore fails', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(fixtureValue.viewer, 'annotationEditorMode');
+    if (descriptor?.get === undefined || descriptor.set === undefined)
+      throw new Error('Expected the fixture viewer mode accessor.');
+    const restoreFailure = new Error('queued tool restore failed');
+    const getMode = descriptor.get.bind(fixtureValue.viewer);
+    const setMode = descriptor.set.bind(fixtureValue.viewer);
+    Object.defineProperty(fixtureValue.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: getMode,
+      set(value: { readonly mode: number }) {
+        if (value.mode === 3) throw restoreFailure;
+        setMode(value);
+      },
+    });
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+    const queuedTool = fixtureValue.editor.setTool('freetext');
+    const queuedToolOutcome = expect(queuedTool).rejects.toBe(restoreFailure);
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await expect(saving).resolves.toHaveLength(3);
+    await queuedToolOutcome;
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
   });
 
   it('drains and coalesces tool intents that arrive while the save tool is restoring', async () => {

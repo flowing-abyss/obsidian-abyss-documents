@@ -603,6 +603,52 @@ describe('AnnotationProjection', () => {
     ]);
   });
 
+  it('replays a committed bind over stale extraction with its original key and payload', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(
+      {
+        ...viewportAnnotation('selection-token', 'selection-token'),
+        selectedText: 'Original quote',
+      },
+      0,
+    );
+    const originalKey = projection.snapshot()[0]?.key;
+    const committed = {
+      ...verifiedAnnotation('pdfjs_internal_editor_4'),
+      selectedText: 'Original quote',
+    };
+
+    expect(projection.bindCommittedSelection('selection-token', committed, 1)).toBe(true);
+    projection.reconcile([], 0);
+    projection.upsert(
+      {
+        nativeId: 'pdfjs_internal_editor_4',
+        pageIndex: 1,
+        type: 'highlight',
+        rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+        selectedText: 'Original quote',
+        tags: [],
+        links: [],
+        writable: true,
+      },
+      1,
+    );
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        key: originalKey,
+        nativeId: 'pdfjs_internal_editor_4',
+        provisionalId: 'selection-token',
+        annotation: {
+          color: '#ffd400',
+          selectedText: 'Original quote',
+          capabilities: { deletion: { available: true } },
+        },
+        writable: true,
+      },
+    ]);
+  });
+
   it('does not bind an older same-page annotation to a newer selection preview', () => {
     const projection = new AnnotationProjection();
     projection.upsert(
@@ -666,7 +712,26 @@ describe('AnnotationProjection', () => {
     ]);
   });
 
-  it('does not bind ambiguous overlapping geometry to provisional row identities', () => {
+  it('remaps a renumbered persisted identity through one unique native style and geometry', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('363R', 'selection-renumbered'));
+    projection.bindCommittedSelection('selection-renumbered', verifiedAnnotation('363R'), 1);
+    const originalKey = projection.snapshot()[0]?.key;
+
+    projection.reconcile([verifiedAnnotation('365R')], 1);
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        key: originalKey,
+        nativeId: '365R',
+        provisionalId: '363R',
+        annotation: { color: '#ffd400', identity: { id: '365R', kind: 'stable' } },
+        writable: true,
+      },
+    ]);
+  });
+
+  it('disambiguates ambiguous overlapping geometry identities by annotation color', () => {
     const projection = new AnnotationProjection();
     projection.upsert({
       ...viewportAnnotation('temporary-red', 'selection-red'),
@@ -700,13 +765,13 @@ describe('AnnotationProjection', () => {
       })),
     ).toEqual([
       {
-        key: 'annotation-row-2',
+        key: 'annotation-row-1',
         nativeId: 'stable-blue',
         color: '#2f80ed',
         comment: 'Blue comment',
       },
       {
-        key: 'annotation-row-3',
+        key: 'annotation-row-0',
         nativeId: 'stable-red',
         color: '#ff6666',
         comment: 'Red comment',
@@ -725,19 +790,19 @@ describe('AnnotationProjection', () => {
       })),
     ).toEqual([
       {
-        key: 'annotation-row-3',
+        key: 'annotation-row-0',
         nativeId: 'stable-red',
         comment: 'Red confirmed again',
       },
       {
-        key: 'annotation-row-2',
+        key: 'annotation-row-1',
         nativeId: 'stable-blue',
         comment: 'Blue confirmed again',
       },
     ]);
   });
 
-  it('preserves exact duplicate overlap multiplicity as independently addressable rows', () => {
+  it('preserves ambiguous exact duplicate overlap multiplicity as independently addressable rows', () => {
     const projection = new AnnotationProjection();
     projection.upsert(viewportAnnotation('temporary-a', 'selection-a'));
     projection.upsert(viewportAnnotation('temporary-b', 'selection-b'));

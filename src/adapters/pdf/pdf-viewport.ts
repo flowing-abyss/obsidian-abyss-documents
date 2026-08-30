@@ -913,7 +913,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   ): ViewportAnnotationSnapshot {
     const selected = this.annotationSelectionFor(node, pageIndex);
     const selectedText = annotationNodeSelectedText(node, selected);
-    const color = annotationNodeColor(node);
+    const color = binding === null ? annotationNodeColor(node) : (binding.color ?? undefined);
     const comment = node.dataset['comment'];
     return {
       nativeId,

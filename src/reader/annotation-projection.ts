@@ -116,20 +116,44 @@ export class AnnotationProjection {
     annotation: DocumentAnnotation,
     revision = 0,
   ): boolean {
+    const current = this.rowForCommittedSelection(provisionalId);
     const changed = this.bindCommittedSelectionRow(provisionalId, annotation);
-    if (changed && revision > this.confirmedRevision)
-      this.recordOperation(Object.freeze({ annotation, kind: 'bind', provisionalId, revision }));
+    if (changed && revision > this.confirmedRevision && current !== undefined) {
+      const committed = this.rows.find((row) => row.key === current.key);
+      if (committed !== undefined)
+        this.recordOperation(
+          Object.freeze({
+            annotation: committed.annotation,
+            key: committed.key,
+            kind: 'bind',
+            provisionalId,
+            revision,
+          }),
+        );
+    }
     return changed;
   }
 
   private bindCommittedSelectionRow(
     provisionalId: string,
     annotation: DocumentAnnotation,
+    replayKey?: string,
   ): boolean {
-    const current = this.rows.find(
-      (row) => row.nativeId === provisionalId || row.provisionalId === provisionalId,
-    );
-    if (current === undefined) return false;
+    const current = this.rowForCommittedSelection(provisionalId);
+    if (current === undefined) {
+      if (replayKey === undefined || this.rows.some((row) => row.key === replayKey)) return false;
+      this.rows = [
+        ...this.rows,
+        Object.freeze({
+          key: replayKey,
+          annotation,
+          nativeId: annotationId(annotation),
+          provisionalId,
+          writable: annotationIsWritable(annotation),
+        }),
+      ];
+      return true;
+    }
     const nativeId = annotationId(annotation);
     const bound = Object.freeze({
       ...current,
@@ -154,6 +178,12 @@ export class AnnotationProjection {
     if (overlay !== undefined) this.editorOverlays.set(bound, overlay);
     this.rows = this.rows.map((row) => (row === current ? bound : row));
     return true;
+  }
+
+  private rowForCommittedSelection(provisionalId: string): AnnotationProjectionRow | undefined {
+    return this.rows.find(
+      (row) => row.nativeId === provisionalId || row.provisionalId === provisionalId,
+    );
   }
 
   upsert(snapshot: ViewportAnnotationSnapshot, revision = 0): boolean {
@@ -318,7 +348,7 @@ export class AnnotationProjection {
       return;
     }
     if (operation.kind === 'bind') {
-      this.bindCommittedSelectionRow(operation.provisionalId, operation.annotation);
+      this.bindCommittedSelectionRow(operation.provisionalId, operation.annotation, operation.key);
       return;
     }
     this.removeRows(operation.nativeId, operation.provisionalId);
@@ -493,6 +523,7 @@ type AnnotationProjectionOperation =
   | {
       readonly kind: 'bind';
       readonly annotation: DocumentAnnotation;
+      readonly key: string;
       readonly provisionalId: string;
       readonly revision: number;
     }
@@ -690,7 +721,39 @@ function rowMatchesSnapshot(
 
 function annotationSignature(annotation: DocumentAnnotation): string {
   const geometry = annotation.anchor.kind === 'fixed-page' ? annotation.anchor.geometry : null;
-  return JSON.stringify([geometry, annotation.selectedText]);
+  const color = annotation.color?.trim().toLowerCase() ?? null;
+  return JSON.stringify([color, normalizedGeometry(geometry)]);
+}
+
+function normalizedGeometry(geometry: AnnotationGeometry | null): unknown {
+  if (geometry === null) return null;
+  if (geometry.kind === 'point') return ['point', normalizedPoint(geometry.point)];
+  if (geometry.kind === 'rectangle')
+    return [
+      'rectangle',
+      normalizedPoint(geometry.rectangle),
+      normalizedNumber(geometry.rectangle.width),
+      normalizedNumber(geometry.rectangle.height),
+    ];
+  if (geometry.kind === 'ink')
+    return ['ink', geometry.paths.map((path) => path.map(normalizedPoint))];
+  return [
+    'quadrilaterals',
+    geometry.quadrilaterals.map((quad) => [
+      normalizedPoint(quad.topLeft),
+      normalizedPoint(quad.topRight),
+      normalizedPoint(quad.bottomLeft),
+      normalizedPoint(quad.bottomRight),
+    ]),
+  ];
+}
+
+function normalizedPoint(point: { readonly x: number; readonly y: number }): readonly number[] {
+  return [normalizedNumber(point.x), normalizedNumber(point.y)];
+}
+
+function normalizedNumber(value: number): number {
+  return Math.round(value * 1_000) / 1_000;
 }
 
 function annotationBucket(annotation: DocumentAnnotation): string {

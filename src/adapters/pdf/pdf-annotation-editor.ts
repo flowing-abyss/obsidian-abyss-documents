@@ -137,8 +137,10 @@ interface PdfAnnotationUiManager {
 }
 
 interface PdfNativeEditorReference {
+  readonly color?: string | undefined;
   readonly elementBeforePopup?: Element | null | undefined;
   getData?(): { readonly id?: string | undefined };
+  getNonHCMColor?(): ArrayLike<number> | null;
   readonly mode?: number | undefined;
   readonly uid?: string | undefined;
 }
@@ -229,16 +231,18 @@ interface PreparedSave {
 interface ContextualSaveRestore {
   readonly id: string;
   readonly mode: number;
+  readonly uid: string | null;
 }
 
 interface ContextualEditSession {
   closing: Promise<void> | null;
   guarded: boolean;
-  readonly id: string;
+  id: string;
   readonly manager: PdfAnnotationUiManager;
   readonly mode: number;
   readonly onEditorsRendered: (event: unknown) => void;
   phase: 'awaiting-selection' | 'selected' | 'closing';
+  readonly restoreUid: string | null;
   readonly suppressedToolbars: Map<HTMLElement, SuppressedNativeToolbar>;
   toolbarObserver: MutationObserver | null;
 }
@@ -353,6 +357,7 @@ export class PdfAnnotationEditor {
       mode,
       onEditorsRendered: this.onContextualEditorsRendered,
       phase: 'awaiting-selection',
+      restoreUid: null,
       suppressedToolbars: new Map(),
       toolbarObserver: null,
     };
@@ -662,6 +667,7 @@ export class PdfAnnotationEditor {
       mode: this.modeFor(request.kind),
       onEditorsRendered: this.onContextualEditorsRendered,
       phase: 'awaiting-selection',
+      restoreUid: null,
       suppressedToolbars: new Map(),
       toolbarObserver: null,
     };
@@ -823,6 +829,7 @@ export class PdfAnnotationEditor {
   }
 
   resolveNativeEditor(internalId: string): {
+    readonly color: string | null;
     readonly id: string;
     readonly kind: PdfEditableAnnotationKind;
     readonly mode: number;
@@ -834,7 +841,7 @@ export class PdfAnnotationEditor {
     const mode = native?.mode;
     if (id === undefined || id.length === 0 || typeof mode !== 'number') return null;
     const kind = this.editableKindForMode(mode);
-    return kind === null ? null : { id, kind, mode };
+    return kind === null ? null : { color: nativeEditorColor(native), id, kind, mode };
   }
 
   onMode(listener: (mode: PdfAnnotationLogicalMode) => void): () => void {
@@ -1265,9 +1272,16 @@ export class PdfAnnotationEditor {
     readonly bytes: Uint8Array | null;
     readonly failure: Error | null;
   }): Uint8Array {
+    if (outcome.bytes !== null) {
+      if (outcome.failure !== null) {
+        console.warn('[abyss-documents] PDF bytes were saved but editor focus was not restored', {
+          cause: outcome.failure,
+        });
+      }
+      return outcome.bytes;
+    }
     if (outcome.failure !== null) throw outcome.failure;
-    if (outcome.bytes === null) throw this.staleError();
-    return outcome.bytes;
+    throw this.staleError();
   }
 
   private prepareSave(signal: AbortSignal): PreparedSave | Promise<PreparedSave> {
@@ -1293,7 +1307,11 @@ export class PdfAnnotationEditor {
     this.beginSave(signal);
     const contextual = this.contextualEditSession;
     if (contextual === null) return { contextualRestore: null, manager, revision };
-    const contextualRestore = { id: contextual.id, mode: contextual.mode };
+    const contextualRestore = {
+      id: contextual.id,
+      mode: contextual.mode,
+      uid: nativeEditorUid(manager.firstSelectedEditor),
+    };
     this.pendingContextualSaveRestore = contextualRestore;
     return this.closeContextualEditSession(contextual).then(
       () => ({ contextualRestore, manager, revision }),
@@ -1369,10 +1387,29 @@ export class PdfAnnotationEditor {
     const restoredSession = this.beginRestoredContextualSession(contextualRestore, manager);
     try {
       await this.changeMode(mode, options);
-      return this.completeRestoredContextualSession(restoredSession);
+      const failure = this.completeRestoredContextualSession(restoredSession);
+      if (failure !== null) await this.neutralizeFailedRestore(manager, revision);
+      return failure;
     } catch (cause) {
       if (restoredSession !== null) this.releaseContextualEditSession(restoredSession);
       return asError(cause);
+    }
+  }
+
+  private async neutralizeFailedRestore(
+    manager: PdfAnnotationUiManager,
+    revision: number,
+  ): Promise<void> {
+    if (
+      manager !== this.manager ||
+      revision !== this.lifecycleRevision ||
+      this.dependencies.viewer.annotationEditorMode === this.dependencies.annotationEditorType.NONE
+    )
+      return;
+    try {
+      await this.changeMode(this.dependencies.annotationEditorType.NONE);
+    } catch {
+      // The captured bytes remain authoritative; the bounded warning is emitted at save exit.
     }
   }
 
@@ -1392,6 +1429,7 @@ export class PdfAnnotationEditor {
       mode: contextualRestore.mode,
       onEditorsRendered: this.onContextualEditorsRendered,
       phase: 'awaiting-selection',
+      restoreUid: contextualRestore.uid,
       suppressedToolbars: new Map(),
       toolbarObserver: null,
     };
@@ -1686,7 +1724,13 @@ export class PdfAnnotationEditor {
 
   private isRequestedEditorSelected(session: ContextualEditSession): boolean {
     const selected = session.manager.firstSelectedEditor;
-    return nativeEditorAnnotationId(selected) === session.id && selected?.mode === session.mode;
+    if (selected?.mode !== session.mode) return false;
+    const selectedId = nativeEditorAnnotationId(selected);
+    if (selectedId === session.id) return true;
+    if (session.restoreUid === null || nativeEditorUid(selected) !== session.restoreUid)
+      return false;
+    if (selectedId !== undefined && selectedId.length > 0) session.id = selectedId;
+    return true;
   }
 
   private async enterContextualEditSession(
@@ -1933,11 +1977,13 @@ export class PdfAnnotationEditor {
     const previousReset = this.storage.onResetModified;
     const ownedEditor = (type: number | null): void => {
       previousEditor?.(type);
+      if (this.activeActivation !== null) return;
       this.emitMutation();
       for (const listener of [...this.editorAddedListeners]) listener(type);
     };
     const ownedSet = (): void => {
       previousSet?.();
+      if (this.activeActivation !== null) return;
       this.emitMutation();
       if (!this.saving) this.emitDirty(true);
     };
@@ -2175,6 +2221,45 @@ function nativeEditorAnnotationId(
     persistedId = undefined;
   }
   return persistedId === undefined || persistedId.length === 0 ? native?.uid?.trim() : persistedId;
+}
+
+function nativeEditorUid(native: PdfNativeEditorReference | undefined): string | null {
+  const uid = native?.uid?.trim();
+  return uid === undefined || uid.length === 0 ? null : uid;
+}
+
+function nativeEditorColor(native: PdfNativeEditorReference | undefined): string | null {
+  const nonHcm = nativeEditorNonHcmColor(native);
+  if (nonHcm !== null) return rgbColor(nonHcm);
+  return normalizedNativeHexColor(native?.color);
+}
+
+function nativeEditorNonHcmColor(
+  native: PdfNativeEditorReference | undefined,
+): ArrayLike<number> | null {
+  try {
+    const color = native?.getNonHCMColor?.() ?? null;
+    return color !== null && color.length >= 3 ? color : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedNativeHexColor(color: string | undefined): string | null {
+  const authored = color?.trim();
+  return authored !== undefined && /^#[\da-f]{6}$/iu.test(authored) ? authored.toLowerCase() : null;
+}
+
+function rgbColor(color: ArrayLike<number>): string {
+  return `#${[color[0], color[1], color[2]]
+    .map(normalizedColorByte)
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('')}`;
+}
+
+function normalizedColorByte(value: number | undefined): number {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.min(255, Math.round(numeric))) : 0;
 }
 
 function editableKindForAnnotation(

@@ -105,7 +105,13 @@ function pdf(pageCount = 700, annotations: readonly TestPdfAnnotation[] = []): P
 }
 
 type NativeTestEditor = {
+  readonly color?: string | undefined;
   readonly editorType?: string | undefined;
+  getData?(): {
+    readonly color?: readonly number[] | undefined;
+    readonly id?: string | undefined;
+  };
+  getNonHCMColor?(): ArrayLike<number> | null;
   readonly mode?: number | undefined;
   readonly uid?: string | undefined;
 };
@@ -567,7 +573,16 @@ describe('PdfDocumentViewport', () => {
       toJSON: () => ({}),
     });
     const uiManager = annotationManager(null, [
-      ['internal-created', { editorType: 'highlight', mode: 9, uid: 'native-created' }],
+      [
+        'internal-created',
+        {
+          color: '#ffffff',
+          editorType: 'highlight',
+          getNonHCMColor: () => [255, 212, 0] as const,
+          mode: 9,
+          uid: 'native-created',
+        },
+      ],
     ]);
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
     const events: ViewportEvent[] = [];
@@ -604,6 +619,88 @@ describe('PdfDocumentViewport', () => {
       type: 'annotation-change',
       change: { operation: 'remove', nativeId: 'native-created' },
     });
+  });
+
+  it('uses native annotation color without DOM color in forced colors mode', async () => {
+    const { host, runtime, viewport } = await mountedViewport(1);
+    const eventBus = runtime.state.eventBus;
+    const viewer = runtime.state.viewer;
+    const page = host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (eventBus === undefined || viewer === undefined || page === null)
+      throw new Error('Expected mounted PDF state.');
+    const nativeNode = page
+      .createDiv({ cls: 'annotationEditorLayer' })
+      .createDiv({ cls: 'highlightEditor' });
+    nativeNode.id = 'internal-forced-colors';
+    vi.spyOn(nativeNode, 'getBoundingClientRect').mockReturnValue(new DOMRect(10, 20, 30, 8));
+    const native = {
+      color: '#ffffff',
+      editorType: 'highlight',
+      getData: () => ({ color: [1, 2, 3], id: '365R' }),
+      getNonHCMColor: () => [255, 212, 0] as const,
+      mode: 9,
+      uid: 'internal-forced-colors',
+    };
+    const uiManager = annotationManager(null, [['internal-forced-colors', native]]);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    await nextFrame();
+
+    const change = events.find(
+      (event) => event.type === 'annotation-change' && event.change.operation === 'upsert',
+    );
+    expect(change).toMatchObject({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: { color: '#ffd400', nativeId: '365R', writable: true },
+      },
+    });
+  });
+
+  it('uses DOM color only for readonly imported annotations', async () => {
+    const { host, runtime, viewport } = await mountedViewport(1);
+    const eventBus = runtime.state.eventBus;
+    const viewer = runtime.state.viewer;
+    const page = host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (eventBus === undefined || viewer === undefined || page === null)
+      throw new Error('Expected mounted PDF state.');
+    const editorNode = page
+      .createDiv({ cls: 'annotationEditorLayer' })
+      .createDiv({ cls: 'highlightEditor' });
+    editorNode.id = 'native-color-unknown';
+    editorNode.dataset['color'] = '#123456';
+    vi.spyOn(editorNode, 'getBoundingClientRect').mockReturnValue(new DOMRect(10, 20, 30, 8));
+    const importedNode = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    importedNode.dataset['annotationId'] = 'imported-color';
+    importedNode.dataset['color'] = '#abcdef';
+    vi.spyOn(importedNode, 'getBoundingClientRect').mockReturnValue(new DOMRect(40, 20, 30, 8));
+    const uiManager = annotationManager(null, [
+      ['native-color-unknown', { editorType: 'highlight', mode: 9, uid: 'native-color-unknown' }],
+    ]);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    await nextFrame();
+
+    const annotations = events.flatMap((event) =>
+      event.type === 'annotation-change' && event.change.operation === 'upsert'
+        ? [event.change.annotation]
+        : [],
+    );
+    const imported = annotations.find(({ nativeId }) => nativeId === 'imported-color');
+    expect(imported).toMatchObject({ color: '#abcdef' });
+    expect(imported).not.toHaveProperty('writable');
+    const native = annotations.find(({ nativeId }) => nativeId === 'native-color-unknown');
+    expect(native).toMatchObject({ writable: true });
+    expect(native).not.toHaveProperty('color');
   });
 
   it('omits unknown mounted facts and structural annotation-layer objects', async () => {
