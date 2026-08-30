@@ -16,6 +16,14 @@ interface AnnotationLoadTestFault {
   readonly extractionFailure?: boolean;
 }
 
+interface AnnotationLoadTestSnapshot {
+  readonly cacheReadFaults: number;
+  readonly extractionFaults: number;
+  readonly loadsFailed: number;
+  readonly loadsSettled: number;
+  readonly loadsStarted: number;
+}
+
 async function setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): Promise<void> {
   await browser.executeObsidian(({ app }, nextFault) => {
     const view = app.workspace.getMostRecentLeaf()?.view;
@@ -27,6 +35,20 @@ async function setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null)
       throw new Error('Typed annotation-load test fault boundary is unavailable.');
     (view.setAnnotationLoadTestFault as (value: AnnotationLoadTestFault | null) => void)(nextFault);
   }, fault);
+}
+
+async function readAnnotationLoadTestSnapshot(): Promise<AnnotationLoadTestSnapshot> {
+  return browser.executeObsidian(({ app }) => {
+    const leaf = app.workspace.getMostRecentLeaf();
+    if (leaf === null) throw new Error('Active reader leaf is unavailable.');
+    const view = leaf.view as unknown as {
+      annotationLoadTestSnapshot?: () => AnnotationLoadTestSnapshot;
+    };
+    const snapshot = view.annotationLoadTestSnapshot?.();
+    if (snapshot === undefined)
+      throw new Error('Typed annotation-load test telemetry is unavailable.');
+    return snapshot;
+  });
 }
 const nativeEditorSelector =
   '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
@@ -284,6 +306,9 @@ async function waitForTargetPageCanvas(target: string): Promise<void> {
                 pageNumber &&
               canvas instanceof HTMLCanvasElement &&
               canvas.isConnected &&
+              canvas.width > 0 &&
+              canvas.height > 0 &&
+              canvas.dataset['abyssPageRendered'] === 'true' &&
               (bounds?.width ?? 0) > 0 &&
               (bounds?.height ?? 0) > 0
             );
@@ -307,7 +332,9 @@ async function waitForTargetPageCanvas(target: string): Promise<void> {
             leaf?.querySelectorAll<HTMLCanvasElement>('[data-page-number] canvas') ?? [],
           ).map((canvas) => ({
             connected: canvas.isConnected,
+            intrinsicSize: [canvas.width, canvas.height],
             page: canvas.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber'] ?? null,
+            rendered: canvas.dataset['abyssPageRendered'] === 'true',
             size: [canvas.getBoundingClientRect().width, canvas.getBoundingClientRect().height],
           })),
           target: pageNumber,
@@ -1734,10 +1761,41 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
 
     await openPdf(terminalPath);
     await waitForFirstPage();
+    const terminalNative = $(
+      activeReaderDescendant('.annotationLayer .highlightAnnotation[data-annotation-id]'),
+    );
+    await terminalNative.waitForExist({ timeout: 10_000 });
+    const terminalNativeId = await browser.execute((readerLeafSelector) => {
+      const native = document.querySelector<HTMLElement>(
+        `${readerLeafSelector} .annotationLayer .highlightAnnotation[data-annotation-id]`,
+      );
+      const id = native?.dataset['annotationId']?.trim() ?? '';
+      if (id.length === 0) throw new Error('Terminal native annotation ID is unavailable.');
+      return id;
+    }, activeReaderLeafSelector);
     await setAnnotationLoadTestFault({ cacheRead: 'fail', extractionFailure: true });
-    await expect($(activeReaderDescendant('.annotationLayer .highlightAnnotation'))).toExist();
+    await expect(terminalNative).toExist();
     await $(activeReaderDescendant('[data-control="sidebar"]')).click();
     await $(activeReaderDescendant('[data-tab="annotations"]')).click();
+    try {
+      await browser.waitUntil(
+        async () => {
+          const snapshot = await readAnnotationLoadTestSnapshot();
+          return (
+            snapshot.cacheReadFaults === 1 &&
+            snapshot.extractionFaults === 1 &&
+            snapshot.loadsFailed === 1 &&
+            snapshot.loadsStarted === snapshot.loadsSettled
+          );
+        },
+        { timeout: 10_000 },
+      );
+    } catch (cause) {
+      const snapshot = await readAnnotationLoadTestSnapshot().catch(() => null);
+      throw new Error(
+        `Terminal extraction fault was not consumed and settled: ${JSON.stringify(snapshot)}; ${String(cause)}`,
+      );
+    }
     await browser.waitUntil(
       async () =>
         browser.execute((readerLeafSelector) => {
@@ -1755,6 +1813,12 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
           'Terminal extraction failure did not preserve the active reader native annotation.',
       },
     );
+    const preservedCard = $(
+      `${activeReaderDescendant('.abyss-annotation-card')}[data-annotation-id="${terminalNativeId}"]`,
+    );
+    await preservedCard.waitForDisplayed({ timeout: 10_000 });
+    await preservedCard.click();
+    await expect(preservedCard).toHaveAttribute('aria-current', 'true');
     expect(
       await browser.execute(() => {
         const panel = document.querySelector<HTMLElement>(

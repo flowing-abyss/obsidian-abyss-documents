@@ -1017,7 +1017,9 @@ export class PdfDocumentViewport implements DocumentViewport {
       return;
     }
     this.failedPages.delete(pageNumber);
-    this.pageElement(pageNumber)?.querySelector('[data-render-error]')?.remove();
+    const page = this.pageElement(pageNumber);
+    page?.querySelector('[data-render-error]')?.remove();
+    this.setRenderedCanvas(page, true);
     incrementReaderCounter('firstUsablePages');
     markReaderPerformanceOnce('first-usable-page');
     markReaderPerformance('usable-page');
@@ -1037,6 +1039,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
     const page = this.pageElement(pageNumber);
     if (page === null) return;
+    this.setRenderedCanvas(page, false);
     if (page.querySelector('[data-render-error]') !== null) return;
     const surface = createDiv();
     surface.dataset['renderError'] = '';
@@ -1049,6 +1052,16 @@ export class PdfDocumentViewport implements DocumentViewport {
     retry.textContent = 'Retry page';
     surface.append(message, retry);
     page.append(surface);
+  }
+
+  private setRenderedCanvas(page: HTMLElement | null, rendered: boolean): void {
+    const canvas =
+      page?.querySelector<HTMLCanvasElement>('canvas:not(.detailView)') ??
+      page?.querySelector<HTMLCanvasElement>('canvas') ??
+      null;
+    if (canvas === null) return;
+    if (rendered) canvas.dataset['abyssPageRendered'] = 'true';
+    else delete canvas.dataset['abyssPageRendered'];
   }
 
   private startColorRebind(): void {

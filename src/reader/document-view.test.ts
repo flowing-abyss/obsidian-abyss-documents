@@ -15,7 +15,10 @@ import {
   DOCUMENT_VIEW_TYPE,
   type ReaderViewController,
 } from './document-view.js';
-import type { AnnotationSaveLifecycleSnapshot } from './reader-controller.js';
+import type {
+  AnnotationLoadTestSnapshot,
+  AnnotationSaveLifecycleSnapshot,
+} from './reader-controller.js';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -52,6 +55,13 @@ function controller() {
     saves: 1,
   };
   const annotationSaveLifecycleSnapshot = vi.fn(() => lifecycle);
+  const annotationLoadTestSnapshot: AnnotationLoadTestSnapshot = {
+    cacheReadFaults: 1,
+    extractionFaults: 1,
+    loadsFailed: 1,
+    loadsSettled: 1,
+    loadsStarted: 1,
+  };
   const setAnnotationLoadTestFault = vi.fn();
   const open = vi.fn(async () => undefined);
   const close = vi.fn(async () => undefined);
@@ -61,6 +71,7 @@ function controller() {
   const saveDocument = vi.fn(async () => undefined);
   const resolveAnnotationLink = vi.fn(async (_reference: AnnotationHrefReference) => true);
   const reader: ReaderViewController = {
+    annotationLoadTestSnapshot: () => annotationLoadTestSnapshot,
     annotationSaveLifecycleSnapshot,
     open,
     close,
@@ -72,6 +83,7 @@ function controller() {
     setAnnotationLoadTestFault,
   };
   return {
+    annotationLoadTestSnapshot,
     annotationSaveLifecycleSnapshot,
     close,
     open,
@@ -106,6 +118,13 @@ describe('AbyssDocumentView', () => {
       [{ cacheRead: 'fail', extractionDelayMs: 350 }],
       [null],
     ]);
+  });
+
+  it('exposes read-only annotation-load fault telemetry through the public view boundary', () => {
+    const reader = controller();
+    const fixture = viewFixture(reader.reader);
+
+    expect(fixture.view.annotationLoadTestSnapshot()).toEqual(reader.annotationLoadTestSnapshot);
   });
 
   it('forwards canonical deep-link state after the PDF is mounted and rejects malformed state', async () => {

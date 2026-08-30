@@ -1814,6 +1814,24 @@ describe('PdfDocumentViewport', () => {
     expect(invalidate).toHaveBeenCalledTimes(7);
   });
 
+  it('marks only the successfully rendered page canvas as usable', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const first = fixture.host.querySelector<HTMLElement>('[data-page-number="1"]');
+    const second = fixture.host.querySelector<HTMLElement>('[data-page-number="2"]');
+    if (eventBus === undefined || first === null || second === null)
+      throw new Error('Expected mounted PDF pages and event bus.');
+    const firstCanvas = first.createEl('canvas');
+    const secondCanvas = second.createEl('canvas');
+
+    eventBus.dispatch('pagerendered', { pageNumber: 1 });
+    eventBus.dispatch('pagerendered', { pageNumber: 2 });
+    eventBus.dispatch('pagerendered', { pageNumber: 2, error: new Error('render failed') });
+
+    expect(firstCanvas.dataset['abyssPageRendered']).toBe('true');
+    expect(secondCanvas.dataset['abyssPageRendered']).toBeUndefined();
+  });
+
   it('does not expose an annotation editor for a read-only qualified document', async () => {
     const documentProxy = pdf(3);
     const runtime = viewerRuntime();

@@ -111,6 +111,33 @@ export interface AnnotationLoadTestFault {
   readonly extractionFailure?: boolean;
 }
 
+/** Read-only test telemetry for deterministic annotation-load fault acceptance scenarios. */
+export interface AnnotationLoadTestSnapshot {
+  readonly cacheReadFaults: number;
+  readonly extractionFaults: number;
+  readonly loadsFailed: number;
+  readonly loadsSettled: number;
+  readonly loadsStarted: number;
+}
+
+interface MutableAnnotationLoadTestSnapshot {
+  cacheReadFaults: number;
+  extractionFaults: number;
+  loadsFailed: number;
+  loadsSettled: number;
+  loadsStarted: number;
+}
+
+function emptyAnnotationLoadTestSnapshot(): MutableAnnotationLoadTestSnapshot {
+  return {
+    cacheReadFaults: 0,
+    extractionFaults: 0,
+    loadsFailed: 0,
+    loadsSettled: 0,
+    loadsStarted: 0,
+  };
+}
+
 const DEFAULT_PROFILE_STATE: ReaderProfileState = {
   reading: DEFAULT_SETTINGS.reading,
   layout: DEFAULT_SETTINGS.layout,
@@ -273,6 +300,8 @@ export class ReaderController {
   private currentHost: HTMLElement | null = null;
   private lifecycleFlushActive = false;
   private annotationLoadTestFault: AnnotationLoadTestFault | null = null;
+  private annotationLoadTestSnapshotState: MutableAnnotationLoadTestSnapshot =
+    emptyAnnotationLoadTestSnapshot();
 
   constructor(
     private readonly registry: DocumentAdapterRegistry,
@@ -375,6 +404,7 @@ export class ReaderController {
   }
 
   setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): void {
+    this.annotationLoadTestSnapshotState = emptyAnnotationLoadTestSnapshot();
     if (fault === null) {
       this.annotationLoadTestFault = null;
       return;
@@ -387,6 +417,10 @@ export class ReaderController {
       ...(delay === 0 ? {} : { extractionDelayMs: delay }),
       ...(fault.extractionFailure === true ? { extractionFailure: true } : {}),
     });
+  }
+
+  annotationLoadTestSnapshot(): AnnotationLoadTestSnapshot {
+    return { ...this.annotationLoadTestSnapshotState };
   }
 
   async resolveAnnotationLink(reference: AnnotationHrefReference): Promise<boolean> {
@@ -1942,34 +1976,43 @@ export class ReaderController {
     session: DocumentSession & AnnotationListingSession,
     signal: AbortSignal,
   ): Promise<readonly DocumentAnnotation[]> {
-    const path = session.descriptor.path;
-    const { annotations: cached, generation: cacheGeneration } = await this.readAnnotationCache(
-      path,
-      session.descriptor.fingerprint,
-      signal,
-    );
-    this.throwIfAnnotationCancelled(signal);
-    if (cached !== null && cached !== undefined) return cached;
-    await this.applyAnnotationExtractionTestFault(signal);
-    const annotations: DocumentAnnotation[] = [];
-    await session.listAnnotations(signal, (batch) => {
-      annotations.push(...batch);
-    });
-    this.throwIfAnnotationCancelled(signal);
+    const trackingTestFault = this.annotationLoadTestFault !== null;
+    if (trackingTestFault) this.annotationLoadTestSnapshotState.loadsStarted += 1;
     try {
-      await this.annotationCache?.write(
-        {
-          version: 1,
-          documentPath: path,
-          fingerprint: session.descriptor.fingerprint,
-          annotations,
-        },
-        cacheGeneration,
+      const path = session.descriptor.path;
+      const { annotations: cached, generation: cacheGeneration } = await this.readAnnotationCache(
+        path,
+        session.descriptor.fingerprint,
+        signal,
       );
+      this.throwIfAnnotationCancelled(signal);
+      if (cached !== null && cached !== undefined) return cached;
+      await this.applyAnnotationExtractionTestFault(signal);
+      const annotations: DocumentAnnotation[] = [];
+      await session.listAnnotations(signal, (batch) => {
+        annotations.push(...batch);
+      });
+      this.throwIfAnnotationCancelled(signal);
+      try {
+        await this.annotationCache?.write(
+          {
+            version: 1,
+            documentPath: path,
+            fingerprint: session.descriptor.fingerprint,
+            annotations,
+          },
+          cacheGeneration,
+        );
+      } catch (cause) {
+        console.error('[abyss-documents] Annotation cache write failed', { path, cause });
+      }
+      return annotations;
     } catch (cause) {
-      console.error('[abyss-documents] Annotation cache write failed', { path, cause });
+      if (trackingTestFault) this.annotationLoadTestSnapshotState.loadsFailed += 1;
+      throw cause;
+    } finally {
+      if (trackingTestFault) this.annotationLoadTestSnapshotState.loadsSettled += 1;
     }
-    return annotations;
   }
 
   private async readAnnotationCache(
@@ -1982,8 +2025,10 @@ export class ReaderController {
   }> {
     let generation = this.annotationCache?.generation(path);
     try {
-      if (this.annotationLoadTestFault?.cacheRead === 'fail')
+      if (this.annotationLoadTestFault?.cacheRead === 'fail') {
+        this.annotationLoadTestSnapshotState.cacheReadFaults += 1;
         throw new Error('Injected annotation cache read failure.');
+      }
       return {
         annotations: await this.annotationCache?.read(path, fingerprint, generation),
         generation,
@@ -2007,8 +2052,10 @@ export class ReaderController {
     const delay = fault.extractionDelayMs ?? 0;
     if (delay > 0) await abortableDelay(delay, signal);
     this.throwIfAnnotationCancelled(signal);
-    if (fault.extractionFailure === true)
+    if (fault.extractionFailure === true) {
+      this.annotationLoadTestSnapshotState.extractionFaults += 1;
       throw new Error('Injected annotation extraction failure.');
+    }
   }
 
   private loadOutline(session: DocumentSession, shell: ReaderShell): void {

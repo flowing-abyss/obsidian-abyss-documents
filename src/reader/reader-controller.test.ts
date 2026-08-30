@@ -3235,7 +3235,7 @@ describe('ReaderController', () => {
       shell.createShell,
     );
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    controller.setAnnotationLoadTestFault({ extractionFailure: true });
+    controller.setAnnotationLoadTestFault({ cacheRead: 'fail', extractionFailure: true });
     await controller.open(pdf, createDiv());
     createdViewport.emit({
       type: 'annotation-change',
@@ -3263,6 +3263,13 @@ describe('ReaderController', () => {
         '[abyss-documents] Failed to extract PDF annotations',
         expect.objectContaining({ path: pdf.path }),
       );
+    });
+    expect(controller.annotationLoadTestSnapshot()).toEqual({
+      cacheReadFaults: 1,
+      extractionFaults: 1,
+      loadsFailed: 1,
+      loadsSettled: 1,
+      loadsStarted: 1,
     });
     expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([
       'native-visible-during-failure',

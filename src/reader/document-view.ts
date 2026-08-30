@@ -3,6 +3,7 @@ import { parseAnnotationHref, type AnnotationHrefReference } from './annotation-
 import { ownerWindow } from './owner-dom.js';
 import type {
   AnnotationLoadTestFault,
+  AnnotationLoadTestSnapshot,
   AnnotationSaveLifecycleSnapshot,
 } from './reader-controller.js';
 
@@ -19,6 +20,7 @@ declare global {
 }
 
 export interface ReaderViewController {
+  annotationLoadTestSnapshot?(): AnnotationLoadTestSnapshot;
   annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null;
   setAnnotationLoadTestFault?(fault: AnnotationLoadTestFault | null): void;
   open(file: TFile, host: HTMLElement): Promise<void>;
@@ -36,6 +38,10 @@ export interface AbyssDocumentViewServices {
 
 export interface AnnotationSaveLifecycleViewBoundary {
   annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null;
+}
+
+export interface AnnotationLoadTestViewBoundary {
+  annotationLoadTestSnapshot(): AnnotationLoadTestSnapshot;
 }
 
 export class AbyssDocumentView extends FileView {
@@ -132,6 +138,12 @@ export class AbyssDocumentView extends FileView {
 
   annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null {
     return this.controller.annotationSaveLifecycleSnapshot();
+  }
+
+  annotationLoadTestSnapshot(): AnnotationLoadTestSnapshot {
+    if (this.controller.annotationLoadTestSnapshot === undefined)
+      throw new DOMException('Annotation load test telemetry is unavailable.', 'NotSupportedError');
+    return this.controller.annotationLoadTestSnapshot();
   }
 
   setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): void {
