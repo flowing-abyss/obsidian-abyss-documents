@@ -291,6 +291,16 @@ interface AnnotationActivation {
   timedOut: boolean;
 }
 
+type AnnotationActivationSettlement =
+  | {
+      readonly kind: 'resolved';
+      readonly value: PdfAnnotationActivationResult;
+    }
+  | {
+      readonly cause: Error;
+      readonly kind: 'rejected';
+    };
+
 interface PendingSelectionTransaction {
   readonly armTimeout: () => void;
   readonly controller: AbortController;
@@ -569,50 +579,108 @@ export class PdfAnnotationEditor {
     run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>,
     settled: ReturnType<typeof deferred<PdfAnnotationActivationResult>>,
   ): void {
-    run(activation)
-      .catch(async (cause: unknown): Promise<PdfAnnotationActivationResult> => {
-        const contextualRejection = this.rejectRecordedContextualFailure(activation);
-        if (contextualRejection !== null) await contextualRejection;
-        if (
-          !this.isOwnedActivation(activation) ||
-          activation.controller.signal.aborted ||
-          isAbortFailure(cause)
-        )
-          return 'cancelled' as const;
-        throw cause;
-      })
-      .then((result) => this.settleAnnotationActivationResult(result, activation, settled))
-      .catch((cause: unknown) => {
-        settled.reject(this.contextualActivationFailureCause(activation) ?? asError(cause));
-      })
-      .finally(() => {
-        this.cleanupAnnotationActivation(activation);
-      })
-      .catch(() => undefined);
+    void this.finalizeAnnotationActivation(activation, run, settled).catch(() => undefined);
   }
 
-  private async settleAnnotationActivationResult(
-    result: PdfAnnotationActivationResult,
+  private async finalizeAnnotationActivation(
     activation: AnnotationActivation,
+    run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>,
     settled: ReturnType<typeof deferred<PdfAnnotationActivationResult>>,
   ): Promise<void> {
-    const contextualRejection = this.rejectRecordedContextualFailure(activation);
-    if (contextualRejection !== null) await contextualRejection;
-    const finalResult =
-      result === 'cancelled' && activation.timedOut
-        ? await this.focusTimedOutProjection(activation)
-        : result;
-    const rejectionAfterFallback = this.rejectRecordedContextualFailure(activation);
-    if (rejectionAfterFallback !== null) await rejectionAfterFallback;
-    settled.resolve(this.isOwnedActivation(activation) ? finalResult : 'cancelled');
+    let settlement: AnnotationActivationSettlement;
+    try {
+      const result = await this.runAnnotationActivationWithinOwnership(activation, run);
+      const contextualRejection = this.rejectRecordedContextualFailure(activation);
+      if (contextualRejection !== null) await contextualRejection;
+      const finalResult =
+        result === 'cancelled' && activation.timedOut
+          ? await this.focusTimedOutProjection(activation)
+          : result;
+      const rejectionAfterFallback = this.rejectRecordedContextualFailure(activation);
+      if (rejectionAfterFallback !== null) await rejectionAfterFallback;
+      settlement = {
+        kind: 'resolved',
+        value: this.isOwnedActivation(activation) ? finalResult : 'cancelled',
+      };
+    } catch (cause) {
+      settlement = {
+        cause: this.contextualActivationFailureCause(activation) ?? asError(cause),
+        kind: 'rejected',
+      };
+    }
+
+    this.publishAnnotationActivationSettlement(activation, settlement, settled);
   }
 
-  private cleanupAnnotationActivation(activation: AnnotationActivation): void {
-    activation.clearDeadline();
-    activation.removeExternalAbort();
-    this.clearPendingAnnotationFocus(activation);
-    this.clearContextualActivationFailureOwner(activation);
-    if (this.activeActivation === activation) this.activeActivation = null;
+  private async runAnnotationActivationWithinOwnership(
+    activation: AnnotationActivation,
+    run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>,
+  ): Promise<PdfAnnotationActivationResult> {
+    try {
+      return await run(activation);
+    } catch (cause) {
+      const contextualRejection = this.rejectRecordedContextualFailure(activation);
+      if (contextualRejection !== null) await contextualRejection;
+      if (
+        !this.isOwnedActivation(activation) ||
+        activation.controller.signal.aborted ||
+        isAbortFailure(cause)
+      )
+        return 'cancelled';
+      throw cause;
+    }
+  }
+
+  private publishAnnotationActivationSettlement(
+    activation: AnnotationActivation,
+    settlement: AnnotationActivationSettlement,
+    settled: ReturnType<typeof deferred<PdfAnnotationActivationResult>>,
+  ): void {
+    const cleanupFailure = this.cleanupAnnotationActivation(activation);
+    try {
+      if (cleanupFailure !== null && settlement.kind === 'rejected')
+        this.reportSecondaryAnnotationActivationCleanupFailure(cleanupFailure, settlement.cause);
+    } finally {
+      const publishedSettlement: AnnotationActivationSettlement =
+        cleanupFailure !== null && settlement.kind === 'resolved'
+          ? { cause: cleanupFailure, kind: 'rejected' }
+          : settlement;
+      if (publishedSettlement.kind === 'resolved') settled.resolve(publishedSettlement.value);
+      else settled.reject(publishedSettlement.cause);
+    }
+  }
+
+  private cleanupAnnotationActivation(activation: AnnotationActivation): Error | null {
+    let failure: Error | null = null;
+    const attempt = (cleanup: () => void): void => {
+      try {
+        cleanup();
+      } catch (cause) {
+        failure ??= asError(cause);
+      }
+    };
+    attempt(activation.clearDeadline);
+    attempt(activation.removeExternalAbort);
+    attempt(() => {
+      this.clearPendingAnnotationFocus(activation);
+    });
+    attempt(() => {
+      this.clearContextualActivationFailureOwner(activation);
+    });
+    attempt(() => {
+      if (this.activeActivation === activation) this.activeActivation = null;
+    });
+    return failure;
+  }
+
+  private reportSecondaryAnnotationActivationCleanupFailure(
+    cleanupFailure: Error,
+    primaryCause: Error,
+  ): void {
+    if (cleanupFailure === primaryCause || isAbortFailure(cleanupFailure)) return;
+    console.warn('[abyss-documents] Failed to clean up the PDF annotation activation', {
+      cause: cleanupFailure,
+    });
   }
 
   private async resolveProjectedAnnotation(
@@ -1066,10 +1134,13 @@ export class PdfAnnotationEditor {
     const owner = activation.contextualFailureOwner;
     if (owner === null) return;
     owner.interrupt = null;
-    owner.removeActivationAbort();
-    activation.contextualFailureOwner = null;
-    if (this.contextualActivationFailureOwner === owner)
-      this.contextualActivationFailureOwner = null;
+    try {
+      owner.removeActivationAbort();
+    } finally {
+      activation.contextualFailureOwner = null;
+      if (this.contextualActivationFailureOwner === owner)
+        this.contextualActivationFailureOwner = null;
+    }
   }
 
   private isCurrentActivation(activation: AnnotationActivation): boolean {
