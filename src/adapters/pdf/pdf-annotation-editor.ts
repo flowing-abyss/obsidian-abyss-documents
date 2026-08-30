@@ -825,19 +825,32 @@ export class PdfAnnotationEditor {
     signal: AbortSignal,
   ): Promise<boolean> {
     if (this.isRequestedEditorSelected(session)) return Promise.resolve(true);
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let settled = false;
-      const finish = (selected: boolean): void => {
-        if (settled) return;
-        settled = true;
+      const cleanup = (): void => {
         this.dependencies.eventBus.off('editingstateschanged', check);
         this.dependencies.eventBus.off('editorsrendered', check);
         signal.removeEventListener('abort', onAbort);
+      };
+      const finish = (selected: boolean): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve(selected);
       };
+      const fail = (cause: unknown): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(asError(cause));
+      };
       const check = (): void => {
-        if (signal.aborted || this.contextualEditSession !== session) finish(false);
-        else if (this.isRequestedEditorSelected(session)) finish(true);
+        try {
+          if (signal.aborted || this.contextualEditSession !== session) finish(false);
+          else if (this.isRequestedEditorSelected(session)) finish(true);
+        } catch (cause) {
+          fail(cause);
+        }
       };
       const onAbort = (): void => {
         finish(false);

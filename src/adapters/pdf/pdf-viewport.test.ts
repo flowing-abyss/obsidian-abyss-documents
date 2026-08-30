@@ -1091,6 +1091,56 @@ describe('PdfDocumentViewport', () => {
     });
   });
 
+  it('reports one deferred native selection-check failure at the page boundary', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null)
+      throw new Error('Expected mounted annotation editing.');
+    const id = 'native-selection-failure';
+    const uiManager = annotationManager();
+    const cause = new Error('selected editor accessor failed');
+    let failNextCheck = false;
+    Object.defineProperty(uiManager, 'firstSelectedEditor', {
+      configurable: true,
+      get: () => {
+        if (failNextCheck) {
+          failNextCheck = false;
+          throw cause;
+        }
+        return undefined;
+      },
+    });
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    editor.setAnnotationProjection([{ annotation: writableHighlight(id), stableId: id }]);
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = id;
+
+    annotation.click();
+    await vi.waitFor(() => {
+      expect(eventBus.listeners.get('editorsrendered')).toHaveLength(1);
+    });
+    failNextCheck = true;
+    expect(() => {
+      eventBus.dispatch('editorsrendered', { pageNumber: 1, source: {} });
+    }).not.toThrow();
+
+    await vi.waitFor(() => {
+      expect(events).toEqual([
+        { type: 'annotation-mutation-error', action: 'open-annotation', cause },
+      ]);
+    });
+  });
+
   it.each([
     ['underlineAnnotation', 'underline', 'imported-underline'],
     ['textAnnotation', 'text-note', 'imported-text-note'],

@@ -1289,6 +1289,62 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(1);
   });
 
+  it('rejects a later throwing selection check promptly and leaves late events inert', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      const annotation = createdAnnotation('', { id: 'throwing-selection-check' });
+      const uiManager = manager();
+      const cause = new Error('selected editor accessor failed');
+      let failNextCheck = false;
+      const selectedAccessor = vi.fn(() => {
+        if (failNextCheck) {
+          failNextCheck = false;
+          throw cause;
+        }
+        return undefined;
+      });
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: selectedAccessor,
+      });
+      current.editor.setAnnotationProjection([
+        { annotation, stableId: 'throwing-selection-check' },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+
+      activation = current.editor.focusAnnotation('throwing-selection-check', {
+        kind: 'root-click',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(1);
+      failNextCheck = true;
+
+      expect(() => {
+        current.eventBus.dispatch('editorsrendered', { pageNumber: 1, source: {} });
+      }).not.toThrow();
+      await expect(activation).rejects.toBe(cause);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      const checksAfterSettlement = selectedAccessor.mock.calls.length;
+      current.eventBus.dispatch('editorsrendered', { pageNumber: 1, source: {} });
+      expect(selectedAccessor).toHaveBeenCalledTimes(checksAfterSettlement);
+    } finally {
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps one absolute activation timeout and removes mode readiness resources', async () => {
     vi.useFakeTimers();
     try {
