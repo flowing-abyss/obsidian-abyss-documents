@@ -289,6 +289,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private resizeFrame: number | null = null;
   private pendingLocation: DocumentLocation | null = null;
   private latestLocation: DocumentLocation | null = null;
+  private navigationRequestRevision = 0;
   private requestedLayout: ReaderLayout = { pages: 'single', scrolling: 'continuous' };
   private requestedScale: ScaleRequest = 'page-width';
   private scaleRequestRevision = 0;
@@ -397,17 +398,20 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   async goTo(location: DocumentLocation): Promise<void> {
+    const revision = ++this.navigationRequestRevision;
     this.requireMounted(this.linkService);
     await this.annotationEditorInstance?.abortInteraction(
       'PDF navigation cancelled the annotation interaction.',
     );
+    if (!this.isCurrentNavigationRequest(revision)) return;
     this.selectionObserverInstance?.invalidate();
     this.latestLocation = { ...location };
     if (!this.pagesInitialized || this.colorRebindActive) {
       this.pendingLocation = { ...location };
       return;
     }
-    await this.navigateTo(location);
+    await this.navigateTo(location, revision);
+    if (!this.isCurrentNavigationRequest(revision)) return;
     const viewer = this.requireMounted(this.viewer);
     this.refitPageHeight(viewer);
   }
@@ -1103,7 +1107,8 @@ export class PdfDocumentViewport implements DocumentViewport {
       const location = this.pendingLocation ?? this.locationForRebind(state);
       this.pendingLocation = null;
       this.latestLocation = { ...location };
-      void this.navigateTo(location).catch((cause: unknown) => {
+      const revision = ++this.navigationRequestRevision;
+      void this.navigateTo(location, revision).catch((cause: unknown) => {
         this.handleRenderError(state.pageNumber, cause);
       });
       const scale = this.explicitScaleRequest ? this.requestedScale : this.scaleFromState(state);
@@ -1218,22 +1223,40 @@ export class PdfDocumentViewport implements DocumentViewport {
       : { ...this.latestLocation };
   }
 
-  private async navigateTo(location: DocumentLocation): Promise<void> {
+  private async navigateTo(location: DocumentLocation, revision: number): Promise<void> {
     const linkService = this.requireMounted(this.linkService);
     const pageNumber = location.pageIndex + 1;
     if (location.coordinateSpace === undefined) {
+      if (!this.isCurrentNavigationRequest(revision)) return;
       linkService.goToPage(pageNumber);
       return;
     }
     let y = location.y ?? 0;
     if (location.coordinateSpace === 'page-points-top-left') {
-      const page = await this.pdf.getPage(pageNumber);
-      const pageTop = page.view[3];
-      if (pageTop === undefined)
-        throw new TypeError('The PDF page crop box is missing its top coordinate.');
+      const pageTop = await this.pageTopForNavigation(pageNumber, revision);
+      if (pageTop === null) return;
       y = pageTop - y;
     }
+    if (!this.isCurrentNavigationRequest(revision)) return;
     linkService.goToXY(pageNumber, location.x ?? 0, y);
+  }
+
+  private isCurrentNavigationRequest(revision: number): boolean {
+    return revision === this.navigationRequestRevision && this.destroyPromise === null;
+  }
+
+  private async pageTopForNavigation(pageNumber: number, revision: number): Promise<number | null> {
+    let page: Awaited<ReturnType<PDFDocumentProxy['getPage']>>;
+    try {
+      page = await this.pdf.getPage(pageNumber);
+    } catch (cause) {
+      if (!this.isCurrentNavigationRequest(revision)) return null;
+      throw cause;
+    }
+    const pageTop = page.view[3];
+    if (pageTop === undefined)
+      throw new TypeError('The PDF page crop box is missing its top coordinate.');
+    return pageTop;
   }
 
   private flushPendingLocation(): void {
@@ -1246,12 +1269,14 @@ export class PdfDocumentViewport implements DocumentViewport {
       return;
     const location = this.pendingLocation;
     this.pendingLocation = null;
-    void this.navigateTo(location).catch((cause: unknown) => {
+    const revision = ++this.navigationRequestRevision;
+    void this.navigateTo(location, revision).catch((cause: unknown) => {
       this.handleRenderError(location.pageIndex + 1, cause);
     });
   }
 
   private clearPendingInteractions(): void {
+    this.navigationRequestRevision += 1;
     this.pendingLocation = null;
     this.latestLocation = null;
   }
@@ -1339,13 +1364,20 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.activateRootAnnotation(annotationId, hasNativeSelectionModifier(event));
   };
 
-  private activateRootAnnotation(id: string, preserveNativeSelection: boolean): void {
+  private activateRootAnnotation(
+    id: string,
+    preserveNativeSelection: boolean,
+    kind: 'root-click' | 'root-context' = 'root-click',
+  ): void {
     this.annotationInteraction
       ?.focusAnnotation(id, {
-        kind: 'root-click',
+        kind,
         ...(preserveNativeSelection ? { preserveNativeSelection: true } : {}),
       })
-      .catch(() => undefined);
+      .catch((cause: unknown) => {
+        if (!isAbortFailure(cause))
+          this.events.emit({ type: 'annotation-mutation-error', action: 'open-annotation', cause });
+      });
   }
 
   private clearPendingPointerActivation(): void {
@@ -1360,18 +1392,15 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (!isElementTarget(target)) return;
     const annotationId = this.annotationActivationId(target);
     if (annotationId === null) return;
-    this.annotationInteraction
-      ?.focusAnnotation(annotationId, {
-        kind: 'root-context',
-      })
-      .catch(() => undefined);
+    event.preventDefault();
+    this.activateRootAnnotation(annotationId, false, 'root-context');
   };
 
   private annotationActivationId(target: Element): string | null {
     if (target.closest('a, button, input, select, textarea') !== null) return null;
     if (isNativeFreeTextEditingTarget(target)) return null;
     const node = target.closest<HTMLElement>(
-      '.annotationLayer [data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
+      '.annotationLayer :is(.underlineAnnotation, .textAnnotation, .highlightAnnotation, .inkAnnotation, .freeTextAnnotation)[data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
     );
     if (node === null) return null;
     const internalId = annotationNodeInternalId(node);
@@ -1490,6 +1519,10 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (value === null) throw new DOMException('PDF viewport is not mounted.', 'InvalidStateError');
     return value;
   }
+}
+
+function isAbortFailure(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === 'AbortError';
 }
 
 function readingProfile(appearance: ReadingAppearance): ResolvedReadingProfile {

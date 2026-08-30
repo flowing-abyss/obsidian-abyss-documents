@@ -1664,6 +1664,22 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('rejects a genuine annotation resolver failure to its caller', async () => {
+    const current = fixture();
+    const cause = new Error('annotation resolver failed');
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(),
+    });
+    current.editor.setAnnotationResolver(async () => {
+      throw cause;
+    });
+
+    await expect(
+      current.editor.focusAnnotation('resolver-failure', { kind: 'root-click' }),
+    ).rejects.toBe(cause);
+  });
+
   it('settles a rejecting deadline fallback as cancelled exactly once', async () => {
     vi.useFakeTimers();
     const current = fixture();

@@ -547,13 +547,24 @@ export class PdfAnnotationEditor {
     }, remainingDeadlineMs(activation.deadline));
     this.activeActivation = activation;
     run(activation)
-      .catch(() => 'cancelled' as const)
+      .catch((cause: unknown) => {
+        if (
+          !this.isOwnedActivation(activation) ||
+          activation.controller.signal.aborted ||
+          isAbortFailure(cause)
+        )
+          return 'cancelled' as const;
+        throw cause;
+      })
       .then(async (result) => {
         const finalResult =
           result === 'cancelled' && activation.timedOut
             ? await this.focusTimedOutProjection(activation)
             : result;
         settled.resolve(this.isOwnedActivation(activation) ? finalResult : 'cancelled');
+      })
+      .catch((cause: unknown) => {
+        settled.reject(asError(cause));
       })
       .finally(() => {
         activation.clearDeadline();
@@ -2440,6 +2451,10 @@ function asError(cause: unknown): Error {
     return cause as Error;
   }
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function isAbortFailure(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === 'AbortError';
 }
 
 function isColorParameter(parameter: PdfAnnotationParameter): boolean {

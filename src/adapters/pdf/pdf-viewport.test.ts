@@ -970,9 +970,12 @@ describe('PdfDocumentViewport', () => {
     annotation.dataset['annotationId'] = 'persisted-root';
 
     annotation.click();
-    annotation.dispatchEvent(
-      new MouseEvent('contextmenu', { bubbles: true, button: 2, cancelable: true }),
-    );
+    const contextmenu = new MouseEvent('contextmenu', {
+      bubbles: true,
+      button: 2,
+      cancelable: true,
+    });
+    annotation.dispatchEvent(contextmenu);
 
     expect(focusAnnotation).toHaveBeenNthCalledWith(1, 'persisted-root', {
       kind: 'root-click',
@@ -982,6 +985,42 @@ describe('PdfDocumentViewport', () => {
     });
     expect(focusAnnotation).toHaveBeenCalledTimes(2);
     expect(bridgeFocus).not.toHaveBeenCalled();
+    expect(contextmenu.defaultPrevented).toBe(true);
+  });
+
+  it('reports one genuine native-page annotation activation failure', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null)
+      throw new Error('Expected mounted annotation editing.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const cause = new Error('annotation resolver failed');
+    editor.setAnnotationResolver(async () => {
+      throw cause;
+    });
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'resolver-failure';
+
+    annotation.click();
+
+    await vi.waitFor(() => {
+      expect(events).toEqual([
+        { type: 'annotation-mutation-error', action: 'open-annotation', cause },
+      ]);
+    });
   });
 
   it.each([
@@ -1235,7 +1274,7 @@ describe('PdfDocumentViewport', () => {
         cancelable: true,
       });
       annotation.dispatchEvent(contextmenu);
-      expect(contextmenu.defaultPrevented).toBe(false);
+      expect(contextmenu.defaultPrevented).toBe(className !== 'stampAnnotation');
       annotation.click();
     }
     await Promise.resolve();
@@ -1272,7 +1311,7 @@ describe('PdfDocumentViewport', () => {
     annotation.click();
     await Promise.resolve();
 
-    expect(contextmenu.defaultPrevented).toBe(false);
+    expect(contextmenu.defaultPrevented).toBe(true);
     expect(viewer.annotationEditorRequests).toEqual([]);
   });
 
@@ -1703,6 +1742,168 @@ describe('PdfDocumentViewport', () => {
     });
 
     expect(linkService.positions).toEqual([[1, 20, 49]]);
+  });
+
+  it('lets only the latest deferred top-left navigation reach PDF.js', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    const firstPage = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    const secondPage = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockImplementation((pageNumber) =>
+      pageNumber === 1 ? firstPage.promise : secondPage.promise,
+    );
+    eventBus.dispatch('pagesinit', {});
+
+    const first = fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+    await vi.waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Vitest inspects the method; it is not invoked detached
+      expect(fixture.documentProxy.getPage).toHaveBeenCalledOnce();
+    });
+    const second = fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 1,
+      x: 40,
+      y: 60,
+    });
+    await vi.waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Vitest inspects the method; it is not invoked detached
+      expect(fixture.documentProxy.getPage).toHaveBeenCalledTimes(2);
+    });
+    secondPage.resolve({ view: [0, 0, 600, 900] } as Awaited<
+      ReturnType<PDFDocumentProxy['getPage']>
+    >);
+    await second;
+    firstPage.resolve({ view: [0, 0, 595, 842] } as Awaited<
+      ReturnType<PDFDocumentProxy['getPage']>
+    >);
+    await first;
+
+    expect(linkService.positions).toEqual([[2, 40, 840]]);
+  });
+
+  it('does not let deferred top-left navigation overtake a newer bottom-left destination', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    const page = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockReturnValueOnce(page.promise);
+    eventBus.dispatch('pagesinit', {});
+
+    const first = fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+    await vi.waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Vitest inspects the method; it is not invoked detached
+      expect(fixture.documentProxy.getPage).toHaveBeenCalledOnce();
+    });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 70,
+      y: 80,
+    });
+    page.resolve({ view: [0, 0, 595, 842] } as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+    await first;
+
+    expect(linkService.positions).toEqual([[3, 70, 80]]);
+  });
+
+  it('settles a stale deferred page rejection quietly after a newer destination wins', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    const page = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockReturnValueOnce(page.promise);
+    eventBus.dispatch('pagesinit', {});
+
+    const stale = fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+    await vi.waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Vitest inspects the method; it is not invoked detached
+      expect(fixture.documentProxy.getPage).toHaveBeenCalledOnce();
+    });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 70,
+      y: 80,
+    });
+    page.reject(new Error('stale crop lookup failed'));
+
+    await expect(stale).resolves.toBeUndefined();
+    expect(linkService.positions).toEqual([[3, 70, 80]]);
+  });
+
+  it('rejects a current coordinate lookup failure without navigating', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    const cause = new Error('current crop lookup failed');
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockRejectedValueOnce(cause);
+    eventBus.dispatch('pagesinit', {});
+
+    await expect(
+      fixture.viewport.goTo({
+        coordinateSpace: 'page-points-top-left',
+        pageIndex: 0,
+        x: 20,
+        y: 49,
+      }),
+    ).rejects.toBe(cause);
+    expect(linkService.positions).toEqual([]);
+  });
+
+  it('does not navigate when a deferred coordinate lookup resolves after destroy', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    const page = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockReturnValueOnce(page.promise);
+    eventBus.dispatch('pagesinit', {});
+    const navigation = fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+    await vi.waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Vitest inspects the method; it is not invoked detached
+      expect(fixture.documentProxy.getPage).toHaveBeenCalledOnce();
+    });
+
+    await fixture.viewport.destroy();
+    page.resolve({ view: [0, 0, 595, 842] } as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+    await navigation;
+
+    expect(linkService.positions).toEqual([]);
   });
 
   it.each([0, 90, 180, 270])(

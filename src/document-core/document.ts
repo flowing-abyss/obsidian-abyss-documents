@@ -92,7 +92,12 @@ export type ViewportEvent =
     }
   | {
       readonly type: 'annotation-mutation-error';
-      readonly action: 'change-color' | 'delete-annotation' | 'delete-comment' | 'save-comment';
+      readonly action:
+        | 'change-color'
+        | 'delete-annotation'
+        | 'delete-comment'
+        | 'open-annotation'
+        | 'save-comment';
       readonly cause: unknown;
     }
   | { readonly type: 'render-error'; readonly pageIndex: number; readonly cause: unknown };

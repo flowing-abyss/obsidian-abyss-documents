@@ -2135,6 +2135,10 @@ export class ReaderController {
       this.finishAnnotationActivation(abort);
       return;
     }
+    if (!sameDocumentLocation(activation.location, resolved.location)) {
+      this.finishAnnotationActivation(abort);
+      return;
+    }
     const { annotation, clientPosition: position } = resolved;
     shell.openAnnotationEditor(
       {
@@ -2186,7 +2190,14 @@ export class ReaderController {
         if (this.viewport === viewport && revision === this.navigationRequestRevision) onArrive?.();
       })
       .catch((cause: unknown) => {
-        if (this.viewport !== viewport) {
+        const isCurrentRequest =
+          this.viewport === viewport && revision === this.navigationRequestRevision;
+        if (!isCurrentRequest || isAbortFailure(cause)) {
+          if (isCurrentRequest && this.pendingNavigationPageIndex === target) {
+            this.navigationPageIndex = this.currentPageIndex;
+            this.pendingNavigationPageIndex = null;
+            shell.toolbar.setCurrentPage(this.currentPageIndex);
+          }
           onFailure?.();
           return;
         }
@@ -2576,9 +2587,19 @@ function annotationDiagnosticIdentity(annotation: DocumentAnnotation): string {
     : annotation.identity.fingerprint;
 }
 
+function sameDocumentLocation(left: DocumentLocation, right: DocumentLocation): boolean {
+  return (
+    left.pageIndex === right.pageIndex &&
+    left.coordinateSpace === right.coordinateSpace &&
+    left.x === right.x &&
+    left.y === right.y
+  );
+}
+
 function annotationMutationAction(
   action: Extract<ViewportEvent, { readonly type: 'annotation-mutation-error' }>['action'],
 ): string {
+  if (action === 'open-annotation') return 'open PDF annotation';
   if (action === 'save-comment') return 'save PDF annotation comment';
   if (action === 'delete-comment') return 'delete PDF annotation comment';
   if (action === 'change-color') return 'change PDF annotation color';

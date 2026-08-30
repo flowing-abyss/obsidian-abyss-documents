@@ -2514,6 +2514,90 @@ describe('ReaderController', () => {
     await controller.close();
   });
 
+  it('cancels read-only details when the resolved row moves after navigation starts', async () => {
+    const [pdf] = files('Books/Signed-row-moved.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const navigation = deferred<undefined>();
+    const createdViewport = viewport();
+    createdViewport.goTo.mockImplementationOnce(async () => navigation.promise);
+    const createdSession = session(pdf.path, createdViewport);
+    const annotation = {
+      ...annotationRecord('signed-row-moved', 0, {
+        kind: 'point',
+        point: { x: 10, y: 20 },
+      }),
+      comment: 'Initial signed details',
+    } satisfies DocumentAnnotation;
+    Object.assign(createdSession.value, {
+      annotationCapabilities: {
+        readOnlyReason: { code: 'signed-document', message: 'Signed PDF documents are read-only.' },
+      },
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotation]);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(
+        shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+          '[data-annotation-id="signed-row-moved"]',
+        ),
+      ).not.toBeNull();
+    });
+    const card = shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-id="signed-row-moved"]',
+    );
+    const rowId = card?.dataset['annotationRowId'];
+    if (card === null || card === undefined || rowId === undefined)
+      throw new Error('Expected a mounted signed annotation row.');
+    vi.spyOn(card, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 52, width: 312, x: 72, y: 236 }),
+    );
+    const openAnnotationEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
+    card.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.goTo).toHaveBeenCalledWith({
+        coordinateSpace: 'page-points-top-left',
+        pageIndex: 0,
+        x: 10,
+        y: 20,
+      });
+    });
+    const moved = {
+      ...annotation,
+      anchor: {
+        kind: 'fixed-page' as const,
+        pageIndex: 1,
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: { kind: 'point' as const, point: { x: 30, y: 40 } },
+      },
+      comment: 'Moved signed details',
+    } satisfies DocumentAnnotation;
+    shell.created.sidebar?.annotationsPanel.setProjectedAnnotations([
+      { annotation: moved, key: rowId, nativeId: 'signed-row-moved', writable: false },
+    ]);
+    navigation.resolve(undefined);
+
+    await vi.waitFor(() => {
+      expect(
+        (controller as unknown as { annotationActivationAbort: AbortController | null })
+          .annotationActivationAbort,
+      ).toBeNull();
+    });
+    expect(openAnnotationEditor).not.toHaveBeenCalled();
+    expect(
+      shell.created.root.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.hidden,
+    ).toBe(true);
+    await controller.close();
+  });
+
   it('releases read-only activation ownership when navigation rejects before details can open', async () => {
     const [pdf] = files('Books/Signed-navigation-rejection.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -3713,12 +3797,21 @@ describe('ReaderController', () => {
     expect(createdViewport.stepScale).toHaveBeenCalledWith(1);
   });
 
-  it('does not let an older navigation failure roll back a newer request to the same page', async () => {
+  it('keeps superseded and aborted navigation rejections quiet', async () => {
     const [pdf] = files('Books/First.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const createdViewport = viewport(8);
-    const navigationCause = new Error('first request failed');
-    createdViewport.goTo.mockRejectedValueOnce(navigationCause).mockResolvedValue(undefined);
+    const staleNavigation = deferred<void>();
+    const staleReturned = deferred<void>();
+    createdViewport.goTo
+      .mockImplementationOnce(async () => {
+        try {
+          await staleNavigation.promise;
+        } finally {
+          staleReturned.resolve();
+        }
+      })
+      .mockResolvedValue(undefined);
     const createdSession = session(pdf.path, createdViewport);
     const adapter = adapterFor(pdf.path, createdSession);
     const shell = capturingShellFactory();
@@ -3726,6 +3819,7 @@ describe('ReaderController', () => {
       new DocumentAdapterRegistry([adapter.value]),
       shell.createShell,
     );
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await controller.open(pdf, createDiv());
     createdViewport.emit({ type: 'page-change', pageIndex: 1 });
@@ -3733,13 +3827,29 @@ describe('ReaderController', () => {
     shell.send({ type: 'previous-page' });
     shell.send({ type: 'previous-page' });
     await vi.waitFor(() => {
-      expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to navigate PDF page', {
-        pageIndex: 0,
-        cause: navigationCause,
-      });
+      expect(createdViewport.goTo).toHaveBeenCalledTimes(2);
+    });
+    staleNavigation.reject(new Error('superseded request failed'));
+    await staleReturned.promise;
+    await Promise.resolve();
+
+    const abortReturned = deferred<void>();
+    createdViewport.goTo.mockImplementationOnce(async () => {
+      try {
+        throw new DOMException('navigation cancelled', 'AbortError');
+      } finally {
+        abortReturned.resolve();
+      }
     });
     shell.send({ type: 'next-page' });
+    await abortReturned.promise;
+    await Promise.resolve();
 
+    expect(notice).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(createdViewport.goTo).toHaveBeenCalledTimes(3);
+    });
     expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, { pageIndex: 1 });
   });
 
