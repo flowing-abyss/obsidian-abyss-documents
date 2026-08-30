@@ -300,6 +300,43 @@ describe('AnnotationProjection', () => {
     expect(projection.snapshot().map((row) => row.annotation.comment)).toEqual(['Committed draft']);
   });
 
+  it('keeps one card optimistic across restored native editor aliases without waiting for extraction', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('pdfjs-editor-0', 'selection-1'));
+    projection.bindCommittedSelection('selection-1', verifiedAnnotation('pdfjs-editor-0'), 1);
+    const originalKey = projection.snapshot()[0]?.key;
+
+    projection.reconcile([verifiedAnnotation('30R')], 1);
+    projection.reconcile([verifiedAnnotation('31R')], 1);
+
+    expect(
+      projection.applyEditorPreview({
+        annotations: [verifiedAnnotation('pdfjs-editor-0')],
+        comment: 'Visible on the first frame',
+      }),
+    ).toBe(true);
+    expect(
+      projection.applyEditorPreview({
+        annotations: [verifiedAnnotation('pdfjs-editor-0')],
+        comment: 'Visible on the second frame',
+      }),
+    ).toBe(true);
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+      })),
+    ).toEqual([
+      {
+        comment: 'Visible on the second frame',
+        key: originalKey,
+        nativeId: '31R',
+      },
+    ]);
+  });
+
   it('replays a live create made during extraction of an older revision', () => {
     const projection = new AnnotationProjection();
     projection.reconcile([], 1);

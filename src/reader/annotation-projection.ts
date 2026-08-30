@@ -17,6 +17,7 @@ export interface AnnotationProjectionEditorUpdate {
 }
 
 export interface AnnotationProjectionRow {
+  readonly aliases?: readonly string[];
   readonly key: string;
   readonly annotation: DocumentAnnotation;
   readonly nativeId: string;
@@ -81,12 +82,7 @@ export class AnnotationProjection {
     const identities = new Set(update.annotations.map(annotationId));
     let changed = false;
     this.rows = this.rows.map((row) => {
-      if (
-        !identities.has(row.nativeId) &&
-        (row.provisionalId === undefined || !identities.has(row.provisionalId)) &&
-        !identities.has(annotationId(row.annotation))
-      )
-        return row;
+      if (!Array.from(identities).some((identity) => rowHasIdentity(row, identity))) return row;
       const currentOverlay = this.editorOverlays.get(row);
       const base = annotationWithoutPreview(row.annotation, currentOverlay);
       const overlay = editorOverlay(currentOverlay, update, { base, preview, revision });
@@ -155,6 +151,7 @@ export class AnnotationProjection {
       return true;
     }
     const nativeId = annotationId(annotation);
+    const aliases = retainedAliases(current, nativeId, provisionalId, nativeId);
     const bound = Object.freeze({
       ...current,
       annotation: Object.freeze({
@@ -172,6 +169,7 @@ export class AnnotationProjection {
       }),
       nativeId,
       provisionalId,
+      ...(aliases.length === 0 ? {} : { aliases }),
       writable: annotationIsWritable(annotation),
     });
     const overlay = this.editorOverlays.get(current);
@@ -181,9 +179,7 @@ export class AnnotationProjection {
   }
 
   private rowForCommittedSelection(provisionalId: string): AnnotationProjectionRow | undefined {
-    return this.rows.find(
-      (row) => row.nativeId === provisionalId || row.provisionalId === provisionalId,
-    );
+    return this.rows.find((row) => rowHasIdentity(row, provisionalId));
   }
 
   upsert(snapshot: ViewportAnnotationSnapshot, revision = 0): boolean {
@@ -205,10 +201,8 @@ export class AnnotationProjection {
   private upsertRows(snapshot: ViewportAnnotationSnapshot, replayKey?: string): boolean {
     const identities = new Set([snapshot.nativeId]);
     if (snapshot.provisionalId !== undefined) identities.add(snapshot.provisionalId);
-    const matches = this.rows.filter(
-      (row) =>
-        identities.has(row.nativeId) ||
-        (row.provisionalId !== undefined && identities.has(row.provisionalId)),
+    const matches = this.rows.filter((row) =>
+      Array.from(identities).some((identity) => rowHasIdentity(row, identity)),
     );
     const current = matches[0];
     if (current !== undefined) {
@@ -239,11 +233,8 @@ export class AnnotationProjection {
   ): AnnotationProjectionRow | undefined {
     return this.rows.find(
       (row) =>
-        row.nativeId === snapshot.nativeId ||
-        row.provisionalId === snapshot.nativeId ||
-        (snapshot.provisionalId !== undefined &&
-          (row.nativeId === snapshot.provisionalId ||
-            row.provisionalId === snapshot.provisionalId)),
+        rowHasIdentity(row, snapshot.nativeId) ||
+        (snapshot.provisionalId !== undefined && rowHasIdentity(row, snapshot.provisionalId)),
     );
   }
 
@@ -277,10 +268,8 @@ export class AnnotationProjection {
     const previousLength = this.rows.length;
     this.rows = this.rows.filter((row) => {
       const retained =
-        row.nativeId !== nativeId &&
-        annotationId(row.annotation) !== nativeId &&
-        row.provisionalId !== nativeId &&
-        (provisionalId === undefined || row.provisionalId !== provisionalId);
+        !rowHasIdentity(row, nativeId) &&
+        (provisionalId === undefined || !rowHasIdentity(row, provisionalId));
       if (!retained) this.editorOverlays.delete(row);
       return retained;
     });
@@ -423,11 +412,18 @@ export class AnnotationProjection {
       current?.annotation,
       snapshot,
     );
+    const aliases = retainedAliases(
+      current,
+      snapshot.nativeId,
+      provisionalId,
+      annotationId(annotation),
+    );
     return Object.freeze({
       key,
       annotation: annotationWithOverlay(annotation, overlay),
       nativeId: snapshot.nativeId,
       ...(provisionalId === undefined ? {} : { provisionalId }),
+      ...(aliases.length === 0 ? {} : { aliases }),
       writable: snapshot.writable ?? annotationIsWritable(annotation),
     });
   }
@@ -446,19 +442,27 @@ export class AnnotationProjection {
     )
       return current;
     const verifiedId = annotationId(annotation);
-    let provisionalId: string | undefined;
-    if (current !== undefined)
-      provisionalId = current.nativeId === verifiedId ? current.provisionalId : current.nativeId;
+    const provisionalId = previousNativeAlias(current, verifiedId);
+    const aliases = retainedAliases(current, verifiedId, provisionalId, verifiedId);
     const row = Object.freeze({
       key,
       annotation: projected,
       nativeId: verifiedId,
       ...(provisionalId === undefined ? {} : { provisionalId }),
+      ...(aliases.length === 0 ? {} : { aliases }),
       writable: annotationIsWritable(annotation),
     });
     if (overlay !== undefined) this.editorOverlays.set(row, overlay);
     return row;
   }
+}
+
+function previousNativeAlias(
+  current: AnnotationProjectionRow | undefined,
+  verifiedId: string,
+): string | undefined {
+  if (current === undefined) return undefined;
+  return current.nativeId === verifiedId ? current.provisionalId : current.nativeId;
 }
 
 function retainVerifiedMetadata(
@@ -702,6 +706,44 @@ function annotationId(annotation: DocumentAnnotation): string {
     : annotation.identity.fingerprint;
 }
 
+function rowHasIdentity(row: AnnotationProjectionRow, identity: string): boolean {
+  return rowIdentityAliases(row).includes(identity);
+}
+
+function rowIdentityAliases(row: AnnotationProjectionRow): readonly string[] {
+  return uniqueAliases(
+    row.nativeId,
+    row.provisionalId,
+    annotationId(row.annotation),
+    ...(row.aliases ?? []),
+  );
+}
+
+function retainedAliases(
+  current: AnnotationProjectionRow | undefined,
+  nativeId: string,
+  provisionalId: string | undefined,
+  annotationIdentity: string,
+): readonly string[] {
+  if (current === undefined) return [];
+  const nextIdentities = new Set(
+    [nativeId, provisionalId, annotationIdentity].filter(
+      (identity): identity is string => identity !== undefined && identity.length > 0,
+    ),
+  );
+  return rowIdentityAliases(current).filter((identity) => !nextIdentities.has(identity));
+}
+
+function uniqueAliases(...identities: ReadonlyArray<string | undefined>): readonly string[] {
+  return [
+    ...new Set(
+      identities.filter(
+        (identity): identity is string => identity !== undefined && identity.length > 0,
+      ),
+    ),
+  ];
+}
+
 function rowMatchesSnapshot(
   row: AnnotationProjectionRow,
   snapshot: ViewportAnnotationSnapshot,
@@ -714,6 +756,15 @@ function rowMatchesSnapshot(
   return (
     row.nativeId === snapshot.nativeId &&
     row.provisionalId === (snapshot.provisionalId ?? row.provisionalId) &&
+    sameStrings(
+      row.aliases ?? [],
+      retainedAliases(
+        row,
+        snapshot.nativeId,
+        snapshot.provisionalId ?? row.provisionalId,
+        annotationId(annotation),
+      ),
+    ) &&
     row.writable === (snapshot.writable ?? annotationIsWritable(annotation)) &&
     JSON.stringify(row.annotation) === JSON.stringify(annotation)
   );
@@ -782,10 +833,8 @@ function exactIdentityIndex(
   rows: readonly AnnotationProjectionRow[],
 ): Map<string, AnnotationProjectionRow[]> {
   const index = new Map<string, AnnotationProjectionRow[]>();
-  for (const row of rows) {
-    appendCandidate(index, row.nativeId, row);
-    if (row.provisionalId !== undefined) appendCandidate(index, row.provisionalId, row);
-  }
+  for (const row of rows)
+    for (const identity of rowIdentityAliases(row)) appendCandidate(index, identity, row);
   return index;
 }
 

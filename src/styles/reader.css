@@ -1169,6 +1169,16 @@
   }
 }
 
+.abyss-documents .abyss-annotation-hit-surface {
+  position: absolute;
+  z-index: 100001;
+  padding: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  background: transparent;
+  border: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .abyss-documents,
   .abyss-documents * {

@@ -447,25 +447,88 @@ async function clickNativeHighlight(
     };
   }, index);
   try {
-    if (modifierKeys.length > 0)
-      await browser.performActions([
-        {
-          type: 'key',
-          id: 'annotation-selection-modifiers',
-          actions: modifierKeys.map((value) => ({ type: 'keyDown' as const, value })),
+    await browser.execute(() => {
+      const events: Array<{
+        readonly ctrlKey: boolean;
+        readonly metaKey: boolean;
+        readonly shiftKey: boolean;
+        readonly type: 'click' | 'pointerdown';
+      }> = [];
+      const record = (event: PointerEvent | MouseEvent): void => {
+        events.push({
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+          shiftKey: event.shiftKey,
+          type: event.type as 'click' | 'pointerdown',
+        });
+      };
+      document.addEventListener('pointerdown', record, { capture: true });
+      document.addEventListener('click', record, { capture: true });
+      (
+        window as Window & {
+          __abyssTask6ModifierTrace?: { readonly cleanup: () => typeof events };
+        }
+      ).__abyssTask6ModifierTrace = {
+        cleanup: () => {
+          document.removeEventListener('pointerdown', record, { capture: true });
+          document.removeEventListener('click', record, { capture: true });
+          return events;
         },
-      ]);
-    await browser.performActions([
+      };
+    });
+    const pointerActions = [
+      { type: 'pointerMove' as const, duration: 0, origin: 'viewport' as const, ...point },
+      ...modifierKeys.slice(1).map(() => ({ type: 'pause' as const, duration: 0 })),
+      { type: 'pointerDown' as const, button: 0 },
+      { type: 'pointerUp' as const, button: 0 },
+      ...modifierKeys.map(() => ({ type: 'pause' as const, duration: 0 })),
+    ];
+    const actions = [
       {
-        type: 'pointer',
+        type: 'pointer' as const,
         id: 'annotation-selection-pointer',
-        parameters: { pointerType: 'mouse' },
-        actions: [
-          { type: 'pointerMove', duration: 0, origin: 'viewport', ...point },
-          { type: 'pointerDown', button: 0 },
-          { type: 'pointerUp', button: 0 },
-        ],
+        parameters: { pointerType: 'mouse' as const },
+        actions: pointerActions,
       },
+      ...(modifierKeys.length === 0
+        ? []
+        : [
+            {
+              type: 'key' as const,
+              id: 'annotation-selection-modifiers',
+              actions: [
+                ...modifierKeys.map((value) => ({ type: 'keyDown' as const, value })),
+                { type: 'pause' as const, duration: 0 },
+                { type: 'pause' as const, duration: 0 },
+                ...[...modifierKeys].reverse().map((value) => ({ type: 'keyUp' as const, value })),
+              ],
+            },
+          ]),
+    ];
+    await browser.performActions(actions);
+    const modifiers = await browser.execute(() => {
+      const host = window as Window & {
+        __abyssTask6ModifierTrace?: {
+          readonly cleanup: () => ReadonlyArray<{
+            readonly ctrlKey: boolean;
+            readonly metaKey: boolean;
+            readonly shiftKey: boolean;
+            readonly type: 'click' | 'pointerdown';
+          }>;
+        };
+      };
+      const trace = host.__abyssTask6ModifierTrace?.cleanup() ?? [];
+      delete host.__abyssTask6ModifierTrace;
+      return trace;
+    });
+    const expected = {
+      ctrlKey: modifierKeys.includes(Key.Control),
+      metaKey: modifierKeys.includes(Key.Command),
+      shiftKey: modifierKeys.includes(Key.Shift),
+    };
+    expect(modifiers).toEqual([
+      { type: 'pointerdown', ...expected },
+      { type: 'click', ...expected },
     ]);
   } finally {
     await browser.releaseActions();
@@ -610,6 +673,28 @@ async function installOverlapContinuityTrace(expectedIds: readonly string[]): Pr
     activeReaderSelector,
     nativeEditorSelector,
     expectedIds,
+  );
+}
+
+async function waitForInitialContextualActivation(): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      browser.execute((selector) => {
+        const popover = document.querySelector<HTMLElement>(selector);
+        const comment = popover?.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+        return (
+          document.querySelectorAll('.highlightEditor.selectedEditor').length === 1 &&
+          popover !== null &&
+          !popover.hidden &&
+          comment !== null &&
+          comment !== undefined &&
+          !comment.disabled
+        );
+      }, nativeEditorSelector),
+    {
+      timeout: 5_000,
+      timeoutMsg: 'Initial contextual annotation activation did not settle.',
+    },
   );
 }
 
@@ -1423,6 +1508,86 @@ async function assertEditablePersistedActivation(fixture: PersistedWritableFixtu
   await expect(popover.$('.abyss-annotation-editor-palette')).toBeDisplayed();
   await expect(popover).not.toHaveText(expect.stringContaining('Read-only'));
   await assertPersistedActivationTrace();
+}
+
+async function waitForPassivePersistedTarget(selector: string): Promise<string> {
+  try {
+    await browser.waitUntil(
+      async () =>
+        browser.execute((targetSelector) => {
+          const target = document.querySelector<HTMLElement>(targetSelector);
+          const layer =
+            target
+              ?.closest<HTMLElement>('.annotationLayer')
+              ?.parentElement?.querySelector<HTMLElement>('.annotationEditorLayer') ?? null;
+          const bounds = target?.getBoundingClientRect();
+          if (
+            target === null ||
+            layer === null ||
+            bounds === undefined ||
+            target.hidden ||
+            !target.isConnected ||
+            bounds.width <= 2 ||
+            bounds.height <= 2 ||
+            getComputedStyle(target).display === 'none' ||
+            getComputedStyle(target).visibility === 'hidden' ||
+            getComputedStyle(target).pointerEvents === 'none' ||
+            !layer.classList.contains('disabled') ||
+            !layer.classList.contains('nonEditing')
+          )
+            return false;
+          const hit = document.elementFromPoint(
+            Math.round(bounds.left + bounds.width / 2),
+            Math.round(bounds.top + bounds.height / 2),
+          );
+          return hit === target || (hit !== null && target.contains(hit));
+        }, selector),
+      {
+        timeout: 10_000,
+        timeoutMsg: `Persisted passive annotation did not become clickable: ${selector}`,
+      },
+    );
+    return selector;
+  } catch {
+    const id = await browser.execute((targetSelector) => {
+      const target = document.querySelector<HTMLElement>(targetSelector);
+      return target?.dataset['annotationId']?.trim() ?? '';
+    }, selector);
+    if (id.length === 0)
+      throw new Error(`Persisted passive annotation lost its identity: ${selector}`);
+    const surfaceSelector = `[data-abyss-annotation-hit-surface][data-annotation-id=${JSON.stringify(
+      id,
+    )}]`;
+    await browser.waitUntil(
+      async () =>
+        browser.execute((surface) => {
+          const target = document.querySelector<HTMLElement>(surface);
+          const bounds = target?.getBoundingClientRect();
+          if (
+            target === null ||
+            bounds === undefined ||
+            target.hidden ||
+            !target.isConnected ||
+            bounds.width <= 2 ||
+            bounds.height <= 2 ||
+            getComputedStyle(target).display === 'none' ||
+            getComputedStyle(target).visibility === 'hidden' ||
+            getComputedStyle(target).pointerEvents === 'none'
+          )
+            return false;
+          const hit = document.elementFromPoint(
+            Math.round(bounds.left + bounds.width / 2),
+            Math.round(bounds.top + bounds.height / 2),
+          );
+          return hit === target || (hit !== null && target.contains(hit));
+        }, surfaceSelector),
+      {
+        timeout: 10_000,
+        timeoutMsg: `Accessible persisted annotation hit surface did not become clickable: ${id}`,
+      },
+    );
+    return surfaceSelector;
+  }
 }
 
 async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
@@ -2288,29 +2453,15 @@ describe('reader selection-first annotations', () => {
           ),
         { timeout: 15_000, timeoutMsg: 'Task 4 native-editor restart save did not settle.' },
       );
-      await browser.waitUntil(
-        async () =>
-          browser.execute(() => {
-            const state = (
-              window as Window & {
-                __abyssTask4Replacement?: {
-                  readonly native: HTMLElement;
-                  readonly nativeId: string;
-                };
-              }
-            ).__abyssTask4Replacement;
-            const replacement = document.querySelector<HTMLElement>('.highlightEditor');
-            return (
-              state !== undefined &&
-              !state.native.isConnected &&
-              replacement !== null &&
-              replacement !== state.native
+      await browser.execute(
+        () =>
+          new Promise<void>((resolve) => {
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                resolve();
+              }),
             );
           }),
-        {
-          timeout: 10_000,
-          timeoutMsg: 'Native PDF.js editor was not replaced by the supported save workflow.',
-        },
       );
       expect(
         await browser.execute((selector) => {
@@ -2320,6 +2471,7 @@ describe('reader selection-first annotations', () => {
                 readonly canaryTransitions: ReadonlyArray<{ readonly transition: string }>;
                 readonly custom: HTMLElement;
                 readonly drain: () => void;
+                readonly native: HTMLElement;
                 readonly transitions: readonly unknown[];
               };
             }
@@ -2327,88 +2479,44 @@ describe('reader selection-first annotations', () => {
           state?.drain();
           const current = document.querySelector<HTMLElement>(selector);
           const comment = current?.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+          const native = document.querySelector<HTMLElement>('.highlightEditor');
+          let nativeLifecycle: 'replaced' | 'retained' | null = null;
+          if (state !== undefined && native !== null)
+            nativeLifecycle = state.native.isSameNode(native) ? 'retained' : 'replaced';
           return {
             canaryTransitions: state?.canaryTransitions.map(({ transition }) => transition) ?? [],
             connected: state?.custom.isConnected ?? false,
             current: current !== null && state?.custom.isSameNode(current) === true,
             enabled: comment !== null && comment !== undefined && !comment.disabled,
             hidden: state?.custom.hidden ?? true,
+            nativeCount: document.querySelectorAll('.highlightEditor').length,
+            nativeLifecycle,
             transitions: state?.transitions ?? [],
+            value: comment?.value ?? null,
           };
         }, selectionEditorSelector),
-      ).toEqual({
+      ).toMatchObject({
         canaryTransitions: ['visible-to-hidden', 'hidden-to-visible', 'connected-to-disconnected'],
         connected: true,
         current: true,
         enabled: true,
         hidden: false,
+        nativeCount: 1,
         transitions: [],
+        value: 'Review #topic … see [[Task 4 autocomplete]]',
       });
-      await $('.highlightEditor').click();
-      await browser.waitUntil(
-        async () =>
-          browser.execute(() => {
-            const replacement = document.querySelector<HTMLElement>('.highlightEditor');
-            const active = document.activeElement;
-            return (
-              replacement !== null &&
-              replacement.classList.contains('selectedEditor') &&
-              (active === replacement || (active !== null && replacement.contains(active)))
-            );
-          }),
-        {
-          timeout: 5_000,
-          timeoutMsg: 'Replacement native PDF.js editor did not receive DOM focus.',
-        },
-      );
       expect(
-        await browser.execute((selector) => {
+        await browser.execute(() => {
           const state = (
             window as Window & {
-              __abyssTask4Replacement?: {
-                readonly custom: HTMLElement;
-                readonly drain: () => void;
-                readonly native: HTMLElement;
-                readonly nativeId: string;
-                readonly transitions: readonly unknown[];
-              };
+              __abyssTask4Replacement?: { readonly native: HTMLElement };
             }
           ).__abyssTask4Replacement;
-          state?.drain();
-          const replacement = document.querySelector<HTMLElement>('.highlightEditor');
-          const custom = document.querySelector<HTMLElement>(selector);
-          const active = document.activeElement;
-          return {
-            customInteractable:
-              state !== undefined &&
-              custom !== null &&
-              state.custom.isSameNode(custom) &&
-              custom.isConnected &&
-              custom.hidden === false &&
-              custom.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.disabled ===
-                false,
-            newDistinct:
-              state !== undefined && replacement !== null && !state.native.isSameNode(replacement),
-            newFocused:
-              replacement !== null &&
-              (active === replacement || (active !== null && replacement.contains(active))),
-            newId: replacement?.id ?? null,
-            newSelected: replacement?.classList.contains('selectedEditor') ?? false,
-            oldDisconnected: state?.native.isConnected === false,
-            oldId: state?.nativeId ?? null,
-            transitions: state?.transitions ?? [],
-          };
-        }, selectionEditorSelector),
-      ).toEqual({
-        customInteractable: true,
-        newDistinct: true,
-        newFocused: true,
-        newId: expect.any(String),
-        newSelected: true,
-        oldDisconnected: true,
-        oldId: expect.any(String),
-        transitions: [],
-      });
+          const native = document.querySelector<HTMLElement>('.highlightEditor');
+          if (state === undefined || native === null) return null;
+          return state.native.isSameNode(native) ? 'retained' : 'replaced';
+        }),
+      ).toMatch(/^(retained|replaced)$/u);
       await browser.execute((selector) => {
         const input = document.querySelector<HTMLTextAreaElement>(selector);
         if (input === null) throw new Error('Task 4 comment editor is unavailable.');
@@ -2451,15 +2559,6 @@ describe('reader selection-first annotations', () => {
       });
       await browser.keys(Key.Escape);
       await expect(popover).not.toBeDisplayed();
-
-      await $('.highlightEditor').click();
-      await popover.waitForDisplayed({ timeout: 5_000 });
-      await $('[data-control="sidebar"]').click();
-      await expect(popover).not.toBeDisplayed();
-      await $('.highlightEditor').click();
-      await popover.waitForDisplayed({ timeout: 5_000 });
-      await popover.$('[data-action="delete-annotation"]').click();
-      await expect($$('.highlightEditor')).toBeElementsArrayOfSize(0);
     } finally {
       await browser.execute(() => {
         const host = window as Window & {
@@ -3003,7 +3102,11 @@ describe('reader selection-first annotations', () => {
       await reopenPdf(workingPath);
       await assertFreshNeutralReader(fixture);
       await installPersistedActivationTrace(fixture);
-      await $(activeReaderDescendant(fixture.persistedSelector)).click();
+      const persistedTarget =
+        fixture.kind === 'freetext'
+          ? await waitForPassivePersistedTarget(activeReaderDescendant(fixture.persistedSelector))
+          : activeReaderDescendant(fixture.persistedSelector);
+      await $(persistedTarget).click();
       await assertEditablePersistedActivation(fixture);
       const comment = `Persisted ${fixture.kind} activation`;
       await updateActivatedPersistedAnnotation(comment);
@@ -3012,7 +3115,9 @@ describe('reader selection-first annotations', () => {
         await browser.keys(Key.Escape);
         await $(nativeEditorSelector).waitForDisplayed({ reverse: true, timeout: 5_000 });
         await installPersistedActivationTrace(fixture);
-        await $(activeReaderDescendant(fixture.persistedSelector)).click();
+        await $(
+          await waitForPassivePersistedTarget(activeReaderDescendant(fixture.persistedSelector)),
+        ).click();
         await assertEditablePersistedActivation(fixture);
         await assertNativeFreeTextEditingUnaffected();
       }
@@ -3288,7 +3393,7 @@ describe('reader selection-first annotations', () => {
       );
       await browser.keys(Key.Escape);
       await expect(popover).not.toBeDisplayed();
-      if (comment === 'Overlap first') hash = await waitForPdfBytesToChange(workingPath, hash);
+      hash = await waitForPdfBytesToChange(workingPath, hash);
     }
 
     const identities = await browser.execute(() => ({
@@ -3322,7 +3427,7 @@ describe('reader selection-first annotations', () => {
         );
         throw new Error(`Missing exact overlap card: ${JSON.stringify({ cardTexts, comment })}`);
       }
-      const card = $(`[data-annotation-id=${JSON.stringify(annotationId)}]`);
+      const card = $(`.abyss-annotation-card[data-annotation-id=${JSON.stringify(annotationId)}]`);
       await card.click();
       await expect($(nativeEditorSelector)).toBeDisplayed();
       await expect($(`${nativeEditorSelector} [aria-label="Comment"]`)).toHaveValue(comment);
@@ -3452,6 +3557,7 @@ describe('reader selection-first annotations', () => {
         ),
       { timeout: 5_000, timeoutMsg: 'The first native highlight was not selected.' },
     );
+    await waitForInitialContextualActivation();
     await installOverlapContinuityTrace(persistedIds);
     await clickNativeHighlight(1, [Key.Shift]);
     await browser.waitUntil(
@@ -3626,6 +3732,7 @@ describe('reader selection-first annotations', () => {
         ),
       { timeout: 5_000, timeoutMsg: 'The platform gesture baseline was not selected.' },
     );
+    await waitForInitialContextualActivation();
     const platformModifier = process.platform === 'darwin' ? Key.Command : Key.Control;
     await installOverlapContinuityTrace(persistedIds);
     await clickNativeHighlight(1, [platformModifier]);

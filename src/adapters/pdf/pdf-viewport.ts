@@ -113,6 +113,12 @@ interface MountedAnnotationContext {
   readonly pageIndex: number;
 }
 
+interface HiddenAnnotationHitTarget {
+  readonly id: string;
+  readonly node: HTMLElement;
+  readonly page: HTMLElement;
+}
+
 interface FindRequest {
   readonly query: string;
   readonly findPrevious: boolean;
@@ -139,6 +145,56 @@ function isNativeFreeTextEditingTarget(target: Element): boolean {
     (target
       .closest('[contenteditable]:not([contenteditable="false"])')
       ?.closest('.annotationEditorLayer .freeTextEditor') ?? null) !== null
+  );
+}
+
+function annotationHitSurfaceId(target: Element): string | null {
+  const surface = target.closest<HTMLElement>(
+    '[data-abyss-annotation-hit-surface][data-annotation-id]',
+  );
+  const id = surface?.dataset['annotationId']?.trim() ?? '';
+  return id.length === 0 ? null : id;
+}
+
+function hiddenAnnotationHitTargets(
+  root: HTMLElement,
+): ReadonlyMap<string, HiddenAnnotationHitTarget> {
+  const targets = new Map<string, HiddenAnnotationHitTarget>();
+  for (const node of Array.from(
+    root.querySelectorAll<HTMLElement>(
+      '.annotationLayer .freeTextAnnotation[data-annotation-id][hidden]',
+    ),
+  )) {
+    const target = hiddenAnnotationHitTarget(node);
+    if (target === null) continue;
+    const pageNumber = target.page.dataset['pageNumber']?.trim() ?? '';
+    if (pageNumber.length > 0) targets.set(`${pageNumber}\u0000${target.id}`, target);
+  }
+  return targets;
+}
+
+function hiddenAnnotationHitTarget(node: HTMLElement): HiddenAnnotationHitTarget | null {
+  const page = node.closest<HTMLElement>('[data-page-number]');
+  const id = node.dataset['annotationId']?.trim() ?? '';
+  if (
+    page === null ||
+    id.length === 0 ||
+    page.querySelector('.annotationEditorLayer.disabled.nonEditing') === null
+  )
+    return null;
+  return { id, node, page };
+}
+
+function annotationHitSurfaceCss(
+  target: HTMLElement,
+  style: CSSStyleDeclaration | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    ['height', 'left', 'top', 'transform', 'width'].flatMap((property) => {
+      const inline = target.style.getPropertyValue(property);
+      const value = inline.length > 0 ? inline : (style?.getPropertyValue(property) ?? '');
+      return value.length === 0 ? [] : [[property, value]];
+    }),
   );
 }
 
@@ -267,6 +323,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private selectionObserverInstance: PdfDomSelectionObserver | null = null;
   private selectionSnapshotUnsubscribe: (() => void) | null = null;
   private annotationMutationUnsubscribe: (() => void) | null = null;
+  private annotationHitSurfaceObserver: MutationObserver | null = null;
   private pendingPointerActivation: { readonly id: string; readonly timeout: number } | null = null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
@@ -700,6 +757,10 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.annotationMutationUnsubscribe = null;
     });
     attempt(() => {
+      this.annotationHitSurfaceObserver?.disconnect();
+      this.annotationHitSurfaceObserver = null;
+    });
+    attempt(() => {
       this.selectionObserverInstance?.destroy();
     });
     attempt(() => {
@@ -732,6 +793,19 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.selectionSnapshotUnsubscribe = this.selectionObserverInstance.onSelection((selection) => {
       this.currentSelection = selection;
     });
+    const Observer = root.ownerDocument.defaultView?.MutationObserver;
+    if (Observer === undefined) return;
+    const observer = new Observer(() => {
+      this.syncHiddenAnnotationHitSurfaces();
+    });
+    observer.observe(root, {
+      attributeFilter: ['class', 'data-annotation-id', 'hidden', 'style'],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    this.annotationHitSurfaceObserver = observer;
+    this.syncHiddenAnnotationHitSurfaces();
   }
 
   private registerRootListeners(root: HTMLElement): void {
@@ -825,6 +899,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private publishMountedAnnotationSnapshot(detectRemovals = false): void {
     if (this.destroyPromise !== null || this.root === null || this.viewer === null) return;
+    this.syncHiddenAnnotationHitSurfaces();
     const annotations = this.collectMountedAnnotationSnapshots();
     const loadedPages = this.loadedAnnotationPages();
     const next = new Map(
@@ -872,6 +947,42 @@ export class PdfDocumentViewport implements DocumentViewport {
         ...(previous.provisionalId === undefined ? {} : { provisionalId: previous.provisionalId }),
       },
     });
+  }
+
+  private syncHiddenAnnotationHitSurfaces(): void {
+    const root = this.root;
+    if (root === null || this.destroyPromise !== null) return;
+    const desired = hiddenAnnotationHitTargets(root);
+    const existing = new Map(
+      Array.from(
+        root.querySelectorAll<HTMLButtonElement>('[data-abyss-annotation-hit-surface]'),
+        (surface) => [surface.dataset['annotationHitSurfaceKey'] ?? '', surface],
+      ),
+    );
+    for (const [key, surface] of existing) {
+      if (!desired.has(key)) surface.remove();
+    }
+    for (const [key, target] of desired) {
+      const surface = existing.get(key) ?? this.createAnnotationHitSurface(target.id, key);
+      if (!target.page.contains(surface)) target.page.append(surface);
+      this.positionAnnotationHitSurface(surface, target.node);
+    }
+  }
+
+  private createAnnotationHitSurface(id: string, key: string): HTMLButtonElement {
+    const root = this.requireMounted(this.root);
+    const surface = root.createEl('button', { cls: 'abyss-annotation-hit-surface' });
+    surface.type = 'button';
+    surface.dataset['abyssAnnotationHitSurface'] = '';
+    surface.dataset['annotationHitSurfaceKey'] = key;
+    surface.dataset['annotationId'] = id;
+    surface.setAttribute('aria-label', 'Edit free text annotation');
+    return surface;
+  }
+
+  private positionAnnotationHitSurface(surface: HTMLElement, target: HTMLElement): void {
+    const style = target.ownerDocument.defaultView?.getComputedStyle(target);
+    surface.setCssProps(annotationHitSurfaceCss(target, style));
   }
 
   private loadedAnnotationPages(): ReadonlySet<number> {
@@ -1452,6 +1563,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private annotationActivationId(target: Element): string | null {
+    const hitSurfaceId = annotationHitSurfaceId(target);
+    if (hitSurfaceId !== null) return hitSurfaceId;
     if (target.closest('a, button, input, select, textarea') !== null) return null;
     if (isNativeFreeTextEditingTarget(target)) return null;
     const node = target.closest<HTMLElement>(

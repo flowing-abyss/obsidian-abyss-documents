@@ -1653,6 +1653,49 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.annotationEditorRequests).toEqual([]);
   });
 
+  it('adds an accessible hit surface for persisted FreeText hidden during neutral mode teardown', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const interaction = fixture.viewport.annotationInteraction;
+    if (eventBus === undefined || viewer === undefined || interaction === null)
+      throw new Error('Expected mounted PDF annotation interaction.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    const page = root?.querySelector<HTMLElement>('[data-page-number="1"]') ?? null;
+    if (page === null) throw new Error('Expected the first PDF page.');
+    const imported = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createEl('section', { cls: 'freeTextAnnotation' });
+    imported.dataset['annotationId'] = 'hidden-freetext';
+    imported.hidden = true;
+    imported.setCssProps({ height: '12%', left: '20%', top: '30%', width: '25%' });
+    page.createDiv({ cls: 'annotationEditorLayer disabled nonEditing' });
+    const focus = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+
+    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 1 });
+
+    const surface = page.querySelector<HTMLButtonElement>(
+      '[data-abyss-annotation-hit-surface][data-annotation-id="hidden-freetext"]',
+    );
+    expect(surface).not.toBeNull();
+    expect(surface).toMatchObject({
+      ariaLabel: 'Edit free text annotation',
+      disabled: false,
+    });
+    surface?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    surface?.click();
+    await Promise.resolve();
+
+    expect(focus).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledWith('hidden-freetext', {
+      kind: 'root-click',
+    });
+  });
+
   it('dismisses stale tokens without a failure Notice', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
