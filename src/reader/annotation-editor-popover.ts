@@ -98,6 +98,7 @@ interface AnnotationCreationJob {
   completed: boolean;
   draft: AnnotationCreationDraft;
   pendingUpdate: AnnotationEditorUpdate | null;
+  settlement: Promise<boolean> | null;
 }
 
 type SelectionCreationState = 'draft' | 'pending' | 'materialized';
@@ -291,9 +292,10 @@ export class AnnotationEditorPopover {
   private isAnnotationOwnerTarget(target: EventTarget | null): boolean {
     return (
       target instanceof ownerWindow(this.host).Element &&
-      (target.closest(
-        '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)',
-      ) !== null ||
+      (target.matches('.annotationEditorLayer.disabled.nonEditing') ||
+        target.closest(
+          '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)',
+        ) !== null ||
         target.closest('.abyss-annotation-card[aria-current="true"]') !== null)
     );
   }
@@ -303,10 +305,20 @@ export class AnnotationEditorPopover {
   }
 
   get hasPendingChanges(): boolean {
-    return this.commentDirty || this.pendingCreationUpdates.size > 0;
+    return (
+      this.commentDirty ||
+      (this.selectionCreation !== null && !this.selectionCreation.completed) ||
+      this.pendingCreationUpdates.size > 0
+    );
   }
 
-  flushPendingChanges(): boolean {
+  async flushPendingChanges(): Promise<boolean> {
+    const creation = this.selectionCreation;
+    if (creation !== null && !creation.completed) {
+      if (creation.settlement === null) return false;
+      if (!(await creation.settlement)) return false;
+      return this.flushPendingChanges();
+    }
     if (!this.flushPendingMetadata()) return false;
     return this.retryPendingUpdates();
   }
@@ -511,25 +523,28 @@ export class AnnotationEditorPopover {
         comment,
         selection: request.target.selection,
       });
-      void Promise.resolve(result).then(
-        (annotation) => {
-          if (job.cancelled) return;
+      job.settlement = Promise.resolve(result)
+        .then((annotation) => {
+          if (job.cancelled) return false;
           if (annotation === 'dismissed') {
             if (generation === this.openGeneration && this.active === request) {
               this.selectionCreationState = 'draft';
-              this.selectionCreation = null;
             }
-          } else if (annotation !== 'created' && annotation !== null && annotation !== undefined)
+            return false;
+          }
+          if (annotation !== 'created' && annotation !== null && annotation !== undefined) {
             this.finishSelectionCreation(job, annotation);
-        },
-        (cause: unknown) => {
-          if (job.cancelled) return;
-          if (generation !== this.openGeneration || this.active !== request) return;
-          this.selectionCreationState = 'draft';
-          this.selectionCreation = null;
-          console.error('[abyss-documents] Could not create selection annotation', { cause });
-        },
-      );
+            return true;
+          }
+          return false;
+        })
+        .catch((cause: unknown) => {
+          if (!job.cancelled && generation === this.openGeneration && this.active === request) {
+            this.selectionCreationState = 'draft';
+            console.error('[abyss-documents] Could not create selection annotation', { cause });
+          }
+          return false;
+        });
     } catch (cause) {
       this.selectionCreationState = 'draft';
       this.selectionCreation = null;
@@ -549,6 +564,7 @@ export class AnnotationEditorPopover {
       generation,
       pendingUpdate: null,
       request,
+      settlement: null,
     };
   }
 

@@ -560,6 +560,52 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
+  it('holds lifecycle flush until pending selection creation materializes', async () => {
+    const host = document.body.createDiv();
+    const creation = deferred<DocumentAnnotation>();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onCreate: () => creation.promise,
+    });
+    popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+
+    let flushed = false;
+    const flushing = Promise.resolve(popover.flushPendingChanges()).then((result) => {
+      flushed = true;
+      return result;
+    });
+    await Promise.resolve();
+    expect(flushed).toBe(false);
+
+    creation.resolve(editableAnnotation({ color: '#5fb236', comment: '' }));
+    await expect(flushing).resolves.toBe(true);
+    expect(popover.isOpen).toBe(true);
+    popover.destroy();
+    host.remove();
+  });
+
+  it('fails lifecycle flush closed when pending selection creation rejects', async () => {
+    const host = document.body.createDiv();
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const creation = deferred<DocumentAnnotation>();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onCreate: () => creation.promise,
+    });
+    popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+    const flushing = Promise.resolve(popover.flushPendingChanges());
+
+    creation.reject(new Error('native creation failed'));
+
+    await expect(flushing).resolves.toBe(false);
+    expect(popover.isOpen).toBe(true);
+    expect(log).toHaveBeenCalledOnce();
+    popover.destroy();
+    host.remove();
+  });
+
   it('returns a dismissed selection creation to its editable draft state', async () => {
     const host = document.body.createDiv();
     const onCreate = vi
@@ -1372,7 +1418,7 @@ describe('AnnotationEditorPopover', () => {
     ],
   ] as const)(
     'reverts an optimistic metadata preview when native persistence %s',
-    (_label, persist) => {
+    async (_label, persist) => {
       const host = document.body.createDiv();
       const annotation = editableAnnotation({ comment: 'Persisted #Original' });
       const onPreviewUpdate = vi.fn();
@@ -1391,8 +1437,11 @@ describe('AnnotationEditorPopover', () => {
         annotations: [annotation],
         comment: 'Unsaved',
       });
-      if (_label === 'throws') expect(() => popover.flushPendingChanges()).toThrow('failed');
-      else expect(popover.flushPendingChanges()).toBe(false);
+      if (_label === 'throws') {
+        await expect(popover.flushPendingChanges()).rejects.toThrow('failed');
+      } else {
+        await expect(popover.flushPendingChanges()).resolves.toBe(false);
+      }
       expect(onPreviewRevert).toHaveBeenLastCalledWith({
         annotations: [annotation],
         comment: 'Persisted #Original',
@@ -1920,41 +1969,79 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
-  it('defers focus-away dismissal across native editor DOM replacement', async () => {
+  it('keeps a materialized selection open when save replacement focuses the disabled editor layer', async () => {
     const host = document.body.createDiv();
-    const nativeLayer = document.body.createDiv({ cls: 'annotationEditorLayer' });
-    const oldEditor = nativeLayer.createEl('button', { cls: 'highlightEditor' });
+    const oldLayer = document.body.createDiv({ cls: 'annotationEditorLayer' });
+    const oldEditor = oldLayer.createEl('button', { cls: 'highlightEditor selectedEditor' });
+    const creation = deferred<DocumentAnnotation>();
+    const chosenSelection = selection();
+    const onClose = vi.fn();
+    const onCreate = vi.fn(() => creation.promise);
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: chosenSelection }),
+      onClose,
+      onCreate,
+    });
+    const samePopover = popover.element;
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
+    oldEditor.focus();
+    comment.focus();
+    popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+    expect(onCreate).toHaveBeenCalledExactlyOnceWith({
+      color: '#5fb236',
+      comment: '',
+      selection: chosenSelection,
+    });
+    creation.resolve(editableAnnotation({ color: '#5fb236', comment: '' }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    oldLayer.remove();
+    const replacementLayer = document.body.createDiv({
+      cls: 'annotationEditorLayer disabled nonEditing',
+    });
+    replacementLayer.tabIndex = -1;
+    replacementLayer.focus();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect({
+      layerFocused: host.ownerDocument.activeElement === replacementLayer,
+      oldDisconnected: !oldLayer.isConnected,
+      sameConnectedPopover: popover.element === samePopover && samePopover.isConnected,
+    }).toEqual({
+      layerFocused: true,
+      oldDisconnected: true,
+      sameConnectedPopover: true,
+    });
+    expect(popover.isOpen).toBe(true);
+    expect(popover.element.hidden).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+    popover.destroy();
+    replacementLayer.remove();
+    host.remove();
+  });
+
+  it('closes with focus-away when focus moves to an unrelated control', async () => {
+    const host = document.body.createDiv();
+    const unrelated = document.body.createEl('button');
     const onClose = vi.fn();
     const popover = new AnnotationEditorPopover(host);
     popover.open({
       ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
       onClose,
     });
-    const samePopover = popover.element;
-    oldEditor.focus();
-    oldEditor.remove();
-    document.body.tabIndex = -1;
-    document.body.focus();
-    document.body.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-    const replacement = nativeLayer.createEl('button', { cls: 'highlightEditor' });
-    replacement.focus();
+    popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.focus();
+
+    unrelated.focus();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
 
-    expect({
-      newFocused: host.ownerDocument.activeElement === replacement,
-      newIsDistinct: replacement !== oldEditor,
-      oldDisconnected: !oldEditor.isConnected,
-      sameConnectedPopover: popover.element === samePopover && samePopover.isConnected,
-    }).toEqual({
-      newFocused: true,
-      newIsDistinct: true,
-      oldDisconnected: true,
-      sameConnectedPopover: true,
-    });
-    expect(popover.isOpen).toBe(true);
-    expect(onClose).not.toHaveBeenCalled();
+    expect(popover.isOpen).toBe(false);
+    expect(popover.element.hidden).toBe(true);
+    expect(onClose).toHaveBeenCalledExactlyOnceWith('focus-away');
     popover.destroy();
-    nativeLayer.remove();
+    unrelated.remove();
     host.remove();
   });
 

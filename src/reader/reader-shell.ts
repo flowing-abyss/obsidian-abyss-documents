@@ -148,7 +148,7 @@ export class ReaderShell implements AnnotationInteractionHost {
     return this.annotationEditor.close();
   }
 
-  flushAnnotationEditor(): boolean {
+  flushAnnotationEditor(): Promise<boolean> {
     return this.annotationEditor.flushPendingChanges();
   }
 

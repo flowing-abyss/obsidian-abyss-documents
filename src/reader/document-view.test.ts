@@ -1,5 +1,6 @@
 import {
   App,
+  FileView as MockFileView,
   TFile as MockTFile,
   WorkspaceLeaf as MockWorkspaceLeaf,
   Notice,
@@ -258,6 +259,20 @@ describe('AbyssDocumentView', () => {
     await fixture.view.onUnloadFile(fixture.file);
 
     expect(reader.close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the file loaded when controller close rejects', async () => {
+    const reader = controller();
+    const cause = new DOMException('Pending annotation creation.', 'InvalidStateError');
+    reader.close.mockRejectedValueOnce(cause);
+    const fixture = viewFixture(reader.reader);
+    await fixture.view.onLoadFile(fixture.file);
+    const unload = vi.spyOn(MockFileView.prototype, 'onUnloadFile');
+
+    await expect(fixture.view.onUnloadFile(fixture.file)).rejects.toBe(cause);
+
+    expect(unload.mock.calls).toHaveLength(0);
+    expect(fixture.view.file).toBe(fixture.file);
   });
 
   it('forwards outline and document-search commands to its reader controller', () => {

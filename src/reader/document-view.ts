@@ -116,13 +116,10 @@ export class AbyssDocumentView extends FileView {
 
   override async onUnloadFile(file: TFile): Promise<void> {
     ++this.loadGeneration;
-    try {
-      await this.controller.close();
-    } finally {
-      this.lastOpenFailureNoticeKey = null;
-      this.clearOpenFailure();
-      await super.onUnloadFile(file);
-    }
+    await this.controller.close();
+    this.lastOpenFailureNoticeKey = null;
+    this.clearOpenFailure();
+    await super.onUnloadFile(file);
   }
 
   showOutline(): void {

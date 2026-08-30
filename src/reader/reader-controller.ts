@@ -365,15 +365,13 @@ export class ReaderController {
     }
   }
 
-  saveDocument(): Promise<void> {
-    if (this.shell?.flushAnnotationEditor() === false)
-      return Promise.reject(
-        new DOMException(
-          'The annotation editor still has changes that could not be persisted.',
-          'InvalidStateError',
-        ),
+  async saveDocument(): Promise<void> {
+    if ((await this.shell?.flushAnnotationEditor()) === false)
+      throw new DOMException(
+        'The annotation editor still has changes that could not be persisted.',
+        'InvalidStateError',
       );
-    return this.autosave?.flush() ?? Promise.resolve();
+    await this.autosave?.flush();
   }
 
   setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): void {
@@ -1379,7 +1377,7 @@ export class ReaderController {
   private async flushBeforeRelease(): Promise<void> {
     this.lifecycleFlushActive = true;
     try {
-      if (this.shell?.flushAnnotationEditor() === false)
+      if ((await this.shell?.flushAnnotationEditor()) === false)
         throw new DOMException(
           'The annotation editor still has changes that could not be persisted.',
           'InvalidStateError',
