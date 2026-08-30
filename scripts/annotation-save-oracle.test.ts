@@ -18,7 +18,13 @@ const settled = {
 
 describe('annotation E2E save oracle', () => {
   it('requires a verified successful Retry before accepting a transient save failure', () => {
-    const baseline = { failures: 0, minimumSaves: 2, recoveries: 0 };
+    const baseline = {
+      failures: 0,
+      minimumCommittedRevision: 1,
+      minimumSavedGeneration: 3,
+      minimumSaves: 2,
+      recoveries: 0,
+    };
 
     expect(isVerifiedAnnotationSaveSettled({ ...settled, saves: 1 }, baseline)).toBe(false);
     expect(isVerifiedAnnotationSaveSettled({ ...settled, recoveries: 0 }, baseline)).toBe(false);
@@ -26,7 +32,13 @@ describe('annotation E2E save oracle', () => {
   });
 
   it('rejects dirty, paused, active, or lagging autosave state after a success counter advances', () => {
-    const baseline = { failures: 1, minimumSaves: 2, recoveries: 1 };
+    const baseline = {
+      failures: 1,
+      minimumCommittedRevision: 1,
+      minimumSavedGeneration: 3,
+      minimumSaves: 2,
+      recoveries: 1,
+    };
 
     expect(isVerifiedAnnotationSaveSettled({ ...settled, isDirty: true }, baseline)).toBe(false);
     expect(isVerifiedAnnotationSaveSettled({ ...settled, paused: true }, baseline)).toBe(false);
@@ -44,11 +56,41 @@ describe('annotation E2E save oracle', () => {
   });
 
   it('accepts a save that completed before polling begins when its baseline was captured first', () => {
-    const baseline = { failures: 0, minimumSaves: 2, recoveries: 0 };
+    const baseline = {
+      failures: 0,
+      minimumCommittedRevision: 1,
+      minimumSavedGeneration: 3,
+      minimumSaves: 2,
+      recoveries: 0,
+    };
 
     expect(isVerifiedAnnotationSaveSettled({ ...settled, failures: 0 }, baseline)).toBe(true);
     expect(isVerifiedAnnotationSaveSettled({ ...settled, failures: 0, saves: 1 }, baseline)).toBe(
       false,
     );
+  });
+
+  it('requires the captured PDF revision and generation to advance with the target save', () => {
+    const baseline = {
+      failures: 0,
+      minimumCommittedRevision: 2,
+      minimumSavedGeneration: 4,
+      minimumSaves: 2,
+      recoveries: 0,
+    };
+
+    expect(isVerifiedAnnotationSaveSettled({ ...settled, failures: 0 }, baseline)).toBe(false);
+    expect(
+      isVerifiedAnnotationSaveSettled(
+        {
+          ...settled,
+          committedRevision: 2,
+          failures: 0,
+          pendingRevision: 2,
+          savedGeneration: 4,
+        },
+        baseline,
+      ),
+    ).toBe(true);
   });
 });

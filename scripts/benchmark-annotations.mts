@@ -322,10 +322,17 @@ async function main(): Promise<void> {
   }
 }
 
+function exactReaderLeafSource(workingPath: string): string {
+  return `const candidates=app.workspace.getLeavesOfType('abyss-document-view').filter(candidate=>candidate.getViewState()?.state?.file===${JSON.stringify(workingPath)});if(candidates.length!==1)throw new Error('Benchmark reader leaf cardinality mismatch.');const leaf=candidates[0];if(!leaf)throw new Error('Benchmark reader leaf unavailable.');const root=leaf.containerEl.querySelector('[data-abyss-document]');if(!root)throw new Error('Benchmark reader root unavailable.');`;
+}
+
+function readerRootStatusSource(workingPath: string): string {
+  return `const candidates=app.workspace.getLeavesOfType('abyss-document-view').filter(candidate=>candidate.getViewState()?.state?.file===${JSON.stringify(workingPath)});const leaf=candidates.length===1?candidates[0]:null;const root=leaf?.containerEl.querySelector('[data-abyss-document]')??null;`;
+}
+
 async function qualifyRecoverableAnnotationPressure(input: {
   readonly executable: string;
   readonly failuresBefore: number;
-  readonly openedLeafId: string;
   readonly recoveriesBefore: number;
   readonly sampleHeap: () => Promise<void>;
   readonly vaultName: string;
@@ -387,16 +394,19 @@ async function qualifyRecoverableAnnotationPressure(input: {
     );
   }
   await restoreRecoverableMemoryPressure(input.executable, input.vaultName);
-  const reopenedLeafId = await evaluate(
+  const exactPriorLeaf = exactReaderLeafSource(input.workingPath);
+  await evaluate(
     input.executable,
     input.vaultName,
-    `(async()=>{const previousLeaf=app.workspace.getLeavesOfType('abyss-document-view').find(leaf=>String(leaf.id)===${JSON.stringify(input.openedLeafId)});const previousRoot=previousLeaf?.containerEl?.querySelector('[data-abyss-document]')??null;if(previousRoot===null)throw new Error('Prior annotation reader root unavailable.');globalThis.__abyssAnnotationBenchmarkPreviousRoot=previousRoot;for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const file=app.vault.getFileByPath(${JSON.stringify(input.workingPath)});if(!file)throw new Error('Recovered benchmark PDF unavailable.');const leaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(leaf,{focus:true});await leaf.openFile(file);return String(leaf.id)})()`,
+    `(async()=>{${exactPriorLeaf}globalThis.__abyssAnnotationBenchmarkPreviousRoot=root;for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const file=app.vault.getFileByPath(${JSON.stringify(input.workingPath)});if(!file)throw new Error('Recovered benchmark PDF unavailable.');const reopenedLeaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(reopenedLeaf,{focus:true});await reopenedLeaf.openFile(file);return true})()`,
   );
+  const reopenedRootStatus = readerRootStatusSource(input.workingPath);
+  const exactReopenedLeaf = exactReaderLeafSource(input.workingPath);
   try {
     await waitFor(
       input.executable,
       input.vaultName,
-      `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});const leaf=app.workspace.getLeavesOfType('abyss-document-view').find(candidate=>String(candidate.id)===${JSON.stringify(reopenedLeafId)});const root=leaf?.containerEl?.querySelector('[data-abyss-document]')??null;return ready({hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:root!==globalThis.__abyssAnnotationBenchmarkPreviousRoot,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${JSON.stringify(input.workingPath)},${JSON.stringify(reopenedLeafId)})})()`,
+      `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});${reopenedRootStatus}return ready({candidateCount:candidates.length,hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:root!==null&&root!==globalThis.__abyssAnnotationBenchmarkPreviousRoot,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${JSON.stringify(input.workingPath)})})()`,
       'Recovered annotation PDF did not reopen to a usable page.',
       30_000,
     );
@@ -404,7 +414,7 @@ async function qualifyRecoverableAnnotationPressure(input: {
     const diagnostics = await evaluate(
       input.executable,
       input.vaultName,
-      `JSON.stringify((()=>{const leaf=app.workspace.getLeavesOfType('abyss-document-view').find(candidate=>String(candidate.id)===${JSON.stringify(reopenedLeafId)});const root=leaf?.containerEl?.querySelector('[data-abyss-document]')??null;return{expectedLeafId:${JSON.stringify(reopenedLeafId)},actualLeafIds:app.workspace.getLeavesOfType('abyss-document-view').map(candidate=>String(candidate.id)),hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:root!==globalThis.__abyssAnnotationBenchmarkPreviousRoot,hasReaderRoot:root!==null,path:leaf?.getViewState()?.state?.file??null}})())`,
+      `JSON.stringify((()=>{${reopenedRootStatus}return{candidateCount:candidates.length,candidates:candidates.map(candidate=>({id:String(candidate.id),path:candidate.getViewState()?.state?.file??null})),hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:root!==null&&root!==globalThis.__abyssAnnotationBenchmarkPreviousRoot,hasReaderRoot:root!==null,path:leaf?.getViewState()?.state?.file??null}})())`,
     );
     throw new Error(`${reason(cause)} Diagnostics: ${diagnostics}`);
   }
@@ -416,12 +426,12 @@ async function qualifyRecoverableAnnotationPressure(input: {
   await evaluate(
     input.executable,
     input.vaultName,
-    `(()=>{document.querySelector('[data-control="sidebar"]')?.click();document.querySelector('[data-tab="annotations"]')?.click();return true})()`,
+    `(()=>{${exactReopenedLeaf}const sidebar=root.querySelector('[data-control="sidebar"]');if(!(sidebar instanceof HTMLButtonElement))throw new Error('Recovered benchmark sidebar control unavailable.');if(sidebar.getAttribute('aria-pressed')!=='true')sidebar.click();const tab=root.querySelector('[data-tab="annotations"]');if(!(tab instanceof HTMLButtonElement))throw new Error('Recovered benchmark annotations tab unavailable.');tab.click();return true})()`,
   );
   await waitFor(
     input.executable,
     input.vaultName,
-    `document.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10001'`,
+    `(()=>{${exactReopenedLeaf}return root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10001'})()`,
     'Recovered annotation did not reindex from verified PDF bytes.',
     30_000,
   );
@@ -509,15 +519,17 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
       await setPluginEnabled(executable, vaultName, true);
       await installNetworkProbe(executable, vaultName);
       const workingPath = `Documents/annotation-benchmark-${iteration + 1}.pdf`;
-      const openedLeafId = await evaluate(
+      await evaluate(
         executable,
         vaultName,
-        `(async()=>{for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const bytes=await app.vault.adapter.readBinary('Documents/annotations-10000.pdf');const path=${JSON.stringify(workingPath)};const existing=app.vault.getFileByPath(path);if(existing)await app.vault.modifyBinary(existing,bytes);else await app.vault.createBinary(path,bytes);const file=app.vault.getFileByPath(path);if(!file)throw new Error('Annotation benchmark PDF unavailable.');const leaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(leaf,{focus:true});await leaf.openFile(file);return String(leaf.id)})()`,
+        `(async()=>{for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const bytes=await app.vault.adapter.readBinary('Documents/annotations-10000.pdf');const path=${JSON.stringify(workingPath)};const existing=app.vault.getFileByPath(path);if(existing)await app.vault.modifyBinary(existing,bytes);else await app.vault.createBinary(path,bytes);const file=app.vault.getFileByPath(path);if(!file)throw new Error('Annotation benchmark PDF unavailable.');const leaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(leaf,{focus:true});await leaf.openFile(file);return true})()`,
       );
+      const openedRootStatus = readerRootStatusSource(workingPath);
+      const exactOpenedLeaf = exactReaderLeafSource(workingPath);
       await waitFor(
         executable,
         vaultName,
-        `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});const leaf=app.workspace.getMostRecentLeaf();const root=leaf?.containerEl?.querySelector('[data-abyss-document]')??null;return ready({hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:true,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${JSON.stringify(workingPath)},${JSON.stringify(openedLeafId)})})()`,
+        `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});${openedRootStatus}return ready({candidateCount:candidates.length,hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:true,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${JSON.stringify(workingPath)})})()`,
         'First annotation benchmark page did not become usable.',
       );
       await waitFor(
@@ -530,16 +542,97 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
       await evaluate(
         executable,
         vaultName,
-        `(()=>{document.querySelector('[data-control="sidebar"]')?.click();document.querySelector('[data-tab="annotations"]')?.click();return true})()`,
+        `(()=>{${exactOpenedLeaf}const sidebar=root.querySelector('[data-control="sidebar"]');if(!(sidebar instanceof HTMLButtonElement))throw new Error('Benchmark sidebar control unavailable.');if(sidebar.getAttribute('aria-pressed')!=='true')sidebar.click();const tab=root.querySelector('[data-tab="annotations"]');if(!(tab instanceof HTMLButtonElement))throw new Error('Benchmark annotations tab unavailable.');tab.click();return true})()`,
       );
       await waitFor(
         executable,
         vaultName,
-        `document.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10000'`,
+        `(()=>{${exactOpenedLeaf}return root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10000'})()`,
         'Ten-thousand-annotation extraction did not complete.',
         30_000,
       );
       await sampleHeap();
+      await evaluate(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const input=root.querySelector('[data-annotation-search]');if(!(input instanceof HTMLInputElement))throw new Error('Annotation search input unavailable.');input.value='Annotation 07500';input.dispatchEvent(new Event('input',{bubbles:true}));return true})()`,
+      );
+      await waitFor(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const input=root.querySelector('[data-annotation-search]');const row=root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row');return input instanceof HTMLInputElement&&input.value==='Annotation 07500'&&row?.getAttribute('aria-setsize')==='1'})()`,
+        'Filtered annotation search did not settle.',
+      );
+      await evaluate(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const input=root.querySelector('[data-annotation-search]');if(!(input instanceof HTMLInputElement))throw new Error('Annotation search input unavailable while clearing.');input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));return true})()`,
+      );
+      await waitFor(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}return root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10000'})()`,
+        'Cleared annotation search did not restore all cards.',
+      );
+      await evaluate(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const color=root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color]');if(!(color instanceof HTMLButtonElement))throw new Error('Annotation color facet unavailable.');color.click();return true})()`,
+      );
+      await waitFor(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const color=root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color][aria-pressed="true"]');const count=Number(root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize'));return color instanceof HTMLButtonElement&&Number.isSafeInteger(count)&&count>0&&count<10000})()`,
+        'Annotation color facet did not become active.',
+      );
+      await evaluate(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const color=root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color][aria-pressed="true"]');if(!(color instanceof HTMLButtonElement))throw new Error('Active annotation color facet unavailable.');color.click();return true})()`,
+      );
+      await waitFor(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const color=root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color][aria-pressed="true"]');return color===null&&root.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-card-row')?.getAttribute('aria-setsize')==='10000'})()`,
+        'Annotation color facet did not become inactive.',
+      );
+      await evaluate(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const sidebar=root.querySelector('[data-control="sidebar"]');if(!(sidebar instanceof HTMLButtonElement))throw new Error('Benchmark sidebar control unavailable after filtering.');if(sidebar.getAttribute('aria-pressed')==='true')sidebar.click();return true})()`,
+      );
+      await waitFor(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}return root.querySelector('[data-control="sidebar"]')?.getAttribute('aria-pressed')==='false'})()`,
+        'Benchmark sidebar did not close after filtering.',
+      );
+      await sampleHeap();
+      await evaluate(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}const tool=root.querySelector('[data-annotation-tool="highlight"]');if(!(tool instanceof HTMLButtonElement))throw new Error('Highlight benchmark tool unavailable.');tool.click();return true})()`,
+      );
+      await waitFor(
+        executable,
+        vaultName,
+        `(()=>{${exactOpenedLeaf}return root.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-pressed')==='true'})()`,
+        'Highlight benchmark tool did not become active.',
+      );
+      await waitFor(
+        executable,
+        vaultName,
+        `(()=>{const ready=(${isSelectableAnnotationBenchmarkPageReady.toString()});${exactOpenedLeaf}const textLayer=root.querySelector('[data-page-number="1"] .textLayer');const manager=leaf.view?.controller?.viewport?.annotationEditorInstance?.manager;return ready({hasEditorLayer:Boolean(textLayer&&manager?.getLayer?.(0)?.hasTextLayer?.(textLayer)),hasErrorBoundary:Boolean(root.querySelector('[data-reader-error]')),leafId:String(leaf.id),path:leaf.getViewState()?.state?.file??null,textCount:root.querySelectorAll('[data-page-number="1"] .textLayer span').length},${JSON.stringify(workingPath)},String(leaf.id))})()`,
+        'Selectable benchmark text did not become ready.',
+      );
+      const annotationStorageBaseline = Number(
+        await evaluate(
+          executable,
+          vaultName,
+          `(()=>{${exactOpenedLeaf}return leaf.view?.controller?.viewport?.annotationEditorInstance?.storage?.size??-1})()`,
+        ),
+      );
+      validateCounter('annotationStorageBaseline', annotationStorageBaseline);
       if (iteration === 0) {
         const baselineSnapshot = await performanceSnapshot(executable, vaultName);
         pressureBaseline = {
@@ -548,46 +641,15 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
         };
         await installRecoverableMemoryPressure(executable, vaultName, workingPath);
       }
-      await evaluate(
-        executable,
-        vaultName,
-        `(()=>{const input=document.querySelector('[data-annotation-search]');if(!(input instanceof HTMLInputElement))throw new Error('Annotation search input unavailable.');input.value='Annotation 07500';input.dispatchEvent(new Event('input',{bubbles:true}));input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));const color=document.querySelector('[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color]');if(!(color instanceof HTMLButtonElement))throw new Error('Annotation color facet unavailable.');color.click();const toggle=document.querySelector('[data-action="toggle-document-tags"]');if(!(toggle instanceof HTMLButtonElement))throw new Error('Document tags toggle unavailable.');toggle.click();const tag=document.querySelector('[data-annotation-tag="topic-0"]');if(!(tag instanceof HTMLButtonElement))throw new Error('Annotation tag facet unavailable.');tag.click();document.querySelector('[data-control="sidebar"]')?.click();return true})()`,
-      );
-      await sampleHeap();
-      await evaluate(
-        executable,
-        vaultName,
-        `(()=>{const tool=document.querySelector('[data-annotation-tool="highlight"]');if(!(tool instanceof HTMLButtonElement))throw new Error('Highlight benchmark tool unavailable.');tool.click();return true})()`,
-      );
-      await waitFor(
-        executable,
-        vaultName,
-        `document.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-pressed')==='true'`,
-        'Highlight benchmark tool did not become active.',
-      );
-      await waitFor(
-        executable,
-        vaultName,
-        `(()=>{const ready=(${isSelectableAnnotationBenchmarkPageReady.toString()});const leaf=app.workspace.getMostRecentLeaf();const root=leaf?.containerEl?.querySelector('[data-abyss-document]')??null;const textLayer=root?.querySelector('[data-page-number="1"] .textLayer')??null;const manager=leaf?.view?.controller?.viewport?.annotationEditorInstance?.manager;return ready({hasEditorLayer:Boolean(textLayer&&manager?.currentLayer?.hasTextLayer?.(textLayer)),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null,textCount:root?.querySelectorAll('[data-page-number="1"] .textLayer span').length??0},${JSON.stringify(workingPath)},${JSON.stringify(openedLeafId)})})()`,
-        'Selectable benchmark text did not become ready.',
-      );
-      const annotationStorageBaseline = Number(
-        await evaluate(
-          executable,
-          vaultName,
-          `app.workspace.getMostRecentLeaf()?.view?.controller?.viewport?.annotationEditorInstance?.storage?.size??-1`,
-        ),
-      );
-      validateCounter('annotationStorageBaseline', annotationStorageBaseline);
       await runAmbiguousMutation(
         executable,
         vaultName,
-        `(()=>{const leaf=app.workspace.getMostRecentLeaf();const root=leaf?.containerEl?.querySelector('[data-abyss-document]');const text=root?.querySelectorAll('[data-page-number="1"] .textLayer span')[1];if(!(text instanceof Node))throw new Error('Selectable benchmark text unavailable.');const textLayer=text.parentElement?.closest('.textLayer')??null;const manager=leaf?.view?.controller?.viewport?.annotationEditorInstance?.manager;if(!textLayer||manager?.currentLayer?.hasTextLayer?.(textLayer)!==true)throw new Error('PDF.js current annotation layer is not bound to selectable benchmark text.');if(typeof manager.highlightSelection!=='function')throw new Error('PDF.js native highlight API is unavailable.');const range=document.createRange();range.selectNodeContents(text);const selection=getSelection();selection?.removeAllRanges();selection?.addRange(range);manager.highlightSelection('benchmark');return true})()`,
+        `(()=>{${exactOpenedLeaf}const text=root.querySelectorAll('[data-page-number="1"] .textLayer span')[1];if(!(text instanceof Node))throw new Error('Selectable benchmark text unavailable.');const textLayer=text.parentElement?.closest('.textLayer')??null;const manager=leaf.view?.controller?.viewport?.annotationEditorInstance?.manager;if(!textLayer||manager?.getLayer?.(0)?.hasTextLayer?.(textLayer)!==true)throw new Error('PDF.js first-page annotation layer is not bound to selectable benchmark text.');if(typeof manager.highlightSelection!=='function')throw new Error('PDF.js native highlight API is unavailable.');const range=document.createRange();range.selectNodeContents(text);const selection=getSelection();selection?.removeAllRanges();selection?.addRange(range);manager.highlightSelection('benchmark');return true})()`,
       );
       await waitFor(
         executable,
         vaultName,
-        `(${hasNativeAnnotationStorageGrowth.toString()})(app.workspace.getMostRecentLeaf()?.view?.controller?.viewport?.annotationEditorInstance?.storage?.size,${String(annotationStorageBaseline)})`,
+        `(()=>{${exactOpenedLeaf}return (${hasNativeAnnotationStorageGrowth.toString()})(leaf.view?.controller?.viewport?.annotationEditorInstance?.storage?.size,${String(annotationStorageBaseline)})})()`,
         'Native highlight creation did not grow PDF.js annotation storage.',
       );
       await sampleHeap();
@@ -598,7 +660,6 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
         const pressuredPeak = await qualifyRecoverableAnnotationPressure({
           executable,
           failuresBefore: pressureBaseline.failuresBefore,
-          openedLeafId,
           recoveriesBefore: pressureBaseline.recoveriesBefore,
           sampleHeap,
           vaultName,
@@ -719,12 +780,25 @@ async function installRecoverableMemoryPressure(
   await evaluate(
     executable,
     vaultName,
-    `(async()=>{const h=globalThis;if(h.__abyssRecoverableMemoryPressure)throw new Error('Recoverable pressure probe already installed.');const path=${JSON.stringify(path)};const digest=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');const before=await app.vault.adapter.readBinary(path);const original=app.vault.modifyBinary;const shouldInject=(${shouldInjectAnnotationBufferPressure.toString()});const state={attempts:0,beforeHash:await digest(before),interval:0,notices:new Set(document.querySelectorAll('.notice')),original,path,peakBytes:null};const sample=()=>{const value=performance.memory?.usedJSHeapSize;if(typeof value==='number'&&Number.isFinite(value))state.peakBytes=Math.max(state.peakBytes??0,value)};state.interval=setInterval(sample,10);sample();h.__abyssRecoverableMemoryPressure=state;app.vault.modifyBinary=async function(file,data,options){if(state.attempts===0&&shouldInject(data)){state.attempts+=1;sample();throw new RangeError('One-shot renderer allocation pressure at PDF vault transfer.')}return Reflect.apply(original,this,arguments)};return true})()`,
+    `(async()=>{const h=globalThis;if(h.__abyssRecoverableMemoryPressure)throw new Error('Recoverable pressure probe already installed.');const path=${JSON.stringify(path)};const digest=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');const before=await app.vault.adapter.readBinary(path);const original=app.vault.modifyBinary;const shouldInject=(${shouldInjectAnnotationBufferPressure.toString()});const state={attempts:0,beforeHash:await digest(before),interval:0,notices:new Set(document.querySelectorAll('.notice')),original,path,peakBytes:null};const sample=()=>{const value=performance.memory?.usedJSHeapSize;if(typeof value==='number'&&Number.isFinite(value))state.peakBytes=Math.max(state.peakBytes??0,value)};state.interval=setInterval(sample,10);sample();h.__abyssRecoverableMemoryPressure=state;app.vault.modifyBinary=async function(file,data,options){if(state.attempts===0&&shouldInject(file?.path,state.path,data)){state.attempts+=1;sample();throw new RangeError('One-shot renderer allocation pressure at PDF vault transfer.')}return Reflect.apply(original,this,arguments)};return true})()`,
   );
 }
 
-export function shouldInjectAnnotationBufferPressure(source: unknown): boolean {
-  return source instanceof ArrayBuffer && source.byteLength >= 1_000_000;
+export function shouldInjectAnnotationBufferPressure(
+  filePath: unknown,
+  targetPath: unknown,
+  source: unknown,
+): boolean {
+  const bytes = source as { readonly byteLength?: unknown } | null;
+  return (
+    typeof filePath === 'string' &&
+    filePath === targetPath &&
+    bytes !== null &&
+    typeof bytes === 'object' &&
+    Object.prototype.toString.call(source) === '[object ArrayBuffer]' &&
+    typeof bytes.byteLength === 'number' &&
+    bytes.byteLength >= 1_000_000
+  );
 }
 
 export function hasNativeAnnotationStorageGrowth(current: unknown, baseline: number): boolean {
@@ -778,6 +852,7 @@ export function isNewRetryNoticeForAnnotationPath(
 
 export function isAnnotationBenchmarkPageReady(
   status: {
+    readonly candidateCount: number;
     readonly hasCanvas: boolean;
     readonly hasErrorBoundary: boolean;
     readonly hasFreshReaderRoot: boolean;
@@ -786,7 +861,7 @@ export function isAnnotationBenchmarkPageReady(
     readonly path: unknown;
   },
   expectedPath: string,
-  expectedLeafId: string,
+  expectedLeafId?: string,
 ): boolean {
   const actualPath =
     typeof status.path === 'string'
@@ -804,11 +879,12 @@ export function isAnnotationBenchmarkPageReady(
     .join('/')
     .normalize('NFC');
   return (
+    status.candidateCount === 1 &&
     status.hasCanvas &&
     !status.hasErrorBoundary &&
     status.hasFreshReaderRoot &&
     status.hasReaderRoot &&
-    status.leafId === expectedLeafId &&
+    (expectedLeafId === undefined || status.leafId === expectedLeafId) &&
     actualPath === normalizedExpectedPath
   );
 }

@@ -12,6 +12,7 @@ import {
   pluginRestartCommands,
   summarizeSamples,
 } from './benchmark-reader.mjs';
+import { normalizeForwardedE2eArguments, runE2e } from './run-e2e.mjs';
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const temporaryDirectories: string[] = [];
@@ -36,6 +37,69 @@ function runBenchmark(environment: NodeJS.ProcessEnv = {}) {
 }
 
 describe('reader benchmark summaries', () => {
+  it('runs the canonical coverage gate with one bounded worker', () => {
+    const packageJson: unknown = JSON.parse(
+      readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
+    );
+    if (typeof packageJson !== 'object' || packageJson === null)
+      throw new Error('Expected package.json to be an object.');
+    const scripts = (packageJson as { readonly scripts?: unknown }).scripts;
+    if (typeof scripts !== 'object' || scripts === null)
+      throw new Error('Expected package.json scripts.');
+
+    expect(Reflect.get(scripts, 'test:coverage')).toBe(
+      'vitest run --coverage --maxWorkers=1 --testTimeout=10000',
+    );
+    expect(Reflect.get(scripts, 'verify')).toEqual(expect.stringContaining('pnpm test:coverage'));
+  });
+
+  it('forwards a focused E2E spec without a literal argument separator', () => {
+    expect(
+      normalizeForwardedE2eArguments(['--', '--spec', 'tests/e2e/reader-selection.e2e.ts']),
+    ).toEqual(['--spec', 'tests/e2e/reader-selection.e2e.ts']);
+    expect(normalizeForwardedE2eArguments(['--spec', 'reader.e2e.ts'])).toEqual([
+      '--spec',
+      'reader.e2e.ts',
+    ]);
+  });
+
+  it('runs setup before launching WDIO with normalized focused arguments', () => {
+    const calls: Array<{ readonly arguments_: readonly string[]; readonly command: string }> = [];
+
+    expect(
+      runE2e(['--', '--spec', 'tests/e2e/reader-selection.e2e.ts'], (command, arguments_) => {
+        calls.push({ arguments_, command });
+        return 0;
+      }),
+    ).toBe(0);
+
+    expect(calls).toEqual([
+      { command: 'pnpm', arguments_: ['dev:vault', '--', '--no-launch'] },
+      {
+        command: 'wdio',
+        arguments_: [
+          'run',
+          'tests/e2e/wdio.conf.mts',
+          '--spec',
+          'tests/e2e/reader-selection.e2e.ts',
+        ],
+      },
+    ]);
+  });
+
+  it('returns setup failure without launching WDIO', () => {
+    const calls: string[] = [];
+
+    expect(
+      runE2e(['--spec', 'tests/e2e/reader.e2e.ts'], (command) => {
+        calls.push(command);
+        return 7;
+      }),
+    ).toBe(7);
+
+    expect(calls).toEqual(['pnpm']);
+  });
+
   it('restarts a loaded plugin through bounded disable and enable commands, never reload', () => {
     expect(
       pluginRestartCommands({ enabled: true, loaded: true, manifestVersion: '0.1.0' }),
@@ -105,6 +169,30 @@ describe('reader benchmark summaries', () => {
         platform: 'desktop',
       }),
     ).toMatchObject({ status: 'failed' });
+  });
+
+  it('keeps the reader budgets strict and rejects PDF work during plugin activation', () => {
+    const passing = {
+      activationMs: [90, 91, 92, 93, 99.999],
+      available: true as const,
+      firstUsablePageMs: [1_500, 1_600, 1_700, 1_800, 1_999.999],
+      pdfWorkDuringActivation: [0, 0, 0, 0, 0],
+      platform: 'desktop' as const,
+    };
+
+    expect(evaluateReaderBudget(passing)).toMatchObject({
+      status: 'passed',
+      zeroPdfWorkDuringActivation: true,
+    });
+    expect(evaluateReaderBudget({ ...passing, activationMs: [90, 91, 92, 93, 100] })).toMatchObject(
+      { status: 'failed' },
+    );
+    expect(
+      evaluateReaderBudget({ ...passing, firstUsablePageMs: [1, 2, 3, 4, 2_000] }),
+    ).toMatchObject({ status: 'failed' });
+    expect(
+      evaluateReaderBudget({ ...passing, pdfWorkDuringActivation: [0, 0, 1, 0, 0] }),
+    ).toMatchObject({ status: 'failed', zeroPdfWorkDuringActivation: false });
   });
 
   it.each([

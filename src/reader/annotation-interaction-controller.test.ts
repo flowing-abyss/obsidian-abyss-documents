@@ -125,12 +125,13 @@ function fixture(
   const opened: AnnotationEditorPopoverRequest[] = [];
   const states: QuickHighlightState[] = [];
   const closeAnnotationEditor = vi.fn(() => true);
+  const openAnnotationEditor = vi.fn((request: AnnotationEditorPopoverRequest) => {
+    opened.push(request);
+    return true;
+  });
   const host: AnnotationInteractionHost = {
     closeAnnotationEditor,
-    openAnnotationEditor: (request) => {
-      opened.push(request);
-      return true;
-    },
+    openAnnotationEditor,
     setQuickHighlightState: (state) => states.push(state),
   };
   const failures: Array<{ action: string; cause: unknown }> = [];
@@ -165,6 +166,7 @@ function fixture(
     modeListenerCount: () => modeListeners.size,
     observedColors,
     observedModes,
+    openAnnotationEditor,
     opened,
     selectionListenerCount: () => selectionListeners.size,
     setQuickHighlight,
@@ -674,6 +676,128 @@ describe('AnnotationInteractionController', () => {
     });
     expect(test.controller.color).toBe('#e56eee');
     expect(test.observedColors).toEqual(['#ff6666', '#e56eee']);
+    test.controller.destroy();
+  });
+
+  it('blocks tool, activation, invalidation, and destroy while the active editor refuses to close', async () => {
+    const test = fixture();
+    test.closeAnnotationEditor.mockReturnValue(false);
+
+    expect(test.controller.requestTool('highlight')).toBe(false);
+    await expect(test.controller.activateAnnotation('blocked', { kind: 'sidebar' })).resolves.toBe(
+      'cancelled',
+    );
+    test.controller.updatePalette([palette[1]]);
+    test.controller.invalidate('navigation');
+    expect(test.controller.destroy()).toBe(false);
+
+    expect(test.focusAnnotation).not.toHaveBeenCalled();
+    expect(test.setQuickHighlight).not.toHaveBeenCalled();
+    expect(test.modeListenerCount()).toBe(1);
+  });
+
+  it('keeps revisions neutral when the host rejects editors and classifies read-only focus', () => {
+    const test = fixture();
+    test.openAnnotationEditor.mockReturnValue(false);
+    test.emitSelection(textSelection('rejected-selection'));
+    test.emitSelection(null);
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Rejected focus')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    test.emitAnnotationFocus(null);
+
+    test.openAnnotationEditor.mockReturnValue(true);
+    const readonly = nativeAnnotation('Read only');
+    test.emitAnnotationFocus({
+      annotations: [readonly],
+      editable: false,
+      position: { x: 20, y: 30 },
+    });
+
+    expect(test.openAnnotationEditor).toHaveBeenCalledTimes(3);
+    expect(test.openAnnotationEditor.mock.calls[2]?.[0].target).toEqual({
+      annotation: readonly,
+      kind: 'readonly',
+    });
+    test.controller.destroy();
+  });
+
+  it('reports failed arm and disarm requests without leaking the active editor', async () => {
+    const test = fixture();
+    const armFailure = new Error('arm failed');
+    const disarmFailure = new Error('disarm failed');
+    test.setQuickHighlight.mockRejectedValueOnce(armFailure).mockRejectedValueOnce(disarmFailure);
+
+    expect(test.controller.requestTool('highlight')).toBe(true);
+    await vi.waitFor(() => {
+      expect(test.failures).toContainEqual({ action: 'arm Quick Highlight', cause: armFailure });
+    });
+    expect(test.controller.requestTool('select')).toBe(true);
+    await vi.waitFor(() => {
+      expect(test.failures).toContainEqual({
+        action: 'disarm Quick Highlight',
+        cause: disarmFailure,
+      });
+    });
+
+    expect(test.closeAnnotationEditor).toHaveBeenCalledTimes(4);
+    expect(test.states[test.states.length - 1]).toEqual({ armed: false, color: '#ffd400' });
+    test.controller.destroy();
+  });
+
+  it('rejects native deletion and does not remember a mixed contextual color', () => {
+    const contextualColors: unknown[] = [];
+    const deleted: unknown[] = [];
+    const test = fixture('neutral', {
+      onAnnotationDelete: (annotations) => deleted.push(annotations),
+      onToolColorChange: (tool, color) => contextualColors.push({ color, tool }),
+    });
+    const highlight = nativeAnnotation();
+    const ink = { ...nativeAnnotation(), type: 'ink' as const };
+    test.emitAnnotationFocus({
+      annotations: [highlight],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected an annotation request.');
+    test.deleteAnnotations.mockReturnValueOnce(false);
+
+    expect(request.onDelete([highlight])).toBe(false);
+    expect(request.onUpdate({ annotations: [highlight, ink], color: '#ff6666' })).toBe(true);
+
+    expect(deleted).toEqual([]);
+    expect(contextualColors).toEqual([]);
+    expect(test.controller.color).toBe('#ffd400');
+    test.controller.destroy();
+  });
+
+  it('supports neutral recolor, remembers highlight edits, and ignores stale or aborted activation', async () => {
+    const test = fixture();
+    expect(test.controller.selectColor('#5fb236')).toBe(true);
+    expect(test.setQuickHighlight).not.toHaveBeenCalled();
+    test.emitSelection(textSelection('contextual-highlight'));
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a selection request.');
+    const highlight = nativeAnnotation();
+
+    expect(request.onUpdate({ annotations: [highlight], color: '#ff6666' })).toBe(true);
+    expect(test.controller.color).toBe('#ff6666');
+    request.onClose('escape');
+    request.onClose('escape');
+    test.controller.updatePalette([
+      { color: '#ff6666', meaning: 'Important', name: 'Red' },
+      palette[0],
+    ]);
+    const abort = new AbortController();
+    abort.abort();
+
+    await expect(
+      test.controller.activateAnnotation('aborted', { kind: 'sidebar', signal: abort.signal }),
+    ).resolves.toBe('cancelled');
+    expect(test.focusAnnotation).not.toHaveBeenCalled();
     test.controller.destroy();
   });
 

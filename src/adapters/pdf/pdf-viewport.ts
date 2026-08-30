@@ -657,14 +657,14 @@ export class PdfDocumentViewport implements DocumentViewport {
     attempt(() => {
       if (this.root !== null) this.unregisterRootListeners(this.root);
     });
-    attempt(() => {
-      this.viewer?.cleanup();
-    });
     if (this.viewer !== null) {
       attempt(() => {
         (this.viewer as unknown as RebindablePdfViewer).setDocument(null);
       });
     }
+    attempt(() => {
+      this.viewer?.cleanup();
+    });
     attempt(() => {
       this.linkService?.setDocument(null);
     });

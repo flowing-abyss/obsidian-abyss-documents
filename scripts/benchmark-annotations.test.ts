@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   annotationCliExecOptions,
@@ -107,15 +108,17 @@ describe('annotation qualification budgets', () => {
     expect(parseObsidianEvalOutput('plain output')).toBe('plain output');
   });
 
-  it('reopens into the exact returned leaf and awaits reader teardown between iterations', () => {
+  it('reopens into the exact working-path leaf and awaits reader teardown between iterations', () => {
     const source = readFileSync(
       path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
       'utf8',
     );
     const retryClick = source.indexOf('retry.click();return true');
-    const reopenedLeaf = source.indexOf('const reopenedLeafId = await evaluate(');
+    const reopenedLeaf = source.indexOf(
+      'const exactPriorLeaf = exactReaderLeafSource(input.workingPath);',
+    );
     const actualLeafCreation = source.indexOf(
-      'const leaf=app.workspace.getLeaf(true)',
+      'const reopenedLeaf=app.workspace.getLeaf(true)',
       reopenedLeaf,
     );
 
@@ -123,12 +126,14 @@ describe('annotation qualification budgets', () => {
     expect(reopenedLeaf).toBeGreaterThan(retryClick);
     expect(actualLeafCreation).toBeGreaterThan(reopenedLeaf);
     expect(source).not.toContain('leaf.detach()');
+    expect(source).toContain('globalThis.__abyssAnnotationBenchmarkPreviousRoot=root;');
+    expect(source).toContain('await reopenedLeaf.openFile(file);');
     expect(source).toContain("await leaf.setViewState({type:'empty',state:{}})");
     expect(source).not.toContain('Recovered benchmark reused the prior leaf session.');
     expect(source).toContain('__abyssAnnotationBenchmarkPreviousRoot');
   });
 
-  it('targets semantic annotation-panel chips instead of toolbar color buttons', () => {
+  it('drives the current annotation search and color facets without legacy document tags', () => {
     const source = readFileSync(
       path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
       'utf8',
@@ -137,8 +142,48 @@ describe('annotation qualification budgets', () => {
       '[data-sidebar-panel="annotations"] .abyss-annotation-colors button[data-annotation-color]',
     );
     expect(source).toContain('color instanceof HTMLButtonElement');
+    expect(source).toContain("input.value='Annotation 07500'");
+    expect(source).not.toContain('toggle-document-tags');
+    expect(source).not.toContain('data-annotation-tag');
     expect(source).toContain("getAttribute('aria-setsize')==='10001'");
     expect(source).not.toContain("includes('10001 annotations')");
+  });
+
+  it('lets each exact-reader filter render settle before invoking the next control', () => {
+    const source = readFileSync(
+      path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
+      'utf8',
+    );
+    const search = source.indexOf("input.value='Annotation 07500'");
+    const filtered = source.indexOf('Filtered annotation search did not settle.');
+    const clear = source.indexOf("input.value=''", search);
+    const restored = source.indexOf('Cleared annotation search did not restore all cards.');
+    const colorOn = source.indexOf('Annotation color facet did not become active.');
+    const colorOff = source.indexOf('Annotation color facet did not become inactive.');
+    const sidebarClosed = source.indexOf('Benchmark sidebar did not close after filtering.');
+
+    expect(search).toBeGreaterThan(-1);
+    expect(filtered).toBeGreaterThan(search);
+    expect(clear).toBeGreaterThan(filtered);
+    expect(restored).toBeGreaterThan(clear);
+    expect(colorOn).toBeGreaterThan(restored);
+    expect(colorOff).toBeGreaterThan(colorOn);
+    expect(sidebarClosed).toBeGreaterThan(colorOff);
+    expect(source).not.toContain('color.click();color.click();const sidebar');
+  });
+
+  it('installs recoverable memory pressure only after the exact leaf is ready to mutate', () => {
+    const source = readFileSync(
+      path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
+      'utf8',
+    );
+    const selectable = source.indexOf('Selectable benchmark text did not become ready.');
+    const install = source.indexOf('await installRecoverableMemoryPressure');
+    const mutation = source.indexOf('await runAmbiguousMutation');
+
+    expect(selectable).toBeGreaterThan(-1);
+    expect(install).toBeGreaterThan(selectable);
+    expect(mutation).toBeGreaterThan(install);
   });
 
   it('waits for selectable text in the exact reader root after sidebar relayout', () => {
@@ -151,12 +196,55 @@ describe('annotation qualification budgets', () => {
     expect(readiness).toBeGreaterThan(-1);
     expect(selection).toBeGreaterThan(readiness);
     expect(source).toContain(
-      'root?.querySelectorAll(\'[data-page-number="1"] .textLayer span\')[1]',
+      'root.querySelectorAll(\'[data-page-number="1"] .textLayer span\')[1]',
     );
+  });
+
+  it('binds benchmark selection to the explicit first-page editor layer', () => {
+    const source = readFileSync(
+      path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
+      'utf8',
+    );
+
+    expect(source).toContain('manager?.getLayer?.(0)?.hasTextLayer?.(textLayer)');
+    expect(source).not.toContain('manager?.currentLayer?.hasTextLayer?.(textLayer)');
+  });
+
+  it('scopes every benchmark reader action to its exact working-path root instead of stale controls', () => {
+    const source = readFileSync(
+      path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
+      'utf8',
+    );
+
+    expect(source).toContain('const exactOpenedLeaf = exactReaderLeafSource(workingPath);');
+    expect(source).toContain('const exactReopenedLeaf = exactReaderLeafSource(input.workingPath);');
+    expect(source).toContain('root.querySelector(\'[data-annotation-tool="highlight"]\')');
+    expect(source).not.toContain('document.querySelector(\'[data-annotation-tool="highlight"]\')');
+    expect(source).not.toContain('document.querySelector(\'[data-control="sidebar"]\')');
+    expect(source).not.toContain('app.workspace.getMostRecentLeaf()');
+  });
+
+  it('resolves the exact reader root by one matching working path after async view replacement', () => {
+    const source = readFileSync(
+      path.join(repoRoot, 'scripts', 'benchmark-annotations.mts'),
+      'utf8',
+    );
+
+    expect(source).toContain('function exactReaderLeafSource(workingPath: string)');
+    expect(source).toContain('function readerRootStatusSource(workingPath: string)');
+    expect(source).toContain(
+      "getLeavesOfType('abyss-document-view').filter(candidate=>candidate.getViewState()?.state?.file===",
+    );
+    expect(source).toContain(
+      "if(candidates.length!==1)throw new Error('Benchmark reader leaf cardinality mismatch.');",
+    );
+    expect(source).toContain('const exactOpenedLeaf = exactReaderLeafSource(workingPath);');
+    expect(source).not.toContain('exactReaderLeafSource(openedLeafId)');
   });
 
   it('accepts readiness only from the exact opened leaf, path, and active canvas', () => {
     const ready = {
+      candidateCount: 1,
       hasCanvas: true,
       hasErrorBoundary: false,
       hasFreshReaderRoot: true,
@@ -165,6 +253,13 @@ describe('annotation qualification budgets', () => {
       path: 'Documents/bench.pdf',
     };
     expect(isAnnotationBenchmarkPageReady(ready, 'Documents/bench.pdf', 'leaf-2')).toBe(true);
+    expect(
+      isAnnotationBenchmarkPageReady(
+        { ...ready, candidateCount: 2 },
+        'Documents/bench.pdf',
+        'leaf-2',
+      ),
+    ).toBe(false);
     expect(
       isAnnotationBenchmarkPageReady(
         { ...ready, leafId: 'leaf-1' },
@@ -262,6 +357,7 @@ describe('annotation qualification budgets', () => {
       [
         '--eval',
         `const predicate=(${source});process.stdout.write(String(predicate(${JSON.stringify({
+          candidateCount: 1,
           hasCanvas: true,
           hasErrorBoundary: false,
           hasFreshReaderRoot: true,
@@ -292,10 +388,40 @@ describe('annotation qualification budgets', () => {
   });
 
   it('injects allocation pressure only at a large PDF vault-transfer buffer', () => {
-    expect(shouldInjectAnnotationBufferPressure(new ArrayBuffer(999_999))).toBe(false);
-    expect(shouldInjectAnnotationBufferPressure(new ArrayBuffer(1_000_000))).toBe(true);
-    expect(shouldInjectAnnotationBufferPressure(new Uint8Array(1_000_000))).toBe(false);
-    expect(shouldInjectAnnotationBufferPressure([1_000_000])).toBe(false);
+    const path = 'Documents/annotation-benchmark-1.pdf';
+    expect(shouldInjectAnnotationBufferPressure(path, path, new ArrayBuffer(999_999))).toBe(false);
+    expect(shouldInjectAnnotationBufferPressure(path, path, new ArrayBuffer(1_000_000))).toBe(true);
+    expect(shouldInjectAnnotationBufferPressure(path, path, new Uint8Array(1_000_000))).toBe(false);
+    expect(shouldInjectAnnotationBufferPressure(path, path, [1_000_000])).toBe(false);
+  });
+
+  it('recognizes large ArrayBuffer-shaped vault bytes across the plugin realm boundary', () => {
+    const path = 'Documents/annotation-benchmark-1.pdf';
+    const crossRealmBuffer: unknown = runInNewContext('new ArrayBuffer(1000000)');
+    const structuralBuffer = {
+      byteLength: 1_000_000,
+      [Symbol.toStringTag]: 'ArrayBuffer',
+    };
+
+    expect(shouldInjectAnnotationBufferPressure(path, path, crossRealmBuffer)).toBe(true);
+    expect(shouldInjectAnnotationBufferPressure(path, path, structuralBuffer)).toBe(true);
+    expect(
+      shouldInjectAnnotationBufferPressure(path, path, {
+        byteLength: 999_999,
+        [Symbol.toStringTag]: 'ArrayBuffer',
+      }),
+    ).toBe(false);
+    expect(shouldInjectAnnotationBufferPressure(path, path, new Uint8Array(1_000_000))).toBe(false);
+  });
+
+  it('does not inject pressure into a large PDF buffer for another vault path', () => {
+    expect(
+      shouldInjectAnnotationBufferPressure(
+        'Documents/unrelated-large.pdf',
+        'Documents/annotation-benchmark-1.pdf',
+        new ArrayBuffer(1_000_000),
+      ),
+    ).toBe(false);
   });
 
   it('qualifies only one injected failure and one recovery relative to the baseline', () => {
@@ -526,6 +652,14 @@ describe('annotation qualification budgets', () => {
     {
       name: 'unqualified recoverable memory pressure',
       mutate: () => ({ memory: { recoverablePressureQualified: false } }),
+    },
+    {
+      name: 'missing qualified save failure',
+      mutate: () => ({ counters: { annotationSaveFailures: 0 } }),
+    },
+    {
+      name: 'missing qualified save recovery',
+      mutate: () => ({ counters: { annotationSaveRecoveries: 0 } }),
     },
   ] as ReadonlyArray<{
     readonly name: string;

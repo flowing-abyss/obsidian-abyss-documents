@@ -227,6 +227,10 @@ describe('AbyssDocumentsSettingTab', () => {
 
     button.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
     expect(region.hidden).toBe(false);
+    button.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', repeat: true }),
+    );
+    expect(region.hidden).toBe(false);
     const firstControl = region.querySelector<HTMLElement>('input, select, textarea, button');
     expect(firstControl).not.toBeNull();
     firstControl?.focus();
@@ -255,6 +259,22 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(previousButton.isConnected).toBe(false);
     previousButton.click();
     expect(previousButton.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('aborts section listeners while hidden and installs fresh listeners on redisplay', () => {
+    const { tab } = fixture();
+    tab.render();
+    const hiddenButton = requiredSectionButton(tab, 'Reading appearance');
+
+    (tab as unknown as { hide(): void }).hide();
+    hiddenButton.click();
+    hiddenButton.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
+    expect(hiddenButton.getAttribute('aria-expanded')).toBe('false');
+
+    tab.render();
+    const activeButton = requiredSectionButton(tab, 'Reading appearance');
+    activeButton.click();
+    expect(activeButton.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('maps every persisted setting exactly once and groups each fixed palette entry', () => {

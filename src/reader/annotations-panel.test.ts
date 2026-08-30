@@ -158,6 +158,81 @@ describe('AnnotationsPanel', () => {
     expect(root.querySelector('.abyss-annotation-card')).toBe(card);
   });
 
+  it('re-resolves the exact current projected row and rendered anchor without public-ID ambiguity', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const first = annotation(0, {
+      identity: { kind: 'stable', id: asAnnotationId('duplicate-public-id') },
+      selectedText: 'First duplicate',
+    });
+    const second = annotation(1, {
+      identity: { kind: 'stable', id: asAnnotationId('duplicate-public-id') },
+      selectedText: 'Second duplicate',
+    });
+    const refreshedSecond = { ...second, comment: 'Reprojected second duplicate' };
+    panel.setProjectedAnnotations([
+      { annotation: first, key: 'row-first', nativeId: 'native-first', writable: false },
+      { annotation: second, key: 'row-second', nativeId: 'native-second', writable: false },
+    ]);
+    panel.setProjectedAnnotations([
+      { annotation: first, key: 'row-first', nativeId: 'native-first', writable: false },
+      {
+        annotation: refreshedSecond,
+        key: 'row-second',
+        nativeId: 'native-second',
+        writable: false,
+      },
+    ]);
+    const secondCard = root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="row-second"]',
+    );
+    if (secondCard === null) throw new Error('Expected the second duplicate card.');
+    vi.spyOn(secondCard, 'getBoundingClientRect').mockReturnValue({
+      bottom: 340,
+      height: 52,
+      left: 64,
+      right: 376,
+      top: 288,
+      width: 312,
+      x: 64,
+      y: 288,
+      toJSON: () => ({}),
+    });
+
+    expect(panel.resolveActivation('row-second')).toEqual({
+      annotation: refreshedSecond,
+      location: { pageIndex: 1, x: 0, y: 0 },
+      nativeId: 'native-second',
+      position: { x: 64, y: 340 },
+      rowId: 'row-second',
+    });
+    expect(
+      root
+        .querySelector('.abyss-annotation-card[aria-current="true"]')
+        ?.getAttribute('data-annotation-row-id'),
+    ).toBe('row-second');
+    panel.destroy();
+    root.remove();
+  });
+
+  it('does not resolve an activation after its projected row is removed', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setProjectedAnnotations([
+      {
+        annotation: annotation(0),
+        key: 'removed-row',
+        nativeId: 'native-removed',
+        writable: false,
+      },
+    ]);
+    panel.setProjectedAnnotations([]);
+
+    expect(panel.resolveActivation('removed-row')).toBeNull();
+    panel.destroy();
+  });
+
   it('moves roving focus to the nearest projected row when the focused annotation is deleted', () => {
     const root = createDiv();
     root.doc.body.append(root);

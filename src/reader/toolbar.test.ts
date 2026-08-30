@@ -383,6 +383,43 @@ describe('ReaderToolbar', () => {
     }
   });
 
+  it('ignores mouse, secondary, and mismatched long-press lifecycle events', () => {
+    vi.useFakeTimers();
+    try {
+      const entries = captureMenuItems();
+      const { host, toolbar } = fixture();
+      const fit = host.querySelector<HTMLButtonElement>('[data-control="fit"]');
+      if (fit === null) throw new Error('Expected Fit.');
+      const OwnerPointerEvent = (fit.win as Window & { PointerEvent: typeof PointerEvent })
+        .PointerEvent;
+      const pointer = (type: string, pointerId: number, pointerType: string, button = 0) =>
+        new OwnerPointerEvent(type, {
+          bubbles: true,
+          button,
+          clientX: 10,
+          clientY: 10,
+          isPrimary: true,
+          pointerId,
+          pointerType,
+        });
+
+      fit.dispatchEvent(pointer('pointerdown', 1, 'mouse'));
+      fit.dispatchEvent(pointer('pointerdown', 2, 'touch', 1));
+      fit.dispatchEvent(pointer('pointerdown', 3, 'touch'));
+      fit.dispatchEvent(pointer('pointermove', 4, 'touch'));
+      fit.dispatchEvent(pointer('pointerup', 4, 'touch'));
+      fit.dispatchEvent(pointer('pointercancel', 4, 'touch'));
+      fit.dispatchEvent(pointer('pointerup', 3, 'touch'));
+      vi.advanceTimersByTime(600);
+
+      expect(entries).toHaveLength(0);
+      toolbar.destroy();
+      toolbar.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('coalesces touch contextmenu before and after the Fit long-press threshold', () => {
     vi.useFakeTimers();
     try {

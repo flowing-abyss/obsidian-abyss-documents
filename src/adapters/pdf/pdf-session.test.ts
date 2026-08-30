@@ -205,6 +205,26 @@ describe('PdfDocumentSession', () => {
     );
   });
 
+  it('falls back to the source path fingerprint and omits writing for a read-only PDF', () => {
+    const fixture = sessionFixture({ fingerprints: [] });
+    const annotationCapabilities: PdfAnnotationCapabilities = {
+      ...fixture.annotationCapabilities,
+      readOnlyReason: {
+        code: 'permission-restricted',
+        message: 'This PDF is locked.',
+      },
+    };
+    const configured = new PdfDocumentSession(
+      file('Books/Guide.pdf'),
+      fixture.document,
+      fixture.pdfjsViewer,
+      { annotationCapabilities, viewportFactory: fixture.viewportFactory },
+    );
+
+    expect(configured.descriptor.fingerprint).toBe('Books/Guide.pdf');
+    expect(configured.capabilities.has('annotation-write')).toBe(false);
+  });
+
   it('maps outline destinations through the public PDF.js APIs', async () => {
     const { session } = sessionFixture();
 
@@ -398,6 +418,22 @@ describe('PdfDocumentSession', () => {
     expect(destroy).toHaveBeenCalledOnce();
   });
 
+  it('still destroys the loading task and reports an owned close error when cleanup fails', async () => {
+    const cause = new Error('cleanup failed');
+    const { destroy, session } = sessionFixture({
+      cleanup: vi.fn(async () => {
+        throw cause;
+      }),
+    });
+
+    await expect(session.close()).rejects.toMatchObject({
+      cause,
+      name: 'DocumentOpenError',
+      path: 'Books/Guide.pdf',
+    });
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
   it('rejects work after close as a typed cancellation', async () => {
     const { session, viewportFactory } = sessionFixture();
     await session.close();
@@ -437,6 +473,25 @@ describe('PdfDocumentSession', () => {
     const first = configured.createNativeEditableSession(vi.fn());
     expect(first).not.toBeNull();
     expect(configured.createNativeEditableSession(vi.fn())).toBe(first);
+    await configured.close();
+  });
+
+  it('does not create a native editable session for a viewport without a qualified editor', async () => {
+    const baseToken: BaseToken = { sha256: 'b'.repeat(64), byteSize: 4, mtime: 10 };
+    const fixture = sessionFixture();
+    const configured = new PdfDocumentSession(
+      file('Books/Guide.pdf'),
+      fixture.document,
+      fixture.pdfjsViewer,
+      {
+        annotationCapabilities: fixture.annotationCapabilities,
+        viewportFactory: fixture.viewportFactory,
+        openedBaseToken: baseToken,
+      },
+    );
+
+    await configured.createViewport();
+    expect(configured.createNativeEditableSession(vi.fn())).toBeNull();
     await configured.close();
   });
 });

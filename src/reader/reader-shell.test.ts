@@ -99,6 +99,125 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
+  it('synchronizes native read-only focus unless a resolved row is explicitly preserved', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const annotation: DocumentAnnotation = {
+      identity: { id: asAnnotationId('native-readonly-focused'), kind: 'stable' },
+      type: 'highlight',
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      },
+      color: '#ffd400',
+      selectedText: 'Read-only focus',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: 'Native read-only details',
+      tags: [],
+      links: [],
+      capabilities: {} as DocumentAnnotation['capabilities'],
+    };
+    const sidebar = shell.openSidebar('annotations', {
+      onClose: vi.fn(),
+      onOutlineNavigate: vi.fn(),
+      onSearchNavigate: vi.fn(),
+      onSearchQuery: vi.fn(),
+      onTabChange: vi.fn(),
+    });
+    sidebar.annotationsPanel.setAnnotations([annotation]);
+
+    shell.openAnnotationEditor({
+      onClose: vi.fn(),
+      onCreate: vi.fn(),
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(),
+      palette: [],
+      target: { annotation, kind: 'readonly' },
+    });
+
+    expect(
+      sidebar.annotationsPanel.root.querySelectorAll('.abyss-annotation-card[aria-current="true"]'),
+    ).toHaveLength(1);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('keeps the resolved duplicate row selected when opening read-only details', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const first: DocumentAnnotation = {
+      identity: { id: asAnnotationId('duplicate-public-id'), kind: 'stable' },
+      type: 'highlight',
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      },
+      color: '#ffd400',
+      selectedText: 'First duplicate',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: 'First details',
+      tags: [],
+      links: [],
+      capabilities: {} as DocumentAnnotation['capabilities'],
+    };
+    const second: DocumentAnnotation = {
+      ...first,
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 1,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      },
+      comment: 'Second details',
+      selectedText: 'Second duplicate',
+    };
+    const sidebar = shell.openSidebar('annotations', {
+      onClose: vi.fn(),
+      onOutlineNavigate: vi.fn(),
+      onSearchNavigate: vi.fn(),
+      onSearchQuery: vi.fn(),
+      onTabChange: vi.fn(),
+    });
+    sidebar.annotationsPanel.setProjectedAnnotations([
+      { annotation: first, key: 'duplicate-first', nativeId: 'native-first', writable: false },
+      { annotation: second, key: 'duplicate-second', nativeId: 'native-second', writable: false },
+    ]);
+
+    const activation = shell.resolveAnnotationActivation('duplicate-second');
+    if (activation === null) throw new Error('Expected the second duplicate activation.');
+    shell.openAnnotationEditor(
+      {
+        onClose: vi.fn(),
+        onCreate: vi.fn(),
+        onDelete: vi.fn(),
+        onUpdate: vi.fn(),
+        palette: [],
+        position: activation.position,
+        target: { annotation: activation.annotation, kind: 'readonly' },
+      },
+      { preserveResolvedRow: true },
+    );
+
+    expect(
+      sidebar.annotationsPanel.root
+        .querySelector('.abyss-annotation-card[aria-current="true"]')
+        ?.getAttribute('data-annotation-row-id'),
+    ).toBe('duplicate-second');
+    expect(
+      host.querySelector<HTMLElement>('.abyss-annotation-editor-readonly-metadata')?.textContent,
+    ).toContain('Second details');
+    shell.destroy();
+    host.remove();
+  });
+
   it('keeps a dismissed selection draft visible and retryable in the unified editor', async () => {
     const host = document.body.createDiv();
     const shell = new ReaderShell(host);
@@ -152,11 +271,16 @@ describe('ReaderShell', () => {
     const intents: unknown[] = [];
     const shell = new ReaderShell(host, (intent) => intents.push(intent));
     expect(shell.annotationToolbar).toBeNull();
+    shell.setQuickHighlightState({ armed: true, color: '#5fb236' });
 
     shell.configureAnnotationToolbar(
-      [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      [
+        { color: '#ffd400', meaning: 'Key idea', name: 'Yellow' },
+        { color: '#5fb236', meaning: 'Definition', name: 'Green' },
+      ],
       null,
     );
+    expect(shell.annotationToolbar).toMatchObject({ color: '#5fb236', tool: 'highlight' });
     shell.annotationToolbar?.root
       .querySelector<HTMLButtonElement>('[data-annotation-tool="ink"]')
       ?.click();
@@ -179,8 +303,15 @@ describe('ReaderShell', () => {
     shell.documentHost.dispatchEvent(
       new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true, key: 'Z', shiftKey: true }),
     );
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, ctrlKey: true, key: 'f' }),
+    );
 
-    expect(intents).toEqual([{ type: 'undo-annotation' }, { type: 'redo-annotation' }]);
+    expect(intents).toEqual([
+      { type: 'undo-annotation' },
+      { type: 'redo-annotation' },
+      { tab: 'search', type: 'open-sidebar' },
+    ]);
     shell.destroy();
     host.remove();
   });
@@ -306,6 +437,42 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
+  it('keeps Quick Highlight armed for Escape dispatched at the reader while its owned menu is open', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.configureAnnotationToolbar([], null);
+    shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
+    const trigger = shell.root.createEl('button');
+    trigger.setAttribute('aria-expanded', 'true');
+    trigger.setAttribute('aria-haspopup', 'menu');
+    const menu = document.body.createDiv({ cls: 'menu' });
+    vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({
+      bottom: 80,
+      height: 40,
+      left: 40,
+      right: 120,
+      top: 40,
+      width: 80,
+      x: 40,
+      y: 40,
+      toJSON: () => undefined,
+    });
+    const escape = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'Escape',
+    });
+
+    shell.documentHost.dispatchEvent(escape);
+
+    expect(escape.defaultPrevented).toBe(false);
+    expect(intents).toEqual([]);
+    menu.remove();
+    shell.destroy();
+    host.remove();
+  });
+
   it('disarms Quick Highlight when only a hidden stale Obsidian menu remains', () => {
     const host = document.body.createDiv();
     const intents: unknown[] = [];
@@ -368,16 +535,19 @@ describe('ReaderShell', () => {
 
   it('inserts the lazy sidebar before the PDF document when it is first opened', () => {
     const shell = new ReaderShell(createDiv());
-
-    shell.openSidebar('outline', {
+    const callbacks = {
       onClose: () => undefined,
       onOutlineNavigate: () => undefined,
       onSearchNavigate: () => undefined,
       onSearchQuery: () => undefined,
       onTabChange: () => undefined,
-    });
+    };
+
+    const firstSidebar = shell.openSidebar('outline', callbacks);
+    const reopenedSidebar = shell.openSidebar('annotations', callbacks);
 
     const body = shell.root.querySelector('.abyss-reader-body');
+    expect(reopenedSidebar).toBe(firstSidebar);
     expect(
       Array.from(body?.children ?? []).map((node) => (node as HTMLElement).dataset['region']),
     ).toEqual(['sidebar', 'document']);
@@ -408,6 +578,10 @@ describe('ReaderShell', () => {
     cleanup();
     cleanup();
     shell.onThemeChange(onThemeChange);
+
+    host.doc.body.addClass('task-6-unrelated-theme-marker');
+    await new Promise((resolve) => host.win.setTimeout(resolve, 0));
+    expect(onThemeChange).not.toHaveBeenCalled();
 
     host.doc.body.removeClass('theme-light');
     host.doc.body.addClass('theme-dark');

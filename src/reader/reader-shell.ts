@@ -11,6 +11,7 @@ import type {
   QuickHighlightState,
 } from './annotation-interaction-controller.js';
 import { AnnotationToolbar, type AnnotationToolbarIntent } from './annotation-toolbar.js';
+import type { ResolvedAnnotationPanelActivation } from './annotations-panel.js';
 import type { AnnotationSuggestionProvider } from './link-suggestions.js';
 import type { ObsidianTheme } from './reading-profiles.js';
 import { ReaderSidebar, type ReaderSidebarCallbacks, type ReaderSidebarTab } from './sidebar.js';
@@ -124,9 +125,12 @@ export class ReaderShell implements AnnotationInteractionHost {
     this.applyQuickHighlightState();
   }
 
-  openAnnotationEditor(request: AnnotationEditorPopoverRequest): boolean {
+  openAnnotationEditor(
+    request: AnnotationEditorPopoverRequest,
+    options: { readonly preserveResolvedRow?: boolean } = {},
+  ): boolean {
     const annotation = editorTargetAnnotation(request.target);
-    if (annotation !== undefined) {
+    if (annotation !== undefined && options.preserveResolvedRow !== true) {
       const id =
         annotation.identity.kind === 'stable'
           ? annotation.identity.id
@@ -134,6 +138,10 @@ export class ReaderShell implements AnnotationInteractionHost {
       this.sidebarValue?.annotationsPanel.selectAnnotation(id, false);
     }
     return this.annotationEditor.open(request);
+  }
+
+  resolveAnnotationActivation(rowId: string): ResolvedAnnotationPanelActivation | null {
+    return this.sidebarValue?.annotationsPanel.resolveActivation(rowId) ?? null;
   }
 
   closeAnnotationEditor(): boolean {

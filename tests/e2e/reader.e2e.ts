@@ -326,8 +326,11 @@ async function selectNativeEditor(selector: string): Promise<void> {
 }
 
 async function inspectPassiveImportedAnnotation(selector: string): Promise<{
+  readonly commentFields: number;
   readonly editableControls: number;
   readonly nativeEditors: number;
+  readonly popoverHeight: number;
+  readonly readOnlyMetadata: boolean;
   readonly selectedEditors: number;
 }> {
   return browser.execute(async (annotationSelector) => {
@@ -357,16 +360,84 @@ async function inspectPassiveImportedAnnotation(selector: string): Promise<{
         resolve();
       });
     });
+    const popover = document.querySelector<HTMLElement>(
+      '[data-annotation-editor-popover]:not([hidden])',
+    );
+    const readOnly = popover?.querySelector<HTMLElement>(
+      '.abyss-annotation-editor-readonly-metadata',
+    );
     return {
-      editableControls: document.querySelectorAll(
-        '[data-annotation-editor-popover]:not([hidden]) :is([data-editor-color], [data-action="delete-annotation"])',
-      ).length,
+      commentFields: Array.from(
+        popover?.querySelectorAll<HTMLElement>('[aria-label="Comment"]') ?? [],
+      ).filter((element) => element.offsetParent !== null).length,
+      editableControls: Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '[data-annotation-editor-popover]:not([hidden]) :is([data-editor-color], [data-action="delete-annotation"])',
+        ),
+      ).filter((element) => element.offsetParent !== null).length,
       nativeEditors: document.querySelectorAll(
         '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)',
       ).length,
+      popoverHeight: popover?.getBoundingClientRect().height ?? 0,
+      readOnlyMetadata:
+        popover?.getAttribute('aria-label') === 'Annotation details' &&
+        readOnly !== null &&
+        readOnly !== undefined &&
+        !readOnly.hidden,
       selectedEditors: document.querySelectorAll('.annotationEditorLayer .selectedEditor').length,
     };
   }, selector);
+}
+
+async function assertCompactReadOnlyCard(comment: string): Promise<void> {
+  await browser.execute((expectedComment) => {
+    const card = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'),
+    ).find((candidate) => candidate.innerText.includes(expectedComment));
+    if (card === undefined)
+      throw new Error(`Read-only annotation card is missing: ${expectedComment}`);
+    card.click();
+  }, comment);
+  const popover = $('[data-annotation-editor-popover]');
+  await popover.waitForDisplayed({ timeout: 5_000 });
+  const geometry = await browser.execute((expectedComment) => {
+    const card = Array.from(document.querySelectorAll<HTMLElement>('.abyss-annotation-card')).find(
+      (candidate) => candidate.innerText.includes(expectedComment),
+    );
+    const editor = document.querySelector<HTMLElement>('[data-annotation-editor-popover]');
+    const readOnly = editor?.querySelector<HTMLElement>(
+      '.abyss-annotation-editor-readonly-metadata',
+    );
+    if (card === undefined || editor === null || readOnly == null)
+      throw new Error('Read-only annotation geometry is incomplete.');
+    return {
+      cardHeight: card.getBoundingClientRect().height,
+      commentFields: Array.from(
+        editor.querySelectorAll<HTMLElement>('[aria-label="Comment"]'),
+      ).filter((element) => element.offsetParent !== null).length,
+      editableControls: Array.from(
+        editor.querySelectorAll<HTMLElement>(
+          '[data-editor-color], [data-action="delete-annotation"]',
+        ),
+      ).filter((element) => element.offsetParent !== null).length,
+      label: editor.getAttribute('aria-label'),
+      metadataVisible: !readOnly.hidden,
+      popoverHeight: editor.getBoundingClientRect().height,
+      popoverWidth: editor.getBoundingClientRect().width,
+    };
+  }, comment);
+  expect(geometry).toMatchObject({
+    commentFields: 0,
+    editableControls: 0,
+    label: 'Annotation details',
+    metadataVisible: true,
+  });
+  expect(geometry.cardHeight).toBeLessThanOrEqual(128);
+  expect(geometry.popoverHeight).toBeGreaterThan(0);
+  expect(geometry.popoverWidth).toBeGreaterThanOrEqual(240);
+  expect(geometry.popoverWidth).toBeLessThanOrEqual(304);
+  await browser.keys(Key.Escape);
+  await expect(popover).not.toBeDisplayed();
 }
 
 describe('PDF reader foundation', () => {
@@ -1025,12 +1096,17 @@ describe('PDF reader foundation', () => {
     await selectNativeEditor('.highlightEditor');
     const commentEditor = $(nativeEditorSelector);
     await commentEditor.waitForDisplayed({ timeout: 5_000 });
-    await inputValue(`${nativeEditorSelector} [aria-label="Comment"]`, 'Comment');
-    await inputValue(`${nativeEditorSelector} [aria-label="Tags"]`, '#review');
-    await inputValue(`${nativeEditorSelector} [aria-label="Links"]`, '[[Linked note]]');
+    await inputValue(
+      `${nativeEditorSelector} [aria-label="Comment"]`,
+      'Comment #review [[Linked note]]',
+    );
     await waitForAnnotationSave(saveBaseline);
     await expect(commentEditor).toBeDisplayed();
-    await expect(commentEditor.$('[aria-label="Comment"]')).toHaveValue('Comment');
+    await expect(commentEditor.$('[aria-label="Comment"]')).toHaveValue(
+      'Comment #review [[Linked note]]',
+    );
+    await expect(commentEditor.$('[aria-label="Tags"]')).not.toExist();
+    await expect(commentEditor.$('[aria-label="Links"]')).not.toExist();
 
     await closeReaderLeaves();
     await openPdf(workingPath);
@@ -1056,13 +1132,16 @@ describe('PDF reader foundation', () => {
     saveBaseline = await captureAnnotationSaveBaseline();
     const revisedComment = $(`${nativeEditorSelector} [aria-label="Comment"]`);
     await revisedComment.waitForDisplayed({ timeout: 5_000 });
-    await inputValue(`${nativeEditorSelector} [aria-label="Comment"]`, 'Revised');
-    await inputValue(`${nativeEditorSelector} [aria-label="Tags"]`, '#verified');
-    await inputValue(`${nativeEditorSelector} [aria-label="Links"]`, '[[Linked note]]');
-    await expect(revisedComment).toHaveValue('Revised');
+    await inputValue(
+      `${nativeEditorSelector} [aria-label="Comment"]`,
+      'Revised #verified [[Linked note]]',
+    );
+    await expect(revisedComment).toHaveValue('Revised #verified [[Linked note]]');
+    await expect($(nativeEditorSelector).$('[aria-label="Tags"]')).not.toExist();
+    await expect($(nativeEditorSelector).$('[aria-label="Links"]')).not.toExist();
     await waitForAnnotationSave(saveBaseline);
     await expect($(nativeEditorSelector)).toBeDisplayed();
-    await expect(revisedComment).toHaveValue('Revised');
+    await expect(revisedComment).toHaveValue('Revised #verified [[Linked note]]');
 
     await closeReaderLeaves();
     await openPdf(workingPath);
@@ -1089,13 +1168,19 @@ describe('PDF reader foundation', () => {
     await expect($('.underlineAnnotation')).toExist();
     await expect($('.textAnnotation')).toExist();
     expect(await inspectPassiveImportedAnnotation('.underlineAnnotation')).toEqual({
+      commentFields: 0,
       editableControls: 0,
       nativeEditors: 0,
+      popoverHeight: expect.any(Number),
+      readOnlyMetadata: true,
       selectedEditors: 0,
     });
     expect(await inspectPassiveImportedAnnotation('.textAnnotation')).toEqual({
+      commentFields: 0,
       editableControls: 0,
       nativeEditors: 0,
+      popoverHeight: expect.any(Number),
+      readOnlyMetadata: true,
       selectedEditors: 0,
     });
     const saveBaseline = await captureAnnotationSaveBaseline();
@@ -1138,6 +1223,8 @@ describe('PDF reader foundation', () => {
     await expect($('[data-sidebar-panel="annotations"]')).toHaveText(
       expect.stringContaining('Existing text note'),
     );
+    await assertCompactReadOnlyCard('Existing underline');
+    await assertCompactReadOnlyCard('Existing text note');
   });
 
   for (const qualification of [
@@ -1176,6 +1263,7 @@ describe('PDF reader foundation', () => {
       await expect($('[data-sidebar-panel="annotations"]')).toHaveText(
         expect.stringContaining(qualification.comment),
       );
+      await assertCompactReadOnlyCard(qualification.comment);
       await browser.keys([process.platform === 'darwin' ? Key.Command : Key.Control, 's']);
       expect(await vaultFileSha256(qualification.path)).toBe(before);
     });

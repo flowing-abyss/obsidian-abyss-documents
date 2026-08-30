@@ -213,11 +213,14 @@ async function closeReaders(): Promise<void> {
     const host = window as Window & {
       __abyssTask3ActivationTrace?: { cleanup(): void };
       __abyssTask3FreeTextProbe?: { cleanup(): void };
+      __abyssTask6OverlapTrace?: { cleanup(): unknown };
     };
     host.__abyssTask3ActivationTrace?.cleanup();
     delete host.__abyssTask3ActivationTrace;
     host.__abyssTask3FreeTextProbe?.cleanup();
     delete host.__abyssTask3FreeTextProbe;
+    host.__abyssTask6OverlapTrace?.cleanup();
+    delete host.__abyssTask6OverlapTrace;
   });
   await browser.executeObsidian(async ({ app }) => {
     for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
@@ -469,6 +472,185 @@ async function clickNativeHighlight(
   }
 }
 
+async function installOverlapContinuityTrace(expectedIds: readonly string[]): Promise<void> {
+  await browser.execute(
+    (readerSelector, popoverSelector, stableIds) => {
+      const reader = document.querySelector<HTMLElement>(readerSelector);
+      const viewer = reader?.querySelector<HTMLElement>('.pdfViewerContainer') ?? null;
+      const page = viewer?.querySelector<HTMLElement>('[data-page-number="1"]') ?? null;
+      const canvas = page?.querySelector<HTMLCanvasElement>('.canvasWrapper canvas') ?? null;
+      const popover = document.querySelector<HTMLElement>(popoverSelector);
+      const cards = Array.from(
+        reader?.querySelectorAll<HTMLElement>('.abyss-annotation-card') ?? [],
+      );
+      if (
+        reader === null ||
+        viewer === null ||
+        page === null ||
+        canvas === null ||
+        popover === null ||
+        popover.hidden ||
+        cards.length !== stableIds.length
+      )
+        throw new Error('Persisted overlap continuity targets are incomplete.');
+      const expected = new Set(stableIds);
+      const state = {
+        canvas,
+        canvasDisconnects: 0,
+        emptyAnnotationListFrames: 0,
+        identityBreaks: 0,
+        mutationRecords: 0,
+        page,
+        pageDisconnects: 0,
+        phantomOrReadOnlyRows: 0,
+        popover,
+        popoverDisconnects: 0,
+        popoverHideTransitions: 0,
+        reader,
+        trackedCardDisconnects: 0,
+        viewer,
+        viewerDisconnects: 0,
+      };
+      const removedTarget = (node: Node, target: Node): boolean =>
+        node === target || (node.instanceOf(Element) && node.contains(target));
+      const sample = (): void => {
+        const currentCards = Array.from(
+          reader.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+        );
+        if (currentCards.length === 0) state.emptyAnnotationListFrames += 1;
+        if (
+          currentCards.some((card) => {
+            const id = card.dataset['annotationId'] ?? '';
+            return !expected.has(id) || card.innerText.includes('Read-only');
+          })
+        )
+          state.phantomOrReadOnlyRows += 1;
+        if (
+          document.querySelector(readerSelector) !== reader ||
+          reader.querySelector('.pdfViewerContainer') !== viewer ||
+          viewer.querySelector('[data-page-number="1"]') !== page ||
+          page.querySelector('.canvasWrapper canvas') !== canvas ||
+          document.querySelector(popoverSelector) !== popover ||
+          cards.some((card) => !card.isConnected) ||
+          currentCards.some((card, index) => card !== cards[index])
+        )
+          state.identityBreaks += 1;
+        if (!popover.hidden && popover.innerText.includes('Read-only'))
+          state.phantomOrReadOnlyRows += 1;
+      };
+      const cardsWithin = (node: Node): HTMLElement[] => {
+        if (!node.instanceOf(Element)) return [];
+        return [
+          ...(node.matches('.abyss-annotation-card') ? [node as HTMLElement] : []),
+          ...Array.from(node.querySelectorAll<HTMLElement>('.abyss-annotation-card')),
+        ];
+      };
+      const processRecords = (records: readonly MutationRecord[]): void => {
+        state.mutationRecords += records.length;
+        for (const record of records) {
+          if (
+            record.type === 'attributes' &&
+            record.target === popover &&
+            record.attributeName === 'hidden' &&
+            record.oldValue === null
+          )
+            state.popoverHideTransitions += 1;
+          for (const added of Array.from(record.addedNodes)) {
+            if (
+              cardsWithin(added).some((card) => {
+                const id = card.dataset['annotationId'] ?? '';
+                return !expected.has(id) || card.innerText.includes('Read-only');
+              })
+            )
+              state.phantomOrReadOnlyRows += 1;
+          }
+          for (const removed of Array.from(record.removedNodes)) {
+            if (removedTarget(removed, viewer)) state.viewerDisconnects += 1;
+            if (removedTarget(removed, page)) state.pageDisconnects += 1;
+            if (removedTarget(removed, canvas)) state.canvasDisconnects += 1;
+            if (removedTarget(removed, popover)) state.popoverDisconnects += 1;
+            if (cards.some((card) => removedTarget(removed, card)))
+              state.trackedCardDisconnects += 1;
+          }
+        }
+        sample();
+      };
+      const observer = new MutationObserver(processRecords);
+      observer.observe(reader.closest('.workspace-leaf') ?? reader, {
+        attributeFilter: ['class', 'hidden', 'style'],
+        attributeOldValue: true,
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+      (
+        window as Window & {
+          __abyssTask6OverlapTrace?: { cleanup(): Record<string, number> };
+        }
+      ).__abyssTask6OverlapTrace = {
+        cleanup() {
+          processRecords(observer.takeRecords());
+          sample();
+          observer.disconnect();
+          return {
+            canvasDisconnects: state.canvasDisconnects,
+            emptyAnnotationListFrames: state.emptyAnnotationListFrames,
+            identityBreaks: state.identityBreaks,
+            mutationRecords: state.mutationRecords,
+            pageDisconnects: state.pageDisconnects,
+            phantomOrReadOnlyRows: state.phantomOrReadOnlyRows,
+            popoverDisconnects: state.popoverDisconnects,
+            popoverHideTransitions: state.popoverHideTransitions,
+            trackedCardDisconnects: state.trackedCardDisconnects,
+            viewerDisconnects: state.viewerDisconnects,
+          };
+        },
+      };
+    },
+    activeReaderSelector,
+    nativeEditorSelector,
+    expectedIds,
+  );
+}
+
+async function assertOverlapContinuityTrace(): Promise<void> {
+  const trace = await browser.execute(() => {
+    const host = window as Window & {
+      __abyssTask6OverlapTrace?: {
+        cleanup(): {
+          canvasDisconnects: number;
+          emptyAnnotationListFrames: number;
+          identityBreaks: number;
+          mutationRecords: number;
+          pageDisconnects: number;
+          phantomOrReadOnlyRows: number;
+          popoverDisconnects: number;
+          popoverHideTransitions: number;
+          trackedCardDisconnects: number;
+          viewerDisconnects: number;
+        };
+      };
+    };
+    const current = host.__abyssTask6OverlapTrace;
+    if (current === undefined) throw new Error('Persisted overlap trace was not installed.');
+    const result = current.cleanup();
+    delete host.__abyssTask6OverlapTrace;
+    return result;
+  });
+  expect(trace.mutationRecords).toBeGreaterThan(0);
+  expect(trace).toMatchObject({
+    canvasDisconnects: 0,
+    emptyAnnotationListFrames: 0,
+    identityBreaks: 0,
+    pageDisconnects: 0,
+    phantomOrReadOnlyRows: 0,
+    popoverDisconnects: 0,
+    popoverHideTransitions: 0,
+    trackedCardDisconnects: 0,
+    viewerDisconnects: 0,
+  });
+}
+
 async function vaultFileSha256(path: string): Promise<string> {
   return browser.executeObsidian(async ({ app }, filePath) => {
     const bytes = await app.vault.adapter.readBinary(filePath);
@@ -481,6 +663,8 @@ async function waitForPdfBytesToChange(path: string, previous: string): Promise<
   const initial = await readAnnotationSaveLifecycleSnapshot();
   const baseline = {
     failures: initial.failures,
+    minimumCommittedRevision: initial.pendingRevision,
+    minimumSavedGeneration: initial.newestGeneration,
     minimumSaves: initial.saves + (initial.isDirty ? 1 : 0),
     recoveries: initial.recoveries,
   };
@@ -2288,6 +2472,77 @@ describe('reader selection-first annotations', () => {
     }
   });
 
+  it('persists completed tag and link suggestions from a reopened Highlight comment', async () => {
+    const fixture = persistedWritableFixtures.find(({ kind }) => kind === 'highlight');
+    if (fixture === undefined) throw new Error('Persisted Highlight fixture is missing.');
+    let hash = await vaultFileSha256(workingPath);
+    await createPersistedWritableAnnotation(fixture);
+    hash = await waitForPdfBytesToChange(workingPath, hash);
+    await reopenPdf(workingPath);
+    await assertFreshNeutralReader(fixture);
+
+    await installTask4AutocompleteNote();
+    try {
+      await installPersistedActivationTrace(fixture);
+      await $(activeReaderDescendant(fixture.persistedSelector)).click();
+      await assertEditablePersistedActivation(fixture);
+      const commentSelector = `${nativeEditorSelector} [aria-label="Comment"]`;
+      const comment = $(commentSelector);
+      const saveBaseline = await captureAnnotationSaveBaseline();
+      await comment.click();
+      await browser.execute((selector) => {
+        const input = document.querySelector<HTMLTextAreaElement>(selector);
+        if (input === null) throw new Error('Reopened Highlight comment editor is unavailable.');
+        input.value = 'Review #to';
+        input.setSelectionRange(input.value.length, input.value.length);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+      }, commentSelector);
+      const tag = $(`${nativeEditorSelector} [role="option"][aria-selected="true"]`);
+      await tag.waitForDisplayed({ timeout: 5_000 });
+      await expect(tag).toHaveText('#topic');
+      await tag.click();
+      await expect(comment).toHaveValue('Review #topic');
+
+      await browser.execute((selector) => {
+        const input = document.querySelector<HTMLTextAreaElement>(selector);
+        if (input === null) throw new Error('Reopened Highlight comment editor is unavailable.');
+        input.value = 'Review #topic … see [[Task 4 auto';
+        input.setSelectionRange(input.value.length, input.value.length);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.focus();
+      }, commentSelector);
+      const link = $(`${nativeEditorSelector} [role="option"][aria-selected="true"]`);
+      await link.waitForDisplayed({ timeout: 5_000 });
+      await expect(link).toHaveText(expect.stringContaining('Task 4 autocomplete'));
+      await browser.keys(Key.Enter);
+      const completed = 'Review #topic … see [[Task 4 autocomplete]]';
+      await expect(comment).toHaveValue(completed);
+      await browser.waitUntil(
+        async () =>
+          isVerifiedAnnotationSaveSettled(
+            await readAnnotationSaveLifecycleSnapshot(),
+            saveBaseline,
+          ),
+        { timeout: 15_000, timeoutMsg: 'Reopened autocomplete save did not settle.' },
+      );
+      await waitForPdfBytesToChange(workingPath, hash);
+
+      await reopenPdf(workingPath);
+      const writable = (await nativePageOneAnnotations()).filter(
+        ({ annotationType }) => annotationType !== 16,
+      );
+      expect(writable).toEqual([{ annotationType: 9, color: [255, 212, 0], contents: completed }]);
+      await $('[data-control="sidebar"]').click();
+      await $('[data-tab="annotations"]').click();
+      await expect($('.abyss-annotation-card')).toHaveText(expect.stringContaining(completed));
+      await expect($('[data-annotation-card-tag]')).not.toExist();
+      await expect($('[data-annotation-link]')).not.toExist();
+    } finally {
+      await removeTask4AutocompleteNote();
+    }
+  });
+
   it('creates enriches saves and reloads one selection-first annotation without remounting', async () => {
     await $('[data-control="sidebar"]').click();
     await $('[data-tab="annotations"]').click();
@@ -3048,6 +3303,8 @@ describe('reader selection-first annotations', () => {
     }));
     expect(new Set(identities.cards).size).toBe(2);
     expect(new Set(identities.editors).size).toBe(2);
+    expect(identities.cards).not.toContain('');
+    expect(identities.editors).not.toContain('');
 
     for (const comment of ['Overlap first', 'Overlap second']) {
       const annotationId = await browser.execute((expectedComment) => {
@@ -3087,9 +3344,18 @@ describe('reader selection-first annotations', () => {
       ),
     );
     expect(new Set(reopenedIds).size).toBe(2);
+    expect(reopenedIds).not.toContain('');
+    expect(new Set(reopenedIds)).toEqual(new Set(identities.cards));
     await $('[data-control="sidebar"]').click();
     await $('[data-tab="annotations"]').click();
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(2);
+    const reopenedCardIds = await browser.execute(() =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+        (card) => card.dataset['annotationId'] ?? '',
+      ),
+    );
+    expect(new Set(reopenedCardIds)).toEqual(new Set(reopenedIds));
   });
 
   it('disables persisted overlap batches selected separately with Shift and the platform modifier', async () => {
@@ -3146,6 +3412,15 @@ describe('reader selection-first annotations', () => {
       hash = await waitForPdfBytesToChange(workingPath, hash);
     }
 
+    const persistedIds = await browser.execute(() =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+        (card) => card.dataset['annotationId'] ?? '',
+      ),
+    );
+    expect(new Set(persistedIds).size).toBe(2);
+    expect(persistedIds).not.toContain('');
+
     await reopenPdf(workingPath);
     await browser.waitUntil(
       async () =>
@@ -3156,6 +3431,19 @@ describe('reader selection-first annotations', () => {
         ),
       { timeout: 15_000, timeoutMsg: 'Persisted overlap annotations did not reopen neutrally.' },
     );
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(2);
+    expect(
+      new Set(
+        await browser.execute(() =>
+          Array.from(
+            document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+            (card) => card.dataset['annotationId'] ?? '',
+          ),
+        ),
+      ),
+    ).toEqual(new Set(persistedIds));
     await $$('.annotationLayer .highlightAnnotation')[0]?.click();
     await browser.waitUntil(
       async () =>
@@ -3164,6 +3452,7 @@ describe('reader selection-first annotations', () => {
         ),
       { timeout: 5_000, timeoutMsg: 'The first native highlight was not selected.' },
     );
+    await installOverlapContinuityTrace(persistedIds);
     await clickNativeHighlight(1, [Key.Shift]);
     await browser.waitUntil(
       async () =>
@@ -3301,6 +3590,7 @@ describe('reader selection-first annotations', () => {
       await expect($$('.highlightEditor.selectedEditor')).toBeElementsArrayOfSize(2);
     };
     await assertFailClosedBatchContract();
+    await assertOverlapContinuityTrace();
 
     await reopenPdf(workingPath);
     await browser.waitUntil(
@@ -3315,6 +3605,19 @@ describe('reader selection-first annotations', () => {
         timeoutMsg: 'Persisted overlap annotations did not reopen for the platform gesture.',
       },
     );
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(2);
+    expect(
+      new Set(
+        await browser.execute(() =>
+          Array.from(
+            document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+            (card) => card.dataset['annotationId'] ?? '',
+          ),
+        ),
+      ),
+    ).toEqual(new Set(persistedIds));
     await $$('.annotationLayer .highlightAnnotation')[0]?.click();
     await browser.waitUntil(
       async () =>
@@ -3324,6 +3627,7 @@ describe('reader selection-first annotations', () => {
       { timeout: 5_000, timeoutMsg: 'The platform gesture baseline was not selected.' },
     );
     const platformModifier = process.platform === 'darwin' ? Key.Command : Key.Control;
+    await installOverlapContinuityTrace(persistedIds);
     await clickNativeHighlight(1, [platformModifier]);
     await browser.waitUntil(
       async () =>
@@ -3333,5 +3637,6 @@ describe('reader selection-first annotations', () => {
       { timeout: 5_000, timeoutMsg: 'The platform-modifier gesture did not select two editors.' },
     );
     await assertFailClosedBatchContract();
+    await assertOverlapContinuityTrace();
   });
 });

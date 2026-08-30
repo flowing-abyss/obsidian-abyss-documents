@@ -1931,7 +1931,7 @@ export class PdfAnnotationEditor {
     const ownedSet = (): void => {
       previousSet?.();
       this.emitMutation();
-      this.emitDirty(true);
+      if (!this.saving) this.emitDirty(true);
     };
     const ownedReset = (): void => {
       previousReset?.();

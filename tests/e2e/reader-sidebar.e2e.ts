@@ -4,6 +4,11 @@ import { Key } from 'webdriverio';
 
 async function closeReaderLeaves(): Promise<void> {
   await browser.executeObsidian(async ({ app }) => {
+    const host = window as Window & {
+      __abyssTask6SidebarMonitor?: { cleanup(): unknown };
+    };
+    host.__abyssTask6SidebarMonitor?.cleanup();
+    delete host.__abyssTask6SidebarMonitor;
     for (const leaf of app.workspace.getLeavesOfType('abyss-document-view')) {
       const controller = (leaf.view as unknown as { controller?: { close(): Promise<void> } })
         .controller;
@@ -224,6 +229,94 @@ async function movePointerTo(x: number, y: number): Promise<void> {
   await browser.releaseActions();
 }
 
+async function installSidebarContinuityMonitor(): Promise<void> {
+  await browser.execute(() => {
+    const reader = document.querySelector<HTMLElement>('.abyss-documents');
+    const viewer = reader?.querySelector<HTMLElement>('.pdfViewerContainer') ?? null;
+    const page = viewer?.querySelector<HTMLElement>('[data-page-number="1"]') ?? null;
+    const canvas = page?.querySelector<HTMLCanvasElement>('canvas') ?? null;
+    const sidebar = reader?.querySelector<HTMLElement>('.abyss-reader-sidebar') ?? null;
+    if (reader === null || viewer === null || page === null || canvas === null || sidebar === null)
+      throw new Error('Sidebar continuity targets are incomplete.');
+    const state = {
+      disconnects: 0,
+      emptySurfaceSamples: 0,
+      identityBreaks: 0,
+      mutationRecords: 0,
+    };
+    const tracked = [reader, viewer, page, canvas, sidebar];
+    const removedTarget = (node: Node, target: Node): boolean =>
+      node === target || (node.instanceOf(Element) && node.contains(target));
+    const sample = (): void => {
+      if (
+        document.querySelector('.abyss-documents') !== reader ||
+        reader.querySelector('.pdfViewerContainer') !== viewer ||
+        viewer.querySelector('[data-page-number="1"]') !== page ||
+        page.querySelector('canvas') !== canvas ||
+        reader.querySelector('.abyss-reader-sidebar') !== sidebar
+      )
+        state.identityBreaks += 1;
+      const bounds = canvas.getBoundingClientRect();
+      if (
+        !canvas.isConnected ||
+        canvas.width <= 0 ||
+        canvas.height <= 0 ||
+        bounds.width <= 0 ||
+        bounds.height <= 0
+      )
+        state.emptySurfaceSamples += 1;
+    };
+    const processRecords = (records: readonly MutationRecord[]): void => {
+      state.mutationRecords += records.length;
+      for (const record of records) {
+        for (const removed of Array.from(record.removedNodes)) {
+          if (tracked.some((target) => removedTarget(removed, target))) state.disconnects += 1;
+        }
+      }
+      sample();
+    };
+    const observer = new MutationObserver(processRecords);
+    observer.observe(reader.closest('.workspace-leaf') ?? reader, {
+      attributeFilter: ['class', 'hidden', 'style'],
+      attributeOldValue: true,
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    (
+      window as Window & {
+        __abyssTask6SidebarMonitor?: { cleanup(): Record<string, number> };
+      }
+    ).__abyssTask6SidebarMonitor = {
+      cleanup() {
+        processRecords(observer.takeRecords());
+        observer.disconnect();
+        return { ...state };
+      },
+    };
+  });
+}
+
+async function assertSidebarContinuityMonitor(): Promise<void> {
+  await browser.pause(50);
+  const metrics = await browser.execute(() => {
+    const host = window as Window & {
+      __abyssTask6SidebarMonitor?: { cleanup(): Record<string, number> };
+    };
+    const monitor = host.__abyssTask6SidebarMonitor;
+    if (monitor === undefined) throw new Error('Sidebar continuity monitor is unavailable.');
+    const result = monitor.cleanup();
+    delete host.__abyssTask6SidebarMonitor;
+    return result;
+  });
+  expect(metrics['mutationRecords']).toBeGreaterThan(0);
+  expect(metrics).toMatchObject({
+    disconnects: 0,
+    emptySurfaceSamples: 0,
+    identityBreaks: 0,
+  });
+}
+
 describe('PDF reader sidebar', () => {
   beforeEach(closeReaderLeaves);
   afterEach(closeReaderLeaves);
@@ -365,17 +458,19 @@ describe('PDF reader sidebar', () => {
   it('overlays the sidebar from narrow reader width without squeezing the document', async () => {
     await openOutline();
     await $('[data-action="close-sidebar"]').click();
-    const auxiliaryLeafIds = await browser.executeObsidian(({ app }) => {
-      const readerLeaf = app.workspace.getMostRecentLeaf();
-      if (readerLeaf === null) throw new Error('Reader leaf is missing.');
-      const auxiliaryLeaves = [
-        app.workspace.createLeafBySplit(readerLeaf, 'vertical'),
-        app.workspace.createLeafBySplit(readerLeaf, 'vertical'),
-      ];
-      app.workspace.setActiveLeaf(readerLeaf, { focus: true });
-      return auxiliaryLeaves.map((leaf) => (leaf as unknown as { id: string }).id);
-    });
+    const auxiliaryLeafIds: string[] = [];
     try {
+      for (let index = 0; index < 2; index += 1) {
+        auxiliaryLeafIds.push(
+          await browser.executeObsidian(({ app }) => {
+            const readerLeaf = app.workspace.getMostRecentLeaf();
+            if (readerLeaf === null) throw new Error('Reader leaf is missing.');
+            const auxiliary = app.workspace.createLeafBySplit(readerLeaf, 'vertical');
+            app.workspace.setActiveLeaf(readerLeaf, { focus: true });
+            return (auxiliary as unknown as { id: string }).id;
+          }),
+        );
+      }
       await browser.waitUntil(
         async () =>
           (await browser.execute(
@@ -388,6 +483,7 @@ describe('PDF reader sidebar', () => {
           document.querySelector('[data-region="document"]')?.getBoundingClientRect().width ?? 0,
       );
 
+      await installSidebarContinuityMonitor();
       await $('[data-control="sidebar"]').click();
 
       const geometry = await browser.execute(() => {
@@ -415,6 +511,7 @@ describe('PDF reader sidebar', () => {
       expect(Math.abs(geometry.sidebarLeft - geometry.bodyLeft)).toBeLessThanOrEqual(1);
       expect(geometry.sidebarWidth).toBeLessThanOrEqual(geometry.readerWidth * 0.9 + 1);
       expect(Math.abs(geometry.documentWidth - closedDocumentWidth)).toBeLessThanOrEqual(1);
+      await assertSidebarContinuityMonitor();
     } finally {
       await browser.executeObsidian(({ app }, leafIds) => {
         const leavesToDetach: Array<{ detach(): void }> = [];
@@ -975,35 +1072,110 @@ describe('PDF reader sidebar', () => {
     });
 
     await browser.execute(() => {
+      const reader = document.querySelector<HTMLElement>('.abyss-documents');
+      const viewer = reader?.querySelector<HTMLElement>('.pdfViewerContainer') ?? null;
+      const page = viewer?.querySelector<HTMLElement>('[data-page-number="1"]') ?? null;
       const canvas = document.querySelector<HTMLCanvasElement>('[data-page-number="1"] canvas');
-      if (canvas === null) throw new Error('Initial page canvas is missing.');
+      const panel =
+        reader?.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]') ?? null;
+      const footer = panel?.querySelector<HTMLElement>('[data-annotation-footer]') ?? null;
+      if (
+        reader === null ||
+        viewer === null ||
+        page === null ||
+        canvas === null ||
+        panel === null ||
+        footer === null
+      )
+        throw new Error('Annotation convergence identity is incomplete.');
       const state = {
         badFrame: false,
+        baselineGeneration: null as number | null,
         canvas,
         consecutivePopulatedFrames: 0,
+        disconnects: 0,
+        footer,
         frame: 0,
+        frameSamples: 0,
+        identityBreaks: 0,
+        maxPendingFrames: 0,
         maxConsecutivePopulatedFrames: 0,
+        mutationSamples: 0,
+        observer: new MutationObserver(() => undefined),
+        pendingFrames: 0,
+        page,
+        panel,
+        reader,
+        samplingGeneration: 0,
         stopped: false,
+        viewer,
       };
       const host = window as Window & { __abyssTask9Continuity?: typeof state };
       host.__abyssTask9Continuity = state;
+      const scheduleSample = (): void => {
+        state.pendingFrames += 1;
+        state.maxPendingFrames = Math.max(state.maxPendingFrames, state.pendingFrames);
+        state.frame = requestAnimationFrame(() => {
+          state.pendingFrames -= 1;
+          sample();
+        });
+      };
       const sample = (): void => {
         if (state.stopped) return;
-        const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
-        const status = panel?.querySelector<HTMLElement>('[data-annotations-status]') ?? null;
+        const currentPanel = document.querySelector<HTMLElement>(
+          '[data-sidebar-panel="annotations"]',
+        );
+        const status =
+          currentPanel?.querySelector<HTMLElement>('[data-annotations-status]') ?? null;
         const populated =
-          panel?.dataset['annotationState'] === 'content' &&
-          panel.querySelectorAll('.abyss-annotation-card').length > 0 &&
+          currentPanel?.dataset['annotationState'] === 'content' &&
+          currentPanel.querySelectorAll('.abyss-annotation-card').length > 0 &&
           status?.hidden === true;
         state.badFrame ||= !populated;
-        state.consecutivePopulatedFrames = populated ? state.consecutivePopulatedFrames + 1 : 0;
-        state.maxConsecutivePopulatedFrames = Math.max(
-          state.maxConsecutivePopulatedFrames,
-          state.consecutivePopulatedFrames,
-        );
-        state.frame = requestAnimationFrame(sample);
+        if (
+          document.querySelector('.abyss-documents') !== reader ||
+          reader.querySelector('.pdfViewerContainer') !== viewer ||
+          viewer.querySelector('[data-page-number="1"]') !== page ||
+          page.querySelector('canvas') !== canvas ||
+          currentPanel !== panel ||
+          panel.querySelector('[data-annotation-footer]') !== footer
+        )
+          state.identityBreaks += 1;
+        if (state.baselineGeneration === state.samplingGeneration) {
+          state.frameSamples += 1;
+          state.consecutivePopulatedFrames = populated ? state.consecutivePopulatedFrames + 1 : 0;
+          state.maxConsecutivePopulatedFrames = Math.max(
+            state.maxConsecutivePopulatedFrames,
+            state.consecutivePopulatedFrames,
+          );
+        }
+        scheduleSample();
       };
-      state.frame = requestAnimationFrame(sample);
+      const removedTarget = (node: Node, target: Node): boolean =>
+        node === target || (node.instanceOf(Element) && node.contains(target));
+      const processRecords = (records: readonly MutationRecord[]): void => {
+        state.mutationSamples += records.length;
+        for (const record of records) {
+          for (const removed of Array.from(record.removedNodes)) {
+            if (
+              [reader, viewer, page, canvas, panel, footer].some((target) =>
+                removedTarget(removed, target),
+              )
+            )
+              state.disconnects += 1;
+          }
+        }
+      };
+      state.observer.disconnect();
+      state.observer = new MutationObserver(processRecords);
+      state.observer.observe(reader.closest('.workspace-leaf') ?? reader, {
+        attributeFilter: ['class', 'hidden', 'style'],
+        attributeOldValue: true,
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+      scheduleSample();
     });
     try {
       await $('[data-sidebar-panel="annotations"] [data-annotation-color]').click();
@@ -1030,17 +1202,50 @@ describe('PDF reader sidebar', () => {
       await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
       await expect($('[data-annotation-page]')).toHaveText('Page 76');
       await expect($('[data-control="page-field"]')).toHaveValue('1');
+      await browser.execute(() => {
+        const state = (
+          window as Window & {
+            __abyssTask9Continuity?: {
+              baselineGeneration: number | null;
+              consecutivePopulatedFrames: number;
+              frameSamples: number;
+              maxConsecutivePopulatedFrames: number;
+              samplingGeneration: number;
+            };
+          }
+        ).__abyssTask9Continuity;
+        const row = document.querySelector(
+          '[data-sidebar-panel="annotations"] .abyss-annotation-card-row',
+        );
+        if (state === undefined || row?.getAttribute('aria-setsize') !== '1')
+          throw new Error('Cannot baseline annotation continuity before its exact search result.');
+        state.samplingGeneration += 1;
+        state.baselineGeneration = state.samplingGeneration;
+        state.consecutivePopulatedFrames = 0;
+        state.frameSamples = 0;
+        state.maxConsecutivePopulatedFrames = 0;
+      });
       await browser.waitUntil(
         async () =>
           browser
-            .execute(
-              () =>
-                (
-                  window as Window & {
-                    __abyssTask9Continuity?: { readonly maxConsecutivePopulatedFrames: number };
-                  }
-                ).__abyssTask9Continuity?.maxConsecutivePopulatedFrames ?? 0,
-            )
+            .execute(() => {
+              const state = (
+                window as Window & {
+                  __abyssTask9Continuity?: {
+                    readonly baselineGeneration: number | null;
+                    readonly frameSamples: number;
+                    readonly maxConsecutivePopulatedFrames: number;
+                    readonly samplingGeneration: number;
+                  };
+                }
+              ).__abyssTask9Continuity;
+              return state?.baselineGeneration === 1 &&
+                state.samplingGeneration === 1 &&
+                state.frameSamples >= 5 &&
+                state.maxConsecutivePopulatedFrames >= 5
+                ? state.maxConsecutivePopulatedFrames
+                : 0;
+            })
             .then((frames) => frames >= 5),
         { timeout: 2_000, timeoutMsg: 'Annotation panel did not sustain five populated frames.' },
       );
@@ -1049,8 +1254,15 @@ describe('PDF reader sidebar', () => {
           window as Window & {
             __abyssTask9Continuity?: {
               badFrame: boolean;
+              readonly baselineGeneration: number | null;
               readonly canvas: HTMLCanvasElement;
+              readonly disconnects: number;
+              readonly frameSamples: number;
+              readonly identityBreaks: number;
+              readonly maxPendingFrames: number;
               readonly maxConsecutivePopulatedFrames: number;
+              readonly mutationSamples: number;
+              readonly samplingGeneration: number;
             };
           }
         ).__abyssTask9Continuity;
@@ -1061,22 +1273,42 @@ describe('PDF reader sidebar', () => {
           throw new Error('Annotation continuity probe is incomplete.');
         return {
           badFrame: state.badFrame,
+          baselineGeneration: state.baselineGeneration,
+          disconnects: state.disconnects,
+          frameSamples: state.frameSamples,
+          identityBreaks: state.identityBreaks,
+          maxPendingFrames: state.maxPendingFrames,
           maxConsecutivePopulatedFrames: state.maxConsecutivePopulatedFrames,
+          mutationSamples: state.mutationSamples,
           sameCanvas: state.canvas === currentCanvas,
+          samplingGeneration: state.samplingGeneration,
         };
       });
       expect(continuity.badFrame).toBe(false);
+      expect(continuity.baselineGeneration).toBe(1);
+      expect(continuity.disconnects).toBe(0);
+      expect(continuity.frameSamples).toBeGreaterThanOrEqual(5);
+      expect(continuity.identityBreaks).toBe(0);
+      expect(continuity.maxPendingFrames).toBe(1);
       expect(continuity.maxConsecutivePopulatedFrames).toBeGreaterThanOrEqual(5);
+      expect(continuity.mutationSamples).toBeGreaterThan(0);
       expect(continuity.sameCanvas).toBe(true);
+      expect(continuity.samplingGeneration).toBe(1);
     } finally {
       await browser.execute(() => {
         const host = window as Window & {
-          __abyssTask9Continuity?: { frame: number; stopped: boolean };
+          __abyssTask9Continuity?: {
+            frame: number;
+            observer: MutationObserver;
+            stopped: boolean;
+          };
         };
         const state = host.__abyssTask9Continuity;
         if (state !== undefined) {
           state.stopped = true;
           cancelAnimationFrame(state.frame);
+          state.observer.takeRecords();
+          state.observer.disconnect();
         }
         delete host.__abyssTask9Continuity;
       });

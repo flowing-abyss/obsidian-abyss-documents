@@ -27,6 +27,22 @@ describe('annotation link suggestions', () => {
     });
   });
 
+  it('does not treat alias text or ordinary prose as an editable suggestion target', () => {
+    const closed = 'See [[Concept|Existing alias]] later';
+    const aliasCursor = closed.indexOf('alias') + 2;
+
+    expect(annotationCaretTokenAtCursor(closed, aliasCursor)).toBeNull();
+    expect(replaceAnnotationSuggestion('ordinary prose', 8, '[[Concept]]')).toBeNull();
+    expect(replaceAnnotationSuggestion('See [[Con', 9, '[[Concept]]')).toEqual({
+      cursor: 15,
+      value: 'See [[Concept]]',
+    });
+    expect(replaceAnnotationSuggestion('See [[Con]] later', 9, 'Concept')).toEqual({
+      cursor: 11,
+      value: 'See Concept later',
+    });
+  });
+
   it('locates and replaces only the active tag token inside a full comment', () => {
     const value = 'Review #todo before [[Note]] later';
     const cursor = value.indexOf('do');

@@ -25,6 +25,7 @@ async function closeReaders(): Promise<void> {
         frame: number;
         observer?: MutationObserver;
       };
+      __abyssTask6AppearanceMonitor?: { cleanup(): unknown };
       __abyssTask6PointerTrace?: Array<Record<string, unknown>>;
       __abyssTask6PointerTraceController?: AbortController;
     };
@@ -35,6 +36,8 @@ async function closeReaders(): Promise<void> {
       monitor.observer?.disconnect();
       delete taskWindow.__abyssTask6RenderMonitor;
     }
+    taskWindow.__abyssTask6AppearanceMonitor?.cleanup();
+    delete taskWindow.__abyssTask6AppearanceMonitor;
     taskWindow.__abyssTask6PointerTraceController?.abort();
     delete taskWindow.__abyssTask6PointerTraceController;
     delete taskWindow.__abyssTask6PointerTrace;
@@ -967,6 +970,63 @@ describe('reader compact toolbar', () => {
 
   it('applies Default Light Dark and Sepia through the public appearance menu', async () => {
     const root = $('[data-abyss-document]');
+    await browser.execute(() => {
+      const reader = document.querySelector<HTMLElement>('[data-abyss-document]');
+      const container = reader?.querySelector<HTMLElement>('.pdfViewerContainer') ?? null;
+      const viewer = container?.querySelector<HTMLElement>('.pdfViewer') ?? null;
+      const page = viewer?.querySelector<HTMLElement>('[data-page-number="1"]') ?? null;
+      const canvas = page?.querySelector<HTMLCanvasElement>('canvas') ?? null;
+      if (
+        reader === null ||
+        container === null ||
+        viewer === null ||
+        page === null ||
+        canvas === null
+      )
+        throw new Error('Appearance continuity targets are incomplete.');
+      const state = { disconnects: 0, identityBreaks: 0, mutationRecords: 0 };
+      const tracked = [reader, container, viewer, page, canvas];
+      const removedTarget = (node: Node, target: Node): boolean =>
+        node === target || (node.instanceOf(Element) && node.contains(target));
+      const sample = (): void => {
+        if (
+          document.querySelector('[data-abyss-document]') !== reader ||
+          reader.querySelector('.pdfViewerContainer') !== container ||
+          container.querySelector('.pdfViewer') !== viewer ||
+          viewer.querySelector('[data-page-number="1"]') !== page ||
+          page.querySelector('canvas') !== canvas
+        )
+          state.identityBreaks += 1;
+      };
+      const processRecords = (records: readonly MutationRecord[]): void => {
+        state.mutationRecords += records.length;
+        for (const record of records) {
+          for (const removed of Array.from(record.removedNodes)) {
+            if (tracked.some((target) => removedTarget(removed, target))) state.disconnects += 1;
+          }
+        }
+        sample();
+      };
+      const observer = new MutationObserver(processRecords);
+      observer.observe(reader.closest('.workspace-leaf') ?? reader, {
+        attributeFilter: ['class', 'data-reading-profile', 'hidden', 'style'],
+        attributeOldValue: true,
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+      (
+        window as Window & {
+          __abyssTask6AppearanceMonitor?: { cleanup(): Record<string, number> };
+        }
+      ).__abyssTask6AppearanceMonitor = {
+        cleanup() {
+          processRecords(observer.takeRecords());
+          observer.disconnect();
+          return { ...state };
+        },
+      };
+    });
     for (const [label, profile] of [
       ['Light', 'light'],
       ['Dark', 'dark'],
@@ -992,6 +1052,18 @@ describe('reader compact toolbar', () => {
         { timeout: 3_000, timeoutMsg: `${label} did not retain a populated PDF surface.` },
       );
     }
+    const continuity = await browser.execute(() => {
+      const host = window as Window & {
+        __abyssTask6AppearanceMonitor?: { cleanup(): Record<string, number> };
+      };
+      const monitor = host.__abyssTask6AppearanceMonitor;
+      if (monitor === undefined) throw new Error('Appearance continuity monitor is unavailable.');
+      const result = monitor.cleanup();
+      delete host.__abyssTask6AppearanceMonitor;
+      return result;
+    });
+    expect(continuity['mutationRecords']).toBeGreaterThan(0);
+    expect(continuity).toMatchObject({ disconnects: 0, identityBreaks: 0 });
   });
 
   it('applies Fit page and explicit Two-page Continuous layout without an empty render frame', async () => {
@@ -1019,6 +1091,7 @@ describe('reader compact toolbar', () => {
           replacementCount: number;
           samples: number;
           shellIdentityBreaks: number;
+          trackedSurfaceRemovals: number;
           viewer: HTMLElement;
         };
       };
@@ -1037,6 +1110,7 @@ describe('reader compact toolbar', () => {
         replacementCount: 0,
         samples: 0,
         shellIdentityBreaks: 0,
+        trackedSurfaceRemovals: 0,
         viewer,
       };
       const currentSurface = (): {
@@ -1083,7 +1157,7 @@ describe('reader compact toolbar', () => {
       };
       monitor.observer.disconnect();
       monitor.observer = new MutationObserver((records) => {
-        const trackedSurfaceRemoved = records.some((record) =>
+        const trackedRemovalRecords = records.filter((record) =>
           Array.from(record.removedNodes).some(
             (removed) =>
               removed === monitor.page ||
@@ -1092,7 +1166,8 @@ describe('reader compact toolbar', () => {
                 (removed.contains(monitor.page) || removed.contains(monitor.canvas))),
           ),
         );
-        if (!trackedSurfaceRemoved) return;
+        monitor.trackedSurfaceRemovals += trackedRemovalRecords.length;
+        if (trackedRemovalRecords.length === 0) return;
         const current = currentSurface();
         if (!isPopulated(current.page, current.canvas))
           monitor.removalWithoutPopulatedReplacement += 1;
@@ -1180,6 +1255,7 @@ describe('reader compact toolbar', () => {
           replacementCount: number;
           samples: number;
           shellIdentityBreaks: number;
+          trackedSurfaceRemovals: number;
         };
       };
       const monitor = taskWindow.__abyssTask6RenderMonitor;
@@ -1196,6 +1272,7 @@ describe('reader compact toolbar', () => {
         replacementCount: monitor.replacementCount,
         samples: monitor.samples,
         shellIdentityBreaks: monitor.shellIdentityBreaks,
+        trackedSurfaceRemovals: monitor.trackedSurfaceRemovals,
       };
     });
     expect(render.samples).toBeGreaterThanOrEqual(5);
@@ -1204,7 +1281,9 @@ describe('reader compact toolbar', () => {
       emptyFrames: 0,
       loadingFrames: 0,
       removalWithoutPopulatedReplacement: 0,
+      replacementCount: 0,
       shellIdentityBreaks: 0,
+      trackedSurfaceRemovals: 0,
     });
   });
 

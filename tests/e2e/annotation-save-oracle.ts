@@ -4,6 +4,8 @@ import type { AnnotationSaveLifecycleViewBoundary } from '../../src/reader/docum
 
 export interface AnnotationSaveBaseline {
   failures: number;
+  minimumCommittedRevision: number;
+  minimumSavedGeneration: number;
   minimumSaves: number;
   recoveries: number;
 }
@@ -40,6 +42,8 @@ export async function captureAnnotationSaveBaseline(): Promise<AnnotationSaveBas
   const snapshot = await readAnnotationSaveLifecycleSnapshot();
   return {
     failures: snapshot.failures,
+    minimumCommittedRevision: snapshot.pendingRevision + 1,
+    minimumSavedGeneration: snapshot.newestGeneration + 1,
     minimumSaves: snapshot.saves + 1,
     recoveries: snapshot.recoveries,
   };
@@ -54,6 +58,8 @@ export function isVerifiedAnnotationSaveSettled(
     (snapshot.failures > baseline.failures && snapshot.recoveries > baseline.recoveries);
   return (
     snapshot.saves >= baseline.minimumSaves &&
+    snapshot.committedRevision >= baseline.minimumCommittedRevision &&
+    snapshot.savedGeneration >= baseline.minimumSavedGeneration &&
     failureChainSettled &&
     snapshot.activeSerializations === 0 &&
     snapshot.activeWrites === 0 &&

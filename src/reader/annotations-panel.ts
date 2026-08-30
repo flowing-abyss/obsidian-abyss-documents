@@ -48,6 +48,10 @@ export interface AnnotationPanelActivation {
   readonly rowId: string;
 }
 
+export interface ResolvedAnnotationPanelActivation extends AnnotationPanelActivation {
+  readonly position: { readonly x: number; readonly y: number };
+}
+
 export interface AnnotationsPanelOptions {
   readonly colorMeanings?: Readonly<Record<string, string>>;
   readonly colorNames?: Readonly<Record<string, string>>;
@@ -338,19 +342,36 @@ export class AnnotationsPanel {
   }
 
   selectAnnotation(id: string, focus = true): boolean {
-    const index = this.filtered.findIndex((annotation) => annotationId(annotation) === id);
+    const annotation = this.filtered.find((candidate) => annotationId(candidate) === id);
+    return annotation === undefined ? false : this.selectRow(this.rowId(annotation), focus);
+  }
+
+  resolveActivation(rowId: string): ResolvedAnnotationPanelActivation | null {
+    const annotation = this.filtered.find((candidate) => this.rowId(candidate) === rowId);
+    if (annotation === undefined || !this.selectRow(rowId, false)) return null;
+    const card = this.cardButtons.get(rowId);
+    if (card === undefined || !this.list.contains(card)) return null;
+    const { bottom, left } = card.getBoundingClientRect();
+    return {
+      annotation,
+      location: location(annotation),
+      nativeId: this.nativeIds.get(annotation) ?? annotationId(annotation),
+      position: { x: left, y: bottom },
+      rowId,
+    };
+  }
+
+  private selectRow(rowId: string, focus: boolean): boolean {
+    const index = this.filtered.findIndex((candidate) => this.rowId(candidate) === rowId);
     if (index < 0) return false;
     this.clearResolutionFeedback();
-    this.selectedRowId = this.rowId(this.filtered[index] as DocumentAnnotation);
-    this.rovingRowId = this.selectedRowId;
+    this.selectedRowId = rowId;
+    this.rovingRowId = rowId;
     this.scrollHost.scrollTop = this.scrollTopForIndex(index);
     this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
     this.render();
     if (focus) {
-      const target = this.list.querySelector<HTMLElement>(
-        `[data-annotation-id="${CSS.escape(id)}"]`,
-      );
-      this.focusWithoutActivation(target, this.selectedRowId);
+      this.focusWithoutActivation(this.cardButtons.get(rowId) ?? null, rowId);
     }
     return true;
   }

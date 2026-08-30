@@ -1,5 +1,6 @@
 import { $, $$, browser, expect } from '@wdio/globals';
 import { afterEach, describe, it } from 'mocha';
+import { Key } from 'webdriverio';
 import {
   captureAnnotationSaveBaseline,
   isVerifiedAnnotationSaveSettled,
@@ -177,9 +178,73 @@ describe('PDF reader foundation on Android', () => {
       ),
     );
     expect(compactTools).toEqual(['Ink', 'Text']);
-    expect(await $('.menu').getText()).not.toContain('Previous page');
-    await $('[data-control="overflow"]').click();
+    const moreMenu = await $('.menu').getText();
+    expect(moreMenu).toContain('Layout');
+    expect(moreMenu).toContain('Fit page');
+    expect(moreMenu).toContain('Two pages');
+    expect(moreMenu).toContain('Appearance');
+    expect(moreMenu).toContain('Default');
+    expect(moreMenu).toContain('Export annotations');
+    expect(moreMenu).not.toContain('OCR');
+    expect(moreMenu).not.toContain('Previous page');
+    const essentialMoreItems = await browser.execute(() => {
+      const menu = document.querySelector<HTMLElement>('.menu');
+      if (menu === null) throw new Error('Mobile More menu is missing.');
+      const itemState = (item: HTMLElement) => {
+        const bounds = item.getBoundingClientRect();
+        return {
+          ariaDisabled: item.getAttribute('aria-disabled') ?? null,
+          clickable: item.offsetParent !== null && getComputedStyle(item).pointerEvents !== 'none',
+          label: item.querySelector('.menu-item-title')?.textContent.trim() ?? '',
+          reachable:
+            bounds.top >= 0 &&
+            bounds.bottom <= window.innerHeight &&
+            bounds.left >= 0 &&
+            bounds.right <= window.innerWidth,
+        };
+      };
+      const actionable = (section: string) =>
+        Array.from(
+          menu.querySelectorAll<HTMLElement>(
+            `.menu-item[data-section="${section}"]:not(.is-label)`,
+          ),
+          itemState,
+        );
+      return {
+        appearance: actionable('abyss-documents-appearance'),
+        export: actionable('abyss-documents-actions'),
+        layout: actionable('abyss-documents-layout'),
+      };
+    });
+    expect(essentialMoreItems.layout.map((item) => item.label)).toEqual([
+      'Single page',
+      'Two pages',
+      'Continuous scrolling',
+    ]);
+    expect(essentialMoreItems.appearance.map((item) => item.label)).toEqual([
+      'Default',
+      'Follow Obsidian',
+      'Light',
+      'Sepia',
+      'Dark',
+      'Custom',
+    ]);
+    expect(essentialMoreItems.export.map((item) => item.label)).toEqual(['Export annotations…']);
+    expect(
+      [
+        ...essentialMoreItems.layout,
+        ...essentialMoreItems.appearance,
+        ...essentialMoreItems.export,
+      ].every((item) => item.ariaDisabled === null && item.clickable && item.reachable),
+    ).toBe(true);
+    await $(
+      '//*[contains(@class, "menu-item-title") and normalize-space(.)="Single page"]',
+    ).click();
     await expect($('.menu')).not.toBeDisplayed();
+    await $('[data-control="overflow"]').click();
+    await $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Default"]').click();
+    await expect($('.menu')).not.toBeDisplayed();
+    await expect($('[data-abyss-document]')).toHaveAttribute('data-reading-profile', 'default');
     const saveBaseline = await captureAnnotationSaveBaseline();
 
     await $('[data-annotation-tool="highlight"]').click();
@@ -334,6 +399,54 @@ describe('PDF reader foundation on Android', () => {
       await expect($('[data-sidebar-panel="annotations"]')).toHaveText(
         expect.stringContaining(qualification.comment),
       );
+      await browser.execute((comment) => {
+        const card = Array.from(
+          document.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'),
+        ).find((candidate) => candidate.innerText.includes(comment));
+        if (card === undefined) throw new Error(`Read-only mobile card is missing: ${comment}`);
+        card.click();
+      }, qualification.comment);
+      const popover = $('[data-annotation-editor-popover]');
+      await popover.waitForDisplayed({ timeout: 5_000 });
+      const readOnlyGeometry = await browser.execute(() => {
+        const editor = document.querySelector<HTMLElement>('[data-annotation-editor-popover]');
+        const card = document.querySelector<HTMLElement>(
+          '.abyss-annotation-card[aria-current="true"]',
+        );
+        const metadata = editor?.querySelector<HTMLElement>(
+          '.abyss-annotation-editor-readonly-metadata',
+        );
+        if (editor === null || card === null || metadata == null)
+          throw new Error('Read-only mobile annotation geometry is incomplete.');
+        const bounds = editor.getBoundingClientRect();
+        return {
+          cardHeight: card.getBoundingClientRect().height,
+          editableControls: Array.from(
+            editor.querySelectorAll<HTMLElement>(
+              '[aria-label="Comment"], [data-editor-color], [data-action="delete-annotation"]',
+            ),
+          ).filter((element) => element.offsetParent !== null).length,
+          edgeInset: Math.min(
+            bounds.left,
+            bounds.top,
+            window.innerWidth - bounds.right,
+            window.innerHeight - bounds.bottom,
+          ),
+          label: editor.getAttribute('aria-label'),
+          metadataVisible: !metadata.hidden,
+          width: bounds.width,
+        };
+      });
+      expect(readOnlyGeometry).toMatchObject({
+        editableControls: 0,
+        label: 'Annotation details',
+        metadataVisible: true,
+      });
+      expect(readOnlyGeometry.cardHeight).toBeLessThanOrEqual(152);
+      expect(readOnlyGeometry.edgeInset).toBeGreaterThanOrEqual(8);
+      expect(readOnlyGeometry.width).toBeLessThanOrEqual(320);
+      await browser.keys(Key.Escape);
+      await expect(popover).not.toBeDisplayed();
       expect(await vaultFileSha256(qualification.path)).toBe(before);
     });
   }

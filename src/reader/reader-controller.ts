@@ -66,6 +66,7 @@ import {
   type AnnotationHrefReference,
   type AnnotationTransferService,
 } from './annotation-transfer.js';
+import type { AnnotationPanelActivation } from './annotations-panel.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
 import type { SaveConflictAction } from './save-conflict-modal.js';
@@ -805,8 +806,10 @@ export class ReaderController {
       await this.writeNativeRevision(session, native, revision, abort.signal);
       verified = true;
       recordSuccessfulAnnotationSave();
-      this.markAnnotationSaveRecovered();
-      this.saveFailureBoundary.clear(this.saveFailureOwner, session.descriptor.path);
+      if (revision >= native.pendingRevision) {
+        this.markAnnotationSaveRecovered();
+        this.saveFailureBoundary.clear(this.saveFailureOwner, session.descriptor.path);
+      }
     } finally {
       if (this.saveAbort === abort) this.saveAbort = null;
       finishSave(verified);
@@ -1811,7 +1814,7 @@ export class ReaderController {
         this.navigateToLocation(location);
       },
       onAnnotationActivate: (activation) => {
-        this.activateAnnotation(viewport, activation.location, activation.nativeId);
+        this.activateAnnotation(viewport, activation);
       },
       ...transferCallbacks,
       onTabChange: (nextTab) => {
@@ -2079,30 +2082,75 @@ export class ReaderController {
 
   private activateAnnotation(
     viewport: DocumentViewport,
-    location: DocumentLocation,
-    nativeId: string,
+    activation: AnnotationPanelActivation,
   ): void {
+    const shell = this.shell;
+    if (shell === null) return;
     this.cancelAnnotationActivation();
     const abort = new AbortController();
     this.annotationActivationAbort = abort;
     this.navigateToLocation(
-      location,
+      activation.location,
       () => {
         const interactionController =
-          this.viewport === viewport ? this.annotationInteractionController : null;
-        if (abort.signal.aborted || interactionController === null) {
+          this.viewport === viewport && this.shell === shell
+            ? this.annotationInteractionController
+            : null;
+        if (abort.signal.aborted) {
           this.finishAnnotationActivation(abort);
           return;
         }
+        if (interactionController === null) {
+          this.openReadOnlyAnnotationActivation(shell, activation, abort);
+          return;
+        }
         void interactionController
-          .activateAnnotation(nativeId, { kind: 'sidebar', signal: abort.signal })
+          .activateAnnotation(activation.nativeId, { kind: 'sidebar', signal: abort.signal })
           .catch(() => 'cancelled' as const)
           .finally(() => {
             this.finishAnnotationActivation(abort);
           });
       },
       true,
+      () => {
+        this.finishAnnotationActivation(abort);
+      },
     );
+  }
+
+  private openReadOnlyAnnotationActivation(
+    shell: ReaderShell,
+    activation: AnnotationPanelActivation,
+    abort: AbortController,
+  ): void {
+    if (abort.signal.aborted || this.shell !== shell) {
+      this.finishAnnotationActivation(abort);
+      return;
+    }
+    const resolved = shell.resolveAnnotationActivation(activation.rowId);
+    if (resolved === null) {
+      this.finishAnnotationActivation(abort);
+      return;
+    }
+    if (!sameDocumentLocation(activation.location, resolved.location)) {
+      this.finishAnnotationActivation(abort);
+      return;
+    }
+    const { annotation, position } = resolved;
+    shell.openAnnotationEditor(
+      {
+        target: { kind: 'readonly', annotation },
+        palette: this.profileState.annotations?.palette ?? DEFAULT_SETTINGS.annotations.palette,
+        color: annotation.color ?? undefined,
+        position,
+        onCreate: () => 'dismissed',
+        onUpdate: () => false,
+        onDelete: () => false,
+        onClose: () => undefined,
+      },
+      { preserveResolvedRow: true },
+    );
+    this.finishAnnotationActivation(abort);
   }
 
   private cancelAnnotationActivation(): void {
@@ -2118,11 +2166,15 @@ export class ReaderController {
     location: DocumentLocation,
     onArrive?: () => void,
     retainAnnotationActivation = false,
+    onFailure?: () => void,
   ): void {
     if (!retainAnnotationActivation) this.cancelAnnotationActivation();
     const viewport = this.viewport;
     const shell = this.shell;
-    if (viewport === null || shell === null || viewport.pageCount === 0) return;
+    if (viewport === null || shell === null || viewport.pageCount === 0) {
+      onFailure?.();
+      return;
+    }
     this.annotationInteractionController?.invalidate('navigation');
     const target = Math.min(viewport.pageCount - 1, Math.max(0, Math.floor(location.pageIndex)));
     const destination: DocumentLocation = { ...location, pageIndex: target };
@@ -2135,7 +2187,10 @@ export class ReaderController {
         if (this.viewport === viewport && revision === this.navigationRequestRevision) onArrive?.();
       })
       .catch((cause: unknown) => {
-        if (this.viewport !== viewport) return;
+        if (this.viewport !== viewport) {
+          onFailure?.();
+          return;
+        }
         if (
           revision === this.navigationRequestRevision &&
           this.pendingNavigationPageIndex === target
@@ -2150,6 +2205,7 @@ export class ReaderController {
           pageIndex: target,
           cause,
         });
+        onFailure?.();
       });
   }
 
@@ -2620,6 +2676,10 @@ function annotationForActivation(
       metadata: unavailable,
     },
   };
+}
+
+function sameDocumentLocation(left: DocumentLocation, right: DocumentLocation): boolean {
+  return left.pageIndex === right.pageIndex && left.x === right.x && left.y === right.y;
 }
 
 function annotationToolForMode(mode: PdfAnnotationLogicalMode): PdfAnnotationTool {

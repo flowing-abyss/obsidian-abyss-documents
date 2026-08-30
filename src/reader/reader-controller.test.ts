@@ -31,6 +31,7 @@ import {
   type BaseToken,
   type NativeDocumentSaveRequest,
   type NativeEditableSaveSession,
+  type PreparedNativeSave,
   type VerifiedReloadListener,
 } from '../document-core/save-coordinator.js';
 import {
@@ -329,6 +330,68 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
+function retainedNativeSession(
+  baseToken: BaseToken,
+  bridge: {
+    onDirty(listener: (dirty: boolean) => void): () => void;
+    save(signal: AbortSignal): Promise<Uint8Array>;
+  },
+  onRevision: (revision: number) => void,
+): NativeEditableSaveSession & { readonly committedRevision: number } {
+  let base = Object.freeze({ ...baseToken });
+  let pendingRevision = 0;
+  let committedRevision = 0;
+  const retained = new Map<number, PreparedNativeSave>();
+  let destroyed = false;
+  const detach = bridge.onDirty((dirty) => {
+    if (!dirty || destroyed) return;
+    pendingRevision += 1;
+    onRevision(pendingRevision);
+  });
+  return {
+    get baseToken() {
+      return base;
+    },
+    get committedRevision() {
+      return committedRevision;
+    },
+    get isDirty() {
+      return pendingRevision > committedRevision;
+    },
+    get pendingRevision() {
+      return pendingRevision;
+    },
+    async prepare(revision, signal) {
+      if (destroyed || revision <= 0 || revision > pendingRevision)
+        throw new DOMException('The requested PDF revision is not pending.', 'InvalidStateError');
+      const existing = retained.get(revision);
+      if (existing !== undefined) return existing;
+      const prepared = Object.freeze({
+        revision,
+        baseToken: base,
+        bytes: await bridge.save(signal),
+      });
+      retained.set(revision, prepared);
+      return prepared;
+    },
+    commit(prepared, token) {
+      if (retained.get(prepared.revision) !== prepared)
+        throw new DOMException(
+          'The prepared PDF revision is no longer active.',
+          'InvalidStateError',
+        );
+      committedRevision = Math.max(committedRevision, prepared.revision);
+      base = Object.freeze({ ...token });
+      retained.delete(prepared.revision);
+    },
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      detach();
+    },
+  };
+}
+
 function session(path: string, createdViewport = viewport()) {
   const createViewport = vi.fn(async () => createdViewport.value);
   const close = vi.fn(async () => undefined);
@@ -613,6 +676,57 @@ describe('ReaderController', () => {
     const lockedProjection = createdViewport.setAnnotationProjection.mock.lastCall?.[0];
     expect(lockedProjection?.[0]?.stableId).toBe('verified-highlight');
     expect(lockedProjection?.[0]?.annotation.capabilities.color.available).toBe(false);
+  });
+
+  it('resolves only the current verified projected annotation for native materialization', async () => {
+    const [pdf] = files('Books/Resolver-lifecycle.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const verified = {
+      ...annotationRecord('resolver-highlight', 0, {
+        kind: 'rectangle',
+        rectangle: { height: 12, width: 100, x: 10, y: 20 },
+      }),
+      capabilities: {
+        color: { available: true as const },
+        comment: { available: true as const },
+        conversions: {
+          highlight: { available: true as const },
+          underline: { available: true as const },
+        },
+        deletion: { available: true as const },
+        geometry: { available: true as const },
+        metadata: { available: true as const },
+      },
+    } satisfies DocumentAnnotation;
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write', 'existing-annotations']),
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([verified]);
+      },
+    });
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+    );
+    await controller.open(pdf, createDiv());
+    const resolver = createdViewport.setAnnotationResolver.mock.calls[0]?.[0];
+    if (resolver == null) throw new Error('Expected native annotation resolver.');
+
+    await expect(
+      resolver('resolver-highlight', new AbortController().signal),
+    ).resolves.toMatchObject({
+      identity: { id: 'resolver-highlight', kind: 'stable' },
+      selectedText: 'resolver-highlight',
+    });
+    await expect(resolver('   ', new AbortController().signal)).resolves.toBeNull();
+    const aborted = new AbortController();
+    aborted.abort(new DOMException('Native editor changed.', 'AbortError'));
+    await expect(resolver('resolver-highlight', aborted.signal)).resolves.toBeNull();
+
+    await controller.close();
+    await expect(resolver('resolver-highlight', new AbortController().signal)).resolves.toBeNull();
   });
 
   it('cancels stale far-page annotation readiness and opens only the latest exact target', async () => {
@@ -1203,25 +1317,24 @@ describe('ReaderController', () => {
     });
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
     const panel = shell.created.sidebar?.annotationsPanel;
-    const before = panel?.root.querySelector<HTMLElement>('.abyss-annotation-card');
-    before?.focus();
-    const scrollHost = panel?.root.querySelector<HTMLElement>('[data-annotation-scroll-host]');
-    if (scrollHost === null || scrollHost === undefined)
-      throw new Error('Expected annotation scroll host.');
+    if (panel === undefined) throw new Error('Expected annotation panel.');
+    const before = panel.root.querySelector<HTMLElement>('.abyss-annotation-card');
+    if (!panel.selectAnnotation('temporary-native-id', true))
+      throw new Error('Expected provisional annotation selection.');
+    const scrollHost = panel.root.querySelector<HTMLElement>('[data-annotation-scroll-host]');
+    if (scrollHost === null) throw new Error('Expected annotation scroll host.');
     scrollHost.scrollTop = 137;
     const rowId = before?.dataset['annotationRowId'];
 
     extractionGate.resolve();
     await vi.waitFor(() => {
-      expect(panel?.visibleIds()).toEqual(['stable-native-id']);
+      expect(panel.visibleIds()).toEqual(['stable-native-id']);
     });
 
     expect({
       focusedRowId: host.doc.activeElement?.getAttribute('data-annotation-row-id'),
       rowId:
-        panel?.root.querySelector<HTMLElement>('.abyss-annotation-card')?.dataset[
-          'annotationRowId'
-        ],
+        panel.root.querySelector<HTMLElement>('.abyss-annotation-card')?.dataset['annotationRowId'],
       scrollTop: scrollHost.scrollTop,
     }).toEqual({ focusedRowId: rowId, rowId, scrollTop: 137 });
     host.remove();
@@ -1332,6 +1445,44 @@ describe('ReaderController', () => {
         shell.created.annotationToolbar?.root.querySelectorAll('[data-annotation-tool]') ?? [],
       ).every((button) => button.getAttribute('aria-pressed') === 'false'),
     ).toBe(true);
+    await controller.close();
+  });
+
+  it('removes a committed selection projection when its unified editor deletes it', async () => {
+    const [pdf] = files('Books/Delete-materialized-selection.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    createdViewport.emitSelection(pdfSelection('deleted-selection'));
+    shell.created.root.querySelector<HTMLButtonElement>('[data-editor-color="#ffd400"]')?.click();
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['created-native']);
+    });
+    const editor = shell.created.root.querySelector<HTMLElement>(
+      '[data-annotation-editor-popover]',
+    );
+    const remove = editor?.querySelector<HTMLButtonElement>('[data-action="delete-annotation"]');
+    if (remove === null || remove === undefined)
+      throw new Error('Expected materialized delete action.');
+
+    remove.click();
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    });
+    expect(editor?.hidden).toBe(true);
+
     await controller.close();
   });
 
@@ -2071,6 +2222,266 @@ describe('ReaderController', () => {
         '[data-annotation-tool="highlight"]',
       )?.disabled,
     ).toBe(true);
+  });
+
+  it('opens read-only annotation details from a listed signed-document card without a native editor', async () => {
+    const [pdf] = files('Books/Signed-listed.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const annotation = {
+      ...annotationRecord('signed-highlight', 0, {
+        kind: 'point',
+        point: { x: 10, y: 20 },
+      }),
+      color: '#e56eee',
+      comment: 'Signed annotation details',
+    } satisfies DocumentAnnotation;
+    Object.assign(createdSession.value, {
+      annotationCapabilities: {
+        readOnlyReason: {
+          code: 'signed-document',
+          message: 'Signed PDF documents are opened read-only to preserve signatures.',
+        },
+      },
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotation]);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(
+        shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+          '[data-annotation-id="signed-highlight"]',
+        ),
+      ).not.toBeNull();
+    });
+    const card = shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-id="signed-highlight"]',
+    );
+    if (card === null || card === undefined) throw new Error('Expected signed annotation card.');
+    vi.spyOn(card, 'getBoundingClientRect').mockReturnValue({
+      bottom: 288,
+      height: 52,
+      left: 72,
+      right: 384,
+      top: 236,
+      width: 312,
+      x: 72,
+      y: 236,
+      toJSON: () => ({}),
+    });
+    const openAnnotationEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
+    card.click();
+
+    await vi.waitFor(() => {
+      expect(createdViewport.goTo).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 0 }));
+    });
+    await vi.waitFor(() => {
+      expect(openAnnotationEditor).toHaveBeenCalledWith(
+        expect.objectContaining({ position: { x: 72, y: 288 } }),
+        { preserveResolvedRow: true },
+      );
+    });
+    await vi.waitFor(() => {
+      const popover = shell.created.root.querySelector<HTMLElement>(
+        '.abyss-annotation-editor-popover[aria-label="Annotation details"]',
+      );
+      expect(popover?.hidden).toBe(false);
+      expect(
+        popover?.querySelector<HTMLElement>('.abyss-annotation-editor-readonly-metadata')
+          ?.textContent,
+      ).toContain('Signed annotation details');
+    });
+    expect(createdViewport.goTo).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 0 }));
+    expect(
+      shell.created.root.querySelectorAll(
+        '.abyss-annotation-editor-palette:not([hidden]) button, ' +
+          '.abyss-annotation-editor-metadata:not([hidden]) textarea, ' +
+          '.abyss-annotation-editor-actions button',
+      ),
+    ).toHaveLength(0);
+
+    await controller.close();
+    expect(shell.created.root.isConnected).toBe(false);
+  });
+
+  it('cancels read-only details when the resolved row moves after navigation starts', async () => {
+    const [pdf] = files('Books/Signed-row-moved.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const navigation = deferred<undefined>();
+    const createdViewport = viewport();
+    createdViewport.goTo.mockImplementationOnce(async () => navigation.promise);
+    const createdSession = session(pdf.path, createdViewport);
+    const annotation = {
+      ...annotationRecord('signed-row-moved', 0, {
+        kind: 'point',
+        point: { x: 10, y: 20 },
+      }),
+      comment: 'Initial signed details',
+    } satisfies DocumentAnnotation;
+    Object.assign(createdSession.value, {
+      annotationCapabilities: {
+        readOnlyReason: { code: 'signed-document', message: 'Signed PDF documents are read-only.' },
+      },
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotation]);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(
+        shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+          '[data-annotation-id="signed-row-moved"]',
+        ),
+      ).not.toBeNull();
+    });
+    const card = shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-id="signed-row-moved"]',
+    );
+    const rowId = card?.dataset['annotationRowId'];
+    if (card === null || card === undefined || rowId === undefined)
+      throw new Error('Expected a mounted signed annotation row.');
+    const openAnnotationEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
+    card.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.goTo).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 0 }));
+    });
+    const moved = {
+      ...annotation,
+      anchor: {
+        kind: 'fixed-page' as const,
+        pageIndex: 1,
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: { kind: 'point' as const, point: { x: 30, y: 40 } },
+      },
+      comment: 'Moved signed details',
+    } satisfies DocumentAnnotation;
+    shell.created.sidebar?.annotationsPanel.setProjectedAnnotations([
+      { annotation: moved, key: rowId, nativeId: 'signed-row-moved', writable: false },
+    ]);
+    navigation.resolve(undefined);
+
+    await vi.waitFor(() => {
+      expect(
+        (controller as unknown as { annotationActivationAbort: AbortController | null })
+          .annotationActivationAbort,
+      ).toBeNull();
+    });
+    expect(openAnnotationEditor).not.toHaveBeenCalled();
+    expect(
+      shell.created.root.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.hidden,
+    ).toBe(true);
+    await controller.close();
+  });
+
+  it('releases read-only activation ownership when navigation rejects before details can open', async () => {
+    const [pdf] = files('Books/Signed-navigation-rejection.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    createdViewport.goTo.mockRejectedValueOnce(new Error('navigation failed'));
+    const createdSession = session(pdf.path, createdViewport);
+    const annotation = annotationRecord('signed-navigation', 0, {
+      kind: 'point',
+      point: { x: 10, y: 20 },
+    });
+    Object.assign(createdSession.value, {
+      annotationCapabilities: {
+        readOnlyReason: { code: 'signed-document', message: 'Signed PDF documents are read-only.' },
+      },
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotation]);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(
+        shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+          '[data-annotation-id="signed-navigation"]',
+        ),
+      ).not.toBeNull();
+    });
+    shell.created.sidebar?.annotationsPanel.root
+      .querySelector<HTMLButtonElement>('[data-annotation-id="signed-navigation"]')
+      ?.click();
+
+    await vi.waitFor(() => {
+      expect(createdViewport.goTo).toHaveBeenCalledOnce();
+      expect(
+        (controller as unknown as { annotationActivationAbort: AbortController | null })
+          .annotationActivationAbort,
+      ).toBeNull();
+    });
+    expect(
+      shell.created.root.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.hidden,
+    ).toBe(true);
+    await controller.close();
+  });
+
+  it('releases read-only activation ownership when a zero-page viewport cannot navigate', async () => {
+    const [pdf] = files('Books/Signed-zero-page.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport(0);
+    const createdSession = session(pdf.path, createdViewport);
+    const annotation = annotationRecord('signed-zero-page', 0, {
+      kind: 'point',
+      point: { x: 10, y: 20 },
+    });
+    Object.assign(createdSession.value, {
+      annotationCapabilities: {
+        readOnlyReason: { code: 'signed-document', message: 'Signed PDF documents are read-only.' },
+      },
+      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
+        sink([annotation]);
+      },
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    await vi.waitFor(() => {
+      expect(
+        shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+          '[data-annotation-id="signed-zero-page"]',
+        ),
+      ).not.toBeNull();
+    });
+    shell.created.sidebar?.annotationsPanel.root
+      .querySelector<HTMLButtonElement>('[data-annotation-id="signed-zero-page"]')
+      ?.click();
+
+    expect(createdViewport.goTo).not.toHaveBeenCalled();
+    expect(
+      (controller as unknown as { annotationActivationAbort: AbortController | null })
+        .annotationActivationAbort,
+    ).toBeNull();
+    await controller.close();
   });
 
   it('maps Ink and FreeText colors and contains one failure boundary per annotation action', async () => {
@@ -5664,6 +6075,112 @@ describe('ReaderController', () => {
         ids: shell.created.sidebar?.annotationsPanel.visibleIds(),
         opens: adapter.open.mock.calls.length,
       }).toEqual({ ids: ['stable-id'], opens: 2 });
+    } finally {
+      endPluginActivation();
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for the newest native revision before acknowledging a retried save', async () => {
+    vi.useFakeTimers();
+    try {
+      beginPluginActivation();
+      const [pdf] = files('Books/Retry-newest-revision.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdSession = session(pdf.path);
+      const baseToken = { byteSize: 4, mtime: 10, sha256: 'a'.repeat(64) };
+      const firstPrepared = Uint8Array.of(37, 80, 68, 70, 1);
+      const newestPrepared = Uint8Array.of(37, 80, 68, 70, 2);
+      const retryWrite = deferred<void>();
+      const newestWrite = deferred<void>();
+      const nativeState: {
+        emitDirty: ((dirty: boolean) => void) | null;
+        session: (NativeEditableSaveSession & { readonly committedRevision: number }) | null;
+      } = { emitDirty: null, session: null };
+      const nativeBridge = {
+        onDirty(listener: (dirty: boolean) => void) {
+          nativeState.emitDirty = listener;
+          return () => {
+            nativeState.emitDirty = null;
+          };
+        },
+        save: vi
+          .fn<() => Promise<Uint8Array>>()
+          .mockResolvedValueOnce(firstPrepared)
+          .mockResolvedValueOnce(newestPrepared),
+      };
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          nativeState.session = retainedNativeSession(baseToken, nativeBridge, onRevision);
+          return nativeState.session;
+        },
+      });
+      const committedBytes: Uint8Array[] = [];
+      const write = vi.fn(async (request: { readonly bytes: Uint8Array }) => {
+        committedBytes.push(Uint8Array.from(request.bytes));
+        if (committedBytes.length === 1) throw new Error('one-shot write failure');
+        if (committedBytes.length === 2) {
+          await retryWrite.promise;
+          return { token: { ...baseToken, sha256: 'b'.repeat(64) } };
+        }
+        await newestWrite.promise;
+        return { token: { ...baseToken, sha256: 'c'.repeat(64) } };
+      });
+      const notice = vi.spyOn(Notice.prototype, 'constructor__');
+      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        undefined,
+        undefined,
+        {
+          saveCoordinator: new DocumentSaveCoordinator(
+            { write },
+            vi.fn(async () => undefined),
+          ),
+        },
+      );
+      await controller.open(pdf, createDiv());
+      const emitNativeDirty = () => {
+        const listener = nativeState.emitDirty;
+        if (listener === null) throw new Error('Expected native dirty listener.');
+        listener(true);
+      };
+      emitNativeDirty();
+      await vi.advanceTimersByTimeAsync(750);
+      expect(write.mock.calls[0]?.[0].bytes).toEqual(firstPrepared);
+      const message = notice.mock.calls[0]?.[0];
+      expect(message).toBeInstanceOf(DocumentFragment);
+      const retry = (message as DocumentFragment).querySelector<HTMLButtonElement>('button');
+      retry?.click();
+      await vi.waitFor(() => {
+        expect(write).toHaveBeenCalledTimes(2);
+        expect(write.mock.calls[1]?.[0].bytes).toEqual(firstPrepared);
+      });
+
+      emitNativeDirty();
+      expect(nativeState.session?.pendingRevision).toBe(2);
+      expect(controller.annotationSaveLifecycleSnapshot()).toMatchObject({
+        newestGeneration: 2,
+        pendingRevision: 2,
+      });
+      retryWrite.resolve();
+      await vi.waitFor(() => {
+        expect(write).toHaveBeenCalledTimes(3);
+        expect(write.mock.calls[2]?.[0].bytes).toEqual(newestPrepared);
+      });
+      expect(readerPerformanceSnapshot().counters.annotationSaveRecoveries).toBe(0);
+
+      newestWrite.resolve();
+      await vi.waitFor(() => {
+        expect(readerPerformanceSnapshot().counters).toMatchObject({
+          annotationSaveRecoveries: 1,
+          annotationSaves: 2,
+        });
+      });
+      expect(committedBytes).toEqual([firstPrepared, firstPrepared, newestPrepared]);
+      expect(nativeState.session?.committedRevision).toBe(2);
+      await controller.close();
+      expect(committedBytes[committedBytes.length - 1]).toEqual(newestPrepared);
     } finally {
       endPluginActivation();
       vi.useRealTimers();

@@ -461,6 +461,9 @@ describe('PdfDocumentViewport', () => {
       { x: 5, y: 10, width: 20, height: 10 },
       { x: 10, y: 25, width: 20, height: 15 },
     ]);
+    expect(viewport.projectSelectionRects({ ...selection, clientRects: [] })).toEqual([
+      { x: 5, y: 10, width: 25, height: 30 },
+    ]);
   });
 
   it('matches extracted top-left geometry across scale, rotation, crop origin, and page border', async () => {
@@ -669,6 +672,70 @@ describe('PdfDocumentViewport', () => {
           event.change.annotation.nativeId === 'structural-link',
       ),
     ).toBe(false);
+  });
+
+  it('normalizes imported read-only subtype text, inline color, and compact metadata', async () => {
+    const { host, runtime, viewport } = await mountedViewport(1);
+    const eventBus = runtime.state.eventBus;
+    const viewer = runtime.state.viewer;
+    const page = host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (eventBus === undefined || viewer === undefined || page === null)
+      throw new Error('Expected mounted PDF state.');
+    vi.spyOn(page, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 200,
+      right: 700,
+      bottom: 1000,
+      width: 600,
+      height: 800,
+      x: 100,
+      y: 200,
+      toJSON: () => ({}),
+    });
+    const imported = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'underlineAnnotation', text: 'Imported underline' });
+    imported.dataset['annotationId'] = 'imported-underline';
+    imported.dataset['tags'] = 'review, follow-up';
+    imported.dataset['links'] = 'Notes/One, Notes/Two';
+    imported.setCssProps({ '--editor-highlight-color': '#123456' });
+    vi.spyOn(imported, 'getBoundingClientRect').mockReturnValue({
+      left: 110,
+      top: 220,
+      right: 150,
+      bottom: 240,
+      width: 40,
+      height: 20,
+      x: 110,
+      y: 220,
+      toJSON: () => ({}),
+    });
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    await nextFrame();
+
+    expect(events).toContainEqual({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'imported-underline',
+          pageIndex: 0,
+          type: 'underline',
+          rects: [{ x: 5, y: 10, width: 20, height: 10 }],
+          selectedText: 'Imported underline',
+          color: '#123456',
+          tags: ['review', 'follow-up'],
+          links: ['Notes/One', 'Notes/Two'],
+        },
+      },
+    });
   });
 
   it('bounds mounted snapshot work after visiting many virtualized pages and mutating', async () => {
@@ -1002,6 +1069,13 @@ describe('PdfDocumentViewport', () => {
     expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('pointer-freetext', {
       kind: 'root-click',
     });
+
+    imported.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 8 }),
+    );
+    await new Promise((resolve) => imported.win.setTimeout(resolve, 0));
+    imported.click();
+    expect(focusAnnotation).toHaveBeenCalledTimes(3);
   });
 
   it.each([
@@ -2598,6 +2672,19 @@ describe('PdfDocumentViewport', () => {
     expect(fixture.runtime.state.linkService?.documents).toEqual([fixture.documentProxy, null]);
     expect(eventBus.listeners.get('pagesinit')).toHaveLength(0);
     expect(fixture.host.children).toHaveLength(0);
+  });
+
+  it('cancels the viewer document before cleanup so in-flight pages can settle', async () => {
+    const fixture = await mountedViewport(3);
+    const viewer = fixture.runtime.state.viewer;
+    if (viewer === undefined) throw new Error('Expected viewer components.');
+    viewer.cleanup.mockImplementation(() => {
+      expect(viewer.documents[viewer.documents.length - 1]).toBeNull();
+    });
+
+    await expect(fixture.viewport.destroy()).resolves.toBeUndefined();
+    expect(viewer.cleanup).toHaveBeenCalledOnce();
+    expect(viewer.documents).toEqual([fixture.documentProxy, null]);
   });
 
   it('rejects invalid mounting states and ignores malformed viewer events', async () => {
