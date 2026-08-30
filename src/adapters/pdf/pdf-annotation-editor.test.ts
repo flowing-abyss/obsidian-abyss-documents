@@ -2232,6 +2232,36 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
   });
 
+  it('does not suppress a genuine mutation while activation resolution is pending', async () => {
+    const current = fixture();
+    const projected = createdAnnotation('', { id: 'pending-highlight', writable: false });
+    const resolved = deferred<DocumentAnnotation | null>();
+    const mutations = vi.fn();
+    const dirty = vi.fn();
+    current.editor.onMutation(mutations);
+    current.editor.onDirty(dirty);
+    current.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'pending-highlight' },
+    ]);
+    current.editor.setAnnotationResolver(async () => resolved.promise);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(),
+    });
+
+    const activation = current.editor.focusAnnotation('pending-highlight', { kind: 'sidebar' });
+    await Promise.resolve();
+    current.annotationStorage.onAnnotationEditor?.(9);
+    current.annotationStorage.onSetModified?.();
+
+    expect(mutations).toHaveBeenCalledTimes(2);
+    expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+
+    current.editor.destroy();
+    resolved.resolve(null);
+    await expect(activation).resolves.toBe('cancelled');
+  });
+
   it('selects supported annotations from NONE', async () => {
     const cases = [
       ['highlight', 9],
@@ -3376,6 +3406,43 @@ describe('PdfAnnotationEditor save boundary', () => {
     expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
   });
 
+  it('returns captured bytes without warning when a queued tool restore is aborted', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(fixtureValue.viewer, 'annotationEditorMode');
+    if (descriptor?.get === undefined || descriptor.set === undefined)
+      throw new Error('Expected the fixture viewer mode accessor.');
+    const restoreFailure = new DOMException('queued tool was cancelled', 'AbortError');
+    const getMode = descriptor.get.bind(fixtureValue.viewer);
+    const setMode = descriptor.set.bind(fixtureValue.viewer);
+    Object.defineProperty(fixtureValue.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: getMode,
+      set(value: { readonly mode: number }) {
+        if (value.mode === 3) throw restoreFailure;
+        setMode(value);
+      },
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+    const queuedTool = fixtureValue.editor.setTool('freetext');
+    const queuedOutcome = expect(queuedTool).rejects.toBe(restoreFailure);
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await expect(saving).resolves.toHaveLength(3);
+    await queuedOutcome;
+    expect(warning).not.toHaveBeenCalled();
+  });
+
   it('drains and coalesces tool intents that arrive while the save tool is restoring', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const pending = deferred<Uint8Array<ArrayBuffer>>();
@@ -3585,6 +3652,35 @@ describe('PdfAnnotationEditor save boundary', () => {
 
     await expect(saving).rejects.toMatchObject({ name: 'InvalidStateError' });
     expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a replacement-manager tool queued behind a retired-manager save', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const initialManager = manager();
+    const replacementManager = manager();
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: initialManager,
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: replacementManager,
+    });
+    const queuedTool = fixtureValue.editor.setTool('ink');
+    const queuedOutcome = expect(queuedTool).rejects.toMatchObject({ name: 'AbortError' });
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await expect(saving).rejects.toMatchObject({ name: 'InvalidStateError' });
+    await queuedOutcome;
+    expect(replacementManager.updateParams).not.toHaveBeenCalled();
+    expect(fixtureValue.modeRequests).not.toContainEqual({ mode: 15 });
   });
 
   it('rejects a concurrent save while preserving the active save', async () => {

@@ -4494,6 +4494,118 @@ describe('ReaderController', () => {
     }
   });
 
+  it('keeps activation below the save and conflict boundary until one real color mutation', async () => {
+    beginPluginActivation();
+    endPluginActivation();
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/Activation-is-not-mutation.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdViewport = interactiveViewport();
+      const createdSession = session(pdf.path, createdViewport);
+      const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      let emitDirty: ((dirty: boolean) => void) | null = null;
+      createdViewport.editor.onDirty = vi.fn((listener: (dirty: boolean) => void) => {
+        emitDirty = listener;
+        return () => {
+          emitDirty = null;
+        };
+      });
+      createdViewport.setParameter.mockImplementation(async () => {
+        emitDirty?.(true);
+      });
+      let nativeSession: NativeEditableSaveSession | null = null;
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          nativeSession = retainedNativeSession(baseToken, createdViewport.editor, onRevision);
+          return nativeSession;
+        },
+      });
+      const save = vi.fn(async (request: NativeDocumentSaveRequest) => {
+        const prepared = await request.source.prepare(
+          request.revision,
+          new AbortController().signal,
+        );
+        const token = { ...baseToken, sha256: 'b'.repeat(64), mtime: 20 };
+        await request.source.commit(prepared, token);
+        return {
+          verified: true as const,
+          generation: request.revision,
+          ...token,
+          committedAt: '2026-08-30T00:00:00.000Z' as never,
+        };
+      });
+      const notices = vi.spyOn(Notice.prototype, 'constructor__');
+      const shell = capturingShellFactory();
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        shell.createShell,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+      shell.send({ type: 'open-sidebar', tab: 'annotations' });
+      createdViewport.emit({
+        type: 'annotation-change',
+        change: {
+          operation: 'upsert',
+          annotation: {
+            nativeId: 'activation-highlight',
+            pageIndex: 0,
+            type: 'highlight',
+            rects: [{ x: 10, y: 20, width: 100, height: 12 }],
+            selectedText: 'Activation only',
+            color: '#ffd400',
+            comment: '',
+            tags: [],
+            links: [],
+            writable: true,
+          },
+        },
+      });
+
+      shell.created.sidebar?.annotationsPanel.root
+        .querySelector<HTMLButtonElement>('[data-annotation-id="activation-highlight"]')
+        ?.click();
+      await vi.waitFor(() => {
+        expect(createdViewport.focusAnnotation).toHaveBeenCalledOnce();
+      });
+      await vi.advanceTimersByTimeAsync(750);
+
+      expect(controller.annotationSaveLifecycleSnapshot()).toMatchObject({
+        committedRevision: 0,
+        isDirty: false,
+        newestGeneration: 0,
+        pendingRevision: 0,
+        savedGeneration: 0,
+      });
+      expect(save).not.toHaveBeenCalled();
+      expect(notices).not.toHaveBeenCalled();
+
+      await createdViewport.setParameter('highlight-color', '#64d8cb');
+      expect(controller.annotationSaveLifecycleSnapshot()).toMatchObject({
+        isDirty: true,
+        newestGeneration: 1,
+        pendingRevision: 1,
+      });
+      await vi.advanceTimersByTimeAsync(750);
+
+      expect(save).toHaveBeenCalledOnce();
+      expect(save.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({ path: pdf.path, revision: 1, source: nativeSession }),
+      );
+      expect(controller.annotationSaveLifecycleSnapshot()).toMatchObject({
+        committedRevision: 1,
+        isDirty: false,
+        pendingRevision: 1,
+        savedGeneration: 1,
+      });
+      expect(notices).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('exposes a typed read-only annotation save lifecycle and resets it on close', async () => {
     beginPluginActivation();
     endPluginActivation();

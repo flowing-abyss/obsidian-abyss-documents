@@ -208,7 +208,9 @@ interface SelectionHighlightReservation {
 }
 
 interface QueuedToolIntent {
+  readonly manager: PdfAnnotationUiManager;
   options: PdfAnnotationModeOptions;
+  readonly revision: number;
   tool: PdfAnnotationTool;
   readonly waiters: Array<{
     readonly reject: (reason: Error) => void;
@@ -303,6 +305,7 @@ export class PdfAnnotationEditor {
   private contextualEditSession: ContextualEditSession | null = null;
   private pendingContextualSaveRestore: ContextualSaveRestore | null = null;
   private activationEpoch = 0;
+  private activationMaterializationDepth = 0;
   private activeActivation: AnnotationActivation | null = null;
   private annotationResolver: PdfAnnotationResolver | null = null;
   private readonly projectedAnnotations = new Map<string, DocumentAnnotation>();
@@ -328,7 +331,8 @@ export class PdfAnnotationEditor {
     if (contextual !== null) await this.closeContextualEditSession(contextual);
     const modeOptions: PdfAnnotationModeOptions =
       options.isFromKeyboard === undefined ? {} : { isFromKeyboard: options.isFromKeyboard };
-    if (this.saving) return this.queueToolIntent(tool, modeOptions);
+    if (this.saving)
+      return this.queueToolIntent(tool, modeOptions, this.requireManager(), this.lifecycleRevision);
     const mode = this.modeFor(tool);
     await this.changeMode(mode, modeOptions);
   }
@@ -1117,26 +1121,38 @@ export class PdfAnnotationEditor {
       this.dependencies.eventBus.on('annotationeditormodechanged', listener);
       wait.signal?.addEventListener('abort', onAbort, { once: true });
       try {
-        this.dependencies.viewer.annotationEditorMode = {
-          mode,
-          ...(options.isFromKeyboard === undefined
-            ? {}
-            : { isFromKeyboard: options.isFromKeyboard }),
-          ...(options.editId === undefined
-            ? {}
-            : {
-                editComment: options.editComment === true,
-                editId: options.editId,
-              }),
-        };
+        this.requestNativeMode(mode, options);
       } catch (cause) {
         this.dependencies.eventBus.off('annotationeditormodechanged', listener);
         clearTimeout();
         removeAbort();
         this.pendingModeChange = null;
-        reject(cause instanceof Error ? cause : new Error(String(cause)));
+        reject(asError(cause));
       }
     });
+  }
+
+  private requestNativeMode(mode: number, options: PdfAnnotationModeOptions): void {
+    const activation = this.activeActivation;
+    const ownsActivationMaterialization =
+      activation !== null &&
+      options.editId === activation.id &&
+      this.isCurrentActivation(activation);
+    if (ownsActivationMaterialization) this.activationMaterializationDepth += 1;
+    try {
+      this.dependencies.viewer.annotationEditorMode = {
+        mode,
+        ...(options.isFromKeyboard === undefined ? {} : { isFromKeyboard: options.isFromKeyboard }),
+        ...(options.editId === undefined
+          ? {}
+          : {
+              editComment: options.editComment === true,
+              editId: options.editId,
+            }),
+      };
+    } finally {
+      if (ownsActivationMaterialization) this.activationMaterializationDepth -= 1;
+    }
   }
 
   setParameter(parameter: PdfAnnotationParameter, value: unknown): Promise<void> {
@@ -1244,7 +1260,7 @@ export class PdfAnnotationEditor {
         : { editComment: false, editId: targetContextualRestore.id };
     let restoreFailure: Error | null = null;
     do {
-      const queued = this.takeQueuedToolIntent();
+      const queued = this.takeQueuedToolIntent(manager, revision);
       if (queued !== null) {
         queuedIntents.push(queued);
         targetMode = this.modeFor(queued.tool);
@@ -1259,7 +1275,7 @@ export class PdfAnnotationEditor {
         revision,
       });
     } while (restoreFailure === null && this.queuedToolIntent !== null);
-    const failedDuringRestore = this.takeQueuedToolIntent();
+    const failedDuringRestore = this.takeQueuedToolIntent(manager, revision);
     if (failedDuringRestore !== null) queuedIntents.push(failedDuringRestore);
     this.clearOwnedContextualSaveRestore(contextualRestore);
     this.releaseSave(manager, revision);
@@ -1273,7 +1289,7 @@ export class PdfAnnotationEditor {
     readonly failure: Error | null;
   }): Uint8Array {
     if (outcome.bytes !== null) {
-      if (outcome.failure !== null) {
+      if (outcome.failure !== null && outcome.failure.name !== 'AbortError') {
         console.warn('[abyss-documents] PDF bytes were saved but editor focus was not restored', {
           cause: outcome.failure,
         });
@@ -1738,7 +1754,8 @@ export class PdfAnnotationEditor {
     tool: PdfAnnotationTool,
     options: PdfAnnotationModeOptions,
   ): Promise<void> {
-    if (this.saving) await this.queueToolIntent(tool, options);
+    if (this.saving)
+      await this.queueToolIntent(tool, options, session.manager, this.lifecycleRevision);
     else await this.changeMode(session.mode, options);
     if (!this.isRequestedEditorSelected(session)) {
       this.guardContextualEditSession(session);
@@ -1977,13 +1994,13 @@ export class PdfAnnotationEditor {
     const previousReset = this.storage.onResetModified;
     const ownedEditor = (type: number | null): void => {
       previousEditor?.(type);
-      if (this.activeActivation !== null) return;
+      if (this.activationMaterializationDepth > 0) return;
       this.emitMutation();
       for (const listener of [...this.editorAddedListeners]) listener(type);
     };
     const ownedSet = (): void => {
       previousSet?.();
-      if (this.activeActivation !== null) return;
+      if (this.activationMaterializationDepth > 0) return;
       this.emitMutation();
       if (!this.saving) this.emitDirty(true);
     };
@@ -2037,11 +2054,30 @@ export class PdfAnnotationEditor {
   private queueToolIntent(
     tool: PdfAnnotationTool,
     options: PdfAnnotationModeOptions,
+    manager: PdfAnnotationUiManager,
+    revision: number,
   ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const queued = this.queuedToolIntent;
       if (queued === null) {
-        this.queuedToolIntent = { tool, options: { ...options }, waiters: [{ resolve, reject }] };
+        this.queuedToolIntent = {
+          manager,
+          options: { ...options },
+          revision,
+          tool,
+          waiters: [{ resolve, reject }],
+        };
+        return;
+      }
+      if (queued.manager !== manager || queued.revision !== revision) {
+        this.settleQueuedToolIntent(queued, queuedToolLifecycleError());
+        this.queuedToolIntent = {
+          manager,
+          options: { ...options },
+          revision,
+          tool,
+          waiters: [{ resolve, reject }],
+        };
         return;
       }
       queued.tool = tool;
@@ -2058,9 +2094,16 @@ export class PdfAnnotationEditor {
     }
   }
 
-  private takeQueuedToolIntent(): QueuedToolIntent | null {
+  private takeQueuedToolIntent(
+    manager: PdfAnnotationUiManager,
+    revision: number,
+  ): QueuedToolIntent | null {
     const queued = this.queuedToolIntent;
     this.queuedToolIntent = null;
+    if (queued !== null && (queued.manager !== manager || queued.revision !== revision)) {
+      this.settleQueuedToolIntent(queued, queuedToolLifecycleError());
+      return null;
+    }
     return queued;
   }
 
@@ -2319,6 +2362,13 @@ function abortReason(signal: AbortSignal): Error {
     return reason as Error;
   }
   return new DOMException('The PDF annotation interaction was cancelled.', 'AbortError');
+}
+
+function queuedToolLifecycleError(): DOMException {
+  return new DOMException(
+    'The PDF annotation editor changed before applying the tool.',
+    'AbortError',
+  );
 }
 
 function remainingDeadlineMs(deadline: number): number {
