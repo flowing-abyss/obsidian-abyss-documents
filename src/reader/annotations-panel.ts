@@ -4,6 +4,7 @@ import type { DocumentLocation } from '../document-core/document.js';
 import { maximizeReaderCounter, recordReaderPerformanceSample } from '../reader-performance.js';
 import type { AnnotationProjectionRow } from './annotation-projection.js';
 import { ownerWindow, type ReaderOwnerWindow } from './owner-dom.js';
+import { configureTextSearchInput, isolateTextEditing } from './text-editing-guard.js';
 
 const MAX_CARDS = 48;
 const MAX_COLOR_FACETS = 16;
@@ -178,7 +179,7 @@ export class AnnotationsPanel {
     this.controls = owner.createDiv();
     this.controls.className = 'abyss-annotation-controls';
     this.query = owner.createEl('input');
-    this.query.type = 'search';
+    configureTextSearchInput(this.query);
     this.query.placeholder = 'Filter annotations';
     this.query.setAttribute('aria-label', 'Filter annotations');
     this.query.dataset['annotationSearch'] = '';
@@ -238,6 +239,8 @@ export class AnnotationsPanel {
       this.resetVirtualScroll();
       this.applyFilter(true);
     });
+    isolateTextEditing(this.query);
+    isolateTextEditing(this.colorSearch);
   }
 
   setLoading(): void {
@@ -1344,7 +1347,7 @@ function createColorFacetControls(owner: ReaderOwnerWindow): {
   label.dataset['annotationColorsLabel'] = '';
   label.textContent = 'Colors';
   const search = owner.createEl('input');
-  search.type = 'search';
+  configureTextSearchInput(search);
   search.placeholder = 'Filter colors';
   search.setAttribute('aria-label', 'Filter annotation colors');
   search.dataset['annotationColorSearch'] = '';

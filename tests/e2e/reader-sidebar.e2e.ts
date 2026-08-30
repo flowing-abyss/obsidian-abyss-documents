@@ -53,6 +53,30 @@ async function openAnnotations(path: string): Promise<void> {
   await expect($('[data-tab="annotations"][aria-selected="true"]')).toExist();
 }
 
+async function selectedPdfEditorSnapshot(): Promise<{
+  readonly color: string | null;
+  readonly count: number;
+}> {
+  return browser.executeObsidian(({ app }) => {
+    const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+      controller?: {
+        viewport?: {
+          annotationEditorInstance?: {
+            manager?: { firstSelectedEditor?: { color?: string } | null } | null;
+          };
+          pdf?: { annotationStorage?: { size?: number } } | null;
+        };
+      };
+    };
+    const viewport = view.controller?.viewport;
+    const editor = viewport?.annotationEditorInstance?.manager?.firstSelectedEditor ?? null;
+    const storage = viewport?.pdf?.annotationStorage ?? null;
+    if (editor === null || storage?.size === undefined)
+      throw new Error('Expected a selected PDF.js editor with annotation storage.');
+    return { color: editor.color ?? null, count: storage.size };
+  });
+}
+
 async function annotationCardGeometry(): Promise<{
   readonly cardHeight: number;
   readonly cardWidth: number;
@@ -574,6 +598,49 @@ describe('PDF reader sidebar', () => {
       document.querySelector('[data-annotation-comment]')?.remove();
     });
     expectAnnotationContentAligned(await annotationContentGeometry(), ['header', 'quote']);
+  });
+
+  it('keeps trusted search editing local while a PDF.js editor is selected', async () => {
+    await openAnnotations('Documents/annotations-10000.pdf');
+    await browser.waitUntil(
+      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
+      { timeout: 15_000, timeoutMsg: 'Annotation panel did not load editable test data.' },
+    );
+    const search = $('[data-annotation-search]');
+    await search.setValue('Annotation 00001');
+    await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
+    await $('.abyss-annotation-card').click();
+    const popover = $('[data-annotation-editor-popover]');
+    await expect(popover).toBeDisplayed();
+    const before = await selectedPdfEditorSnapshot();
+    const modifier = process.platform === 'darwin' ? Key.Command : Key.Control;
+
+    await search.click();
+    await browser.keys([modifier, 'a']);
+    await browser.keys('trusted typing');
+    const typed = await search.getValue();
+    expect(typed).toBe('trusted typing');
+
+    await browser.keys(Key.Backspace);
+    expect(await search.getValue()).toBe(typed.slice(0, -1));
+
+    await browser.keys([modifier, 'a']);
+    await browser.keys('replacement');
+    await expect(search).toHaveValue('replacement');
+    await browser.keys([modifier, 'z']);
+    await expect(search).toHaveValue(typed.slice(0, -1));
+    await browser.keys(
+      process.platform === 'darwin' ? [modifier, Key.Shift, 'z'] : [modifier, 'y'],
+    );
+    await expect(search).toHaveValue('replacement');
+
+    await browser.keys([modifier, 'a']);
+    await browser.keys([modifier, 'c']);
+    await browser.keys([modifier, 'x']);
+    await expect(search).toHaveValue('');
+    await browser.keys([modifier, 'v']);
+    await expect(search).toHaveValue('replacement');
+    expect(await selectedPdfEditorSnapshot()).toEqual(before);
   });
 
   it('keeps annotation controls above an independent virtual scroll host', async () => {

@@ -9,6 +9,7 @@ import {
   type AnnotationSuggestionProvider,
 } from './link-suggestions.js';
 import { ownerWindow } from './owner-dom.js';
+import { isolateTextEditing } from './text-editing-guard.js';
 
 export type AnnotationEditorTarget =
   | { readonly kind: 'selection'; readonly selection: PdfTextSelection }
@@ -226,7 +227,12 @@ export class AnnotationEditorPopover {
     });
     this.listen(this.commentInput, 'keydown', (event) => {
       this.handleSuggestionKey(event);
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault();
+        this.close('escape', true);
+      }
     });
+    isolateTextEditing(this.commentInput);
   }
 
   private registerDocumentListeners(): void {

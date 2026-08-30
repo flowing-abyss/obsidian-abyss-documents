@@ -1,6 +1,7 @@
 import { setIcon, setTooltip } from 'obsidian';
 import type { DocumentLocation, OutlineItem } from '../document-core/document.js';
 import { ownerWindow } from './owner-dom.js';
+import { configureTextSearchInput, isolateTextEditing } from './text-editing-guard.js';
 
 interface OutlineRow {
   readonly chevron: HTMLSpanElement;
@@ -100,7 +101,7 @@ export class OutlinePanel {
     setTooltip(button, 'Find headings', { delay: 250 });
     setIcon(button, 'search');
     const input = owner.createEl('input');
-    input.type = 'search';
+    configureTextSearchInput(input);
     input.className = 'abyss-reader-outline-search';
     input.dataset['outlineSearch'] = '';
     input.placeholder = 'Find a heading…';
@@ -113,6 +114,7 @@ export class OutlinePanel {
     input.addEventListener('keydown', (event) => {
       this.onSearchKeyDown(event);
     });
+    isolateTextEditing(input);
     button.addEventListener('click', () => {
       this.toggleSearch();
     });

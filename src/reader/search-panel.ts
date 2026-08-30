@@ -1,6 +1,7 @@
 import { setIcon } from 'obsidian';
 import type { SearchHit, SearchResultSet } from '../document-core/document.js';
 import { ownerWindow } from './owner-dom.js';
+import { configureTextSearchInput, isolateTextEditing } from './text-editing-guard.js';
 
 export type SearchNavigationKind = 'direct' | 'next' | 'previous';
 
@@ -59,19 +60,12 @@ export class SearchPanel {
       this.render();
       this.callbacks.onQuery(this.input.value);
     });
+    this.input.addEventListener('keydown', (event) => {
+      this.handleEscape(event);
+    });
+    isolateTextEditing(this.input);
     this.root.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (this.input.value.length > 0) {
-        this.input.value = '';
-        this.results = { query: '', hits: [], complete: true };
-        this.selectedIndex = -1;
-        this.windowStart = 0;
-        this.render();
-        this.callbacks.onQuery('');
-        this.input.focus();
-      } else this.callbacks.onClose();
+      this.handleEscape(event);
     });
     this.previous.addEventListener('click', () => {
       this.moveSelection('previous');
@@ -79,6 +73,21 @@ export class SearchPanel {
     this.next.addEventListener('click', () => {
       this.moveSelection('next');
     });
+  }
+
+  private handleEscape(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (this.input.value.length > 0) {
+      this.input.value = '';
+      this.results = { query: '', hits: [], complete: true };
+      this.selectedIndex = -1;
+      this.windowStart = 0;
+      this.render();
+      this.callbacks.onQuery('');
+      this.input.focus();
+    } else this.callbacks.onClose();
   }
 
   setResults(results: SearchResultSet): void {
@@ -264,7 +273,7 @@ export class SearchPanel {
     const root = owner.createDiv();
     root.className = 'abyss-reader-search-controls';
     const input = owner.createEl('input');
-    input.type = 'search';
+    configureTextSearchInput(input);
     input.className = 'abyss-reader-search-input';
     input.placeholder = 'Search document';
     input.setAttribute('aria-label', 'Search document');

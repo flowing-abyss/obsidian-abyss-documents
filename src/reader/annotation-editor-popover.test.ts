@@ -95,6 +95,161 @@ function editComment(popover: AnnotationEditorPopover, value: string): void {
 }
 
 describe('AnnotationEditorPopover', () => {
+  it('isolates comment editing from PDF.js global Backspace and clipboard handlers', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationEditorPopover(host);
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
+    const annotationState = { color: '#ffd400', count: 1 };
+    const documentMutation = vi.fn(() => {
+      annotationState.count = 0;
+      annotationState.color = '#ff0000';
+    });
+    const windowMutation = vi.fn(() => {
+      annotationState.count = 0;
+      annotationState.color = '#ff0000';
+    });
+    const owner = host.win as Window & { Event: typeof Event; KeyboardEvent: typeof KeyboardEvent };
+    const keyEvents: KeyboardEventInit[] = [
+      { key: 'Backspace' },
+      { key: 'Delete' },
+      { ctrlKey: true, key: 'a' },
+      { metaKey: true, key: 'a' },
+      { ctrlKey: true, key: 'z' },
+      { metaKey: true, key: 'z' },
+      { ctrlKey: true, key: 'y' },
+      { metaKey: true, key: 'y' },
+      { ctrlKey: true, key: 'Z', shiftKey: true },
+      { metaKey: true, key: 'Z', shiftKey: true },
+      { key: 'Enter' },
+      { key: ' ' },
+      { key: 'ArrowDown' },
+      { key: 'ArrowLeft' },
+      { key: 'ArrowRight' },
+      { key: 'ArrowUp' },
+    ];
+    const events: Event[] = [];
+    document.addEventListener('keydown', documentMutation);
+    document.addEventListener('copy', documentMutation);
+    document.addEventListener('cut', documentMutation);
+    document.addEventListener('paste', documentMutation);
+    owner.addEventListener('keydown', windowMutation);
+    owner.addEventListener('copy', windowMutation);
+    owner.addEventListener('cut', windowMutation);
+    owner.addEventListener('paste', windowMutation);
+
+    try {
+      comment.value = 'Keep this comment intact';
+      for (const init of keyEvents) {
+        const event = new owner.KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        });
+        comment.dispatchEvent(event);
+        events.push(event);
+      }
+      for (const type of ['copy', 'cut', 'paste'] as const) {
+        const event = new owner.Event(type, { bubbles: true, cancelable: true });
+        comment.dispatchEvent(event);
+        events.push(event);
+      }
+
+      expect({
+        annotation: annotationState,
+        defaultPrevented: events.map((event) => event.defaultPrevented),
+        documentMutations: documentMutation.mock.calls.length,
+        value: comment.value,
+        windowMutations: windowMutation.mock.calls.length,
+      }).toEqual({
+        annotation: { color: '#ffd400', count: 1 },
+        defaultPrevented: Array.from({ length: 19 }, () => false),
+        documentMutations: 0,
+        value: 'Keep this comment intact',
+        windowMutations: 0,
+      });
+    } finally {
+      document.removeEventListener('keydown', documentMutation);
+      document.removeEventListener('copy', documentMutation);
+      document.removeEventListener('cut', documentMutation);
+      document.removeEventListener('paste', documentMutation);
+      owner.removeEventListener('keydown', windowMutation);
+      owner.removeEventListener('copy', windowMutation);
+      owner.removeEventListener('cut', windowMutation);
+      owner.removeEventListener('paste', windowMutation);
+      popover.destroy();
+      host.remove();
+    }
+  });
+
+  it('leaves IME composition and its following input native', () => {
+    const host = document.body.createDiv();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open(editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }));
+    const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected comment field.');
+    const owner = host.win as Window & { Event: typeof Event };
+    const observed: string[] = [];
+    const documentObserver = (event: Event): void => {
+      observed.push(`document:${event.type}`);
+    };
+    const windowObserver = (event: Event): void => {
+      observed.push(`window:${event.type}`);
+    };
+    for (const type of [
+      'compositionstart',
+      'compositionupdate',
+      'compositionend',
+      'input',
+    ] as const) {
+      document.addEventListener(type, documentObserver);
+      owner.addEventListener(type, windowObserver);
+    }
+
+    try {
+      const events = [
+        new owner.Event('compositionstart', { bubbles: true, cancelable: true }),
+        new owner.Event('compositionupdate', { bubbles: true, cancelable: true }),
+        new owner.Event('compositionend', { bubbles: true, cancelable: true }),
+      ];
+      for (const event of events) comment.dispatchEvent(event);
+      comment.value = '入力';
+      const input = new owner.Event('input', { bubbles: true, cancelable: true });
+      comment.dispatchEvent(input);
+
+      expect({
+        defaultPrevented: [...events, input].map((event) => event.defaultPrevented),
+        observed,
+        value: comment.value,
+      }).toEqual({
+        defaultPrevented: [false, false, false, false],
+        observed: [
+          'document:compositionstart',
+          'window:compositionstart',
+          'document:compositionupdate',
+          'window:compositionupdate',
+          'document:compositionend',
+          'window:compositionend',
+          'document:input',
+          'window:input',
+        ],
+        value: '入力',
+      });
+    } finally {
+      for (const type of [
+        'compositionstart',
+        'compositionupdate',
+        'compositionend',
+        'input',
+      ] as const) {
+        document.removeEventListener(type, documentObserver);
+        owner.removeEventListener(type, windowObserver);
+      }
+      popover.destroy();
+      host.remove();
+    }
+  });
+
   it('auto-grows the two-row comment field without a resize handle', () => {
     const host = document.body.createDiv();
     const popover = new AnnotationEditorPopover(host);

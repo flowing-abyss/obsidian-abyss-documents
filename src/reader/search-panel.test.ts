@@ -31,6 +31,106 @@ function enterQuery(panel: SearchPanel, query: string): void {
 }
 
 describe('SearchPanel', () => {
+  it('isolates search editing from PDF.js global Backspace and clipboard handlers', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const panel = new SearchPanel(host, callbacks());
+    const annotation = { color: '#ffd400', count: 1 };
+    const documentMutation = vi.fn(() => {
+      annotation.count = 0;
+      annotation.color = '#ff0000';
+    });
+    const windowMutation = vi.fn(() => {
+      annotation.count = 0;
+      annotation.color = '#ff0000';
+    });
+    const owner = panel.root.win as Window & {
+      Event: typeof Event;
+      KeyboardEvent: typeof KeyboardEvent;
+    };
+    const keyEvents: KeyboardEventInit[] = [
+      { key: 'Backspace' },
+      { key: 'Delete' },
+      { ctrlKey: true, key: 'a' },
+      { metaKey: true, key: 'a' },
+      { ctrlKey: true, key: 'z' },
+      { metaKey: true, key: 'z' },
+      { ctrlKey: true, key: 'y' },
+      { metaKey: true, key: 'y' },
+      { ctrlKey: true, key: 'Z', shiftKey: true },
+      { metaKey: true, key: 'Z', shiftKey: true },
+      { key: 'Enter' },
+      { key: ' ' },
+      { key: 'ArrowDown' },
+      { key: 'ArrowLeft' },
+      { key: 'ArrowRight' },
+      { key: 'ArrowUp' },
+    ];
+    const events: Event[] = [];
+    host.doc.addEventListener('keydown', documentMutation);
+    host.doc.addEventListener('copy', documentMutation);
+    host.doc.addEventListener('cut', documentMutation);
+    host.doc.addEventListener('paste', documentMutation);
+    owner.addEventListener('keydown', windowMutation);
+    owner.addEventListener('copy', windowMutation);
+    owner.addEventListener('cut', windowMutation);
+    owner.addEventListener('paste', windowMutation);
+
+    try {
+      panel.input.value = 'Keep this query intact';
+      for (const init of keyEvents) {
+        const event = new owner.KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        });
+        panel.input.dispatchEvent(event);
+        events.push(event);
+      }
+      for (const type of ['copy', 'cut', 'paste'] as const) {
+        const event = new owner.Event(type, { bubbles: true, cancelable: true });
+        panel.input.dispatchEvent(event);
+        events.push(event);
+      }
+
+      expect({
+        annotation,
+        defaultPrevented: events.map((event) => event.defaultPrevented),
+        documentMutations: documentMutation.mock.calls.length,
+        input: {
+          autocomplete: panel.input.autocomplete,
+          role: panel.input.getAttribute('role'),
+          spellcheck: panel.input.spellcheck,
+          type: panel.input.type,
+          value: panel.input.value,
+        },
+        windowMutations: windowMutation.mock.calls.length,
+      }).toEqual({
+        annotation: { color: '#ffd400', count: 1 },
+        defaultPrevented: Array.from({ length: 19 }, () => false),
+        documentMutations: 0,
+        input: {
+          autocomplete: 'off',
+          role: 'searchbox',
+          spellcheck: false,
+          type: 'text',
+          value: 'Keep this query intact',
+        },
+        windowMutations: 0,
+      });
+    } finally {
+      host.doc.removeEventListener('keydown', documentMutation);
+      host.doc.removeEventListener('copy', documentMutation);
+      host.doc.removeEventListener('cut', documentMutation);
+      host.doc.removeEventListener('paste', documentMutation);
+      owner.removeEventListener('keydown', windowMutation);
+      owner.removeEventListener('copy', windowMutation);
+      owner.removeEventListener('cut', windowMutation);
+      owner.removeEventListener('paste', windowMutation);
+      host.remove();
+    }
+  });
+
   it('uses a semantic result list without replacing button semantics', () => {
     const panel = new SearchPanel(createDiv(), callbacks());
     enterQuery(panel, 'needle');

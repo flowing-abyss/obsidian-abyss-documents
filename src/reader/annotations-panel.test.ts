@@ -59,6 +59,123 @@ function annotationFooter(root: HTMLElement): HTMLElement {
 }
 
 describe('AnnotationsPanel', () => {
+  it('isolates annotation filters from PDF.js global Backspace and clipboard handlers', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0)]);
+    const inputs = [
+      root.querySelector<HTMLInputElement>('[data-annotation-search]'),
+      root.querySelector<HTMLInputElement>('[data-annotation-color-search]'),
+    ];
+    if (inputs.some((input) => input === null))
+      throw new Error('Expected annotation filter fields.');
+    const filters = inputs as HTMLInputElement[];
+    const annotationState = { color: '#ffd400', count: 1 };
+    const documentMutation = vi.fn(() => {
+      annotationState.count = 0;
+      annotationState.color = '#ff0000';
+    });
+    const windowMutation = vi.fn(() => {
+      annotationState.count = 0;
+      annotationState.color = '#ff0000';
+    });
+    const owner = root.win as Window & { Event: typeof Event; KeyboardEvent: typeof KeyboardEvent };
+    const keyEvents: KeyboardEventInit[] = [
+      { key: 'Backspace' },
+      { key: 'Delete' },
+      { ctrlKey: true, key: 'a' },
+      { metaKey: true, key: 'a' },
+      { ctrlKey: true, key: 'z' },
+      { metaKey: true, key: 'z' },
+      { ctrlKey: true, key: 'y' },
+      { metaKey: true, key: 'y' },
+      { ctrlKey: true, key: 'Z', shiftKey: true },
+      { metaKey: true, key: 'Z', shiftKey: true },
+      { key: 'Enter' },
+      { key: ' ' },
+      { key: 'ArrowDown' },
+      { key: 'ArrowLeft' },
+      { key: 'ArrowRight' },
+      { key: 'ArrowUp' },
+    ];
+    const events: Event[] = [];
+    root.doc.addEventListener('keydown', documentMutation);
+    root.doc.addEventListener('copy', documentMutation);
+    root.doc.addEventListener('cut', documentMutation);
+    root.doc.addEventListener('paste', documentMutation);
+    owner.addEventListener('keydown', windowMutation);
+    owner.addEventListener('copy', windowMutation);
+    owner.addEventListener('cut', windowMutation);
+    owner.addEventListener('paste', windowMutation);
+
+    try {
+      for (const [index, input] of filters.entries()) {
+        input.value = `Keep annotation filter ${String(index)} intact`;
+        for (const init of keyEvents) {
+          const event = new owner.KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            ...init,
+          });
+          input.dispatchEvent(event);
+          events.push(event);
+        }
+        for (const type of ['copy', 'cut', 'paste'] as const) {
+          const event = new owner.Event(type, { bubbles: true, cancelable: true });
+          input.dispatchEvent(event);
+          events.push(event);
+        }
+      }
+
+      expect({
+        annotation: annotationState,
+        defaultPrevented: events.map((event) => event.defaultPrevented),
+        documentMutations: documentMutation.mock.calls.length,
+        inputs: filters.map((input) => ({
+          autocomplete: input.autocomplete,
+          role: input.getAttribute('role'),
+          spellcheck: input.spellcheck,
+          type: input.type,
+          value: input.value,
+        })),
+        windowMutations: windowMutation.mock.calls.length,
+      }).toEqual({
+        annotation: { color: '#ffd400', count: 1 },
+        defaultPrevented: Array.from({ length: 38 }, () => false),
+        documentMutations: 0,
+        inputs: [
+          {
+            autocomplete: 'off',
+            role: 'searchbox',
+            spellcheck: false,
+            type: 'text',
+            value: 'Keep annotation filter 0 intact',
+          },
+          {
+            autocomplete: 'off',
+            role: 'searchbox',
+            spellcheck: false,
+            type: 'text',
+            value: 'Keep annotation filter 1 intact',
+          },
+        ],
+        windowMutations: 0,
+      });
+    } finally {
+      root.doc.removeEventListener('keydown', documentMutation);
+      root.doc.removeEventListener('copy', documentMutation);
+      root.doc.removeEventListener('cut', documentMutation);
+      root.doc.removeEventListener('paste', documentMutation);
+      owner.removeEventListener('keydown', windowMutation);
+      owner.removeEventListener('copy', windowMutation);
+      owner.removeEventListener('cut', windowMutation);
+      owner.removeEventListener('paste', windowMutation);
+      panel.destroy();
+      root.remove();
+    }
+  });
+
   it('preserves the connected projected card, focus, and scroll through provisional reconciliation', async () => {
     const root = createDiv();
     root.doc.body.append(root);
