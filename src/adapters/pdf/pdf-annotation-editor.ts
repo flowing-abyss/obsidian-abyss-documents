@@ -948,6 +948,7 @@ export class PdfAnnotationEditor {
     manager: PdfAnnotationUiManager,
   ): SelectionHighlightReservation {
     const created = deferred<DocumentAnnotation>();
+    void created.promise.catch(() => undefined);
     const existingIds = this.dependencies.commentBridge.nativeEditorIds(manager);
     let current: DocumentAnnotation | null = null;
     let frame: number | null = null;
@@ -963,9 +964,21 @@ export class PdfAnnotationEditor {
       created.resolve(annotation);
       return true;
     };
+    const stopRetries = (): void => {
+      stopped = true;
+      if (frame === null) return;
+      window.cancelAnimationFrame(frame);
+      frame = null;
+    };
     const refresh = (): void => {
       if (stopped || current !== null) return;
-      if (resolveCurrent() || frame !== null) return;
+      try {
+        if (resolveCurrent() || frame !== null) return;
+      } catch (cause) {
+        stopRetries();
+        created.reject(asError(cause));
+        return;
+      }
       frame = window.requestAnimationFrame(() => {
         frame = null;
         refresh();
@@ -983,9 +996,8 @@ export class PdfAnnotationEditor {
       observed: () => observed,
       refresh,
       unsubscribe: () => {
-        stopped = true;
+        stopRetries();
         unsubscribe();
-        if (frame !== null) window.cancelAnimationFrame(frame);
       },
     };
   }
@@ -2230,13 +2242,16 @@ function remainingDeadlineMs(deadline: number): number {
 
 function deferred<T>(): {
   readonly promise: Promise<T>;
+  readonly reject: (reason: unknown) => void;
   readonly resolve: (value: T | PromiseLike<T>) => void;
 } {
+  let reject!: (reason: unknown) => void;
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    reject = rejectPromise;
     resolve = resolvePromise;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

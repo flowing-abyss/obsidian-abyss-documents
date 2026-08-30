@@ -325,6 +325,38 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('routes a throwing highlight accessor to the commit boundary exactly once', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    const failure = new Error('PDF.js public highlight color failed');
+    const accessor = vi.fn(() => {
+      throw failure;
+    });
+    let editorReady = false;
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() => {
+      if (!editorReady) return null;
+      return accessor();
+    });
+    uiManager.highlightSelection.mockImplementation(() => {
+      editorReady = true;
+      fixtureValue.annotationStorage.addEditor(9);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    await expect(
+      fixtureValue.editor.commitSelection('current', {
+        kind: 'highlight',
+        color: '#ffd400',
+      }),
+    ).rejects.toBe(failure);
+    await Promise.resolve();
+
+    expect(accessor).toHaveBeenCalledOnce();
+  });
+
   it('resolves highlight after dirty and NONE', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const uiManager = manager();
