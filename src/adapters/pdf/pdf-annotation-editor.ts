@@ -660,11 +660,42 @@ export class PdfAnnotationEditor {
       if (!(await this.focusContextualEditor(request.id, projected, session, activation)))
         return this.failContextualActivation(session, projected, activation);
       return 'editable';
-    } catch {
+    } catch (cause) {
+      return this.handleContextualActivationFailure(cause, session, projected, activation);
+    }
+  }
+
+  private async handleContextualActivationFailure(
+    cause: unknown,
+    session: ContextualEditSession | null,
+    projected: DocumentAnnotation | undefined,
+    activation: AnnotationActivation,
+  ): Promise<PdfAnnotationActivationResult> {
+    if (!this.isCurrentActivation(activation) || isAbortFailure(cause)) {
       return session === null
         ? 'cancelled'
         : this.failContextualActivation(session, projected, activation);
     }
+    if (session === null) throw cause;
+    return this.rejectAfterContextualContainment(cause, session, activation);
+  }
+
+  private async rejectAfterContextualContainment(
+    cause: unknown,
+    session: ContextualEditSession,
+    activation: AnnotationActivation,
+  ): Promise<never> {
+    try {
+      await this.containFailedContextualEntry(session, activation.controller.signal);
+    } catch (containmentCause) {
+      if (this.isCurrentActivation(activation) && !isAbortFailure(containmentCause)) {
+        console.warn(
+          '[abyss-documents] Failed to contain the PDF annotation editor after activation failure',
+          { cause: asError(containmentCause) },
+        );
+      }
+    }
+    throw cause;
   }
 
   private async prepareContextualActivation(activation: AnnotationActivation): Promise<boolean> {
@@ -767,8 +798,9 @@ export class PdfAnnotationEditor {
   ): Promise<PdfAnnotationActivationResult> {
     try {
       await this.containFailedContextualEntry(session, activation.controller.signal);
-    } catch {
-      return 'cancelled';
+    } catch (cause) {
+      if (!this.isCurrentActivation(activation) || isAbortFailure(cause)) return 'cancelled';
+      throw cause;
     }
     if (!this.isCurrentActivation(activation)) return 'cancelled';
     const focused = await waitWithSignal(
@@ -1886,9 +1918,7 @@ export class PdfAnnotationEditor {
   ): Promise<void> {
     if (this.contextualEditSession !== session) return;
     this.guardContextualEditSession(session);
-    await this.closeContextualEditSession(session, signal === undefined ? {} : { signal }).catch(
-      () => undefined,
-    );
+    await this.closeContextualEditSession(session, signal === undefined ? {} : { signal });
   }
 
   private readonly onContextualEditorsRendered = (event: unknown): void => {

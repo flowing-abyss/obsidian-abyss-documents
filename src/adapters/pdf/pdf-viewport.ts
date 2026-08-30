@@ -290,6 +290,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private pendingLocation: DocumentLocation | null = null;
   private latestLocation: DocumentLocation | null = null;
   private navigationRequestRevision = 0;
+  private navigationLifecycleRevision = 0;
   private requestedLayout: ReaderLayout = { pages: 'single', scrolling: 'continuous' };
   private requestedScale: ScaleRequest = 'page-width';
   private scaleRequestRevision = 0;
@@ -399,19 +400,20 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   async goTo(location: DocumentLocation): Promise<void> {
     const revision = ++this.navigationRequestRevision;
+    const lifecycleRevision = this.navigationLifecycleRevision;
     this.requireMounted(this.linkService);
     await this.annotationEditorInstance?.abortInteraction(
       'PDF navigation cancelled the annotation interaction.',
     );
-    if (!this.isCurrentNavigationRequest(revision)) return;
+    if (!this.isCurrentNavigationRequest(revision, lifecycleRevision)) return;
     this.selectionObserverInstance?.invalidate();
     this.latestLocation = { ...location };
     if (!this.pagesInitialized || this.colorRebindActive) {
       this.pendingLocation = { ...location };
       return;
     }
-    await this.navigateTo(location, revision);
-    if (!this.isCurrentNavigationRequest(revision)) return;
+    await this.navigateTo(location, revision, lifecycleRevision);
+    if (!this.isCurrentNavigationRequest(revision, lifecycleRevision)) return;
     const viewer = this.requireMounted(this.viewer);
     this.refitPageHeight(viewer);
   }
@@ -1049,6 +1051,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private startColorRebind(): void {
     const viewer = this.requireMounted(this.viewer);
+    this.navigationLifecycleRevision += 1;
     this.selectionObserverInstance?.invalidate();
     const pageColors = this.requestedPageColors;
     this.preservedViewState ??= this.captureViewState(viewer);
@@ -1108,7 +1111,8 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.pendingLocation = null;
       this.latestLocation = { ...location };
       const revision = ++this.navigationRequestRevision;
-      void this.navigateTo(location, revision).catch((cause: unknown) => {
+      const lifecycleRevision = this.navigationLifecycleRevision;
+      void this.navigateTo(location, revision, lifecycleRevision).catch((cause: unknown) => {
         this.handleRenderError(state.pageNumber, cause);
       });
       const scale = this.explicitScaleRequest ? this.requestedScale : this.scaleFromState(state);
@@ -1223,36 +1227,49 @@ export class PdfDocumentViewport implements DocumentViewport {
       : { ...this.latestLocation };
   }
 
-  private async navigateTo(location: DocumentLocation, revision: number): Promise<void> {
+  private async navigateTo(
+    location: DocumentLocation,
+    revision: number,
+    lifecycleRevision: number,
+  ): Promise<void> {
     const linkService = this.requireMounted(this.linkService);
     const pageNumber = location.pageIndex + 1;
     if (location.coordinateSpace === undefined) {
-      if (!this.isCurrentNavigationRequest(revision)) return;
+      if (!this.isCurrentNavigationRequest(revision, lifecycleRevision)) return;
       linkService.goToPage(pageNumber);
       return;
     }
     let y = location.y ?? 0;
     if (location.coordinateSpace === 'page-points-top-left') {
-      const pageTop = await this.pageTopForNavigation(pageNumber, revision);
+      const pageTop = await this.pageTopForNavigation(pageNumber, revision, lifecycleRevision);
       if (pageTop === null) return;
       y = pageTop - y;
     }
-    if (!this.isCurrentNavigationRequest(revision)) return;
+    if (!this.isCurrentNavigationRequest(revision, lifecycleRevision)) return;
     linkService.goToXY(pageNumber, location.x ?? 0, y);
   }
 
-  private isCurrentNavigationRequest(revision: number): boolean {
-    return revision === this.navigationRequestRevision && this.destroyPromise === null;
+  private isCurrentNavigationRequest(revision: number, lifecycleRevision: number): boolean {
+    return (
+      revision === this.navigationRequestRevision &&
+      lifecycleRevision === this.navigationLifecycleRevision &&
+      this.destroyPromise === null
+    );
   }
 
-  private async pageTopForNavigation(pageNumber: number, revision: number): Promise<number | null> {
+  private async pageTopForNavigation(
+    pageNumber: number,
+    revision: number,
+    lifecycleRevision: number,
+  ): Promise<number | null> {
     let page: Awaited<ReturnType<PDFDocumentProxy['getPage']>>;
     try {
       page = await this.pdf.getPage(pageNumber);
     } catch (cause) {
-      if (!this.isCurrentNavigationRequest(revision)) return null;
+      if (!this.isCurrentNavigationRequest(revision, lifecycleRevision)) return null;
       throw cause;
     }
+    if (!this.isCurrentNavigationRequest(revision, lifecycleRevision)) return null;
     const pageTop = page.view[3];
     if (pageTop === undefined)
       throw new TypeError('The PDF page crop box is missing its top coordinate.');
@@ -1270,13 +1287,15 @@ export class PdfDocumentViewport implements DocumentViewport {
     const location = this.pendingLocation;
     this.pendingLocation = null;
     const revision = ++this.navigationRequestRevision;
-    void this.navigateTo(location, revision).catch((cause: unknown) => {
+    const lifecycleRevision = this.navigationLifecycleRevision;
+    void this.navigateTo(location, revision, lifecycleRevision).catch((cause: unknown) => {
       this.handleRenderError(location.pageIndex + 1, cause);
     });
   }
 
   private clearPendingInteractions(): void {
     this.navigationRequestRevision += 1;
+    this.navigationLifecycleRevision += 1;
     this.pendingLocation = null;
     this.latestLocation = null;
   }

@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
-import type { DocumentAnnotation } from '../../document-core/annotations.js';
+import { asAnnotationId, type DocumentAnnotation } from '../../document-core/annotations.js';
 import type { ViewportEvent } from '../../document-core/document.js';
 import {
   beginPluginActivation,
@@ -152,6 +152,36 @@ function nativeHighlight(uid: string, comment = ''): PdfCommentEditor {
     propertiesToUpdate: [],
     select: vi.fn(),
     uid,
+  };
+}
+
+function writableHighlight(id: string): DocumentAnnotation {
+  const available = { available: true } as const;
+  return {
+    anchor: {
+      coordinateSpace: 'page-points-top-left',
+      geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      kind: 'fixed-page',
+      pageIndex: 0,
+    },
+    author: '',
+    capabilities: {
+      color: available,
+      comment: available,
+      conversions: { highlight: available, underline: available },
+      deletion: available,
+      geometry: available,
+      metadata: available,
+    },
+    color: '#ffd400',
+    comment: '',
+    createdAt: null,
+    identity: { id: asAnnotationId(id), kind: 'stable' },
+    links: [],
+    modifiedAt: null,
+    selectedText: null,
+    tags: [],
+    type: 'highlight',
   };
 }
 
@@ -1023,6 +1053,44 @@ describe('PdfDocumentViewport', () => {
     });
   });
 
+  it('reports one genuine internal native activation failure at the page boundary', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null)
+      throw new Error('Expected mounted annotation editing.');
+    const id = 'native-mode-failure';
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(nativeHighlight(id)),
+    });
+    editor.setAnnotationProjection([{ annotation: writableHighlight(id), stableId: id }]);
+    const cause = new Error('native mode failed');
+    viewer.annotationEditorRequestHook = (request) => {
+      const mode = typeof request === 'number' ? request : request.mode;
+      if (mode === 9) throw cause;
+    };
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = id;
+
+    annotation.click();
+
+    await vi.waitFor(() => {
+      expect(events).toEqual([
+        { type: 'annotation-mutation-error', action: 'open-annotation', cause },
+      ]);
+    });
+  });
+
   it.each([
     ['underlineAnnotation', 'underline', 'imported-underline'],
     ['textAnnotation', 'text-note', 'imported-text-note'],
@@ -1856,6 +1924,39 @@ describe('PdfDocumentViewport', () => {
     expect(linkService.positions).toEqual([[3, 70, 80]]);
   });
 
+  it('settles a stale malformed page quietly after a newer destination wins', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    const page = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockReturnValueOnce(page.promise);
+    eventBus.dispatch('pagesinit', {});
+
+    const stale = fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+    await vi.waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Vitest inspects the method; it is not invoked detached
+      expect(fixture.documentProxy.getPage).toHaveBeenCalledOnce();
+    });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 70,
+      y: 80,
+    });
+    page.resolve({ view: [0, 0, 595] } as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+
+    await expect(stale).resolves.toBeUndefined();
+    expect(linkService.positions).toEqual([[3, 70, 80]]);
+  });
+
   it('rejects a current coordinate lookup failure without navigating', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
@@ -2165,6 +2266,40 @@ describe('PdfDocumentViewport', () => {
       pageIndex: 0,
       cause: redrawFailure,
     });
+  });
+
+  it('invalidates a deferred coordinate lookup when reading colors replace the PDF lifecycle', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    const page = deferred<Awaited<ReturnType<PDFDocumentProxy['getPage']>>>();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockReturnValueOnce(page.promise);
+    eventBus.dispatch('pagesinit', {});
+
+    const navigation = fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+    await vi.waitFor(() => {
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- Vitest inspects the method; it is not invoked detached
+      expect(fixture.documentProxy.getPage).toHaveBeenCalledOnce();
+    });
+    fixture.viewport.setReadingColors({
+      background: '#202020',
+      foreground: '#e6e1d8',
+      brightness: 0.86,
+      contrast: 0.95,
+      imageDim: 0.18,
+    });
+    page.resolve({ view: [0, 0, 595, 842] } as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+
+    await expect(navigation).resolves.toBeUndefined();
+    expect(linkService.positions).toEqual([]);
   });
 
   it('keeps authored PDF page colors when the Default profile supplies null pageColors', async () => {

@@ -1680,6 +1680,87 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ).rejects.toBe(cause);
   });
 
+  it('rejects a genuine native mode failure instead of presenting a read-only fallback', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'mode-failure' });
+    const cause = new Error('native mode failed');
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'mode-failure' }]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('mode-failure', 9)),
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(current.viewer, 'annotationEditorMode');
+    if (descriptor?.get === undefined || descriptor.set === undefined)
+      throw new Error('Expected the fixture viewer mode accessor.');
+    const getMode = descriptor.get.bind(current.viewer);
+    const setMode = descriptor.set.bind(current.viewer);
+    Object.defineProperty(current.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: getMode,
+      set(request: { readonly mode: number }) {
+        if (request.mode === 9) throw cause;
+        setMode(request);
+      },
+    });
+
+    await expect(
+      current.editor.focusAnnotation('mode-failure', { kind: 'root-click' }),
+    ).rejects.toBe(cause);
+    expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+  });
+
+  it('rejects a genuine native focus failure without retrying it as read-only', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'focus-failure' });
+    const cause = new Error('native focus failed');
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'focus-failure' }]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('focus-failure', 9)),
+    });
+    current.commentBridge.focusAnnotation.mockRejectedValueOnce(cause);
+
+    await expect(
+      current.editor.focusAnnotation('focus-failure', { kind: 'root-click' }),
+    ).rejects.toBe(cause);
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the primary native failure when contextual containment also fails', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'containment-failure' });
+    const primary = new Error('native focus failed');
+    const secondary = new Error('native containment failed');
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    current.editor.setAnnotationProjection([{ annotation, stableId: 'containment-failure' }]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('containment-failure', 9)),
+    });
+    current.commentBridge.focusAnnotation.mockRejectedValueOnce(primary);
+    const descriptor = Object.getOwnPropertyDescriptor(current.viewer, 'annotationEditorMode');
+    if (descriptor?.get === undefined || descriptor.set === undefined)
+      throw new Error('Expected the fixture viewer mode accessor.');
+    const getMode = descriptor.get.bind(current.viewer);
+    const setMode = descriptor.set.bind(current.viewer);
+    Object.defineProperty(current.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: getMode,
+      set(request: { readonly mode: number }) {
+        if (request.mode === 0 && getMode() === 9) throw secondary;
+        setMode(request);
+      },
+    });
+
+    await expect(
+      current.editor.focusAnnotation('containment-failure', { kind: 'root-click' }),
+    ).rejects.toBe(primary);
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      '[abyss-documents] Failed to contain the PDF annotation editor after activation failure',
+      { cause: secondary },
+    );
+  });
+
   it('settles a rejecting deadline fallback as cancelled exactly once', async () => {
     vi.useFakeTimers();
     const current = fixture();
