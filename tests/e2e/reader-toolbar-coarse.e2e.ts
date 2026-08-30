@@ -167,11 +167,45 @@ describe('reader toolbar under a 390px coarse pointer', () => {
     const geometry = await browser.execute(() => {
       const toolbar = document.querySelector<HTMLElement>('.abyss-reader-toolbar');
       if (toolbar === null) throw new Error('Reader toolbar unavailable.');
+      const navigation = toolbar.querySelector<HTMLElement>('.abyss-reader-toolbar-navigation');
+      const zones = Array.from(
+        toolbar.querySelectorAll<HTMLElement>(':scope > [data-toolbar-zone]'),
+      );
+      if (navigation === null || zones.length !== 3)
+        throw new Error('Three-zone toolbar geometry unavailable.');
       const visible = Array.from(
         toolbar.querySelectorAll<HTMLElement>(
           '[data-toolbar-control], [data-control-group], [data-control="page-field"], [data-control="page-total"]',
         ),
       ).filter((element) => element.offsetParent !== null);
+      const contentBounds = zones.map((zone) => {
+        const visibleChildren = Array.from(zone.children)
+          .filter((child): child is HTMLElement => child.instanceOf(HTMLElement))
+          .filter((child) => child.offsetParent !== null)
+          .map((child) => child.getBoundingClientRect());
+        if (visibleChildren.length === 0) throw new Error('Toolbar zone has no visible content.');
+        return {
+          left: Math.min(...visibleChildren.map((bounds) => bounds.left)),
+          right: Math.max(...visibleChildren.map((bounds) => bounds.right)),
+        };
+      });
+      const toolbarBounds = toolbar.getBoundingClientRect();
+      const toolbarStyle = getComputedStyle(toolbar);
+      const toolbarContentLeft = toolbarBounds.left + Number.parseFloat(toolbarStyle.paddingLeft);
+      const toolbarContentRight =
+        toolbarBounds.right - Number.parseFloat(toolbarStyle.paddingRight);
+      const navigationBounds = navigation.getBoundingClientRect();
+      const directNavigation = ['previous-page', 'page-field', 'next-page'].map((control) => {
+        const element = toolbar.querySelector<HTMLElement>(`[data-control="${control}"]`);
+        if (element === null) throw new Error(`Direct navigation control unavailable: ${control}`);
+        const bounds = element.getBoundingClientRect();
+        return {
+          control,
+          height: bounds.height,
+          visible: element.offsetParent !== null,
+          width: bounds.width,
+        };
+      });
       return {
         coarse: matchMedia('(pointer: coarse)').matches,
         controls: visible.map((element) => {
@@ -182,13 +216,39 @@ describe('reader toolbar under a 390px coarse pointer', () => {
             width: bounds.width,
           };
         }),
+        directNavigation,
         innerWidth: window.innerWidth,
+        navigationCenterDelta: Math.abs(
+          navigationBounds.left +
+            navigationBounds.width / 2 -
+            (toolbarContentLeft + toolbarContentRight) / 2,
+        ),
+        noZoneOverlap:
+          (contentBounds[0]?.right ?? Number.POSITIVE_INFINITY) <=
+            (contentBounds[1]?.left ?? Number.NEGATIVE_INFINITY) + 1 &&
+          (contentBounds[1]?.right ?? Number.POSITIVE_INFINITY) <=
+            (contentBounds[2]?.left ?? Number.NEGATIVE_INFINITY) + 1,
         overflow: toolbar.scrollWidth - toolbar.clientWidth,
+        zones: zones.map((zone) => zone.dataset['toolbarZone']),
       };
     });
     expect(geometry.coarse).toBe(true);
     expect(geometry.innerWidth).toBe(390);
     expect(geometry.overflow).toBeLessThanOrEqual(0);
+    expect(geometry.navigationCenterDelta).toBeLessThanOrEqual(2);
+    expect(geometry.noZoneOverlap).toBe(true);
+    expect(geometry.zones).toEqual(['left', 'center', 'right']);
+    expect(
+      geometry.directNavigation.map(({ control, height, visible, width }) => ({
+        control,
+        touchSized: height >= 44 && width >= 44,
+        visible,
+      })),
+    ).toEqual([
+      { control: 'previous-page', touchSized: true, visible: true },
+      { control: 'page-field', touchSized: true, visible: true },
+      { control: 'next-page', touchSized: true, visible: true },
+    ]);
     expect(Math.max(...geometry.controls.map(({ center }) => Math.round(center)))).toBe(
       Math.min(...geometry.controls.map(({ center }) => Math.round(center))),
     );
@@ -231,10 +291,18 @@ describe('reader toolbar under a 390px coarse pointer', () => {
     await browser.keys(['Escape']);
     await expect($('.menu')).not.toBeDisplayed();
 
+    const pageField = $('[data-control="page-field"]');
+    await expect(pageField).toHaveValue('1');
+    await $('[data-control="next-page"]').click();
+    await expect(pageField).toHaveValue('2');
+    await $('[data-control="previous-page"]').click();
+    await expect(pageField).toHaveValue('1');
+
     await touchMenu('overflow');
     await expect($('.menu')).toHaveText(expect.stringContaining('Fit page'));
-    await expect($('.menu')).toHaveText(expect.stringContaining('Previous page'));
-    await expect($('.menu')).toHaveText(expect.stringContaining('Next page'));
+    const moreText = await $('.menu').getText();
+    expect(moreText).not.toContain('Previous page');
+    expect(moreText).not.toContain('Next page');
     await browser.keys(['Escape']);
     await expect($('.menu')).not.toBeDisplayed();
   });

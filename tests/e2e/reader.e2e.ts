@@ -595,11 +595,35 @@ describe('PDF reader foundation', () => {
     await $('[data-control="sidebar"]').click();
     await expect($('[data-tab="outline"][aria-selected="true"]')).toExist();
     await expect($$('[data-outline-item]')).toBeElementsArrayOfSize({ gte: 6 });
-    await expect($('[data-outline-search]')).not.toBeDisplayed();
-    await $('[data-action="toggle-outline-search"]').click();
-    await expect($('[data-outline-search]')).toBeFocused();
+    const searchContract = await browser.execute(() => {
+      const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="outline"]');
+      const tree = panel?.querySelector<HTMLElement>('[role="tree"]') ?? null;
+      const searches = Array.from(
+        panel?.querySelectorAll<HTMLInputElement>('[data-outline-search]') ?? [],
+      );
+      if (panel === null || tree === null) throw new Error('Outline search surface unavailable.');
+      return {
+        beforeTree:
+          searches[0] !== undefined &&
+          Boolean(searches[0].compareDocumentPosition(tree) & Node.DOCUMENT_POSITION_FOLLOWING),
+        count: searches.length,
+        toggleCount: panel.querySelectorAll('[data-action="toggle-outline-search"]').length,
+        visibleCount: searches.filter((search) => search.offsetParent !== null).length,
+      };
+    });
+    expect(searchContract).toEqual({
+      beforeTree: true,
+      count: 1,
+      toggleCount: 0,
+      visibleCount: 1,
+    });
+    const outlineSearch = $('[data-outline-search]');
+    await outlineSearch.setValue('Section 2');
+    await expect(outlineSearch).toHaveValue('Section 2');
     await browser.keys(Key.Escape);
-    await expect($('[data-outline-search]')).not.toBeDisplayed();
+    await expect(outlineSearch).toHaveValue('');
+    await expect(outlineSearch).toBeDisplayed();
+    await expect(outlineSearch).toBeFocused();
 
     const treeLayout = await browser.execute(() => {
       const tree = document.querySelector<HTMLElement>('.abyss-reader-outline-tree');
