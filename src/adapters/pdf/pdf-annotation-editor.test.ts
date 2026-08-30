@@ -769,7 +769,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
   });
 
   it('aborts pending transactions on lifecycle changes', async () => {
-    for (const lifecycle of ['detach', 'destroy', 'save'] as const) {
+    for (const lifecycle of ['detach', 'destroy'] as const) {
       const fixtureValue = fixture();
       const uiManager = manager();
       fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
@@ -791,18 +791,14 @@ describe('PdfAnnotationEditor lifecycle', () => {
         expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
       });
 
-      let saving: Promise<Uint8Array> | null = null;
       if (lifecycle === 'detach') fixtureValue.editor.detachFromDocument();
-      else if (lifecycle === 'destroy') fixtureValue.editor.destroy();
-      else saving = fixtureValue.editor.save(new AbortController().signal);
+      else fixtureValue.editor.destroy();
 
       await vi.waitFor(() => {
         expect(outcome).not.toBe('pending');
       });
       expect(outcome).toMatchObject({ name: 'AbortError' });
       expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
-      if (saving !== null)
-        await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
     }
   });
 
@@ -2781,7 +2777,56 @@ describe('PdfAnnotationEditor lifecycle', () => {
 });
 
 describe('PdfAnnotationEditor save boundary', () => {
-  it('waits for source-confirmed NONE before saving an aborted interaction', async () => {
+  it('waits for an in-flight selection before autosave', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    const nativeReady = deferred<DocumentAnnotation>();
+    let annotation: DocumentAnnotation | null = null;
+    void nativeReady.promise.then(
+      (value) => {
+        annotation = value;
+      },
+      () => undefined,
+    );
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() => annotation);
+    uiManager.highlightSelection.mockImplementation(() => {
+      fixtureValue.annotationStorage.addEditor(9);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    const creating = fixtureValue.editor.commitSelection('current', {
+      kind: 'highlight',
+      color: '#ffd400',
+    });
+    await vi.waitFor(() => {
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    });
+    const transaction = (
+      fixtureValue.editor as unknown as {
+        readonly pendingSelectionTransaction: {
+          readonly controller: AbortController;
+        } | null;
+      }
+    ).pendingSelectionTransaction;
+    expect(transaction).not.toBeNull();
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    const abortedBeforeReady = transaction?.controller.signal.aborted;
+    nativeReady.resolve(createdAnnotation());
+    const outcomes = await Promise.allSettled([creating, saving]);
+
+    expect(abortedBeforeReady).toBe(false);
+    expect(outcomes).toEqual([
+      expect.objectContaining({ status: 'fulfilled' }),
+      expect.objectContaining({ status: 'fulfilled' }),
+    ]);
+    expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+  });
+
+  it('waits for source-confirmed NONE before saving a completed interaction', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const uiManager = manager();
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
@@ -2802,7 +2847,13 @@ describe('PdfAnnotationEditor save boundary', () => {
     const saving = fixtureValue.editor.save(new AbortController().signal);
     await Promise.resolve();
 
-    expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+    expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }]);
+    expect(uiManager.endCurrentEditing).not.toHaveBeenCalled();
+    expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockReturnValue(createdAnnotation());
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+    });
     expect(uiManager.endCurrentEditing).not.toHaveBeenCalled();
     expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
     fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
@@ -2811,12 +2862,14 @@ describe('PdfAnnotationEditor save boundary', () => {
     });
 
     await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
-    await expect(committing).resolves.toMatchObject({ name: 'AbortError' });
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'created-native', kind: 'stable' },
+    });
     expect(uiManager.endCurrentEditing).toHaveBeenCalledOnce();
     expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
   });
 
-  it('propagates neutral mode failure before entering the save boundary', async () => {
+  it('propagates neutral mode failure after the pending selection settles', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
@@ -2840,7 +2893,7 @@ describe('PdfAnnotationEditor save boundary', () => {
 
     await expect(fixtureValue.editor.save(new AbortController().signal)).rejects.toBe(failure);
     await expect(committing).resolves.toBe(failure);
-    expect(uiManager.endCurrentEditing).not.toHaveBeenCalled();
+    expect(uiManager.endCurrentEditing).toHaveBeenCalledOnce();
     expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
   });
 

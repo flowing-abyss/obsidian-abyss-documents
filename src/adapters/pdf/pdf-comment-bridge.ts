@@ -21,6 +21,7 @@ interface PdfCommentData {
 
 export interface PdfCommentEditor {
   readonly annotationElementId?: string | null | undefined;
+  readonly color?: string | undefined;
   comment: unknown;
   readonly annotationEditorType?: number | undefined;
   readonly editorType?: string | undefined;
@@ -31,6 +32,7 @@ export interface PdfCommentEditor {
   editComment?(): Promise<void> | void;
   focusCommentButton?(): void;
   getData(): PdfCommentData;
+  getNonHCMColor?(): ArrayLike<number> | null;
   select?(): void;
   setCommentButtonStates?(options: {
     readonly hasPopup: boolean;
@@ -50,6 +52,16 @@ interface PdfCommentUiManager {
 interface NativeAnnotationBinding {
   readonly editor: PdfCommentEditor;
   readonly manager: PdfCommentUiManager;
+}
+
+interface AnnotationProjectionOptions {
+  readonly manager: PdfCommentUiManager | null;
+  readonly snapshot?: {
+    readonly color: string | null;
+    readonly data: PdfCommentData | null;
+    readonly id: string;
+  };
+  readonly writable: boolean;
 }
 
 interface ReadyNativeEditor extends NativeAnnotationBinding {
@@ -383,7 +395,12 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     this.replaceActiveSelectedEditors([editor]);
     setFocusedCommentButton(editor);
     this.emitFocus({
-      annotations: [this.annotationFromEditor(editor, editorComment(editor), false, null)],
+      annotations: [
+        this.annotationFromEditor(editor, editorComment(editor), {
+          manager: null,
+          writable: false,
+        }),
+      ],
       editable: false,
       position: {
         x: node.getBoundingClientRect().left,
@@ -428,12 +445,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     this.bindingIds.set(editor, stableId);
     manager.setSelected(editor);
     const editable = isSupportedNativeEditor(editor);
-    const annotation = this.annotationFromEditor(
-      editor,
-      editorComment(editor),
-      editable,
-      writableManager(editable, manager),
-    );
+    const annotation = this.annotationFromEditor(editor, editorComment(editor), {
+      manager: writableManager(editable, manager),
+      writable: editable,
+    });
     if (editable) this.retainActiveBinding(editor);
     else {
       this.activeSource = editor;
@@ -549,7 +564,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         'InvalidStateError',
       );
     }
-    const annotation = this.annotationFromEditor(editor, reservation.seed, true, manager);
+    const annotation = this.annotationFromEditor(editor, reservation.seed, {
+      manager,
+      writable: true,
+    });
     this.retainActiveBinding(editor);
     reservation.isOpen = true;
     reservation.resolveOpened(annotation);
@@ -584,12 +602,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       this.firstSelectedEditor(manager) ??
       this.uniqueSupportedNativeEditor(manager);
     if (editor === undefined || !isSupportedNativeEditor(editor)) return null;
-    const annotation = this.annotationFromEditor(
-      editor,
-      editor.getData().contentsObj?.str ?? '',
-      true,
+    const annotation = this.annotationFromEditor(editor, editor.getData().contentsObj?.str ?? '', {
       manager,
-    );
+      writable: true,
+    });
     this.retainActiveBinding(editor);
     return annotation;
   }
@@ -602,12 +618,15 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     if (manager === null) return null;
     const editor = this.createdSelectionHighlight(manager, existingIds);
     if (editor === undefined) return null;
-    const annotation = this.annotationFromEditor(
-      editor,
-      editor.getData().contentsObj?.str ?? '',
-      true,
+    const color = selectionHighlightColor(editor);
+    const id = editorPublicId(editor);
+    if (color === null || id === undefined) return null;
+    manager.setSelected(editor);
+    const annotation = this.annotationFromEditor(editor, editorPublicComment(editor), {
       manager,
-    );
+      snapshot: { color, data: null, id },
+      writable: true,
+    });
     this.retainActiveBinding(editor);
     return annotation;
   }
@@ -745,7 +764,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     const sources = selected.length > 0 ? selected : [editor];
     this.clearWritableBindings(editable, sources);
     const annotations = sources.map((source) =>
-      this.annotationFromEditor(source, editorComment(source), editable, editable ? manager : null),
+      this.annotationFromEditor(source, editorComment(source), {
+        manager: editable ? manager : null,
+        writable: editable,
+      }),
     );
     if (editable && manager !== null) this.retainActiveBinding(editor);
     else {
@@ -999,13 +1021,18 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   private annotationFromEditor(
     editor: PdfCommentEditor,
     comment: string,
-    writable: boolean,
-    manager: PdfCommentUiManager | null,
+    options: AnnotationProjectionOptions,
   ): DocumentAnnotation {
-    const data = editorData(editor);
+    const { manager, snapshot, writable } = options;
+    const data = snapshot === undefined ? editorData(editor) : snapshot.data;
     const id =
-      firstNonEmpty(this.bindingIds.get(editor), editorAnnotationId(editor)) ??
-      this.fallbackId(editor);
+      firstNonEmpty(
+        this.bindingIds.get(editor),
+        snapshot?.id,
+        editor.annotationElementId ?? undefined,
+        data?.id,
+        editor.uid,
+      ) ?? this.fallbackId(editor);
     const capability = writable
       ? ({ available: true } as const)
       : ({
@@ -1031,7 +1058,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         geometry: capability,
         metadata: capability,
       },
-      color: data?.color === undefined ? null : rgbToHex(data.color),
+      color: projectedAnnotationColor(data, snapshot),
       comment,
       createdAt: null,
       identity: { id: asAnnotationId(id), kind: 'stable' },
@@ -1113,13 +1140,11 @@ function editorData(editor: PdfCommentEditor): PdfCommentData | null {
 }
 
 function editorRuntimeId(editor: PdfCommentEditor): string {
-  const data = editorData(editor);
-  return firstNonEmpty(editor.uid, data?.id, editor.annotationElementId ?? undefined) ?? '';
-}
-
-function editorAnnotationId(editor: PdfCommentEditor): string {
-  const data = editorData(editor);
-  return firstNonEmpty(editor.annotationElementId ?? undefined, data?.id, editor.uid) ?? '';
+  return (
+    firstNonEmpty(editor.uid, editor.annotationElementId ?? undefined) ??
+    editorData(editor)?.id ??
+    ''
+  );
 }
 
 function writableManager(
@@ -1307,17 +1332,53 @@ function addSelectionHighlightCandidate(
 ): void {
   const id = editorRuntimeId(editor);
   if (
+    id.length === 0 ||
+    firstNonEmpty(editor.annotationElementId ?? undefined) !== undefined ||
     existingIds.has(id) ||
     editor.mode !== 9 ||
     editor.editorType !== 'highlight' ||
-    !isSupportedNativeEditor(editor)
+    !isSupportedNativeEditor(editor) ||
+    selectionHighlightColor(editor) === null
   )
     return;
   candidates.set(id, editor);
 }
 
-function rgbToHex(color: readonly number[] | undefined): string {
-  const [red = 0, green = 0, blue = 0] = color ?? [];
+function editorPublicId(editor: PdfCommentEditor): string | undefined {
+  return firstNonEmpty(editor.annotationElementId ?? undefined, editor.uid);
+}
+
+function editorPublicComment(editor: PdfCommentEditor): string {
+  const comment = editor.comment;
+  if (typeof comment === 'string') return comment;
+  if (typeof comment !== 'object' || comment === null) return '';
+  const text = (comment as { readonly text?: unknown }).text;
+  return typeof text === 'string' ? text : '';
+}
+
+function selectionHighlightColor(editor: PdfCommentEditor): string | null {
+  const nonHcm = editor.getNonHCMColor?.() ?? null;
+  if (nonHcm !== null && nonHcm.length >= 3) return rgbToHex(nonHcm);
+  return normalizedHexColor(editor.color);
+}
+
+function projectedAnnotationColor(
+  data: PdfCommentData | null,
+  snapshot: AnnotationProjectionOptions['snapshot'],
+): string | null {
+  if (snapshot !== undefined) return snapshot.color;
+  return data?.color === undefined ? null : rgbToHex(data.color);
+}
+
+function normalizedHexColor(color: string | undefined): string | null {
+  const value = color?.trim();
+  return value !== undefined && /^#[\da-f]{6}$/iu.test(value) ? value.toLowerCase() : null;
+}
+
+function rgbToHex(color: ArrayLike<number> | undefined): string {
+  const red = color?.[0] ?? 0;
+  const green = color?.[1] ?? 0;
+  const blue = color?.[2] ?? 0;
   return `#${[red, green, blue]
     .map((value) => clampByte(value).toString(16).padStart(2, '0'))
     .join('')}`;

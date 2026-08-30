@@ -11,6 +11,7 @@ import { PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE } from './pdf-runtime.js';
 function editor(
   comment = '',
   options: {
+    readonly annotationElementId?: string | null;
     readonly anchor?: Element | null;
     readonly color?: readonly number[] | undefined;
     readonly dataId?: string | undefined;
@@ -24,6 +25,8 @@ function editor(
   if (mode === 3) editorType = 'freetext';
   else if (mode === 15) editorType = 'ink';
   return {
+    annotationElementId: options.annotationElementId ?? null,
+    color: '#ffd400',
     get comment() {
       return value;
     },
@@ -40,6 +43,7 @@ function editor(
       ...('dataId' in options ? { id: options.dataId } : {}),
       opacity: 1,
     }),
+    getNonHCMColor: () => [255, 212, 0],
     mode,
     propertiesToUpdate: [],
     select: vi.fn(),
@@ -94,6 +98,120 @@ function annotation(id: string, writable = true): DocumentAnnotation {
 }
 
 describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
+  it('adopts the new highlight with a null comment without reading incomplete PDF.js data', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor' });
+    node.id = 'pdfjs_internal_editor_3';
+    const getData = vi.fn(() => {
+      throw new TypeError("Cannot destructure property 'text' of 'this.comment' as it is null.");
+    });
+    const native = {
+      annotationElementId: null,
+      color: '#ffd400',
+      comment: null,
+      editorType: 'highlight',
+      getData,
+      getNonHCMColor: vi.fn(() => [255, 212, 0] as const),
+      mode: 9,
+      propertiesToUpdate: [],
+      select: vi.fn(),
+      uid: 'pdfjs_internal_editor_3',
+    } satisfies PdfCommentEditor & {
+      readonly color: string;
+      getNonHCMColor(): readonly number[];
+    };
+    const manager = uiManager();
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+
+    const result = bridge.normalizeSelectionHighlight(manager, new Set());
+
+    expect(getData).not.toHaveBeenCalled();
+    expect(manager.setSelected).toHaveBeenCalledExactlyOnceWith(native);
+    expect(result).toMatchObject({
+      color: '#ffd400',
+      capabilities: { deletion: { available: true } },
+      comment: '',
+      identity: { id: 'pdfjs_internal_editor_3', kind: 'stable' },
+    });
+    bridge.dispose();
+    host.remove();
+  });
+
+  it.each([
+    ['#5FB236', '#5fb236'],
+    ['yellow', null],
+  ] as const)(
+    'falls back to the public editor color %s when PDF.js exposes no non-HCM accessor',
+    (publicColor, expectedColor) => {
+      const host = document.body.createDiv();
+      const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+      const node = layer.createDiv({ cls: 'highlightEditor' });
+      node.id = 'public-color-editor';
+      const getData = vi.fn(() => {
+        throw new Error('Incomplete selection data must not be read.');
+      });
+      const native = {
+        annotationElementId: null,
+        color: publicColor,
+        comment: { text: 'Public comment' },
+        editorType: 'highlight',
+        getData,
+        mode: 9,
+        propertiesToUpdate: [],
+        select: vi.fn(),
+        uid: 'public-color-editor',
+      } satisfies PdfCommentEditor;
+      const manager = uiManager();
+      manager.getEditor.mockReturnValue(native);
+      const bridge = new PdfCommentBridge(host);
+
+      const result = bridge.normalizeSelectionHighlight(manager, new Set());
+
+      expect(getData).not.toHaveBeenCalled();
+      if (expectedColor === null) {
+        expect(result).toBeNull();
+        expect(manager.setSelected).not.toHaveBeenCalled();
+      } else {
+        expect(result).toMatchObject({ color: expectedColor, comment: 'Public comment' });
+        expect(manager.setSelected).toHaveBeenCalledExactlyOnceWith(native);
+      }
+      bridge.dispose();
+      host.remove();
+    },
+  );
+
+  it('ignores a persisted highlight mounted during repeated selection before adopting the new one', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const persistedNode = layer.createDiv({ cls: 'highlightEditor' });
+    persistedNode.id = 'pdfjs_internal_editor_0';
+    const persisted = editor('', {
+      annotationElementId: '7R',
+      uid: '7R',
+    });
+    const created = editor('', { uid: 'pdfjs_internal_editor_1' });
+    const manager = uiManager();
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'pdfjs_internal_editor_0') return persisted;
+      return id === 'pdfjs_internal_editor_1' ? created : undefined;
+    });
+    const bridge = new PdfCommentBridge(host);
+
+    expect(bridge.normalizeSelectionHighlight(manager, new Set())).toBeNull();
+
+    const createdNode = layer.createDiv({ cls: 'highlightEditor' });
+    createdNode.id = 'pdfjs_internal_editor_1';
+    expect(bridge.normalizeSelectionHighlight(manager, new Set())).toMatchObject({
+      identity: { id: 'pdfjs_internal_editor_1', kind: 'stable' },
+      type: 'highlight',
+    });
+    expect(manager.setSelected).toHaveBeenCalledExactlyOnceWith(created);
+    bridge.dispose();
+    host.remove();
+  });
+
   it('normalizes the new unselected native editor without adopting an older highlight', () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });

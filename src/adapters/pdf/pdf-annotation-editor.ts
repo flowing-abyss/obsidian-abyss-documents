@@ -1261,11 +1261,11 @@ export class PdfAnnotationEditor {
   private prepareSave(signal: AbortSignal): PreparedSave | Promise<PreparedSave> {
     const manager = this.requireManager();
     const revision = this.lifecycleRevision;
-    const pendingAbort = this.abortInteractionForSave();
-    if (pendingAbort === null) {
+    const pendingSelection = this.waitForSelectionBeforeSave(signal);
+    if (pendingSelection === null) {
       return this.beginPreparedSave(manager, revision, signal);
     }
-    return pendingAbort.then(() => {
+    return pendingSelection.then(() => {
       return this.beginPreparedSave(manager, revision, signal);
     });
   }
@@ -1294,15 +1294,11 @@ export class PdfAnnotationEditor {
     );
   }
 
-  private abortInteractionForSave(): Promise<void> | null {
+  private waitForSelectionBeforeSave(signal: AbortSignal): Promise<void> | null {
     const pendingSelection = this.pendingSelectionTransaction;
-    if (pendingSelection !== null) {
-      return this.abortAndWaitForTransaction(
-        pendingSelection,
-        new DOMException('Saving aborted the PDF annotation interaction.', 'AbortError'),
-      );
-    }
-    return null;
+    return pendingSelection === null
+      ? null
+      : waitWithSignal(pendingSelection.settled.promise, signal);
   }
 
   private beginSave(signal: AbortSignal): void {

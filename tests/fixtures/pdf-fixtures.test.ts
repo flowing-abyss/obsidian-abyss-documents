@@ -28,6 +28,7 @@ import {
 } from '../../src/adapters/pdf/pdf-runtime.js';
 import type { PdfSelectionObserver } from '../../src/adapters/pdf/pdf-selection-observer.js';
 import { AutosaveScheduler, type SaveReason } from '../../src/autosave-scheduler.js';
+import type { DocumentAnnotation } from '../../src/document-core/annotations.js';
 import {
   DocumentSaveCoordinator,
   type BaseToken,
@@ -143,6 +144,179 @@ async function saveWithNativePdfjsEditors(
     annotationEditor.destroy();
     commentBridge.dispose();
     editorLayer.destroy();
+    drawLayer.destroy();
+    uiManager.destroy();
+    container.remove();
+    await loadingTask.destroy();
+  }
+}
+
+async function createNativeSelectionHighlight(
+  original: Uint8Array,
+  options: {
+    readonly color: string;
+    readonly rect: DOMRect;
+    readonly text: string;
+  },
+): Promise<{ readonly bytes: Uint8Array; readonly projected: DocumentAnnotation }> {
+  const loadingTask = getDocument({
+    data: Uint8Array.from(original),
+    isOffscreenCanvasSupported: true,
+    standardFontDataUrl,
+  });
+  const pdf = await loadingTask.promise;
+  expect(pdf.annotationStorage.size).toBe(0);
+  const container = createDiv();
+  const viewer = createDiv();
+  const textLayerElement = createDiv({ cls: 'textLayer' });
+  const annotationLayerElement = createDiv({ cls: 'annotationLayer' });
+  const editorLayerElement = createDiv({ cls: 'annotationEditorLayer' });
+  const drawLayerElement = createDiv();
+  const textSpan = textLayerElement.createSpan();
+  textSpan.textContent = options.text;
+  textLayerElement.append(textSpan);
+  container.append(viewer, textLayerElement, annotationLayerElement, editorLayerElement);
+  editorLayerElement.append(drawLayerElement);
+  document.body.append(container);
+  for (const element of [textLayerElement, editorLayerElement]) {
+    Object.defineProperty(element, 'getBoundingClientRect', {
+      value: () => new DOMRect(0, 0, 612, 792),
+    });
+  }
+  const eventBus = new EventBus();
+  const commentBridge = new PdfCommentBridge(container);
+  const uiManager = new AnnotationEditorUIManager(
+    container,
+    viewer,
+    null,
+    null,
+    commentBridge,
+    null,
+    eventBus,
+    pdf,
+    null,
+    'yellow=#FFD400,green=#64D8CB',
+    false,
+    false,
+    false,
+    null,
+    null,
+    true,
+  );
+  const page = await pdf.getPage(1);
+  const viewport = page.getViewport({ scale: 1 });
+  const annotationLayer = new AnnotationLayer({
+    accessibilityManager: null,
+    annotationCanvasMap: null,
+    annotationEditorUIManager: uiManager,
+    annotationStorage: pdf.annotationStorage,
+    commentManager: commentBridge,
+    div: annotationLayerElement,
+    linkService: {},
+    page,
+    structTreeLayer: null,
+    viewport: viewport.clone({ dontFlip: true }),
+  });
+  await annotationLayer.render({
+    annotations: await page.getAnnotations(),
+    div: annotationLayerElement,
+    imageResourcesPath: '',
+    linkService: {} as never,
+    page,
+    renderForms: false,
+    viewport: viewport.clone({ dontFlip: true }),
+  });
+  const drawLayer = new DrawLayer({ pageIndex: 0 });
+  drawLayer.setParent(drawLayerElement);
+  const l10n = {
+    get: async (_ids: unknown, _args: unknown, fallback: unknown) => fallback,
+    getDirection: () => 'ltr',
+    getLanguage: () => 'en-us',
+    pause: () => undefined,
+    resume: () => undefined,
+    translate: async () => undefined,
+    translateOnce: async () => undefined,
+  };
+  const editorLayer = new AnnotationEditorLayer({
+    annotationLayer,
+    div: editorLayerElement,
+    drawLayer,
+    enabled: true,
+    l10n: l10n as never,
+    mode: {},
+    pageIndex: 0,
+    structTreeLayer: null as never,
+    textLayer: { div: textLayerElement } as never,
+    uiManager,
+    viewport,
+  });
+  const runtimeViewer: {
+    annotationEditorMode: number | { readonly mode: number };
+    currentMode: number;
+  } = {
+    annotationEditorMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE,
+    currentMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE,
+  };
+  let modeUpdateFailure: unknown = null;
+  Object.defineProperty(runtimeViewer, 'annotationEditorMode', {
+    configurable: true,
+    get: () => runtimeViewer.currentMode,
+    set: (request: number | { readonly mode: number }) => {
+      const mode = typeof request === 'number' ? request : request.mode;
+      void uiManager.updateMode(mode).then(
+        () => {
+          runtimeViewer.currentMode = mode;
+          eventBus.dispatch('annotationeditormodechanged', { source: runtimeViewer, mode });
+        },
+        (cause: unknown) => {
+          modeUpdateFailure = cause;
+        },
+      );
+    },
+  });
+  const annotationEditor = new PdfAnnotationEditor({
+    annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
+    annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
+    commentBridge,
+    eventBus,
+    pdf,
+    selectionObserver: {
+      invalidate: () => undefined,
+      onSelection: () => () => undefined,
+      validate: () => 'current',
+    },
+    viewer: runtimeViewer,
+  });
+  eventBus.dispatch('annotationeditoruimanager', { source: runtimeViewer, uiManager });
+  const selection = document.getSelection();
+  if (selection === null) throw new Error('The real PDF.js selection fixture needs Selection.');
+  const range = document.createRange();
+  range.selectNodeContents(textSpan);
+  Object.defineProperty(range, 'getClientRects', { value: () => [options.rect] });
+  selection.removeAllRanges();
+  selection.addRange(range);
+  try {
+    const projected = await annotationEditor.commitSelection('selection-token', {
+      color: options.color,
+      kind: 'highlight',
+    });
+    if (projected === 'dismissed') throw new Error('PDF.js selection fixture was dismissed.');
+    if (modeUpdateFailure !== null) {
+      throw modeUpdateFailure instanceof Error
+        ? modeUpdateFailure
+        : new Error('PDF.js mode update failed with a non-Error cause.');
+    }
+    expect(runtimeViewer.currentMode).toBe(PDFJS_ANNOTATION_EDITOR_TYPE.NONE);
+    return {
+      bytes: await annotationEditor.save(new AbortController().signal),
+      projected,
+    };
+  } finally {
+    selection.removeAllRanges();
+    annotationEditor.destroy();
+    commentBridge.dispose();
+    editorLayer.destroy();
+    annotationLayer.destroy();
     drawLayer.destroy();
     uiManager.destroy();
     container.remove();
@@ -703,6 +877,38 @@ describe('generatePdfFixtures', () => {
 });
 
 describe('native PDF.js annotation save qualification', () => {
+  it('repeated native highlight creation survives mode exit and reopen', async () => {
+    const original = await createReadonlyAnnotationFixture(false);
+    const first = await createNativeSelectionHighlight(original, {
+      color: '#ffd400',
+      rect: new DOMRect(72, 202, 148, 22),
+      text: 'First native selection',
+    });
+    const firstReopened = await reopenedAnnotations(first.bytes);
+
+    expect(firstReopened).toHaveLength(1);
+    expect(firstReopened[0]).toMatchObject({ annotationType: 9, color: [255, 212, 0] });
+
+    const second = await createNativeSelectionHighlight(first.bytes, {
+      color: '#64d8cb',
+      rect: new DOMRect(96, 252, 164, 22),
+      text: 'Second native selection',
+    });
+    const secondReopened = await reopenedAnnotations(second.bytes);
+    const projections = [first.projected, second.projected];
+
+    expect(secondReopened).toHaveLength(2);
+    expect(secondReopened.map((annotation) => annotation['color'])).toEqual([
+      [255, 212, 0],
+      [100, 216, 203],
+    ]);
+    expect(projections).toHaveLength(secondReopened.length);
+    expect(projections).toEqual([
+      expect.objectContaining({ color: '#ffd400', type: 'highlight' }),
+      expect.objectContaining({ color: '#64d8cb', type: 'highlight' }),
+    ]);
+  });
+
   it.each([
     {
       name: 'FreeText',
