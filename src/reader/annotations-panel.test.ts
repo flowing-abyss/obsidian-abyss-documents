@@ -448,7 +448,7 @@ describe('AnnotationsPanel', () => {
     expect(annotationFooter(root).hidden).toBe(true);
   });
 
-  it('keeps only search above the list and only Colors in the footer', () => {
+  it('keeps accessible color filters without visible Colors copy', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
 
@@ -457,9 +457,16 @@ describe('AnnotationsPanel', () => {
     const footer = annotationFooter(root);
     const colors = footer.querySelector<HTMLElement>('[data-section="colors"]');
     const controls = root.querySelector<HTMLElement>('.abyss-annotation-controls');
+    const chips = Array.from(
+      colors?.querySelectorAll<HTMLButtonElement>('[data-annotation-color]') ?? [],
+    );
     expect(panel.root.lastElementChild).toBe(footer);
     expect(Array.from(footer.children)).toEqual([colors]);
-    expect(colors?.querySelector('[data-annotation-colors-label]')?.textContent).toBe('Colors');
+    expect(colors?.getAttribute('aria-label')).toBe('Annotation colors');
+    expect(colors?.querySelector('[data-annotation-colors-label]')).toBeNull();
+    expect(
+      chips.map((chip) => [chip.getAttribute('aria-label'), chip.getAttribute('aria-pressed')]),
+    ).toEqual([['Color, 2 annotations', 'false']]);
     expect(controls?.children).toHaveLength(1);
     expect(controls?.firstElementChild).toBe(
       root.querySelector<HTMLInputElement>('[data-annotation-search]'),

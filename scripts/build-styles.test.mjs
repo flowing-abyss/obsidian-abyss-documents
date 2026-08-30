@@ -263,15 +263,31 @@ describe('PDF.js style build', () => {
         node.name === 'container' &&
         node.params === 'abyss-reader (inline-size <= 760px)',
     );
+    const phone = root.nodes.find(
+      (node) =>
+        node.type === 'atrule' &&
+        node.name === 'container' &&
+        node.params === 'abyss-reader (inline-size <= 420px)',
+    );
     const coarsePointer = root.nodes.find(
       (node) =>
         node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
     );
 
     expect(topLevelDeclarations(root, '.abyss-documents .abyss-reader-toolbar')).toMatchObject({
-      'flex-wrap': 'nowrap',
+      display: 'grid',
+      'grid-template-columns': 'minmax(0, 1fr) auto minmax(0, 1fr)',
       'overflow-x': 'hidden',
     });
+    expect(topLevelDeclarations(root, ".abyss-documents [data-toolbar-zone='left']")).toMatchObject(
+      { 'justify-content': 'flex-start' },
+    );
+    expect(
+      topLevelDeclarations(root, ".abyss-documents [data-toolbar-zone='center']"),
+    ).toMatchObject({ 'justify-content': 'center' });
+    expect(
+      topLevelDeclarations(root, ".abyss-documents [data-toolbar-zone='right']"),
+    ).toMatchObject({ 'justify-content': 'flex-end' });
     expect(topLevelDeclarations(root, '.abyss-documents')).toMatchObject({
       'container-name': 'abyss-reader',
       'container-type': 'inline-size',
@@ -281,6 +297,9 @@ describe('PDF.js style build', () => {
     ).toMatchObject({ display: 'none' });
     expect(
       mobileDeclarations(priority, '.abyss-documents .abyss-reader-toolbar-zoom'),
+    ).toMatchObject({ display: 'none' });
+    expect(
+      mobileDeclarations(phone, '.abyss-documents .abyss-reader-toolbar-page-total'),
     ).toMatchObject({ display: 'none' });
     expect(mobileDeclarations(narrow, ".abyss-documents [data-control='previous-page']")).toEqual(
       {},

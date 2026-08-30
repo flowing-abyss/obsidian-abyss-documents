@@ -31,15 +31,34 @@
   --abyss-reader-split-disclosure-width: 14px;
   --abyss-reader-split-main-width: 34px;
 
-  display: flex;
+  display: grid;
   min-width: 0;
   align-items: center;
-  flex-wrap: nowrap;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   gap: var(--size-2-1);
   padding: var(--size-2-1) var(--size-4-1);
   border-bottom: var(--border-width) solid var(--background-modifier-border);
   background: var(--background-primary);
   overflow-x: hidden;
+}
+
+.abyss-documents .abyss-reader-toolbar-zone {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--size-2-1);
+}
+
+.abyss-documents [data-toolbar-zone='left'] {
+  justify-content: flex-start;
+}
+
+.abyss-documents [data-toolbar-zone='center'] {
+  justify-content: center;
+}
+
+.abyss-documents [data-toolbar-zone='right'] {
+  justify-content: flex-end;
 }
 
 .abyss-documents .abyss-reader-toolbar-navigation {
@@ -80,11 +99,6 @@
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.abyss-documents .abyss-reader-toolbar-spacer {
-  min-width: var(--size-4-2);
-  flex: 1 1 auto;
 }
 
 .abyss-documents .abyss-reader-toolbar-zoom {
@@ -473,18 +487,6 @@
   flex: 1 1 auto;
 }
 
-.abyss-documents .abyss-reader-outline-search[hidden] {
-  display: none;
-}
-
-.abyss-documents .abyss-reader-outline-search-toggle {
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  min-height: 28px;
-  flex: 0 0 auto;
-}
-
 .abyss-documents .abyss-reader-outline-tree {
   min-width: 0;
   flex: 1 1 auto;
@@ -668,13 +670,6 @@
   padding: var(--size-2-1) var(--size-4-2);
   border-top: var(--border-width) solid var(--background-modifier-border);
   background: var(--background-primary);
-}
-
-.abyss-documents .abyss-annotation-colors-label {
-  flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  font-weight: var(--font-medium);
 }
 
 .abyss-documents .abyss-annotation-colors > [data-annotation-color-search] {
@@ -1026,12 +1021,14 @@
 }
 
 @container abyss-reader (inline-size <= 760px) {
-  .abyss-documents .abyss-reader-toolbar-spacer {
-    display: none;
-  }
-
   .abyss-documents .abyss-reader-fit-control,
   .abyss-documents .abyss-reader-toolbar-zoom {
+    display: none;
+  }
+}
+
+@container abyss-reader (inline-size <= 420px) {
+  .abyss-documents .abyss-reader-toolbar-page-total {
     display: none;
   }
 }

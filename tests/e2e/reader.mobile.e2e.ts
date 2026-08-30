@@ -135,10 +135,29 @@ describe('PDF reader foundation on Android', () => {
       const disclosure = toolbar?.querySelector<HTMLElement>(
         '[data-control="quick-highlight-menu"]',
       );
-      if (toolbar === null || highlight == null || disclosure == null)
+      const navigation = toolbar?.querySelector<HTMLElement>('.abyss-reader-toolbar-navigation');
+      const zones = Array.from(
+        toolbar?.querySelectorAll<HTMLElement>(':scope > [data-toolbar-zone]') ?? [],
+      );
+      if (
+        toolbar === null ||
+        highlight == null ||
+        disclosure == null ||
+        navigation == null ||
+        zones.length !== 3
+      )
         throw new Error('Mobile annotation split is missing.');
       const mainBounds = highlight.getBoundingClientRect();
       const disclosureBounds = disclosure.getBoundingClientRect();
+      const navigationBounds = navigation.getBoundingClientRect();
+      const toolbarBounds = toolbar.getBoundingClientRect();
+      const toolbarStyle = getComputedStyle(toolbar);
+      const toolbarContentMidpoint =
+        (toolbarBounds.left +
+          Number.parseFloat(toolbarStyle.paddingLeft) +
+          toolbarBounds.right -
+          Number.parseFloat(toolbarStyle.paddingRight)) /
+        2;
       return {
         directPageNavigation: ['previous-page', 'page-field', 'next-page'].every(
           (control) =>
@@ -149,11 +168,15 @@ describe('PDF reader foundation on Android', () => {
         disclosureWidth: disclosureBounds.width,
         mainHeight: mainBounds.height,
         mainWidth: mainBounds.width,
+        navigationCenterDelta: Math.abs(
+          navigationBounds.left + navigationBounds.width / 2 - toolbarContentMidpoint,
+        ),
         noOverlap: mainBounds.right <= disclosureBounds.left,
         overflow: toolbar.scrollWidth > toolbar.clientWidth,
         visibleTools: Array.from(toolbar.querySelectorAll<HTMLElement>('[data-annotation-tool]'))
           .filter((button) => button.offsetParent !== null)
           .map((button) => button.dataset['annotationTool']),
+        zones: zones.map((zone) => zone.dataset['toolbarZone']),
       };
     });
     expect(compactToolbar).toMatchObject({
@@ -161,7 +184,9 @@ describe('PDF reader foundation on Android', () => {
       noOverlap: true,
       overflow: false,
       visibleTools: ['highlight'],
+      zones: ['left', 'center', 'right'],
     });
+    expect(compactToolbar.navigationCenterDelta).toBeLessThanOrEqual(2);
     expect(compactToolbar.mainHeight).toBeGreaterThanOrEqual(44);
     expect(compactToolbar.mainWidth).toBeGreaterThanOrEqual(44);
     expect(compactToolbar.disclosureHeight).toBeGreaterThanOrEqual(44);
@@ -351,13 +376,14 @@ describe('PDF reader foundation on Android', () => {
         throw new Error('Mobile color footer is missing.');
       return {
         height: colors.getBoundingClientRect().height,
+        labelAbsent: colors.querySelector('[data-annotation-colors-label]') === null,
         onlyColors:
           annotationFooter.childElementCount === 1 &&
           annotationFooter.firstElementChild === colors &&
           annotationFooter.querySelector('[data-section="tags"]') === null,
       };
     });
-    expect(footer.onlyColors).toBe(true);
+    expect(footer).toMatchObject({ labelAbsent: true, onlyColors: true });
     expect(footer.height).toBeLessThanOrEqual(44);
     const maximumCards = (await runtimeMetrics()).counters.maxAnnotationCards;
     expect(maximumCards).toBeGreaterThan(0);

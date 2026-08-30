@@ -1351,69 +1351,117 @@ describe('reader compact toolbar', () => {
     await openPdf('Documents/text-700-pages.pdf');
     await expect($('[data-control="page-total"]')).toHaveText('/ 700');
 
-    for (const width of [1440, 1024, 768, 480, 390]) {
-      const geometry = await browser.execute((readerWidth) => {
-        const reader = document.querySelector<HTMLElement>('.abyss-documents');
-        if (reader === null) throw new Error('Reader is missing.');
-        const toolbar = reader.querySelector<HTMLElement>('.abyss-reader-toolbar');
-        if (toolbar === null) throw new Error('Reader toolbar is missing.');
-        reader.setAttribute(
-          'style',
-          `align-self: flex-start; width: ${readerWidth}px; max-width: ${readerWidth}px`,
-        );
-        const visible = Array.from(
-          toolbar.querySelectorAll<HTMLElement>('[data-toolbar-control], [data-control-group]'),
-        ).filter((element) => element.offsetParent !== null);
-        const centers = visible.map((element) => {
-          const bounds = element.getBoundingClientRect();
-          return Math.round(bounds.top + bounds.height / 2);
-        });
-        const fit = toolbar.querySelector<HTMLElement>('.abyss-reader-fit-control');
-        const visibleTools = Array.from(
-          toolbar.querySelectorAll<HTMLElement>('[data-annotation-tool]'),
-        )
-          .filter((element) => element.offsetParent !== null)
-          .map((element) => element.dataset['annotationTool']);
-        return {
-          centers,
-          clientWidth: toolbar.clientWidth,
-          directPageNavigation: ['previous-page', 'page-field', 'next-page'].every(
-            (control) =>
-              toolbar.querySelector<HTMLElement>(`[data-control="${control}"]`)?.offsetParent !==
+    for (const sidebarOpen of [false, true]) {
+      const sidebarToggle = $('[data-control="sidebar"]');
+      if ((await sidebarToggle.getAttribute('aria-pressed')) !== String(sidebarOpen)) {
+        await sidebarToggle.click();
+        await expect(sidebarToggle).toHaveAttribute('aria-pressed', String(sidebarOpen));
+      }
+      for (const width of [1440, 1024, 768, 480, 390]) {
+        const geometry = await browser.execute((readerWidth) => {
+          const reader = document.querySelector<HTMLElement>('.abyss-documents');
+          if (reader === null) throw new Error('Reader is missing.');
+          const toolbar = reader.querySelector<HTMLElement>('.abyss-reader-toolbar');
+          if (toolbar === null) throw new Error('Reader toolbar is missing.');
+          reader.setAttribute(
+            'style',
+            `align-self: flex-start; width: ${readerWidth}px; max-width: ${readerWidth}px`,
+          );
+          const visible = Array.from(
+            toolbar.querySelectorAll<HTMLElement>('[data-toolbar-control], [data-control-group]'),
+          ).filter((element) => element.offsetParent !== null);
+          const centers = visible.map((element) => {
+            const bounds = element.getBoundingClientRect();
+            return Math.round(bounds.top + bounds.height / 2);
+          });
+          const fit = toolbar.querySelector<HTMLElement>('.abyss-reader-fit-control');
+          const navigation = toolbar.querySelector<HTMLElement>('.abyss-reader-toolbar-navigation');
+          const zones = Array.from(
+            toolbar.querySelectorAll<HTMLElement>(':scope > [data-toolbar-zone]'),
+          );
+          if (navigation === null || zones.length !== 3)
+            throw new Error('Three-zone toolbar geometry is incomplete.');
+          const contentBounds = zones.map((zone) => {
+            const visibleChildren = Array.from(zone.children)
+              .filter((child): child is HTMLElement => child.instanceOf(HTMLElement))
+              .filter((child) => child.offsetParent !== null)
+              .map((child) => child.getBoundingClientRect());
+            return {
+              left: Math.min(...visibleChildren.map((bounds) => bounds.left)),
+              right: Math.max(...visibleChildren.map((bounds) => bounds.right)),
+            };
+          });
+          const toolbarBounds = toolbar.getBoundingClientRect();
+          const toolbarStyle = getComputedStyle(toolbar);
+          const toolbarContentLeft =
+            toolbarBounds.left + Number.parseFloat(toolbarStyle.paddingLeft);
+          const toolbarContentRight =
+            toolbarBounds.right - Number.parseFloat(toolbarStyle.paddingRight);
+          const navigationBounds = navigation.getBoundingClientRect();
+          const visibleTools = Array.from(
+            toolbar.querySelectorAll<HTMLElement>('[data-annotation-tool]'),
+          )
+            .filter((element) => element.offsetParent !== null)
+            .map((element) => element.dataset['annotationTool']);
+          return {
+            centers,
+            clientWidth: toolbar.clientWidth,
+            directPageNavigation: ['previous-page', 'page-field', 'next-page'].every(
+              (control) =>
+                toolbar.querySelector<HTMLElement>(`[data-control="${control}"]`)?.offsetParent !==
+                null,
+            ),
+            fitVisible: fit?.offsetParent !== null,
+            navigationCenterDelta: Math.abs(
+              navigationBounds.left +
+                navigationBounds.width / 2 -
+                (toolbarContentLeft + toolbarContentRight) / 2,
+            ),
+            noZoneOverlap:
+              (contentBounds[0]?.right ?? Number.POSITIVE_INFINITY) <=
+                (contentBounds[1]?.left ?? Number.NEGATIVE_INFINITY) + 1 &&
+              (contentBounds[1]?.right ?? Number.POSITIVE_INFINITY) <=
+                (contentBounds[2]?.left ?? Number.NEGATIVE_INFINITY) + 1,
+            overflowVisible:
+              toolbar.querySelector<HTMLElement>('[data-control="overflow"]')?.offsetParent !==
               null,
-          ),
-          fitVisible: fit?.offsetParent !== null,
-          overflowVisible:
-            toolbar.querySelector<HTMLElement>('[data-control="overflow"]')?.offsetParent !== null,
-          scrollWidth: toolbar.scrollWidth,
-          visibleTools,
-        };
-      }, width);
-      expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
-      expect(Math.max(...geometry.centers) - Math.min(...geometry.centers)).toBeLessThanOrEqual(1);
-      expect(geometry.fitVisible).toBe(width > 760);
-      expect(geometry.directPageNavigation).toBe(true);
-      expect(geometry.overflowVisible).toBe(true);
-      expect(geometry.visibleTools).toEqual(
-        width <= 600 ? ['highlight'] : ['highlight', 'ink', 'freetext'],
-      );
+            scrollWidth: toolbar.scrollWidth,
+            visibleTools,
+            zones: zones.map((zone) => zone.dataset['toolbarZone']),
+          };
+        }, width);
+        expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
+        expect(Math.max(...geometry.centers) - Math.min(...geometry.centers)).toBeLessThanOrEqual(
+          1,
+        );
+        expect(geometry.navigationCenterDelta).toBeLessThanOrEqual(2);
+        expect(geometry.noZoneOverlap).toBe(true);
+        expect(geometry.zones).toEqual(['left', 'center', 'right']);
+        expect(geometry.fitVisible).toBe(width > 760);
+        expect(geometry.directPageNavigation).toBe(true);
+        expect(geometry.overflowVisible).toBe(true);
+        expect(geometry.visibleTools).toEqual(
+          width <= 600 ? ['highlight'] : ['highlight', 'ink', 'freetext'],
+        );
 
-      await $('[data-control="overflow"]').click();
-      await $('.menu').waitForDisplayed({ timeout: 3_000 });
-      const toolTitles = await browser.execute(() =>
-        Array.from(
-          document.querySelectorAll<HTMLElement>(
-            '.menu .menu-item[data-section="abyss-documents-tools"]:not(.is-label) .menu-item-title',
+        if (sidebarOpen) continue;
+        await $('[data-control="overflow"]').click();
+        await $('.menu').waitForDisplayed({ timeout: 3_000 });
+        const toolTitles = await browser.execute(() =>
+          Array.from(
+            document.querySelectorAll<HTMLElement>(
+              '.menu .menu-item[data-section="abyss-documents-tools"]:not(.is-label) .menu-item-title',
+            ),
+            (item) => item.textContent.trim(),
           ),
-          (item) => item.textContent.trim(),
-        ),
-      );
-      expect(toolTitles).toEqual(width <= 600 ? ['Ink', 'Text'] : []);
-      const menuText = await $('.menu').getText();
-      expect(menuText).not.toContain('Previous page');
-      expect(menuText).not.toContain('Next page');
-      await $('[data-control="overflow"]').click();
-      await expect($('.menu')).not.toBeDisplayed();
+        );
+        expect(toolTitles).toEqual(width <= 600 ? ['Ink', 'Text'] : []);
+        const menuText = await $('.menu').getText();
+        expect(menuText).not.toContain('Previous page');
+        expect(menuText).not.toContain('Next page');
+        await $('[data-control="overflow"]').click();
+        await expect($('.menu')).not.toBeDisplayed();
+      }
     }
   });
 });

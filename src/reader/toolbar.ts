@@ -206,14 +206,26 @@ export class ReaderToolbar {
   ) {
     this.root = host;
     this.root.addClass('abyss-reader-toolbar');
+    const left = this.root.createDiv({
+      cls: 'abyss-reader-toolbar-zone',
+      attr: { 'data-toolbar-zone': 'left' },
+    });
+    const center = this.root.createDiv({
+      cls: 'abyss-reader-toolbar-zone',
+      attr: { 'data-toolbar-zone': 'center' },
+    });
+    const right = this.root.createDiv({
+      cls: 'abyss-reader-toolbar-zone',
+      attr: { 'data-toolbar-zone': 'right' },
+    });
 
-    this.sidebarButton = this.iconButton('sidebar', 'Toggle sidebar', 'panel-left');
+    this.sidebarButton = this.iconButton('sidebar', 'Toggle sidebar', 'panel-left', left);
     this.sidebarButton.setAttribute('aria-pressed', 'false');
     this.listen(this.sidebarButton, 'click', () => {
       this.onIntent({ type: 'toggle-sidebar' });
     });
 
-    const navigation = this.root.createDiv({ cls: 'abyss-reader-toolbar-navigation' });
+    const navigation = center.createDiv({ cls: 'abyss-reader-toolbar-navigation' });
     this.previousButton = this.iconButton(
       'previous-page',
       'Previous page',
@@ -251,8 +263,7 @@ export class ReaderToolbar {
       this.onIntent({ type: 'next-page' });
     });
 
-    this.root.createDiv({ cls: 'abyss-reader-toolbar-spacer' });
-    const zoom = this.root.createDiv({ cls: 'abyss-reader-toolbar-zoom' });
+    const zoom = left.createDiv({ cls: 'abyss-reader-toolbar-zoom' });
     const zoomOut = this.iconButton('zoom-out', 'Zoom out', 'minus', zoom);
     this.listen(zoomOut, 'click', () => {
       this.onIntent({ type: 'zoom-step', direction: -1 });
@@ -263,9 +274,9 @@ export class ReaderToolbar {
       this.onIntent({ type: 'zoom-step', direction: 1 });
     });
 
-    this.annotationHost = this.root.createDiv({ cls: 'abyss-reader-toolbar-annotations' });
+    this.annotationHost = right.createDiv({ cls: 'abyss-reader-toolbar-annotations' });
 
-    const overflow = this.iconButton('overflow', 'More options', 'ellipsis');
+    const overflow = this.iconButton('overflow', 'More options', 'ellipsis', right);
     overflow.setAttribute('aria-haspopup', 'menu');
     overflow.setAttribute('aria-expanded', 'false');
     this.bindMenuTrigger(overflow, () => {

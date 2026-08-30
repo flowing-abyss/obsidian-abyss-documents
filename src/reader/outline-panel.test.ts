@@ -184,20 +184,23 @@ describe('OutlinePanel', () => {
     }
   });
 
-  it('starts with a native tree surface and reveals heading search on demand', () => {
+  it('keeps one heading search always visible before the native tree', () => {
     const host = createDiv();
     host.doc.body.append(host);
     const panel = new OutlinePanel(host, vi.fn());
     panel.render(searchableOutline);
 
     const searchInput = panel.root.querySelector<HTMLInputElement>('[data-outline-search]');
-    const searchButton = panel.root.querySelector<HTMLButtonElement>(
-      '[data-action="toggle-outline-search"]',
-    );
+    const searchInputs = panel.root.querySelectorAll<HTMLInputElement>('[data-outline-search]');
     const branch = panel.root.querySelector<HTMLElement>('[data-outline-id="knowledge"]');
 
-    expect(searchInput?.hidden).toBe(true);
-    expect(searchButton?.getAttribute('aria-expanded')).toBe('false');
+    expect(searchInputs).toHaveLength(1);
+    expect(searchInput?.hidden).toBe(false);
+    expect(searchInput?.getAttribute('role')).toBe('searchbox');
+    expect(
+      searchInput?.compareDocumentPosition(panel.root.querySelector('[role="tree"]') as Node),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(panel.root.querySelector('[data-action="toggle-outline-search"]')).toBeNull();
     expect(branch?.classList.contains('tree-item')).toBe(true);
     expect(branch?.querySelector('[data-outline-row]')?.classList.contains('tree-item-self')).toBe(
       true,
@@ -206,13 +209,6 @@ describe('OutlinePanel', () => {
       true,
     );
 
-    searchButton?.click();
-    expect(searchInput?.hidden).toBe(false);
-    expect(searchButton?.getAttribute('aria-expanded')).toBe('true');
-    expect(panel.root.doc.activeElement).toBe(searchInput);
-    expect(mocks.setIcon).toHaveBeenCalledWith(searchButton, 'search');
-    expect(mocks.setTooltip).toHaveBeenCalledWith(searchButton, 'Find headings', { delay: 250 });
-    expect(searchButton?.hasAttribute('title')).toBe(false);
     host.remove();
   });
 
@@ -244,12 +240,11 @@ describe('OutlinePanel', () => {
     });
   });
 
-  it('clears heading search before Escape hides its empty field', () => {
+  it('clears heading search on Escape but never hides its always visible field', () => {
     const host = createDiv();
     host.doc.body.append(host);
     const panel = new OutlinePanel(host, vi.fn());
     panel.render(searchableOutline);
-    panel.root.querySelector<HTMLButtonElement>('[data-action="toggle-outline-search"]')?.click();
     const input = panel.root.querySelector<HTMLInputElement>('[data-outline-search]');
     if (input === null) throw new Error('Expected an outline search field.');
     search(panel, 'internal');
@@ -266,26 +261,18 @@ describe('OutlinePanel', () => {
     input.dispatchEvent(
       new OwnerKeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
     );
-    expect(input.hidden).toBe(true);
-    expect(
-      panel.root
-        .querySelector('[data-action="toggle-outline-search"]')
-        ?.getAttribute('aria-expanded'),
-    ).toBe('false');
+    expect(input.hidden).toBe(false);
+    expect(panel.root.doc.activeElement).toBe(input);
     host.remove();
   });
 
-  it('restores the complete tree when the heading-search action closes a filtered view', () => {
+  it('restores the complete tree when heading search is cleared', () => {
     const panel = new OutlinePanel(createDiv(), vi.fn());
     panel.render(searchableOutline);
-    const action = panel.root.querySelector<HTMLButtonElement>(
-      '[data-action="toggle-outline-search"]',
-    );
-    action?.click();
     search(panel, 'internal');
     expect(panel.root.querySelectorAll('[data-outline-row]')).toHaveLength(3);
 
-    action?.click();
+    search(panel, '');
 
     expect(panel.root.querySelector<HTMLInputElement>('[data-outline-search]')?.value).toBe('');
     expect(panel.root.querySelectorAll('[data-outline-row]')).toHaveLength(5);

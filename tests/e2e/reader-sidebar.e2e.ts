@@ -348,8 +348,10 @@ describe('PDF reader sidebar', () => {
   it('filters a searchable outline while retaining its ancestor path', async () => {
     await openOutline();
 
-    await $('[data-action="toggle-outline-search"]').click();
     const search = $('[data-outline-search]');
+    await expect(search).toBeDisplayed();
+    await expect($$('[data-outline-search]')).toBeElementsArrayOfSize(1);
+    await expect($('[data-action="toggle-outline-search"]')).not.toExist();
     await expect(search).toHaveAttribute('placeholder', 'Find a heading…');
     await search.setValue('SECTION 2');
 
@@ -865,6 +867,7 @@ describe('PDF reader sidebar', () => {
     expect(initial.chipRoles).toEqual(
       Array.from({ length: 12 }, () => ({ pressed: 'false', tag: 'BUTTON' })),
     );
+    await expect($('[data-annotation-colors-label]')).not.toExist();
     expect(initial.header).toContain('Page 1 · Highlight');
     expect(initial.comment).toContain('Annotation 00000');
     expect(initial.cardRight).toBeLessThanOrEqual(initial.panelRight + 1);

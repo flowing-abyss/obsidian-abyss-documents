@@ -1,4 +1,4 @@
-import { setIcon, setTooltip } from 'obsidian';
+import { setIcon } from 'obsidian';
 import type { DocumentLocation, OutlineItem } from '../document-core/document.js';
 import { ownerWindow } from './owner-dom.js';
 import { configureTextSearchInput, isolateTextEditing } from './text-editing-guard.js';
@@ -25,7 +25,6 @@ interface SourceRange {
 export class OutlinePanel {
   readonly root: HTMLElement;
 
-  private readonly searchButton: HTMLButtonElement;
   private readonly searchInput: HTMLInputElement;
   private readonly status: HTMLElement;
   private readonly tree: HTMLUListElement;
@@ -46,7 +45,6 @@ export class OutlinePanel {
     this.root.setAttribute('aria-label', 'Document outline');
 
     const controls = this.createSearchControls();
-    this.searchButton = controls.button;
     this.searchInput = controls.input;
 
     this.tree = owner.createEl('ul');
@@ -66,7 +64,6 @@ export class OutlinePanel {
     this.items = items;
     this.query = '';
     this.searchInput.value = '';
-    this.setSearchVisible(false);
     this.expanded.clear();
     this.initializeExpansion(items);
     this.renderTree();
@@ -85,28 +82,18 @@ export class OutlinePanel {
   }
 
   private createSearchControls(): {
-    readonly button: HTMLButtonElement;
     readonly input: HTMLInputElement;
     readonly root: HTMLElement;
   } {
     const owner = ownerWindow(this.root);
     const root = owner.createDiv();
     root.className = 'abyss-reader-outline-controls';
-    const button = owner.createEl('button');
-    button.type = 'button';
-    button.className = 'clickable-icon abyss-reader-outline-search-toggle';
-    button.dataset['action'] = 'toggle-outline-search';
-    button.setAttribute('aria-label', 'Find headings');
-    button.setAttribute('aria-expanded', 'false');
-    setTooltip(button, 'Find headings', { delay: 250 });
-    setIcon(button, 'search');
     const input = owner.createEl('input');
     configureTextSearchInput(input);
     input.className = 'abyss-reader-outline-search';
     input.dataset['outlineSearch'] = '';
     input.placeholder = 'Find a heading…';
     input.setAttribute('aria-label', 'Find a heading');
-    input.hidden = true;
     input.addEventListener('input', () => {
       this.query = this.foldText(input.value.trim());
       this.renderTree();
@@ -115,11 +102,8 @@ export class OutlinePanel {
       this.onSearchKeyDown(event);
     });
     isolateTextEditing(input);
-    button.addEventListener('click', () => {
-      this.toggleSearch();
-    });
-    root.append(input, button);
-    return { button, input, root };
+    root.append(input);
+    return { input, root };
   }
 
   private onSearchKeyDown(event: KeyboardEvent): void {
@@ -130,22 +114,8 @@ export class OutlinePanel {
       this.searchInput.value = '';
       this.query = '';
       this.renderTree();
-      this.searchInput.focus();
-      return;
     }
-    this.setSearchVisible(false);
-    this.searchButton.focus();
-  }
-
-  private toggleSearch(): void {
-    if (this.searchInput.hidden) {
-      this.setSearchVisible(true);
-      return;
-    }
-    this.searchInput.value = '';
-    this.query = '';
-    this.renderTree();
-    this.setSearchVisible(false);
+    this.searchInput.focus();
   }
 
   private renderTree(): void {
@@ -492,12 +462,5 @@ export class OutlinePanel {
     };
     visit(this.items);
     return candidateId;
-  }
-
-  private setSearchVisible(visible: boolean): void {
-    this.searchInput.hidden = !visible;
-    this.searchButton.setAttribute('aria-expanded', String(visible));
-    this.root.classList.toggle('is-searching', visible);
-    if (visible) this.searchInput.focus();
   }
 }

@@ -212,25 +212,46 @@ describe('ReaderToolbar', () => {
     expect(host.querySelector('[data-control="page-total"]')?.textContent).toBe('/ 702');
   });
 
-  it('orders zoom as minus Fit plus without a visible scale label', () => {
-    const { host } = fixture();
-    const controls = Array.from(host.querySelectorAll<HTMLElement>('[data-control]')).map(
-      ({ dataset }) => dataset['control'],
-    );
+  it.each([390, 480, 768, 1024])(
+    'keeps page navigation in the center zone and toolbar controls in tab order at %ipx',
+    (width) => {
+      const { host, toolbar } = fixture();
+      setToolbarWidth(host, width);
+      toolbar.setPageCount(702);
+      toolbar.setCurrentPage(99);
+      const zones = Array.from(host.querySelectorAll<HTMLElement>('[data-toolbar-zone]'));
+      const controlsByZone: Record<string, string[]> = {};
+      for (const zone of zones) {
+        const name = zone.dataset['toolbarZone'];
+        if (name === undefined) throw new Error('Expected a named toolbar zone.');
+        controlsByZone[name] = Array.from(
+          zone.querySelectorAll<HTMLElement>('[data-control]'),
+          (control) => control.dataset['control'] ?? '',
+        );
+      }
+      const tabOrder = Array.from(
+        host.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])'),
+      ).map((control) => control.dataset['control']);
 
-    expect(controls).toEqual([
-      'sidebar',
-      'previous-page',
-      'page-field',
-      'page-total',
-      'next-page',
-      'zoom-out',
-      'fit',
-      'fit-menu',
-      'zoom-in',
-      'overflow',
-    ]);
-  });
+      expect(zones.map((zone) => zone.dataset['toolbarZone'])).toEqual(['left', 'center', 'right']);
+      expect(controlsByZone).toEqual({
+        center: ['previous-page', 'page-field', 'page-total', 'next-page'],
+        left: ['sidebar', 'zoom-out', 'fit', 'fit-menu', 'zoom-in'],
+        right: ['overflow'],
+      });
+      expect(tabOrder).toEqual([
+        'sidebar',
+        'zoom-out',
+        'fit',
+        'fit-menu',
+        'zoom-in',
+        'previous-page',
+        'page-field',
+        'next-page',
+        'overflow',
+      ]);
+    },
+  );
 
   it('renders Fit as one accessible split control', () => {
     const { host } = fixture();

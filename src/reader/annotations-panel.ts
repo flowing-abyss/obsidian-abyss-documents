@@ -1156,10 +1156,6 @@ function createColorFacetControls(owner: ReaderOwnerWindow): {
   colors.className = 'abyss-annotation-colors';
   colors.dataset['section'] = 'colors';
   colors.setAttribute('aria-label', 'Annotation colors');
-  const label = owner.createSpan();
-  label.className = 'abyss-annotation-colors-label';
-  label.dataset['annotationColorsLabel'] = '';
-  label.textContent = 'Colors';
   const search = owner.createEl('input');
   configureTextSearchInput(search);
   search.placeholder = 'Filter colors';
@@ -1168,7 +1164,7 @@ function createColorFacetControls(owner: ReaderOwnerWindow): {
   search.hidden = true;
   const rows = owner.createDiv();
   rows.className = 'abyss-annotation-color-rows';
-  colors.append(label, search, rows);
+  colors.append(search, rows);
   return { colors, rows, search };
 }
 
