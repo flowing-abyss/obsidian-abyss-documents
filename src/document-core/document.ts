@@ -42,6 +42,7 @@ export interface PdfPageRect {
 
 export interface ViewportAnnotationSnapshot {
   readonly nativeId: string;
+  readonly runtimeId?: string;
   readonly provisionalId?: string;
   readonly pageIndex: number;
   readonly type: DocumentAnnotation['type'];

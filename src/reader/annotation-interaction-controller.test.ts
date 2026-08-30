@@ -98,7 +98,9 @@ function fixture(
   const updateAnnotations = vi.fn<PdfAnnotationInteraction['updateAnnotations']>(() => true);
   const deleteAnnotations = vi.fn(() => true);
   const focusAnnotation = vi.fn(async () => 'editable' as const);
+  const abortInteraction = vi.fn(async () => undefined);
   const interaction: PdfAnnotationInteraction = {
+    abortInteraction,
     commitSelection,
     deleteAnnotations,
     focusAnnotation,
@@ -125,12 +127,14 @@ function fixture(
   const opened: AnnotationEditorPopoverRequest[] = [];
   const states: QuickHighlightState[] = [];
   const closeAnnotationEditor = vi.fn(() => true);
+  const flushAnnotationEditor = vi.fn(async () => true);
   const openAnnotationEditor = vi.fn((request: AnnotationEditorPopoverRequest) => {
     opened.push(request);
     return true;
   });
   const host: AnnotationInteractionHost = {
     closeAnnotationEditor,
+    flushAnnotationEditor,
     openAnnotationEditor,
     setQuickHighlightState: (state) => states.push(state),
   };
@@ -144,6 +148,7 @@ function fixture(
     onModeChange: (nextMode) => observedModes.push(nextMode),
   });
   return {
+    abortInteraction,
     closeAnnotationEditor,
     commitSelection,
     controller,
@@ -162,6 +167,7 @@ function fixture(
       for (const listener of selectionListeners) listener(selection);
     },
     failures,
+    flushAnnotationEditor,
     focusAnnotation,
     modeListenerCount: () => modeListeners.size,
     observedColors,
@@ -715,6 +721,88 @@ describe('AnnotationInteractionController', () => {
     expect(test.focusAnnotation).not.toHaveBeenCalled();
     expect(test.setQuickHighlight).not.toHaveBeenCalled();
     expect(test.modeListenerCount()).toBe(1);
+  });
+
+  it('keeps a materialized annotation editor visible while another annotation activates', async () => {
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Current annotation')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    test.closeAnnotationEditor.mockClear();
+
+    await expect(
+      test.controller.activateAnnotation('next-annotation', { kind: 'sidebar' }),
+    ).resolves.toBe('editable');
+
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+    expect(test.flushAnnotationEditor).toHaveBeenCalledOnce();
+    expect(test.focusAnnotation).toHaveBeenCalledExactlyOnceWith('next-annotation', {
+      kind: 'sidebar',
+    });
+    test.controller.destroy();
+  });
+
+  it('does not move native focus when the current annotation draft refuses to flush', async () => {
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Current annotation')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    test.flushAnnotationEditor.mockResolvedValueOnce(false);
+
+    await expect(
+      test.controller.activateAnnotation('next-annotation', { kind: 'sidebar' }),
+    ).resolves.toBe('cancelled');
+
+    expect(test.focusAnnotation).not.toHaveBeenCalled();
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+    expect(test.opened).toHaveLength(1);
+    test.controller.destroy();
+  });
+
+  it('neutralizes the native contextual editor when its unified popover closes', async () => {
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Closing annotation')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    request.onClose('escape');
+    await vi.waitFor(() => {
+      expect(test.abortInteraction).toHaveBeenCalledExactlyOnceWith(
+        'The PDF annotation editor was closed.',
+      );
+    });
+    test.controller.destroy();
+  });
+
+  it('neutralizes a selection editor after its optimistic draft materializes', async () => {
+    const test = fixture();
+    test.emitSelection(textSelection('materialized-selection'));
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected a selection editor request.');
+
+    await expect(
+      request.onCreate({
+        color: '#ffd400',
+        comment: '',
+        selection: textSelection('materialized-selection'),
+      }),
+    ).resolves.not.toBe('dismissed');
+    request.onClose('escape');
+
+    await vi.waitFor(() => {
+      expect(test.abortInteraction).toHaveBeenCalledExactlyOnceWith(
+        'The PDF annotation editor was closed.',
+      );
+    });
+    test.controller.destroy();
   });
 
   it('keeps revisions neutral when the host rejects editors and classifies read-only focus', () => {

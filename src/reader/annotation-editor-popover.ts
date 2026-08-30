@@ -297,7 +297,7 @@ export class AnnotationEditorPopover {
       (target.closest(
         '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor).selectedEditor',
       ) !== null ||
-        target.closest('.abyss-annotation-card[aria-current="true"]') !== null)
+        target.closest('.abyss-annotation-card') !== null)
     );
   }
 
@@ -870,11 +870,13 @@ export class AnnotationEditorPopover {
   }
 
   private disableBatchAction(button: HTMLButtonElement): void {
+    const actionLabel = button.getAttribute('aria-label');
     button.disabled = true;
     button.setAttribute('aria-disabled', 'true');
     button.setAttribute('aria-describedby', this.statusElement.id);
     button.title = UNSAFE_BATCH_REASON;
     setTooltip(button, UNSAFE_BATCH_REASON, { delay: 250 });
+    if (actionLabel !== null) button.setAttribute('aria-label', actionLabel);
   }
 
   private renderReadOnly(annotation: DocumentAnnotation): void {

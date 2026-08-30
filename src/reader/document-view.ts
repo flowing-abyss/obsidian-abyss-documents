@@ -40,10 +40,6 @@ export interface AnnotationSaveLifecycleViewBoundary {
   annotationSaveLifecycleSnapshot(): AnnotationSaveLifecycleSnapshot | null;
 }
 
-export interface AnnotationLoadTestViewBoundary {
-  annotationLoadTestSnapshot(): AnnotationLoadTestSnapshot;
-}
-
 export class AbyssDocumentView extends FileView {
   private readonly controller: ReaderViewController;
   private loadGeneration = 0;

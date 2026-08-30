@@ -28,8 +28,16 @@ export type PdfAnnotationActivationSource = {
 };
 
 export interface PdfProjectedAnnotation {
+  readonly aliases?: readonly string[];
   readonly annotation: DocumentAnnotation;
+  readonly editorUid?: string;
   readonly stableId: string;
+}
+
+interface PdfProjectedTarget {
+  readonly annotation: DocumentAnnotation;
+  readonly canonicalId: string;
+  readonly editorUid?: string;
 }
 
 export type PdfAnnotationResolver = (
@@ -42,6 +50,9 @@ export type PdfSelectionAction =
   | { readonly kind: 'comment'; readonly color: string; readonly seed: string };
 
 export interface PdfAnnotationInteraction {
+  abortInteraction?(message: string): Promise<void>;
+  suspendInteractions?(): Promise<void>;
+  resumeInteractions?(): void;
   onColor(listener: (color: string) => void): () => void;
   onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void;
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void;
@@ -172,7 +183,12 @@ interface PdfAnnotationEditorDependencies {
     | 'reserveNextDialog'
     | 'updateAnnotations'
   > &
-    Partial<Pick<PdfCommentBridge, 'refreshAnnotationFocus' | 'setSidebarUiManager'>>;
+    Partial<
+      Pick<
+        PdfCommentBridge,
+        'nativeEditorUidForAnnotation' | 'refreshAnnotationFocus' | 'setSidebarUiManager'
+      >
+    >;
   readonly selectionObserver: PdfSelectionObserver;
   readonly viewer: PdfAnnotationViewer;
 }
@@ -293,6 +309,13 @@ interface AnnotationActivation {
   timedOut: boolean;
 }
 
+interface DeferredAnnotationActivation {
+  readonly clientPosition: { readonly x: number; readonly y: number } | undefined;
+  readonly externalSignal: AbortSignal | undefined;
+  readonly id: string;
+  readonly run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>;
+}
+
 type AnnotationActivationSettlement =
   | {
       readonly kind: 'resolved';
@@ -331,8 +354,10 @@ export class PdfAnnotationEditor {
   private pendingSelectionTransaction: PendingSelectionTransaction | null = null;
   private queuedToolIntent: QueuedToolIntent | null = null;
   private readonly queuedMutations: QueuedMutation[] = [];
+  private saveBarrier: ReturnType<typeof deferred<void>> | null = null;
   private readonly retiredManagers = new WeakSet<object>();
   private destroyed = false;
+  private interactionsSuspended = false;
   private lifecycleRevision = 0;
   private saving = false;
   private logicalMode: PdfAnnotationLogicalMode = 'neutral';
@@ -344,7 +369,7 @@ export class PdfAnnotationEditor {
   private activationMaterialization: ActivationMaterialization | null = null;
   private activeActivation: AnnotationActivation | null = null;
   private annotationResolver: PdfAnnotationResolver | null = null;
-  private readonly projectedAnnotations = new Map<string, DocumentAnnotation>();
+  private readonly projectedTargets = new Map<string, PdfProjectedTarget>();
   private readonly removeBridgeFocusListener: () => void;
   private pendingAnnotationFocus: PendingAnnotationFocus | null = null;
 
@@ -360,6 +385,7 @@ export class PdfAnnotationEditor {
   }
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
+    if (this.interactionsSuspended) return;
     this.cancelAnnotationActivation('The PDF annotation activation was superseded by a tool.');
     this.cancelContextualSaveRestore();
     this.requireManager();
@@ -378,6 +404,12 @@ export class PdfAnnotationEditor {
     readonly kind: PdfEditableAnnotationKind;
     readonly editComment: boolean;
   }): Promise<void> {
+    if (this.interactionsSuspended) return;
+    const saveBarrier = this.waitForSaveRelease();
+    if (saveBarrier !== null) {
+      await saveBarrier;
+      return this.editAnnotation(request);
+    }
     const manager = this.requireManager();
     if (this.logicalMode !== 'neutral' || this.contextualEditSession !== null) return;
     const editId = request.id.trim();
@@ -423,13 +455,9 @@ export class PdfAnnotationEditor {
   }
 
   setAnnotationProjection(annotations: readonly PdfProjectedAnnotation[]): void {
-    this.projectedAnnotations.clear();
-    for (const { annotation, stableId } of annotations) {
-      const id = stableId.trim();
-      if (id.length > 0) this.projectedAnnotations.set(id, annotation);
-      if (annotation.identity.kind === 'stable')
-        this.projectedAnnotations.set(annotation.identity.id, annotation);
-    }
+    this.projectedTargets.clear();
+    for (const [identity, target] of pdfProjectedTargetIndex(annotations))
+      this.projectedTargets.set(identity, target);
   }
 
   setAnnotationResolver(resolver: PdfAnnotationResolver | null): void {
@@ -440,9 +468,15 @@ export class PdfAnnotationEditor {
     stableId: string,
     source: PdfAnnotationActivationSource,
   ): Promise<PdfAnnotationActivationResult> {
-    const id = stableId.trim();
-    if (id.length === 0 || source.signal?.aborted === true || this.destroyed)
+    const requestedId = stableId.trim();
+    if (
+      requestedId.length === 0 ||
+      source.signal?.aborted === true ||
+      this.destroyed ||
+      this.interactionsSuspended
+    )
       return Promise.resolve('cancelled');
+    const id = this.projectedTargets.get(requestedId)?.canonicalId ?? requestedId;
     return this.startAnnotationActivation(
       id,
       source.signal,
@@ -481,6 +515,7 @@ export class PdfAnnotationEditor {
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
         ...clientPositionOptions(activation.clientPosition),
+        ...this.editorUidOptions(id),
         forceReadonly: true,
       }),
       activation.controller.signal,
@@ -501,6 +536,7 @@ export class PdfAnnotationEditor {
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
         ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
+        ...this.editorUidOptions(id),
         preserveSelection: true,
       }),
       activation.controller.signal,
@@ -517,7 +553,8 @@ export class PdfAnnotationEditor {
     readonly kind: PdfEditableAnnotationKind;
   }): Promise<PdfAnnotationActivationResult> {
     const id = request.id.trim();
-    if (id.length === 0 || this.destroyed) return Promise.resolve('cancelled');
+    if (id.length === 0 || this.destroyed || this.interactionsSuspended)
+      return Promise.resolve('cancelled');
     return this.startAnnotationActivation(id, undefined, undefined, (activation) =>
       this.activateWithinEpoch({ ...request, id }, undefined, activation),
     );
@@ -529,13 +566,21 @@ export class PdfAnnotationEditor {
     clientPosition: { readonly x: number; readonly y: number } | undefined,
     run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>,
   ): Promise<PdfAnnotationActivationResult> {
+    if (this.activationUnavailable(externalSignal)) return Promise.resolve('cancelled');
+    const saveBarrier = this.waitForSaveRelease(externalSignal);
+    if (saveBarrier !== null)
+      return this.resumeActivationAfterSave(saveBarrier, {
+        clientPosition,
+        externalSignal,
+        id,
+        run,
+      });
     const current = this.activeActivation;
-    if (current !== null && current.id === id && !current.controller.signal.aborted)
-      return current.promise;
+    const reusable = reusableActivation(current, id);
+    if (reusable !== null) return reusable.promise;
     this.cancelAnnotationActivation('The PDF annotation activation was superseded.');
-    const manager = this.manager;
-    if (manager === null || this.destroyed || externalSignal?.aborted === true)
-      return Promise.resolve('cancelled');
+    const manager = this.availableActivationManager(externalSignal);
+    if (manager === null) return Promise.resolve('cancelled');
     const controller = new AbortController();
     const onExternalAbort = (): void => {
       if (externalSignal !== undefined) controller.abort(abortReason(externalSignal));
@@ -558,7 +603,7 @@ export class PdfAnnotationEditor {
       lifecycleRevision: this.lifecycleRevision,
       manager,
       promise: settled.promise,
-      projected: this.projectedAnnotations.get(id) ?? null,
+      projected: this.projectedTargets.get(id)?.annotation ?? null,
       removeExternalAbort: () => {
         externalSignal?.removeEventListener('abort', onExternalAbort);
       },
@@ -574,6 +619,30 @@ export class PdfAnnotationEditor {
     this.activeActivation = activation;
     this.runAnnotationActivation(activation, run, settled);
     return activation.promise;
+  }
+
+  private resumeActivationAfterSave(
+    saveBarrier: Promise<void>,
+    request: DeferredAnnotationActivation,
+  ): Promise<PdfAnnotationActivationResult> {
+    const { clientPosition, externalSignal, id, run } = request;
+    return saveBarrier.then(
+      () => this.startAnnotationActivation(id, externalSignal, clientPosition, run),
+      (cause: unknown) => {
+        if (externalSignal?.aborted === true || isAbortFailure(cause)) return 'cancelled';
+        throw cause;
+      },
+    );
+  }
+
+  private activationUnavailable(signal: AbortSignal | undefined): boolean {
+    return this.destroyed || this.interactionsSuspended || signal?.aborted === true;
+  }
+
+  private availableActivationManager(
+    signal: AbortSignal | undefined,
+  ): PdfAnnotationUiManager | null {
+    return this.activationUnavailable(signal) ? null : this.manager;
   }
 
   private runAnnotationActivation(
@@ -692,7 +761,7 @@ export class PdfAnnotationEditor {
     id: string,
     activation: AnnotationActivation,
   ): Promise<DocumentAnnotation | null> {
-    const projected = this.projectedAnnotations.get(id) ?? null;
+    const projected = this.projectedTargets.get(id)?.annotation ?? null;
     if (this.annotationResolver === null || (projected !== null && annotationIsWritable(projected)))
       return projected;
     const resolved = await waitWithSignal(
@@ -722,6 +791,7 @@ export class PdfAnnotationEditor {
         projected,
         {
           ...clientPositionOptions(activation.clientPosition),
+          ...this.editorUidOptions(activation.id),
           forceReadonly: true,
         },
       );
@@ -927,6 +997,7 @@ export class PdfAnnotationEditor {
     request: { readonly id: string; readonly kind: PdfEditableAnnotationKind },
     activation: AnnotationActivation,
   ): ContextualEditSession {
+    const editorUid = this.nativeEditorUid(request.id);
     const session: ContextualEditSession = {
       closing: null,
       guarded: false,
@@ -935,7 +1006,7 @@ export class PdfAnnotationEditor {
       mode: this.modeFor(request.kind),
       onEditorsRendered: this.onContextualEditorsRendered,
       phase: 'awaiting-selection',
-      restoreUid: null,
+      restoreUid: editorUid,
       suppressedToolbars: new Map(),
       toolbarObserver: null,
     };
@@ -968,11 +1039,8 @@ export class PdfAnnotationEditor {
     activation: AnnotationActivation,
   ): Promise<boolean> {
     const signal = this.contextualActivationSignal(session, activation);
-    await this.changeMode(
-      session.mode,
-      { editComment: request.editComment, editId: request.id },
-      { signal },
-    );
+    const editId = this.nativeEditorUid(request.id);
+    await this.changeMode(session.mode, { editComment: request.editComment, editId }, { signal });
     if (!this.isActiveContextualSession(session, activation)) return false;
     if (!(await this.waitForRequestedEditor(session, activation))) return false;
     if (!this.isCurrentActivation(activation)) return false;
@@ -991,10 +1059,12 @@ export class PdfAnnotationEditor {
     activation: AnnotationActivation,
   ): Promise<boolean> {
     const signal = this.contextualActivationSignal(session, activation);
+    const editorUid = this.nativeEditorUid(id);
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, signal, projected, {
         ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
+        ...(editorUid === id ? {} : { editorUid }),
         preserveSelection: true,
       }),
       signal,
@@ -1030,6 +1100,7 @@ export class PdfAnnotationEditor {
         projected,
         {
           ...clientPositionOptions(activation.clientPosition),
+          ...this.editorUidOptions(activation.id),
           forceReadonly: true,
         },
       ),
@@ -1179,6 +1250,7 @@ export class PdfAnnotationEditor {
   }
 
   deleteAnnotations(annotations: readonly DocumentAnnotation[]): boolean {
+    if (this.interactionsSuspended) return false;
     this.cancelAnnotationActivation('Deleting the PDF annotation cancelled its activation.');
     const deleted = this.dependencies.commentBridge.deleteAnnotations(annotations);
     if (deleted) this.cancelContextualSaveRestore();
@@ -1186,6 +1258,7 @@ export class PdfAnnotationEditor {
   }
 
   updateAnnotations(update: PdfAnnotationUpdate): boolean {
+    if (this.interactionsSuspended) return false;
     return this.dependencies.commentBridge.updateAnnotations(update);
   }
 
@@ -1231,7 +1304,13 @@ export class PdfAnnotationEditor {
     action: PdfSelectionAction,
     signal?: AbortSignal,
   ): Promise<DocumentAnnotation | 'dismissed'> {
+    if (this.interactionsSuspended) return 'dismissed';
     if (!this.restoreSelectionToken(token)) return 'dismissed';
+    const saveBarrier = this.waitForSaveRelease(signal);
+    if (saveBarrier !== null) {
+      await saveBarrier;
+      return this.commitSelection(token, action, signal);
+    }
     const manager = this.requireManager();
     if (this.logicalMode !== 'neutral') return 'dismissed';
     if (signal?.aborted === true) throw abortReason(signal);
@@ -1423,6 +1502,7 @@ export class PdfAnnotationEditor {
     readonly enabled: boolean;
     readonly color: string;
   }): Promise<void> {
+    if (this.interactionsSuspended) return;
     if (state.enabled) {
       await this.setParameter('highlight-color', state.color);
       await this.setTool('highlight');
@@ -1442,6 +1522,22 @@ export class PdfAnnotationEditor {
     const contextual = this.contextualEditSession;
     if (contextual === null) return;
     await this.closeContextualEditSession(contextual);
+  }
+
+  async suspendInteractions(): Promise<void> {
+    if (this.destroyed || this.interactionsSuspended) return;
+    this.interactionsSuspended = true;
+    this.cancelQueuedToolIntent('The PDF annotation interaction is closing.');
+    try {
+      await this.abortInteraction('The PDF annotation interaction is closing.');
+    } catch (cause) {
+      this.interactionsSuspended = false;
+      throw cause;
+    }
+  }
+
+  resumeInteractions(): void {
+    if (!this.destroyed) this.interactionsSuspended = false;
   }
 
   private async changeMode(
@@ -1535,12 +1631,8 @@ export class PdfAnnotationEditor {
     options: PdfAnnotationModeOptions,
   ): ActivationMaterialization | null {
     const activation = this.activeActivation;
-    if (
-      activation === null ||
-      options.editId !== activation.id ||
-      !this.isCurrentActivation(activation)
-    )
-      return null;
+    if (activation === null || !this.isCurrentActivation(activation)) return null;
+    if (options.editId !== this.nativeEditorUid(activation.id)) return null;
     const materialization: ActivationMaterialization = {
       activation,
       baselineEditors: new Set(this.nativeStorageEditors()),
@@ -1714,36 +1806,41 @@ export class PdfAnnotationEditor {
   ): Promise<Error | null> {
     const { contextualRestore, manager, revision } = context;
     const queuedIntents: QueuedToolIntent[] = [];
-    let targetContextualRestore =
-      this.pendingContextualSaveRestore === contextualRestore ? contextualRestore : null;
-    let targetMode = targetContextualRestore?.mode ?? restoredMode;
-    let targetOptions: PdfAnnotationModeOptions =
-      targetContextualRestore === null
-        ? {}
-        : { editComment: false, editId: targetContextualRestore.id };
+    const initialTarget = initialSaveRestoreTarget(
+      this.pendingContextualSaveRestore === contextualRestore ? contextualRestore : null,
+      restoredMode,
+    );
+    let targetContextualRestore = initialTarget.contextualRestore;
+    let targetMode = initialTarget.mode;
+    let targetOptions = initialTarget.options;
     let restoreFailure: Error | null = null;
-    do {
-      const queued = this.takeQueuedToolIntent(manager, revision);
-      if (queued !== null) {
-        queuedIntents.push(queued);
-        targetMode = this.modeFor(queued.tool);
-        targetOptions = queued.options;
-        targetContextualRestore = null;
-      }
-      restoreFailure = await this.restoreAfterSave({
-        contextualRestore: targetContextualRestore,
-        manager,
-        mode: targetMode,
-        options: targetOptions,
-        revision,
-      });
-    } while (restoreFailure === null && this.queuedToolIntent !== null);
-    const failedDuringRestore = this.takeQueuedToolIntent(manager, revision);
-    if (failedDuringRestore !== null) queuedIntents.push(failedDuringRestore);
-    this.clearOwnedContextualSaveRestore(contextualRestore);
-    this.releaseSave(manager, revision);
-    this.synchronizeLogicalModeAfterSave();
-    for (const queued of queuedIntents) this.settleQueuedToolIntent(queued, restoreFailure);
+    try {
+      do {
+        const queued = this.takeQueuedToolIntent(manager, revision);
+        if (queued !== null) {
+          queuedIntents.push(queued);
+          targetMode = this.modeFor(queued.tool);
+          targetOptions = queued.options;
+          targetContextualRestore = null;
+        }
+        restoreFailure = await this.restoreAfterSave({
+          contextualRestore: targetContextualRestore,
+          manager,
+          mode: targetMode,
+          options: targetOptions,
+          revision,
+        });
+      } while (restoreFailure === null && this.queuedToolIntent !== null);
+    } catch (cause) {
+      restoreFailure = asError(cause);
+    } finally {
+      const failedDuringRestore = this.takeQueuedToolIntent(manager, revision);
+      if (failedDuringRestore !== null) queuedIntents.push(failedDuringRestore);
+      this.clearOwnedContextualSaveRestore(contextualRestore);
+      this.releaseSave(manager, revision);
+      this.synchronizeLogicalModeAfterSave();
+      for (const queued of queuedIntents) this.settleQueuedToolIntent(queued, restoreFailure);
+    }
     return restoreFailure;
   }
 
@@ -1766,11 +1863,11 @@ export class PdfAnnotationEditor {
   private prepareSave(signal: AbortSignal): PreparedSave | Promise<PreparedSave> {
     const manager = this.requireManager();
     const revision = this.lifecycleRevision;
-    const pendingSelection = this.waitForSelectionBeforeSave(signal);
-    if (pendingSelection === null) {
+    const pendingInteraction = this.waitForInteractionBeforeSave(signal);
+    if (pendingInteraction === null) {
       return this.beginPreparedSave(manager, revision, signal);
     }
-    return pendingSelection.then(() => {
+    return pendingInteraction.then(() => {
       return this.beginPreparedSave(manager, revision, signal);
     });
   }
@@ -1783,6 +1880,9 @@ export class PdfAnnotationEditor {
     if (manager !== this.manager || revision !== this.lifecycleRevision || this.destroyed) {
       throw this.staleError();
     }
+    const pendingInteraction = this.waitForInteractionBeforeSave(signal);
+    if (pendingInteraction !== null)
+      return pendingInteraction.then(() => this.beginPreparedSave(manager, revision, signal));
     this.beginSave(signal);
     const contextual = this.contextualEditSession;
     if (contextual === null) return { contextualRestore: null, manager, revision };
@@ -1803,11 +1903,20 @@ export class PdfAnnotationEditor {
     );
   }
 
-  private waitForSelectionBeforeSave(signal: AbortSignal): Promise<void> | null {
+  private waitForInteractionBeforeSave(signal: AbortSignal): Promise<void> | null {
+    const pending: Array<Promise<unknown>> = [];
     const pendingSelection = this.pendingSelectionTransaction;
-    return pendingSelection === null
-      ? null
-      : waitWithSignal(pendingSelection.settled.promise, signal);
+    if (pendingSelection !== null) pending.push(pendingSelection.settled.promise);
+    const activation = this.activeActivation;
+    if (activation !== null) {
+      this.cancelAnnotationActivation('The PDF annotation activation yielded to saving.');
+      pending.push(activation.promise.catch(() => 'cancelled'));
+    }
+    if (pending.length === 0) return null;
+    return waitWithSignal(
+      Promise.all(pending).then(() => undefined),
+      signal,
+    );
   }
 
   private beginSave(signal: AbortSignal): void {
@@ -1816,6 +1925,13 @@ export class PdfAnnotationEditor {
     }
     this.throwIfAborted(signal);
     this.saving = true;
+    this.saveBarrier = deferred<void>();
+  }
+
+  private waitForSaveRelease(signal?: AbortSignal): Promise<void> | null {
+    const barrier = this.saveBarrier;
+    if (!this.saving || barrier === null) return null;
+    return signal === undefined ? barrier.promise : waitWithSignal(barrier.promise, signal);
   }
 
   private async pauseForSave(
@@ -1992,12 +2108,25 @@ export class PdfAnnotationEditor {
     this.mutationListeners.clear();
     this.modeListeners.clear();
     this.colorListeners.clear();
-    this.projectedAnnotations.clear();
+    this.projectedTargets.clear();
     this.annotationResolver = null;
     this.releaseContextualEditSession();
     this.clearPendingAnnotationFocus();
     this.removeBridgeFocusListener();
     this.annotationFocusListeners.clear();
+  }
+
+  private nativeEditorUid(annotationId: string): string {
+    return (
+      this.projectedTargets.get(annotationId)?.editorUid ??
+      this.dependencies.commentBridge.nativeEditorUidForAnnotation?.(annotationId) ??
+      annotationId
+    );
+  }
+
+  private editorUidOptions(annotationId: string): { readonly editorUid?: string } {
+    const editorUid = this.nativeEditorUid(annotationId);
+    return editorUid === annotationId ? {} : { editorUid };
   }
 
   private readonly onBridgeAnnotationFocus = (focus: PdfAnnotationFocus | null): void => {
@@ -2621,6 +2750,11 @@ export class PdfAnnotationEditor {
   }
 
   private runOrQueueMutation(apply: (manager: PdfAnnotationUiManager) => void): Promise<void> {
+    if (this.interactionsSuspended) {
+      return Promise.reject(
+        new DOMException('The PDF annotation interaction is closing.', 'AbortError'),
+      );
+    }
     const manager = this.requireManager();
     if (!this.saving) {
       apply(manager);
@@ -2632,8 +2766,11 @@ export class PdfAnnotationEditor {
   }
 
   private releaseSave(manager: PdfAnnotationUiManager, revision: number): void {
+    const barrier = this.saveBarrier;
+    this.saveBarrier = null;
     this.saving = false;
     this.applyQueuedMutations(manager, revision);
+    barrier?.resolve(undefined);
   }
 
   private applyQueuedMutations(manager: PdfAnnotationUiManager, revision: number): void {
@@ -2769,6 +2906,103 @@ function nativeEditorAnnotationId(
     persistedId = undefined;
   }
   return persistedId === undefined || persistedId.length === 0 ? native?.uid?.trim() : persistedId;
+}
+
+function reusableActivation(
+  activation: AnnotationActivation | null,
+  id: string,
+): AnnotationActivation | null {
+  return activation?.id === id && !activation.controller.signal.aborted ? activation : null;
+}
+
+function initialSaveRestoreTarget(
+  contextualRestore: ContextualSaveRestore | null,
+  restoredMode: number | null,
+): {
+  readonly contextualRestore: ContextualSaveRestore | null;
+  readonly mode: number | null;
+  readonly options: PdfAnnotationModeOptions;
+} {
+  return {
+    contextualRestore,
+    mode: contextualRestore?.mode ?? restoredMode,
+    options:
+      contextualRestore === null
+        ? {}
+        : {
+            editComment: false,
+            editId: contextualRestore.uid ?? contextualRestore.id,
+          },
+  };
+}
+
+function documentAnnotationId(annotation: DocumentAnnotation): string {
+  return annotation.identity.kind === 'stable'
+    ? annotation.identity.id
+    : annotation.identity.fingerprint;
+}
+
+function pdfProjectedTarget(projected: PdfProjectedAnnotation): PdfProjectedTarget {
+  const annotationId = documentAnnotationId(projected.annotation);
+  const stableId = projected.stableId.trim();
+  const editorUid = projected.editorUid?.trim();
+  return {
+    annotation: projected.annotation,
+    canonicalId: stableId.length === 0 ? annotationId : stableId,
+    ...(editorUid === undefined || editorUid.length === 0 ? {} : { editorUid }),
+  };
+}
+
+function pdfProjectedAliases(
+  projected: PdfProjectedAnnotation,
+  target: PdfProjectedTarget,
+): ReadonlySet<string> {
+  return new Set(
+    [
+      target.canonicalId,
+      documentAnnotationId(projected.annotation),
+      target.editorUid,
+      ...(projected.aliases ?? []),
+    ]
+      .map((alias) => alias?.trim())
+      .filter((alias): alias is string => alias !== undefined && alias.length > 0),
+  );
+}
+
+interface PdfProjectedEntry {
+  readonly aliases: ReadonlySet<string>;
+  readonly target: PdfProjectedTarget;
+}
+
+function pdfProjectedTargetIndex(
+  annotations: readonly PdfProjectedAnnotation[],
+): Map<string, PdfProjectedTarget> {
+  const entries: PdfProjectedEntry[] = annotations.map((projected) => {
+    const target = pdfProjectedTarget(projected);
+    return { aliases: pdfProjectedAliases(projected, target), target };
+  });
+  const indexed = new Map(entries.map(({ target }) => [target.canonicalId, target]));
+  const aliases = unambiguousProjectedAliases(entries, new Set(indexed.keys()));
+  for (const [alias, target] of aliases) indexed.set(alias, target);
+  return indexed;
+}
+
+function unambiguousProjectedAliases(
+  entries: readonly PdfProjectedEntry[],
+  canonicalIds: ReadonlySet<string>,
+): Map<string, PdfProjectedTarget> {
+  const candidates = new Map<string, PdfProjectedTarget | null>();
+  for (const { aliases, target } of entries) {
+    for (const alias of aliases) {
+      if (canonicalIds.has(alias)) continue;
+      const current = candidates.get(alias);
+      if (current === undefined) candidates.set(alias, target);
+      else if (current?.canonicalId !== target.canonicalId) candidates.set(alias, null);
+    }
+  }
+  return new Map(
+    [...candidates].filter((entry): entry is [string, PdfProjectedTarget] => entry[1] !== null),
+  );
 }
 
 function nativeEditorUid(native: PdfNativeEditorReference | undefined): string | null {

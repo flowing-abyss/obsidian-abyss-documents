@@ -940,6 +940,42 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('focuses a selected runtime editor while publishing its stable projected identity', async () => {
+    vi.useFakeTimers();
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    node.id = 'pdfjs_internal_editor_0';
+    const native = editor('Persisted comment', {
+      anchor: node,
+      uid: 'pdfjs_internal_editor_0',
+    });
+    const manager = uiManager(native);
+    manager.getEditor.mockImplementation((id) =>
+      id === 'pdfjs_internal_editor_0' ? native : undefined,
+    );
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) focused.push(focus);
+    });
+
+    const result = bridge.focusAnnotation('29R', undefined, annotation('29R'), {
+      editableOnly: true,
+      preserveSelection: true,
+      ...({ editorUid: 'pdfjs_internal_editor_0' } as Record<string, string>),
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+    const value = await result;
+    vi.useRealTimers();
+
+    expect(value).toBe(true);
+    expect(focused[0]?.annotations[0]?.identity).toEqual({ id: '29R', kind: 'stable' });
+    bridge.dispose();
+    host.remove();
+  });
+
   it('skips stale selected DOM candidates before preserving the exact ready native selection', async () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });
@@ -1120,6 +1156,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
 
     await expect(bridge.focusAnnotation('overlap-second')).resolves.toBe(true);
 
+    expect(bridge.nativeEditorUidForAnnotation('overlap-second')).toBe('overlap-second');
     expect(manager.setSelected).toHaveBeenCalledOnce();
     expect(manager.setSelected).toHaveBeenCalledWith(second);
     expect(focused).toHaveLength(1);

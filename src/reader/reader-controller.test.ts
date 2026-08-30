@@ -40,7 +40,7 @@ import {
   readerPerformanceSnapshot,
 } from '../reader-performance.js';
 import { DEFAULT_SETTINGS } from '../settings.js';
-import type { AnnotationProjectionRow } from './annotation-projection.js';
+import type { AnnotationProjection, AnnotationProjectionRow } from './annotation-projection.js';
 import {
   ReaderController,
   type ReaderProfileState,
@@ -257,7 +257,11 @@ function interactiveViewport(pageCount = 3) {
   const focusAnnotation = vi.fn<PdfAnnotationInteraction['focusAnnotation']>(
     async () => 'editable',
   );
+  const abortInteraction = vi.fn(async () => undefined);
+  const resumeInteractions = vi.fn();
+  const suspendInteractions = vi.fn(async () => undefined);
   const interaction: PdfAnnotationInteraction = {
+    abortInteraction,
     commitSelection,
     deleteAnnotations: () => true,
     focusAnnotation,
@@ -278,7 +282,9 @@ function interactiveViewport(pageCount = 3) {
       selectionListeners.add(listener);
       return () => selectionListeners.delete(listener);
     },
+    resumeInteractions,
     setQuickHighlight,
+    suspendInteractions,
     updateAnnotations,
   };
   created.setTool.mockImplementation(async (tool) => {
@@ -290,9 +296,11 @@ function interactiveViewport(pageCount = 3) {
   Object.assign(created.value, { annotationInteraction: interaction, projectSelectionRects });
   return {
     ...created,
+    abortInteraction,
     commitSelection,
     focusAnnotation,
     projectSelectionRects,
+    resumeInteractions,
     emitMode(next: PdfAnnotationLogicalMode) {
       mode = next;
       for (const listener of modeListeners) listener(next);
@@ -309,6 +317,7 @@ function interactiveViewport(pageCount = 3) {
       for (const listener of selectionListeners) listener(selection);
     },
     setQuickHighlight,
+    suspendInteractions,
     updateAnnotations,
   };
 }
@@ -1387,7 +1396,7 @@ describe('ReaderController', () => {
   it('carries projection row identity through controller provisional reconciliation', async () => {
     const [pdf] = files('Books/Controller-row-identity.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
-    const createdViewport = viewport();
+    const createdViewport = interactiveViewport();
     const createdSession = session(pdf.path, createdViewport);
     const extractionGate = deferred<void>();
     const geometry = {
@@ -1418,7 +1427,7 @@ describe('ReaderController', () => {
       change: {
         operation: 'upsert',
         annotation: {
-          nativeId: 'temporary-native-id',
+          nativeId: 'pdfjs_internal_editor_0',
           provisionalId: 'selection-token',
           pageIndex: 0,
           type: 'highlight',
@@ -1432,11 +1441,13 @@ describe('ReaderController', () => {
         },
       },
     });
+    const resolver = createdViewport.setAnnotationResolver.mock.calls[0]?.[0];
+    if (resolver == null) throw new Error('Expected native annotation resolver.');
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
     const panel = shell.created.sidebar?.annotationsPanel;
     if (panel === undefined) throw new Error('Expected annotation panel.');
     const before = panel.root.querySelector<HTMLElement>('.abyss-annotation-card');
-    if (!panel.selectAnnotation('temporary-native-id', true))
+    if (!panel.selectAnnotation('pdfjs_internal_editor_0', true))
       throw new Error('Expected provisional annotation selection.');
     const scrollHost = panel.root.querySelector<HTMLElement>('[data-annotation-scroll-host]');
     if (scrollHost === null) throw new Error('Expected annotation scroll host.');
@@ -1454,7 +1465,50 @@ describe('ReaderController', () => {
         panel.root.querySelector<HTMLElement>('.abyss-annotation-card')?.dataset['annotationRowId'],
       scrollTop: scrollHost.scrollTop,
     }).toEqual({ focusedRowId: rowId, rowId, scrollTop: 137 });
+    expect(createdViewport.setAnnotationProjection.mock.lastCall?.[0]).toMatchObject([
+      {
+        editorUid: 'pdfjs_internal_editor_0',
+        stableId: 'stable-native-id',
+      },
+    ]);
+    await expect(
+      resolver('pdfjs_internal_editor_0', new AbortController().signal),
+    ).resolves.toMatchObject({ identity: { id: 'stable-native-id', kind: 'stable' } });
+    await expect(resolver('selection-token', new AbortController().signal)).resolves.toMatchObject({
+      identity: { id: 'stable-native-id', kind: 'stable' },
+    });
+    await expect(resolver('missing-id', new AbortController().signal)).resolves.toBeNull();
     host.remove();
+  });
+
+  it('resolves a canonical PDF id before a colliding historical alias after row reorder', () => {
+    const controller = new ReaderController(new DocumentAdapterRegistry([]));
+    const projection = Reflect.get(controller, 'annotationProjection') as AnnotationProjection;
+    const geometry = {
+      kind: 'rectangle' as const,
+      rectangle: { height: 8, width: 30, x: 10, y: 20 },
+    };
+    const first = { ...annotationRecord('29R', 0, geometry), comment: 'First' };
+    const second = { ...annotationRecord('30R', 0, geometry), comment: 'Second' };
+    projection.reconcile([first, second], 1);
+    projection.reconcile(
+      [
+        {
+          ...second,
+          identity: { id: asAnnotationId('31R'), kind: 'stable' as const },
+        },
+        {
+          ...first,
+          identity: { id: asAnnotationId('30R'), kind: 'stable' as const },
+        },
+      ],
+      2,
+    );
+    const resolver = Reflect.get(controller, 'projectedAnnotationForStableId') as (
+      id: string,
+    ) => DocumentAnnotation | null;
+
+    expect(Reflect.apply(resolver, controller, ['30R'])).toMatchObject({ comment: 'First' });
   });
 
   it('renders unavailable without retry when annotation listing is unsupported', async () => {
@@ -4711,22 +4765,52 @@ describe('ReaderController', () => {
         byteSize: 5,
         committedAt: '2026-08-13T00:00:00.000Z' as never,
       }));
+      const shell = capturingShellFactory();
       const controller = new ReaderController(
         new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
-        undefined,
+        shell.createShell,
         undefined,
         { saveCoordinator: { save } },
       );
       await controller.open(pdf, createDiv());
+      shell.created.openAnnotationEditor({
+        onClose: () => undefined,
+        onCreate: () => 'dismissed',
+        onDelete: () => false,
+        onUpdate: () => false,
+        palette: [],
+        target: {
+          annotation: annotationRecord('autosave-focus', 0, {
+            kind: 'point',
+            point: { x: 10, y: 20 },
+          }),
+          kind: 'readonly',
+        },
+      });
 
       dirtyListeners[0]?.(1);
-      await vi.advanceTimersByTimeAsync(749);
+      await vi.advanceTimersByTimeAsync(5_250);
       expect(save).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
+      shell.created.closeAnnotationEditor();
+      await Promise.resolve();
       expect(save).toHaveBeenCalledOnce();
       expect(save.mock.calls[0]?.[0]).toMatchObject({ path: pdf.path, revision: 1, source });
 
       dirtyListeners[0]?.(2);
+      shell.created.openAnnotationEditor({
+        onClose: () => undefined,
+        onCreate: () => 'dismissed',
+        onDelete: () => false,
+        onUpdate: () => false,
+        palette: [],
+        target: {
+          annotation: annotationRecord('manual-focus', 0, {
+            kind: 'point',
+            point: { x: 10, y: 20 },
+          }),
+          kind: 'readonly',
+        },
+      });
       await controller.saveDocument();
       expect(save).toHaveBeenCalledTimes(2);
       expect(save.mock.calls[1]?.[0]).toMatchObject({ revision: 2 });
@@ -4735,6 +4819,97 @@ describe('ReaderController', () => {
         counters: { annotationSaves: 2 },
         samples: { annotationSaveMs: [expect.any(Number), expect.any(Number)] },
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('promotes a deferred automatic save when Ctrl-S is pressed with the popover open', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/Promoted-save.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdViewport = viewport();
+      const createdSession = session(pdf.path, createdViewport);
+      const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      const dirtyListeners: Array<(revision: number) => void> = [];
+      let dirty = true;
+      const prepare = vi.fn(async () => ({
+        revision: 1,
+        baseToken,
+        bytes: new Uint8Array([1]),
+      }));
+      const source: NativeEditableSaveSession = {
+        baseToken,
+        pendingRevision: 1,
+        get isDirty() {
+          return dirty;
+        },
+        prepare,
+        commit: vi.fn(() => {
+          dirty = false;
+        }),
+        destroy: vi.fn(),
+      };
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          dirtyListeners.push(onRevision);
+          return source;
+        },
+      });
+      const peerWrite = deferred<undefined>();
+      const save = vi.fn(async (request: NativeDocumentSaveRequest, signal: AbortSignal) => {
+        await peerWrite.promise;
+        request.beforePrepare?.(signal);
+        const prepared = await request.source.prepare(request.revision, signal);
+        await request.source.commit(prepared, {
+          sha256: 'b'.repeat(64),
+          byteSize: 5,
+          mtime: 20,
+        });
+        return {
+          verified: true as const,
+          generation: request.revision,
+          sha256: 'b'.repeat(64),
+          byteSize: 5,
+          committedAt: '2026-08-31T00:00:00.000Z' as never,
+        };
+      });
+      const shell = capturingShellFactory();
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        shell.createShell,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+      dirtyListeners[0]?.(1);
+      await vi.advanceTimersByTimeAsync(750);
+      await vi.waitFor(() => {
+        expect(save).toHaveBeenCalledOnce();
+      });
+      shell.created.openAnnotationEditor({
+        onClose: () => undefined,
+        onCreate: () => 'dismissed',
+        onDelete: () => false,
+        onUpdate: () => false,
+        palette: [],
+        target: {
+          annotation: annotationRecord('manual-promotion', 0, {
+            kind: 'point',
+            point: { x: 10, y: 20 },
+          }),
+          kind: 'readonly',
+        },
+      });
+      peerWrite.resolve(undefined);
+      await Promise.resolve();
+
+      await controller.saveDocument();
+
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(prepare).toHaveBeenCalledOnce();
+      expect(shell.created.annotationEditorOpen).toBe(true);
     } finally {
       vi.useRealTimers();
     }
@@ -5079,6 +5254,8 @@ describe('ReaderController', () => {
       const [pdf] = files('Books/Close-editor-flush.pdf');
       if (pdf === undefined) throw new Error('Expected a PDF fixture.');
       const createdViewport = interactiveViewport();
+      const neutralized = deferred<undefined>();
+      createdViewport.abortInteraction.mockImplementationOnce(() => neutralized.promise);
       const createdSession = session(pdf.path, createdViewport);
       const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
       const dirtyListeners: Array<(revision: number) => void> = [];
@@ -5145,8 +5322,19 @@ describe('ReaderController', () => {
 
       const closing = controller.close();
       await vi.waitFor(() => {
+        expect(createdViewport.abortInteraction).toHaveBeenCalledOnce();
+      });
+      expect(createdViewport.suspendInteractions).toHaveBeenCalledOnce();
+      expect(host.inert).toBe(true);
+      expect(save).not.toHaveBeenCalled();
+      neutralized.resolve(undefined);
+      await vi.waitFor(() => {
         expect(save).toHaveBeenCalledOnce();
       });
+      expect(shell.created.annotationEditorOpen).toBe(false);
+      comment.value = 'Late edit after close boundary';
+      comment.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(createdViewport.updateAnnotations).toHaveBeenCalledOnce();
       expect(destroy).not.toHaveBeenCalled();
       saved.resolve({
         verified: true,
@@ -6056,6 +6244,71 @@ describe('ReaderController', () => {
     expect(createdAdapter.open).toHaveBeenCalledTimes(2);
     expect(createdSession.close).toHaveBeenCalledOnce();
     expect(controller).toHaveProperty('session', reloaded.value);
+  });
+
+  it('keeps a native-clean peer conflicted while the annotation popover has buffered edits', async () => {
+    const [pdf] = files('Books/Buffered-peer-comment.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const native = {
+      baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 },
+      pendingRevision: 0,
+      isDirty: false,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, { createNativeEditableSession: () => native });
+    const createdAdapter = adapterFor(pdf.path, createdSession);
+    const shell = capturingShellFactory();
+    let broadcast: VerifiedReloadListener | undefined;
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([createdAdapter.value]),
+      shell.createShell,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    const host = createDiv();
+    await controller.open(pdf, host);
+    if (broadcast === undefined) throw new Error('Expected verified reload listener.');
+    shell.created.openAnnotationEditor({
+      onClose: vi.fn(),
+      onCreate: vi.fn(),
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(() => true),
+      palette: [],
+      target: {
+        annotation: annotationRecord('buffered-comment', 0, {
+          kind: 'point',
+          point: { x: 10, y: 20 },
+        }),
+        kind: 'annotation',
+      },
+    });
+    const comment = host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]');
+    if (comment === null) throw new Error('Expected annotation comment editor.');
+    comment.value = 'Buffered but not yet native';
+    comment.dispatchEvent(new Event('input', { bubbles: true }));
+    expect(shell.created.annotationEditorPendingChanges).toBe(true);
+
+    await broadcast({ sha256: 'b'.repeat(64), byteSize: 5, mtime: 20 }, 1, {
+      pendingRevision: 0,
+      isDirty: false,
+    } as NativeEditableSaveSession);
+
+    expect(createdAdapter.open).toHaveBeenCalledOnce();
+    expect(createdSession.close).not.toHaveBeenCalled();
+    expect(controller.annotationSaveLifecycleSnapshot()).toMatchObject({ paused: true });
+    shell.created.closeAnnotationEditor();
+    host.remove();
   });
 
   it('ignores a stale verified-reload listener after a different document lifecycle replaces it', async () => {

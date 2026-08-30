@@ -2027,6 +2027,29 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
+  it('stays open until a different annotation card can activate its own target', () => {
+    const host = document.body.createDiv();
+    const currentCard = host.createEl('button');
+    currentCard.className = 'abyss-annotation-card';
+    currentCard.setAttribute('aria-current', 'true');
+    const nextCard = host.createEl('button');
+    nextCard.className = 'abyss-annotation-card';
+    nextCard.setAttribute('aria-current', 'false');
+    const onClose = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      onClose,
+    });
+
+    nextCard.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+
+    expect(popover.isOpen).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    popover.destroy();
+    host.remove();
+  });
+
   it('keeps a materialized selection open when save replacement focuses the disabled editor layer', async () => {
     const host = document.body.createDiv();
     const oldLayer = host.createDiv({ cls: 'annotationEditorLayer' });

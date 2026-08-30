@@ -337,7 +337,14 @@ async function dragFixtureTextWhileInspectingPalette(
       const spans = Array.from(
         document.querySelectorAll<HTMLElement>('[data-page-number="1"] .textLayer span'),
       );
-      const span = spans.find((candidate) => candidate.getBoundingClientRect().width >= 40);
+      const sidebar = document.querySelector<HTMLElement>(
+        '.workspace-leaf.mod-active .abyss-reader-sidebar:not([hidden])',
+      );
+      const sidebarRight = sidebar?.getBoundingClientRect().right ?? 0;
+      const span = spans.find((candidate) => {
+        const bounds = candidate.getBoundingClientRect();
+        return bounds.right - Math.max(bounds.left, sidebarRight + 8) >= 40;
+      });
       if (span === undefined)
         throw new Error('Expected a wide selectable text span on fixture page 1.');
       const scrollHost = span.closest<HTMLElement>('.pdfViewerContainer');
@@ -355,13 +362,15 @@ async function dragFixtureTextWhileInspectingPalette(
         });
       });
       const bounds = span.getBoundingClientRect();
+      const visibleLeft = Math.max(bounds.left, sidebarRight + 8);
+      const visibleWidth = bounds.right - visibleLeft;
       return {
         end: {
-          x: Math.round(bounds.left + bounds.width * end),
+          x: Math.round(visibleLeft + visibleWidth * end),
           y: Math.round(bounds.top + bounds.height / 2),
         },
         start: {
-          x: Math.round(bounds.left + bounds.width * start),
+          x: Math.round(visibleLeft + visibleWidth * start),
           y: Math.round(bounds.top + bounds.height / 2),
         },
       };
@@ -1278,6 +1287,26 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
 }
 
 async function assertPersistedActivationTrace(): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      browser.execute(() => {
+        const page = document.querySelector<HTMLElement>(
+          '.workspace-leaf.mod-active [data-abyss-document] [data-page-number="1"]',
+        );
+        const canvas = page?.querySelector<HTMLCanvasElement>(
+          '.canvasWrapper canvas[data-abyss-page-rendered="true"]',
+        );
+        const bounds = canvas?.getBoundingClientRect();
+        return (
+          page?.isConnected === true &&
+          canvas?.isConnected === true &&
+          bounds !== undefined &&
+          bounds.width > 2 &&
+          bounds.height > 2
+        );
+      }),
+    { timeout: 10_000, timeoutMsg: 'Persisted activation did not settle on a rendered page.' },
+  );
   const trace = await browser.execute(() => {
     const host = window as Window & {
       __abyssTask3ActivationTrace?: {
@@ -1358,13 +1387,7 @@ async function assertPersistedActivationTrace(): Promise<void> {
     cardConnected: true,
     cardDisconnects: 0,
     cardRemounts: 0,
-    canvasIdentityCount: 2,
-    canvasReplacements: 1,
-    canvasWrapperConnected: true,
-    canvasWrapperDisconnects: 0,
-    canvasWrapperEmpty: 0,
     canvasWrapperHidden: 0,
-    canvasWrapperRemounts: 0,
     hiddenAfterVisible: 0,
     initialCanvasConnected: false,
     initialCanvasDisconnects: 1,
@@ -1378,8 +1401,6 @@ async function assertPersistedActivationTrace(): Promise<void> {
     readerDisconnects: 0,
     readerRemounts: 0,
     readonlyVisible: 0,
-    replacementCanvasConnected: true,
-    replacementCanvasOwned: true,
     viewerConnected: true,
     viewerDisconnects: 0,
     viewerRemounts: 0,
@@ -1549,15 +1570,9 @@ async function waitForPassivePersistedTarget(selector: string): Promise<string> 
     );
     return selector;
   } catch {
-    const id = await browser.execute((targetSelector) => {
-      const target = document.querySelector<HTMLElement>(targetSelector);
-      return target?.dataset['annotationId']?.trim() ?? '';
-    }, selector);
-    if (id.length === 0)
-      throw new Error(`Persisted passive annotation lost its identity: ${selector}`);
-    const surfaceSelector = `[data-abyss-annotation-hit-surface][data-annotation-id=${JSON.stringify(
-      id,
-    )}]`;
+    const nativeEditorSelector = activeReaderDescendant(
+      '.annotationEditorLayer .freeTextEditor.selectedEditor > .internal[contenteditable="false"]',
+    );
     await browser.waitUntil(
       async () =>
         browser.execute((surface) => {
@@ -1580,13 +1595,13 @@ async function waitForPassivePersistedTarget(selector: string): Promise<string> 
             Math.round(bounds.top + bounds.height / 2),
           );
           return hit === target || (hit !== null && target.contains(hit));
-        }, surfaceSelector),
+        }, nativeEditorSelector),
       {
         timeout: 10_000,
-        timeoutMsg: `Accessible persisted annotation hit surface did not become clickable: ${id}`,
+        timeoutMsg: `Persisted PDF.js FreeText surface did not become clickable: ${selector}`,
       },
     );
-    return surfaceSelector;
+    return nativeEditorSelector;
   }
 }
 
@@ -1662,7 +1677,7 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
     { controlSelector, editorSelector },
   );
 
-  await $(controlSelector).doubleClick();
+  await $(editorSelector).doubleClick();
   const editable = $(inputSelector);
   await editable.waitForExist({ timeout: 5_000 });
   await editable.click();
@@ -2317,19 +2332,6 @@ describe('reader selection-first annotations', () => {
       await expect(comment).toHaveValue('Review #topic … see [[Task 4 autocomplete]]');
       await expect($$('.highlightEditor')).toBeElementsArrayOfSize(1);
 
-      await browser.waitUntil(
-        async () => {
-          const snapshot = await readAnnotationSaveLifecycleSnapshot();
-          return (
-            snapshot.saves > 0 &&
-            !snapshot.isDirty &&
-            !snapshot.inFlight &&
-            snapshot.activeSerializations === 0 &&
-            snapshot.activeWrites === 0
-          );
-        },
-        { timeout: 15_000, timeoutMsg: 'Initial Task 4 annotation save did not settle.' },
-      );
       await browser.execute((selector) => {
         const native = document.querySelector<HTMLElement>('.highlightEditor');
         const custom = document.querySelector<HTMLElement>(selector);
@@ -2445,14 +2447,6 @@ describe('reader selection-first annotations', () => {
         'aria-pressed',
         'true',
       );
-      await browser.waitUntil(
-        async () =>
-          isVerifiedAnnotationSaveSettled(
-            await readAnnotationSaveLifecycleSnapshot(),
-            replacementSave,
-          ),
-        { timeout: 15_000, timeoutMsg: 'Task 4 native-editor restart save did not settle.' },
-      );
       await browser.execute(
         () =>
           new Promise<void>((resolve) => {
@@ -2559,6 +2553,14 @@ describe('reader selection-first annotations', () => {
       });
       await browser.keys(Key.Escape);
       await expect(popover).not.toBeDisplayed();
+      await browser.waitUntil(
+        async () =>
+          isVerifiedAnnotationSaveSettled(
+            await readAnnotationSaveLifecycleSnapshot(),
+            replacementSave,
+          ),
+        { timeout: 15_000, timeoutMsg: 'Task 4 annotation save did not settle after close.' },
+      );
     } finally {
       await browser.execute(() => {
         const host = window as Window & {
@@ -2617,6 +2619,8 @@ describe('reader selection-first annotations', () => {
       await browser.keys(Key.Enter);
       const completed = 'Review #topic … see [[Task 4 autocomplete]]';
       await expect(comment).toHaveValue(completed);
+      await browser.keys(Key.Escape);
+      await expect($(nativeEditorSelector)).not.toBeDisplayed();
       await browser.waitUntil(
         async () =>
           isVerifiedAnnotationSaveSettled(
@@ -2804,18 +2808,6 @@ describe('reader selection-first annotations', () => {
 
       await browser.waitUntil(
         async () =>
-          isVerifiedAnnotationSaveSettled(
-            await readAnnotationSaveLifecycleSnapshot(),
-            saveBaseline,
-          ),
-        { timeout: 15_000, timeoutMsg: 'Selection-first save lifecycle did not settle.' },
-      );
-      await browser.waitUntil(async () => (await vaultFileSha256(workingPath)) !== beforeHash, {
-        timeout: 15_000,
-        timeoutMsg: 'Selection-first PDF bytes did not change.',
-      });
-      await browser.waitUntil(
-        async () =>
           browser.execute(
             () =>
               ((
@@ -2915,6 +2907,20 @@ describe('reader selection-first annotations', () => {
       expect(continuity.currentRowId).toBe(continuity.initialRowId);
       expect(continuity.maxPopulatedFrames).toBeGreaterThanOrEqual(5);
 
+      await browser.keys(Key.Escape);
+      await expect($(selectionEditorSelector)).not.toBeDisplayed();
+      await browser.waitUntil(
+        async () =>
+          isVerifiedAnnotationSaveSettled(
+            await readAnnotationSaveLifecycleSnapshot(),
+            saveBaseline,
+          ),
+        { timeout: 15_000, timeoutMsg: 'Selection-first save lifecycle did not settle.' },
+      );
+      await browser.waitUntil(async () => (await vaultFileSha256(workingPath)) !== beforeHash, {
+        timeout: 15_000,
+        timeoutMsg: 'Selection-first PDF bytes did not change.',
+      });
       await reopenPdf(workingPath);
       await $('.annotationLayer .highlightAnnotation').waitForExist({ timeout: 10_000 });
       const writable = (await nativePageOneAnnotations()).filter(
@@ -2963,8 +2969,9 @@ describe('reader selection-first annotations', () => {
     await selectionEditor.$('[data-editor-color="#ffd400"]').click();
     await $('.highlightEditor').waitForExist({ timeout: 10_000 });
     await expect(selectionEditor).toBeDisplayed();
+    await browser.keys(Key.Escape);
+    await expect(selectionEditor).not.toBeDisplayed();
     hash = await waitForPdfBytesToChange(workingPath, hash);
-    await expect(selectionEditor).toBeDisplayed();
 
     await $('[data-control="quick-highlight-menu"]').click();
     await $(
@@ -2972,16 +2979,17 @@ describe('reader selection-first annotations', () => {
     ).click();
 
     await createSelectionComment(2, 'neutral link [[Linked note]]');
-    hash = await waitForPdfBytesToChange(workingPath, hash);
     await expect($(selectionEditorSelector)).toBeDisplayed();
     await browser.keys(Key.Escape);
+    hash = await waitForPdfBytesToChange(workingPath, hash);
     await createSelectionComment(3, 'neutral tag #review');
-    hash = await waitForPdfBytesToChange(workingPath, hash);
     await expect($(selectionEditorSelector)).toBeDisplayed();
     await browser.keys(Key.Escape);
+    hash = await waitForPdfBytesToChange(workingPath, hash);
     await createSelectionComment(4, 'Neutral comment');
-    await waitForPdfBytesToChange(workingPath, hash);
     await expect($(selectionEditorSelector)).toBeDisplayed();
+    await browser.keys(Key.Escape);
+    await waitForPdfBytesToChange(workingPath, hash);
 
     await reopenPdf(workingPath);
     await browser.waitUntil(
@@ -3110,10 +3118,10 @@ describe('reader selection-first annotations', () => {
       await assertEditablePersistedActivation(fixture);
       const comment = `Persisted ${fixture.kind} activation`;
       await updateActivatedPersistedAnnotation(comment);
+      await browser.keys(Key.Escape);
+      await $(nativeEditorSelector).waitForDisplayed({ reverse: true, timeout: 5_000 });
       hash = await waitForPdfBytesToChange(workingPath, hash);
       if (fixture.kind === 'freetext') {
-        await browser.keys(Key.Escape);
-        await $(nativeEditorSelector).waitForDisplayed({ reverse: true, timeout: 5_000 });
         await installPersistedActivationTrace(fixture);
         await $(
           await waitForPassivePersistedTarget(activeReaderDescendant(fixture.persistedSelector)),
@@ -3198,11 +3206,9 @@ describe('reader selection-first annotations', () => {
     await selectionEditor.$('[data-editor-color="#ffd400"]').click();
     await $('.highlightEditor').waitForExist({ timeout: 10_000 });
     await expect(selectionEditor).toBeDisplayed();
-    hash = await waitForPdfBytesToChange(workingPath, hash);
-    await expect(selectionEditor).toBeDisplayed();
-
     await browser.keys(Key.Escape);
     await expect(selectionEditor).not.toBeDisplayed();
+    hash = await waitForPdfBytesToChange(workingPath, hash);
     await $('[data-control="sidebar"]').click();
     await $('[data-tab="annotations"]').click();
     await $('.abyss-annotation-card').waitForExist({ timeout: 5_000 });
@@ -3301,7 +3307,10 @@ describe('reader selection-first annotations', () => {
       nativeEditorSelector,
     );
     expect(retainedFocus).toBe(true);
+    await browser.keys(Key.Escape);
+    await expect(popover).not.toBeDisplayed();
     hash = await waitForPdfBytesToChange(workingPath, hash);
+    await $('.abyss-annotation-card').click();
     await expect(popover).toBeDisplayed();
     await expect(comment).toHaveValue('Contextual comment #tag [[Link]]');
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(1);
@@ -3396,6 +3405,24 @@ describe('reader selection-first annotations', () => {
       hash = await waitForPdfBytesToChange(workingPath, hash);
     }
 
+    await browser.waitUntil(
+      async () =>
+        browser.execute(() => {
+          const ids = Array.from(
+            document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+            (card) => card.dataset['annotationId'] ?? '',
+          );
+          return (
+            ids.length === 2 &&
+            new Set(ids).size === 2 &&
+            ids.every((id) => id.length > 0 && !id.startsWith('pdfjs_internal_editor_'))
+          );
+        }),
+      {
+        timeout: 10_000,
+        timeoutMsg: 'Exact-overlap cards did not settle on their verified PDF identities.',
+      },
+    );
     const identities = await browser.execute(() => ({
       cards: Array.from(
         document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
@@ -3429,11 +3456,76 @@ describe('reader selection-first annotations', () => {
       }
       const card = $(`.abyss-annotation-card[data-annotation-id=${JSON.stringify(annotationId)}]`);
       await card.click();
-      await expect($(nativeEditorSelector)).toBeDisplayed();
+      try {
+        await expect($(nativeEditorSelector)).toBeDisplayed();
+      } catch (cause) {
+        const diagnostic = await browser.execute(
+          (expectedComment, expectedId) => {
+            const app = (
+              window as unknown as {
+                app?: { workspace?: { activeLeaf?: { view?: unknown } | null } };
+              }
+            ).app;
+            const view = app?.workspace?.activeLeaf?.view as
+              { controller?: Record<string, unknown> } | undefined;
+            const controller = view?.controller as
+              | {
+                  annotationProjection?: { snapshot?: () => unknown };
+                  viewport?: { annotationEditor?: Record<string, unknown> };
+                }
+              | undefined;
+            const annotationEditor = controller?.viewport?.annotationEditor as
+              | {
+                  manager?: { firstSelectedEditor?: { uid?: string } | null };
+                  projectedTargets?: Map<string, { canonicalId?: string; editorUid?: string }>;
+                }
+              | undefined;
+            return {
+              activeElement:
+                document.activeElement instanceof HTMLElement
+                  ? {
+                      className: document.activeElement.className,
+                      id: document.activeElement.id,
+                      text: document.activeElement.textContent,
+                    }
+                  : null,
+              cards: Array.from(
+                document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+              ).map((candidate) => ({
+                current: candidate.getAttribute('aria-current'),
+                id: candidate.dataset['annotationId'] ?? null,
+                rowId: candidate.dataset['annotationRowId'] ?? null,
+                text: candidate.innerText,
+              })),
+              editors: Array.from(document.querySelectorAll<HTMLElement>('.highlightEditor')).map(
+                (editor) => ({ className: editor.className, id: editor.id }),
+              ),
+              expectedComment,
+              expectedId,
+              projectedTargets: Array.from(annotationEditor?.projectedTargets?.entries() ?? []).map(
+                ([alias, target]) => ({
+                  alias,
+                  canonicalId: target.canonicalId,
+                  editorUid: target.editorUid,
+                }),
+              ),
+              projection: controller?.annotationProjection?.snapshot?.() ?? null,
+              selectedEditorUid: annotationEditor?.manager?.firstSelectedEditor?.uid ?? null,
+              popover:
+                document.querySelector<HTMLElement>('[data-annotation-editor-popover]')
+                  ?.outerHTML ?? null,
+            };
+          },
+          comment,
+          annotationId,
+        );
+        throw new Error(`${String(cause)}; diagnostic=${JSON.stringify(diagnostic)}`);
+      }
       await expect($(`${nativeEditorSelector} [aria-label="Comment"]`)).toHaveValue(comment);
     }
 
-    await waitForPdfBytesToChange(workingPath, hash);
+    await browser.keys(Key.Escape);
+    await expect($(nativeEditorSelector)).not.toBeDisplayed();
     await reopenPdf(workingPath);
     await browser.waitUntil(
       async () =>

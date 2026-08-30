@@ -52,6 +52,31 @@ function verifiedAnnotation(id: string): DocumentAnnotation {
   };
 }
 
+function renumberedOverlapProjection(): AnnotationProjection {
+  const projection = new AnnotationProjection();
+  const first = { ...verifiedAnnotation('internal-a'), comment: 'First' };
+  const second = { ...verifiedAnnotation('internal-b'), comment: 'Second' };
+  projection.upsert({ ...viewportAnnotation('internal-a', 'selection-a'), comment: 'First' }, 1);
+  projection.bindCommittedSelection('selection-a', first, 1);
+  projection.upsert({ ...viewportAnnotation('internal-b', 'selection-b'), comment: 'Second' }, 2);
+  projection.bindCommittedSelection('selection-b', second, 2);
+  projection.reconcile(
+    [
+      { ...first, identity: { kind: 'stable', id: '29R' as AnnotationId } },
+      { ...second, identity: { kind: 'stable', id: '30R' as AnnotationId } },
+    ],
+    2,
+  );
+  projection.reconcile(
+    [
+      { ...first, identity: { kind: 'stable', id: '30R' as AnnotationId } },
+      { ...second, identity: { kind: 'stable', id: '31R' as AnnotationId } },
+    ],
+    3,
+  );
+  return projection;
+}
+
 describe('AnnotationProjection', () => {
   it('adds a provisional annotation immediately', () => {
     const projection = new AnnotationProjection();
@@ -337,6 +362,49 @@ describe('AnnotationProjection', () => {
     ]);
   });
 
+  it('records every writable mounted snapshot as a live runtime target', () => {
+    const projection = new AnnotationProjection();
+
+    projection.upsert(viewportAnnotation('pdfjs_internal_editor_0'));
+
+    expect(projection.snapshot()[0]).toMatchObject({
+      nativeId: 'pdfjs_internal_editor_0',
+      runtimeId: 'pdfjs_internal_editor_0',
+    });
+  });
+
+  it('keeps the verified PDF id canonical when its live runtime snapshot refreshes', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('pdfjs_internal_editor_0', 'selection-1'));
+    projection.bindCommittedSelection(
+      'selection-1',
+      verifiedAnnotation('pdfjs_internal_editor_0'),
+      1,
+    );
+    projection.reconcile([verifiedAnnotation('29R')], 1);
+
+    projection.upsert(viewportAnnotation('pdfjs_internal_editor_0'));
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        nativeId: '29R',
+        runtimeId: 'pdfjs_internal_editor_0',
+      },
+    ]);
+
+    projection.upsert({
+      ...viewportAnnotation('29R'),
+      runtimeId: '29R',
+    });
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        nativeId: '29R',
+        runtimeId: '29R',
+      },
+    ]);
+  });
+
   it('replays a live create made during extraction of an older revision', () => {
     const projection = new AnnotationProjection();
     projection.reconcile([], 1);
@@ -427,6 +495,58 @@ describe('AnnotationProjection', () => {
       nativeId: '29R',
     });
     expect(projection.snapshot()[0]).not.toHaveProperty('provisionalId');
+  });
+
+  it('keeps a causally bound selection row when the saved geometry is normalized', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('selection-token', 'selection-token'), 2);
+    const originalKey = projection.snapshot()[0]?.key;
+    projection.bindCommittedSelection(
+      'selection-token',
+      verifiedAnnotation('pdfjs_internal_editor_0'),
+      2,
+    );
+    const verified = {
+      ...verifiedAnnotation('29R'),
+      anchor: {
+        ...verifiedAnnotation('29R').anchor,
+        geometry: { kind: 'point' as const, point: { x: 12, y: 24 } },
+      },
+    };
+
+    projection.reconcile([verified], 2);
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        key: originalKey,
+        nativeId: '29R',
+        provisionalId: 'pdfjs_internal_editor_0',
+      },
+    ]);
+  });
+
+  it('does not apply a causal bind from a revision newer than the verified snapshot', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('selection-token', 'selection-token'), 3);
+    projection.bindCommittedSelection(
+      'selection-token',
+      verifiedAnnotation('pdfjs_internal_editor_0'),
+      3,
+    );
+    const verified = {
+      ...verifiedAnnotation('29R'),
+      anchor: {
+        ...verifiedAnnotation('29R').anchor,
+        geometry: { kind: 'point' as const, point: { x: 12, y: 24 } },
+      },
+    };
+
+    projection.reconcile([verified], 2);
+
+    expect(projection.snapshot()).toMatchObject([
+      { key: 'annotation-row-1', nativeId: '29R' },
+      { key: 'annotation-row-0', nativeId: 'pdfjs_internal_editor_0' },
+    ]);
   });
 
   it('binds a committed stable identity before a viewport snapshot drops the selection token', () => {
@@ -839,24 +959,335 @@ describe('AnnotationProjection', () => {
     ]);
   });
 
-  it('preserves ambiguous exact duplicate overlap multiplicity as independently addressable rows', () => {
+  it('causally binds coalesced exact duplicate creations without replacing their row keys', () => {
     const projection = new AnnotationProjection();
-    projection.upsert(viewportAnnotation('temporary-a', 'selection-a'));
-    projection.upsert(viewportAnnotation('temporary-b', 'selection-b'));
+    projection.upsert(viewportAnnotation('internal-a', 'selection-a'), 1);
+    projection.bindCommittedSelection('selection-a', verifiedAnnotation('internal-a'), 1);
+    projection.upsert(viewportAnnotation('internal-b', 'selection-b'), 2);
+    projection.bindCommittedSelection('selection-b', verifiedAnnotation('internal-b'), 2);
 
-    projection.reconcile([verifiedAnnotation('stable-a'), verifiedAnnotation('stable-b')]);
+    projection.reconcile([verifiedAnnotation('stable-a'), verifiedAnnotation('stable-b')], 2);
     const beforeRemoval = projection
       .snapshot()
-      .map((row) => ({ key: row.key, nativeId: row.nativeId }));
+      .map((row) => ({ key: row.key, nativeId: row.nativeId, runtimeId: row.runtimeId }));
     projection.remove('stable-a');
 
     expect({ beforeRemoval, afterRemoval: projection.snapshot().map((row) => row.key) }).toEqual({
       beforeRemoval: [
-        { key: 'annotation-row-2', nativeId: 'stable-a' },
-        { key: 'annotation-row-3', nativeId: 'stable-b' },
+        { key: 'annotation-row-0', nativeId: 'stable-a', runtimeId: 'internal-a' },
+        { key: 'annotation-row-1', nativeId: 'stable-b', runtimeId: 'internal-b' },
       ],
-      afterRemoval: ['annotation-row-3'],
+      afterRemoval: ['annotation-row-1'],
     });
+  });
+
+  it('does not swap overlapping row identities when verified PDF object ids are renumbered', () => {
+    const projection = new AnnotationProjection();
+    const first = { ...verifiedAnnotation('internal-a'), comment: 'First' };
+    const second = { ...verifiedAnnotation('internal-b'), comment: 'Second' };
+    projection.upsert({ ...viewportAnnotation('internal-a', 'selection-a'), comment: 'First' }, 1);
+    projection.bindCommittedSelection('selection-a', first, 1);
+    projection.upsert({ ...viewportAnnotation('internal-b', 'selection-b'), comment: 'Second' }, 2);
+    projection.bindCommittedSelection('selection-b', second, 2);
+    projection.reconcile(
+      [
+        { ...first, identity: { kind: 'stable', id: '29R' as AnnotationId } },
+        { ...second, identity: { kind: 'stable', id: '30R' as AnnotationId } },
+      ],
+      2,
+    );
+
+    projection.reconcile(
+      [
+        { ...first, identity: { kind: 'stable', id: '30R' as AnnotationId } },
+        { ...second, identity: { kind: 'stable', id: '31R' as AnnotationId } },
+      ],
+      3,
+    );
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+        runtimeId: row.runtimeId,
+      })),
+    ).toEqual([
+      {
+        comment: 'First',
+        key: 'annotation-row-0',
+        nativeId: '30R',
+        runtimeId: 'internal-a',
+      },
+      {
+        comment: 'Second',
+        key: 'annotation-row-1',
+        nativeId: '31R',
+        runtimeId: 'internal-b',
+      },
+    ]);
+  });
+
+  it('preserves causal order when identical overlapping PDF objects are renumbered', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('internal-a', 'selection-a'), 1);
+    projection.bindCommittedSelection('selection-a', verifiedAnnotation('internal-a'), 1);
+    projection.upsert(viewportAnnotation('internal-b', 'selection-b'), 2);
+    projection.bindCommittedSelection('selection-b', verifiedAnnotation('internal-b'), 2);
+    projection.reconcile([verifiedAnnotation('29R'), verifiedAnnotation('30R')], 2);
+
+    projection.reconcile([verifiedAnnotation('30R'), verifiedAnnotation('31R')], 3);
+
+    expect(
+      projection.snapshot().map((row) => ({
+        key: row.key,
+        nativeId: row.nativeId,
+        runtimeId: row.runtimeId,
+      })),
+    ).toEqual([
+      { key: 'annotation-row-0', nativeId: '30R', runtimeId: 'internal-a' },
+      { key: 'annotation-row-1', nativeId: '31R', runtimeId: 'internal-b' },
+    ]);
+  });
+
+  it('keeps a canonical row distinct from a neighbours retained historical alias', () => {
+    const projection = renumberedOverlapProjection();
+    const before = projection.snapshot();
+
+    projection.upsert({
+      ...viewportAnnotation('30R'),
+      comment: 'First live',
+      runtimeId: 'internal-a',
+    });
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+        runtimeId: row.runtimeId,
+      })),
+    ).toEqual([
+      {
+        comment: 'First live',
+        key: before[0]?.key,
+        nativeId: '30R',
+        runtimeId: 'internal-a',
+      },
+      {
+        comment: 'Second',
+        key: before[1]?.key,
+        nativeId: '31R',
+        runtimeId: 'internal-b',
+      },
+    ]);
+  });
+
+  it('removes only the canonical row when another row retains that id as history', () => {
+    const projection = renumberedOverlapProjection();
+
+    expect(projection.remove('30R')).toBe(true);
+    expect(
+      projection
+        .snapshot()
+        .map((row) => ({ comment: row.annotation.comment, nativeId: row.nativeId })),
+    ).toEqual([{ comment: 'Second', nativeId: '31R' }]);
+  });
+
+  it('edits only the canonical row when another row retains that id as history', () => {
+    const projection = renumberedOverlapProjection();
+    const canonical = projection.snapshot()[0]?.annotation;
+    if (canonical === undefined) throw new Error('Expected canonical overlap row.');
+
+    expect(
+      projection.applyEditorUpdate({ annotations: [canonical], comment: 'First edited' }, 4),
+    ).toBe(true);
+    expect(
+      projection
+        .snapshot()
+        .map((row) => ({ comment: row.annotation.comment, nativeId: row.nativeId })),
+    ).toEqual([
+      { comment: 'First edited', nativeId: '30R' },
+      { comment: 'Second', nativeId: '31R' },
+    ]);
+  });
+
+  it('keeps canonical overlap identities when row order reverses under an optimistic overlay', () => {
+    const projection = renumberedOverlapProjection();
+    const [firstRow, secondRow] = projection.snapshot();
+    if (firstRow === undefined || secondRow === undefined)
+      throw new Error('Expected two overlap rows.');
+    projection.reconcile(
+      [
+        { ...secondRow.annotation, comment: 'Second' },
+        { ...firstRow.annotation, comment: 'First' },
+      ],
+      4,
+    );
+    const first = projection.snapshot().find((row) => row.key === firstRow.key)?.annotation;
+    if (first === undefined) throw new Error('Expected first canonical row after reorder.');
+    projection.applyEditorUpdate({ annotations: [first], comment: 'Optimistic A' }, 6);
+
+    projection.reconcile(
+      [
+        { ...firstRow.annotation, comment: 'First' },
+        { ...secondRow.annotation, comment: 'Second' },
+      ],
+      5,
+    );
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+        runtimeId: row.runtimeId,
+      })),
+    ).toEqual([
+      {
+        comment: 'Optimistic A',
+        key: firstRow.key,
+        nativeId: '30R',
+        runtimeId: 'internal-a',
+      },
+      {
+        comment: 'Second',
+        key: secondRow.key,
+        nativeId: '31R',
+        runtimeId: 'internal-b',
+      },
+    ]);
+  });
+
+  it('reserves every canonical overlap identity before replaying a newer deletion', () => {
+    const projection = renumberedOverlapProjection();
+    const [firstRow, secondRow] = projection.snapshot();
+    if (firstRow === undefined || secondRow === undefined)
+      throw new Error('Expected two renumbered overlap rows.');
+
+    projection.remove(firstRow.nativeId, 'selection-a', 5);
+    projection.reconcile(
+      [
+        { ...firstRow.annotation, comment: 'First' },
+        { ...secondRow.annotation, comment: 'Second' },
+      ],
+      4,
+    );
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+        runtimeId: row.runtimeId,
+      })),
+    ).toEqual([
+      {
+        comment: 'Second',
+        key: secondRow.key,
+        nativeId: '31R',
+        runtimeId: 'internal-b',
+      },
+    ]);
+  });
+
+  it('keeps exact stable ids when an edited overlap adopts a neighbours old content', () => {
+    const projection = new AnnotationProjection();
+    const first = { ...verifiedAnnotation('29R'), comment: 'First' };
+    const second = { ...verifiedAnnotation('30R'), comment: 'Second' };
+    projection.reconcile([first, second], 1);
+
+    projection.reconcile(
+      [
+        { ...first, comment: 'Second' },
+        { ...second, comment: 'Third' },
+      ],
+      2,
+    );
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+      })),
+    ).toEqual([
+      { comment: 'Second', key: 'annotation-row-0', nativeId: '29R' },
+      { comment: 'Third', key: 'annotation-row-1', nativeId: '30R' },
+    ]);
+  });
+
+  it('does not swap optimistic overlap overlays when an older verified scan arrives', () => {
+    const projection = new AnnotationProjection();
+    const first = { ...verifiedAnnotation('29R'), comment: 'First' };
+    const second = { ...verifiedAnnotation('30R'), comment: 'Second' };
+    projection.reconcile([first, second], 1);
+    projection.applyEditorUpdate({ annotations: [first], comment: 'Second' }, 3);
+    projection.applyEditorUpdate({ annotations: [second], comment: 'Third' }, 3);
+
+    projection.reconcile([first, second], 2);
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+      })),
+    ).toEqual([
+      { comment: 'Second', key: 'annotation-row-0', nativeId: '29R' },
+      { comment: 'Third', key: 'annotation-row-1', nativeId: '30R' },
+    ]);
+  });
+
+  it('does not mistake swapped optimistic overlap comments for object-id renumbering', () => {
+    const projection = new AnnotationProjection();
+    const first = { ...verifiedAnnotation('29R'), comment: 'First' };
+    const second = { ...verifiedAnnotation('30R'), comment: 'Second' };
+    projection.reconcile([first, second], 1);
+    projection.applyEditorUpdate({ annotations: [first], comment: 'Second' }, 3);
+    projection.applyEditorUpdate({ annotations: [second], comment: 'First' }, 3);
+
+    projection.reconcile([first, second], 2);
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        key: row.key,
+        nativeId: row.nativeId,
+      })),
+    ).toEqual([
+      { comment: 'Second', key: 'annotation-row-0', nativeId: '29R' },
+      { comment: 'First', key: 'annotation-row-1', nativeId: '30R' },
+    ]);
+  });
+
+  it('causally binds a normalized toolbar creation without a selection token', () => {
+    const projection = new AnnotationProjection();
+    const snapshot = {
+      ...viewportAnnotation('internal-freetext'),
+      type: 'free-text' as const,
+    };
+    const verified = {
+      ...verifiedAnnotation('29R'),
+      type: 'free-text' as const,
+      anchor: {
+        kind: 'fixed-page' as const,
+        pageIndex: 1,
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: { kind: 'point' as const, point: { x: 10, y: 20 } },
+      },
+    };
+
+    projection.upsert(snapshot, 1);
+    projection.reconcile([verified], 1);
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        key: 'annotation-row-0',
+        nativeId: '29R',
+        runtimeId: 'internal-freetext',
+      },
+    ]);
   });
 
   it('coalesces native and provisional aliases without collapsing geometric duplicates', () => {
@@ -882,8 +1313,9 @@ describe('AnnotationProjection', () => {
     expect(projection.snapshot()).toHaveLength(1);
     expect(projection.snapshot()[0]).toMatchObject({
       key: initial?.key,
-      nativeId: 'pdfjs_internal_editor_0',
+      nativeId: 'stable-id',
       provisionalId: 'pdfjs_internal_editor_0',
+      runtimeId: 'pdfjs_internal_editor_0',
       annotation: { identity: { id: 'stable-id', kind: 'stable' } },
     });
     expect(projection.remove('pdfjs_internal_editor_0')).toBe(true);
@@ -897,6 +1329,25 @@ describe('AnnotationProjection', () => {
 
     expect(projection.remove('pdfjs_internal_editor_0')).toBe(true);
     expect(projection.snapshot()).toHaveLength(0);
+  });
+
+  it('ignores a stale mounted-editor removal after that row receives a new runtime id', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('internal-a', 'selection-a'));
+    projection.reconcile([verifiedAnnotation('29R')]);
+    const key = projection.snapshot()[0]?.key;
+    projection.upsert({ ...viewportAnnotation('29R'), runtimeId: 'remounted-a' });
+
+    expect(projection.remove('internal-a', 'selection-a')).toBe(false);
+    projection.upsert({ ...viewportAnnotation('29R'), runtimeId: 'remounted-a' });
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        key,
+        nativeId: '29R',
+        runtimeId: 'remounted-a',
+      },
+    ]);
   });
 
   it('keeps every converted selection rectangle in provisional annotation geometry', () => {

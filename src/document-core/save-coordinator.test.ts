@@ -171,6 +171,47 @@ describe('DocumentSaveCoordinator', () => {
     expect(reloadB.mock.calls[0]).toHaveLength(3);
   });
 
+  it('rechecks the caller preparation boundary after waiting for a peer save', async () => {
+    const firstWrite = deferred<void>();
+    const write = vi.fn(async () => {
+      if (write.mock.calls.length === 1) await firstWrite.promise;
+      return verified();
+    });
+    const coordinator = new DocumentSaveCoordinator(
+      { write },
+      vi.fn(async () => undefined),
+    );
+    const first = source(1);
+    const second = source(2);
+    const beforePrepare = vi.fn();
+    const saveA = coordinator.save(
+      { path: 'Books/Guide.pdf', baseToken: tokenA, revision: 1, source: first },
+      new AbortController().signal,
+    );
+    const saveB = coordinator.save(
+      {
+        path: 'Books/Guide.pdf',
+        baseToken: tokenA,
+        revision: 2,
+        source: second,
+        beforePrepare,
+      },
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(write).toHaveBeenCalledOnce();
+    });
+    expect(beforePrepare).not.toHaveBeenCalled();
+
+    firstWrite.resolve();
+    await vi.waitFor(() => {
+      expect(beforePrepare).toHaveBeenCalledOnce();
+    });
+    await Promise.all([saveA, saveB]);
+
+    expect(second.prepare).toHaveBeenCalledOnce();
+  });
+
   it('uses one prepared native snapshot for a retry after a vault failure', async () => {
     const native = source(1);
     const write = vi

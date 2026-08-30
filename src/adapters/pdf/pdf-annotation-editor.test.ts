@@ -240,6 +240,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
       editorAddBaseline = annotationStorage.addEditor.mock.calls.length;
       return new Set<string>();
     }),
+    nativeEditorUidForAnnotation: vi.fn((_id: string) => null as string | null),
     normalizeCreatedAnnotation: vi.fn<(_uiManager: unknown) => DocumentAnnotation | null>(() =>
       annotationStorage.addEditor.mock.calls.length > editorAddBaseline
         ? createdAnnotation()
@@ -1131,8 +1132,14 @@ describe('PdfAnnotationEditor lifecycle', () => {
   it('materializes a verified persisted annotation before publishing editable focus', async () => {
     const current = fixture();
     const annotation = createdAnnotation('', { id: 'persisted-highlight' });
-    current.editor.setAnnotationProjection([{ annotation, stableId: 'persisted-highlight' }]);
-    const uiManager = manager(selectedEditor('persisted-highlight', 9));
+    current.editor.setAnnotationProjection([
+      {
+        annotation,
+        stableId: 'persisted-highlight',
+        ...({ editorUid: 'pdfjs_internal_editor_0' } as Record<string, string>),
+      },
+    ]);
+    const uiManager = manager(selectedEditor('pdfjs_internal_editor_0', 9));
     current.eventBus.dispatch('annotationeditoruimanager', {
       source: current.viewer,
       uiManager,
@@ -1143,13 +1150,94 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ).resolves.toBe('editable');
 
     expect(current.modeRequests).toEqual([
-      { editComment: false, editId: 'persisted-highlight', mode: 9 },
+      { editComment: false, editId: 'pdfjs_internal_editor_0', mode: 9 },
     ]);
     expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
       'persisted-highlight',
       expect.any(AbortSignal),
       annotation,
-      { editableOnly: true, preserveSelection: true },
+      {
+        editableOnly: true,
+        editorUid: 'pdfjs_internal_editor_0',
+        preserveSelection: true,
+      },
+    );
+  });
+
+  it('canonicalizes a live runtime activation through its projected stable target', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: '29R' });
+    current.editor.setAnnotationProjection([
+      {
+        aliases: ['selection-1'],
+        annotation,
+        editorUid: 'pdfjs_internal_editor_0',
+        stableId: '29R',
+      },
+    ]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('pdfjs_internal_editor_0', 9)),
+    });
+
+    await expect(
+      current.editor.focusAnnotation('pdfjs_internal_editor_0', { kind: 'root-click' }),
+    ).resolves.toBe('editable');
+
+    expect(current.modeRequests).toEqual([
+      { editComment: false, editId: 'pdfjs_internal_editor_0', mode: 9 },
+    ]);
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      '29R',
+      expect.any(AbortSignal),
+      annotation,
+      {
+        editableOnly: true,
+        editorUid: 'pdfjs_internal_editor_0',
+        preserveSelection: true,
+      },
+    );
+  });
+
+  it('never lets a historical alias override another projected canonical id', async () => {
+    const current = fixture();
+    const first = createdAnnotation('First', { id: '30R' });
+    const second = createdAnnotation('Second', { id: '31R' });
+    current.editor.setAnnotationProjection([
+      {
+        aliases: ['29R'],
+        annotation: first,
+        editorUid: 'pdfjs_internal_editor_0',
+        stableId: '30R',
+      },
+      {
+        aliases: ['30R'],
+        annotation: second,
+        editorUid: 'pdfjs_internal_editor_1',
+        stableId: '31R',
+      },
+    ]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('pdfjs_internal_editor_0', 9)),
+    });
+
+    await expect(current.editor.focusAnnotation('30R', { kind: 'sidebar' })).resolves.toBe(
+      'editable',
+    );
+
+    expect(current.modeRequests).toEqual([
+      { editComment: false, editId: 'pdfjs_internal_editor_0', mode: 9 },
+    ]);
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      '30R',
+      expect.any(AbortSignal),
+      first,
+      {
+        editableOnly: true,
+        editorUid: 'pdfjs_internal_editor_0',
+        preserveSelection: true,
+      },
     );
   });
 
@@ -3987,7 +4075,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(modeRequests).toEqual([
       { editComment: false, editId: '363R', mode: 9 },
       { mode: 0 },
-      { editComment: false, editId: '363R', mode: 9 },
+      { editComment: false, editId: 'pdfjs_internal_editor_4', mode: 9 },
     ]);
   });
 
@@ -4020,6 +4108,43 @@ describe('PdfAnnotationEditor lifecycle', () => {
       { editComment: false, editId: 'highlight-1', mode: 9 },
       { mode: 0 },
     ]);
+  });
+
+  it('releases the save queue when contextual restore cleanup throws', async () => {
+    const { editor, eventBus, saveDocument, viewer } = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    saveDocument.mockReturnValue(pending.promise);
+    const selected = selectedEditor('restore-cleanup', 9);
+    const uiManager = manager(selected);
+    let userSelectCalls = 0;
+    const cleanupFailure = new Error('contextual cleanup failed');
+    uiManager.disableUserSelect.mockImplementation(() => {
+      userSelectCalls += 1;
+      if (userSelectCalls >= 3) throw cleanupFailure;
+    });
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({
+      editComment: false,
+      id: 'restore-cleanup',
+      kind: 'highlight',
+    });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const saving = editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(saveDocument).toHaveBeenCalledOnce();
+    });
+    const queuedUndo = editor.undo();
+    pending.resolve(new Uint8Array([37, 80, 68, 70]));
+
+    await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70]));
+    await expect(queuedUndo).resolves.toBeUndefined();
+    expect(uiManager.undo).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledOnce();
   });
 
   it('restores an in-flight contextual selection when an exact multi delete is rejected', async () => {
@@ -4745,6 +4870,216 @@ describe('PdfAnnotationEditor save boundary', () => {
 
     await Promise.all([saving, ...mutations]);
     expect(calls).toEqual(['parameter', 'undo', 'redo', 'delete']);
+  });
+
+  it('queues annotation activation behind byte capture so later native input becomes dirty', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const projected = createdAnnotation('', { id: 'queued-freetext', type: 'free-text' });
+    const uiManager = manager(selectedEditor('queued-freetext', 3));
+    const dirty = vi.fn();
+    fixtureValue.editor.onDirty(dirty);
+    fixtureValue.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'queued-freetext' },
+    ]);
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    const focusing = fixtureValue.editor.focusAnnotation('queued-freetext', {
+      kind: 'root-click',
+    });
+    await Promise.resolve();
+    expect(fixtureValue.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+    await expect(saving).resolves.toHaveLength(3);
+    await expect(focusing).resolves.toBe('editable');
+    fixtureValue.annotationStorage.onSetModified?.();
+
+    expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it('cancels and settles an activation already in flight before byte capture starts', async () => {
+    const fixtureValue = fixture();
+    const resolver = deferred<DocumentAnnotation | null>();
+    fixtureValue.editor.setAnnotationResolver(async () => resolver.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    const focusing = fixtureValue.editor.focusAnnotation('slow-activation', {
+      kind: 'root-click',
+    });
+    await Promise.resolve();
+
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+
+    await expect(focusing).resolves.toBe('cancelled');
+    await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
+    expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    resolver.resolve(null);
+  });
+
+  it('queues a selection commit behind byte capture and marks the created highlight dirty', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const uiManager = manager();
+    const dirty = vi.fn();
+    uiManager.highlightSelection.mockImplementation(() => {
+      fixtureValue.annotationStorage.addEditor(9);
+    });
+    fixtureValue.editor.onDirty(dirty);
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    const committing = fixtureValue.editor.commitSelection('current', {
+      kind: 'highlight',
+      color: '#ffd400',
+    });
+    await Promise.resolve();
+    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+    await expect(saving).resolves.toHaveLength(3);
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'created-native', kind: 'stable' },
+    });
+
+    expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it('cancels queued activation and selection work when the view suspends during a save', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const projected = createdAnnotation('', { id: 'closing-freetext', type: 'free-text' });
+    const uiManager = manager(selectedEditor('closing-freetext', 3));
+    fixtureValue.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'closing-freetext' },
+    ]);
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    const focusing = fixtureValue.editor.focusAnnotation('closing-freetext', {
+      kind: 'root-click',
+    });
+    const committing = fixtureValue.editor.commitSelection('current', {
+      kind: 'highlight',
+      color: '#ffd400',
+    });
+    await fixtureValue.editor.suspendInteractions();
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await expect(saving).resolves.toHaveLength(3);
+    await expect(focusing).resolves.toBe('cancelled');
+    await expect(committing).resolves.toBe('dismissed');
+    expect(fixtureValue.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+  });
+
+  it('rolls back interaction suspension when native neutralization fails', async () => {
+    const fixtureValue = fixture();
+    const failure = new Error('neutralization failed');
+    vi.spyOn(fixtureValue.editor, 'abortInteraction').mockRejectedValue(failure);
+
+    await expect(fixtureValue.editor.suspendInteractions()).rejects.toBe(failure);
+
+    expect(Reflect.get(fixtureValue.editor, 'interactionsSuspended') as boolean).toBe(false);
+  });
+
+  it('rejects toolbar and contextual edit intents after interaction suspension', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    await fixtureValue.editor.suspendInteractions();
+    await fixtureValue.editor.setTool('highlight');
+    await fixtureValue.editor.editAnnotation({
+      editComment: false,
+      id: 'closing-highlight',
+      kind: 'highlight',
+    });
+
+    expect(fixtureValue.modeRequests).toEqual([]);
+    expect(uiManager.updateParams).not.toHaveBeenCalled();
+  });
+
+  it('cancels a save-queued activation promptly when its external signal aborts', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const abort = new AbortController();
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: manager(),
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    const focusing = fixtureValue.editor.focusAnnotation('queued-abort', {
+      kind: 'sidebar',
+      signal: abort.signal,
+    });
+    abort.abort();
+
+    await expect(focusing).resolves.toBe('cancelled');
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+    await expect(saving).resolves.toHaveLength(3);
+  });
+
+  it('queues direct contextual editing behind byte capture', async () => {
+    const fixtureValue = fixture();
+    const pending = deferred<Uint8Array<ArrayBuffer>>();
+    const uiManager = manager(selectedEditor('queued-direct-edit', 9));
+    fixtureValue.saveDocument.mockReturnValue(pending.promise);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+    const saving = fixtureValue.editor.save(new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+    });
+
+    const editing = fixtureValue.editor.editAnnotation({
+      editComment: false,
+      id: 'queued-direct-edit',
+      kind: 'highlight',
+    });
+    await Promise.resolve();
+    expect(fixtureValue.modeRequests).toEqual([]);
+    pending.resolve(new Uint8Array(new ArrayBuffer(3)));
+
+    await expect(saving).resolves.toHaveLength(3);
+    await expect(editing).resolves.toBeUndefined();
+    expect(fixtureValue.modeRequests).toEqual([
+      { editComment: false, editId: 'queued-direct-edit', mode: 9 },
+    ]);
   });
 
   it('rejects a deferred mutation instead of replaying it into a replacement manager', async () => {

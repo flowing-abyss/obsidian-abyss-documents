@@ -627,6 +627,7 @@ describe('PdfDocumentViewport', () => {
         operation: 'upsert',
         annotation: {
           nativeId: 'native-created',
+          runtimeId: 'internal-created',
           pageIndex: 0,
           type: 'highlight',
           rects: [{ x: 5, y: 10, width: 20, height: 10 }],
@@ -686,7 +687,12 @@ describe('PdfDocumentViewport', () => {
       type: 'annotation-change',
       change: {
         operation: 'upsert',
-        annotation: { color: '#ffd400', nativeId: '365R', writable: true },
+        annotation: {
+          color: '#ffd400',
+          nativeId: '365R',
+          runtimeId: 'internal-forced-colors',
+          writable: true,
+        },
       },
     });
   });
@@ -1455,13 +1461,15 @@ describe('PdfDocumentViewport', () => {
     },
   );
 
-  it('leaves persisted FreeText contenteditable clicks entirely to PDF.js', async () => {
+  it('leaves an active persisted FreeText editor entirely to PDF.js', async () => {
     const fixture = await mountedViewport(3);
+    fixture.host.dataset['abyssDocument'] = '';
     document.body.append(fixture.host);
     const eventBus = fixture.runtime.state.eventBus;
     const viewer = fixture.runtime.state.viewer;
     const interaction = fixture.viewport.annotationInteraction;
-    if (eventBus === undefined || viewer === undefined || interaction === null)
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || interaction === null || editor === null)
       throw new Error('Expected mounted annotation interaction.');
     const native = nativeHighlight('persisted-freetext-editor');
     Object.assign(native, { editorType: 'freetext', mode: 3 });
@@ -1475,7 +1483,11 @@ describe('PdfDocumentViewport', () => {
     nativeNode.id = 'persisted-freetext-editor';
     const editable = nativeNode.createDiv({ cls: 'internal' });
     editable.tabIndex = 0;
+    const popover = fixture.host.createDiv();
+    popover.dataset['annotationEditorPopover'] = '';
     const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const dirty = vi.fn();
+    editor.onDirty(dirty);
     const nativeClick = vi.fn(() => {
       editable.focus();
     });
@@ -1488,8 +1500,36 @@ describe('PdfDocumentViewport', () => {
     expect(nativeClick).toHaveBeenCalledTimes(2);
     expect(document.activeElement).toBe(editable);
     expect(focusAnnotation).not.toHaveBeenCalled();
+    expect(dirty).not.toHaveBeenCalled();
     expect(viewer.annotationEditorRequests).toEqual([]);
     fixture.host.remove();
+  });
+
+  it('opens persisted FreeText from PDF.js neutral mode', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const interaction = fixture.viewport.annotationInteraction;
+    if (eventBus === undefined || viewer === undefined || interaction === null)
+      throw new Error('Expected mounted annotation interaction.');
+    const native = nativeHighlight('neutral-freetext-editor');
+    Object.assign(native, { editorType: 'freetext', mode: 3 });
+    const manager = annotationManager(native, [['neutral-freetext-editor', native]]);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const layer = root.createDiv({ cls: 'annotationEditorLayer disabled nonEditing' });
+    const nativeNode = layer.createDiv({ cls: 'freeTextEditor selectedEditor' });
+    nativeNode.id = 'neutral-freetext-editor';
+    const control = nativeNode.createDiv({ cls: 'internal' });
+    control.setAttribute('contenteditable', 'false');
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+
+    control.click();
+
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('neutral-freetext-editor', {
+      kind: 'root-click',
+    });
   });
 
   it('still activates an imported FreeText contenteditable surface', async () => {
@@ -1651,49 +1691,6 @@ describe('PdfDocumentViewport', () => {
 
     expect(contextmenu.defaultPrevented).toBe(true);
     expect(viewer.annotationEditorRequests).toEqual([]);
-  });
-
-  it('adds an accessible hit surface for persisted FreeText hidden during neutral mode teardown', async () => {
-    const fixture = await mountedViewport(3);
-    const eventBus = fixture.runtime.state.eventBus;
-    const viewer = fixture.runtime.state.viewer;
-    const interaction = fixture.viewport.annotationInteraction;
-    if (eventBus === undefined || viewer === undefined || interaction === null)
-      throw new Error('Expected mounted PDF annotation interaction.');
-    eventBus.dispatch('annotationeditoruimanager', {
-      source: viewer,
-      uiManager: annotationManager(),
-    });
-    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
-    const page = root?.querySelector<HTMLElement>('[data-page-number="1"]') ?? null;
-    if (page === null) throw new Error('Expected the first PDF page.');
-    const imported = page
-      .createDiv({ cls: 'annotationLayer' })
-      .createEl('section', { cls: 'freeTextAnnotation' });
-    imported.dataset['annotationId'] = 'hidden-freetext';
-    imported.hidden = true;
-    imported.setCssProps({ height: '12%', left: '20%', top: '30%', width: '25%' });
-    page.createDiv({ cls: 'annotationEditorLayer disabled nonEditing' });
-    const focus = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
-
-    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 1 });
-
-    const surface = page.querySelector<HTMLButtonElement>(
-      '[data-abyss-annotation-hit-surface][data-annotation-id="hidden-freetext"]',
-    );
-    expect(surface).not.toBeNull();
-    expect(surface).toMatchObject({
-      ariaLabel: 'Edit free text annotation',
-      disabled: false,
-    });
-    surface?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
-    surface?.click();
-    await Promise.resolve();
-
-    expect(focus).toHaveBeenCalledOnce();
-    expect(focus).toHaveBeenCalledWith('hidden-freetext', {
-      kind: 'root-click',
-    });
   });
 
   it('dismisses stale tokens without a failure Notice', async () => {

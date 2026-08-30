@@ -25,6 +25,7 @@ export interface AnnotationInteractionHost {
   setQuickHighlightState(state: QuickHighlightState): void;
   openAnnotationEditor(request: AnnotationEditorPopoverRequest): boolean;
   closeAnnotationEditor(): boolean;
+  flushAnnotationEditor(): Promise<boolean>;
 }
 
 export type AnnotationInteractionInvalidation = 'zoom' | 'layout' | 'navigation' | 'session';
@@ -57,10 +58,12 @@ export class AnnotationInteractionController {
   private readonly cleanups: Array<() => void> = [];
   private activeAbort: AbortController | null = null;
   private activeColor: string;
+  private activeEditorKind: AnnotationEditorTarget['kind'] | null = null;
   private contextualColorMutationDepth = 0;
   private activeSelectionRevision = 0;
   private ownedSelectionRevision: number | null = null;
   private destroyed = false;
+  private nativeNeutralization: Promise<void> = Promise.resolve();
   private mode: PdfAnnotationLogicalMode = 'neutral';
   private palette: readonly AnnotationPaletteEntry[];
   private quickRequestRevision = 0;
@@ -98,6 +101,10 @@ export class AnnotationInteractionController {
     return this.mode === 'quick-highlight';
   }
 
+  waitForNativeEditorNeutralization(): Promise<void> {
+    return this.nativeNeutralization;
+  }
+
   requestTool(tool: PdfAnnotationTool, color?: string): boolean {
     if (this.destroyed || (tool !== 'highlight' && tool !== 'select')) return false;
     if (!this.closeActiveSelection()) return false;
@@ -112,8 +119,11 @@ export class AnnotationInteractionController {
     stableId: string,
     source: PdfAnnotationActivationSource,
   ): Promise<PdfAnnotationActivationResult> {
-    if (this.destroyed || source.signal?.aborted === true) return 'cancelled';
-    if (!this.closeActiveSelection()) return 'cancelled';
+    if (activationUnavailable(this.destroyed, source)) return 'cancelled';
+    if (this.activeEditorKind === 'annotation') {
+      if (!(await this.host.flushAnnotationEditor())) return 'cancelled';
+      if (activationUnavailable(this.destroyed, source)) return 'cancelled';
+    } else if (!this.closeActiveSelection()) return 'cancelled';
     this.abortCommit('The PDF annotation selection was superseded by annotation activation.');
     return this.interaction.focusAnnotation(stableId, source);
   }
@@ -202,9 +212,12 @@ export class AnnotationInteractionController {
       color: this.activeColor,
       onClose: () => {
         if (revision !== this.activeSelectionRevision) return;
+        const materialized = this.activeEditorKind === 'annotation';
+        this.activeEditorKind = null;
         this.ownedSelectionRevision = null;
         this.activeSelectionRevision += 1;
-        this.abortCommit('The PDF annotation selection editor was closed.');
+        if (materialized) this.neutralizeNativeEditor();
+        else this.abortCommit('The PDF annotation selection editor was closed.');
       },
       onCreate: (creation) => this.createSelection(revision, creation),
       onDelete: (annotations) => this.deleteAnnotations(annotations),
@@ -216,6 +229,7 @@ export class AnnotationInteractionController {
       target: { kind: 'selection', selection },
     });
     if (opened) {
+      this.activeEditorKind = 'selection';
       this.activeSelectionRevision = revision;
       this.ownedSelectionRevision = revision;
     }
@@ -235,8 +249,10 @@ export class AnnotationInteractionController {
       color: first.color ?? undefined,
       onClose: () => {
         if (revision !== this.activeSelectionRevision) return;
+        this.activeEditorKind = null;
         this.ownedSelectionRevision = null;
         this.activeSelectionRevision += 1;
+        this.neutralizeNativeEditor();
       },
       onCreate: () => 'dismissed' as const,
       onDelete: (annotations) => this.deleteAnnotations(annotations),
@@ -248,6 +264,7 @@ export class AnnotationInteractionController {
       target,
     });
     if (opened) {
+      this.activeEditorKind = target.kind;
       this.activeSelectionRevision = revision;
       this.ownedSelectionRevision = revision;
     }
@@ -311,6 +328,7 @@ export class AnnotationInteractionController {
       return;
     }
     if (revision !== this.activeSelectionRevision) return;
+    this.activeEditorKind = 'annotation';
     this.options.onSelectionCreateCommit?.(creation, result);
     this.ownedSelectionRevision = revision;
   }
@@ -381,6 +399,7 @@ export class AnnotationInteractionController {
   private closeActiveSelection(): boolean {
     const revision = this.activeSelectionRevision;
     if (!this.host.closeAnnotationEditor()) return false;
+    this.activeEditorKind = null;
     this.ownedSelectionRevision = null;
     if (this.activeSelectionRevision === revision) this.activeSelectionRevision += 1;
     return true;
@@ -390,6 +409,16 @@ export class AnnotationInteractionController {
     const abort = this.activeAbort;
     this.activeAbort = null;
     abort?.abort(new DOMException(message, 'AbortError'));
+  }
+
+  private neutralizeNativeEditor(): void {
+    const neutralize = this.interaction.abortInteraction?.('The PDF annotation editor was closed.');
+    if (neutralize === undefined) return;
+    this.nativeNeutralization = neutralize.catch((cause: unknown) => {
+      console.error('[abyss-documents] Unexpected annotation interaction controller failure', {
+        cause,
+      });
+    });
   }
 
   private publishQuickHighlightState(): void {
@@ -429,6 +458,14 @@ function isAbortFailure(cause: unknown): boolean {
   return (
     typeof cause === 'object' && cause !== null && 'name' in cause && cause.name === 'AbortError'
   );
+}
+
+function activationSourceAborted(source: PdfAnnotationActivationSource): boolean {
+  return source.signal?.aborted === true;
+}
+
+function activationUnavailable(destroyed: boolean, source: PdfAnnotationActivationSource): boolean {
+  return destroyed || activationSourceAborted(source);
 }
 
 function annotationToolForType(

@@ -42,6 +42,38 @@ describe('AutosaveScheduler', () => {
     expect(save.mock.calls.map(([generation]) => generation)).toEqual([1, 3]);
   });
 
+  it('defers automatic serialization while an editor is open and drains immediately when editing ends', async () => {
+    let editing = true;
+    const save = vi.fn(async (_generation: number, _reason: string) => undefined);
+    const scheduler = new AutosaveScheduler(save, {
+      shouldDeferAutomaticSave: () => editing,
+    });
+    scheduler.markDirty(1);
+
+    await vi.advanceTimersByTimeAsync(5_250);
+    expect(save).not.toHaveBeenCalled();
+    expect(scheduler.lifecycleSnapshot()).toMatchObject({
+      newestGeneration: 1,
+      savedGeneration: 0,
+    });
+
+    editing = false;
+    await scheduler.resumeAutomaticSave();
+    expect(save).toHaveBeenCalledExactlyOnceWith(1, 'autosave');
+  });
+
+  it('lets an explicit flush bypass an open editor deferral', async () => {
+    const save = vi.fn(async (_generation: number, _reason: string) => undefined);
+    const scheduler = new AutosaveScheduler(save, {
+      shouldDeferAutomaticSave: () => true,
+    });
+    scheduler.markDirty(2);
+
+    await scheduler.flush();
+
+    expect(save).toHaveBeenCalledExactlyOnceWith(2, 'manual');
+  });
+
   it('pauses after failure, retains the generation for explicit Retry, and cancels teardown', async () => {
     const failure = new Error('disk full');
     const save = vi
@@ -89,6 +121,28 @@ describe('AutosaveScheduler', () => {
     gate.resolve();
     await Promise.all([first, second]);
     expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('releases a covered external pause after in-flight success and drains the newer generation', async () => {
+    const gate = deferred<void>();
+    const save = vi.fn(async (generation: number) => {
+      if (generation === 1) await gate.promise;
+    });
+    const scheduler = new AutosaveScheduler(save);
+    scheduler.markDirty(1);
+    const saving = scheduler.flush();
+    scheduler.pauseForFailure(new Error('peer save'), 1);
+    scheduler.markDirty(2);
+
+    gate.resolve();
+    await saving;
+
+    expect(save.mock.calls.map(([generation]) => generation)).toEqual([1, 2]);
+    expect(scheduler.lifecycleSnapshot()).toMatchObject({
+      newestGeneration: 2,
+      paused: false,
+      savedGeneration: 2,
+    });
   });
 
   it('does not publish an actionable failure after its owner is destroyed in flight', async () => {

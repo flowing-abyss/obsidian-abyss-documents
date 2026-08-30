@@ -40,6 +40,7 @@ export class ReaderShell implements AnnotationInteractionHost {
   private annotationToolbarValue: AnnotationToolbar | null = null;
 
   private readonly cleanups: Array<() => void> = [];
+  private readonly annotationEditorCloseListeners = new Set<() => void>();
   private readonly annotationEditor: AnnotationEditorPopover;
   private readonly announcer: PoliteAnnouncer;
   private readonly body: HTMLElement;
@@ -103,6 +104,14 @@ export class ReaderShell implements AnnotationInteractionHost {
     return this.annotationToolbarValue;
   }
 
+  get annotationEditorOpen(): boolean {
+    return this.annotationEditor.isOpen;
+  }
+
+  get annotationEditorPendingChanges(): boolean {
+    return this.annotationEditor.hasPendingChanges;
+  }
+
   configureAnnotationToolbar(
     palette: readonly AnnotationPaletteEntry[],
     readOnlyReason: string | null,
@@ -137,7 +146,23 @@ export class ReaderShell implements AnnotationInteractionHost {
           : annotation.identity.fingerprint;
       this.sidebarValue?.annotationsPanel.selectAnnotation(id, false);
     }
-    return this.annotationEditor.open(request);
+    return this.annotationEditor.open({
+      ...request,
+      onClose: (reason) => {
+        try {
+          request.onClose(reason);
+        } finally {
+          for (const listener of this.annotationEditorCloseListeners) listener();
+        }
+      },
+    });
+  }
+
+  onAnnotationEditorClose(listener: () => void): () => void {
+    this.annotationEditorCloseListeners.add(listener);
+    return () => {
+      this.annotationEditorCloseListeners.delete(listener);
+    };
   }
 
   resolveAnnotationActivation(rowId: string): ResolvedAnnotationPanelActivation | null {
@@ -220,6 +245,7 @@ export class ReaderShell implements AnnotationInteractionHost {
     if (!this.annotationEditor.destroy()) return false;
     this.destroyed = true;
     for (const cleanup of [...this.cleanups]) cleanup();
+    this.annotationEditorCloseListeners.clear();
     this.sidebarValue?.destroy();
     this.sidebarValue = null;
     this.focusReturn.clear();

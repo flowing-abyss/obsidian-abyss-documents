@@ -4,6 +4,7 @@ export interface AutosaveSchedulerOptions {
   readonly idleDelay?: number;
   readonly maximumLatency?: number;
   readonly onFailure?: (cause: unknown, generation: number, reason: SaveReason) => void;
+  readonly shouldDeferAutomaticSave?: (reason: 'autosave' | 'maximum-latency') => boolean;
   readonly window?: Pick<Window, 'setTimeout' | 'clearTimeout'>;
 }
 
@@ -26,6 +27,7 @@ export class AutosaveScheduler {
   private savedGeneration = 0;
   private inFlight: Promise<void> | null = null;
   private paused = false;
+  private pausedAtGeneration: number | null = null;
   private destroyed = false;
 
   constructor(
@@ -54,6 +56,11 @@ export class AutosaveScheduler {
     if (this.destroyed || !Number.isSafeInteger(generation) || generation <= 0) return;
     this.newestGeneration = Math.max(this.newestGeneration, generation);
     if (this.paused) return;
+    this.scheduleAutomaticSave();
+  }
+
+  private scheduleAutomaticSave(): void {
+    if (this.destroyed || this.paused || this.newestGeneration <= this.savedGeneration) return;
     this.clearIdle();
     this.idleTimer = this.owner.setTimeout(() => {
       this.idleTimer = null;
@@ -69,9 +76,15 @@ export class AutosaveScheduler {
     return this.run('manual');
   }
 
+  resumeAutomaticSave(): Promise<void> {
+    if (this.destroyed || this.paused) return Promise.resolve();
+    return this.run('autosave');
+  }
+
   retry(): Promise<void> {
     if (this.destroyed) return Promise.resolve();
     this.paused = false;
+    this.pausedAtGeneration = null;
     return this.run('retry');
   }
 
@@ -79,6 +92,7 @@ export class AutosaveScheduler {
     if (this.destroyed) return;
     this.newestGeneration = Math.max(this.newestGeneration, generation);
     this.paused = true;
+    this.pausedAtGeneration = Math.max(this.pausedAtGeneration ?? 0, generation);
     this.clearTimers();
     this.options.onFailure?.(cause, generation, 'autosave');
   }
@@ -96,6 +110,10 @@ export class AutosaveScheduler {
     if (this.paused && reason !== 'retry') {
       return Promise.reject(new DOMException('PDF autosave is paused.', 'InvalidStateError'));
     }
+    if (this.shouldDefer(reason)) {
+      this.scheduleAutomaticSave();
+      return Promise.resolve();
+    }
     this.clearTimers();
     if (this.inFlight !== null) {
       return this.inFlight.then(() => this.run(reason));
@@ -104,10 +122,15 @@ export class AutosaveScheduler {
     const operation = this.save(generation, reason).then(
       () => {
         this.savedGeneration = Math.max(this.savedGeneration, generation);
+        if (this.pausedAtGeneration !== null && this.savedGeneration >= this.pausedAtGeneration) {
+          this.paused = false;
+          this.pausedAtGeneration = null;
+        }
       },
       (cause: unknown) => {
         if (!this.destroyed) {
           this.paused = true;
+          this.pausedAtGeneration = Math.max(this.pausedAtGeneration ?? 0, generation);
           this.options.onFailure?.(cause, generation, reason);
         }
         throw cause;
@@ -120,6 +143,13 @@ export class AutosaveScheduler {
       if (this.newestGeneration > this.savedGeneration) return this.run(reason);
       return undefined;
     });
+  }
+
+  private shouldDefer(reason: SaveReason): boolean {
+    return (
+      (reason === 'autosave' || reason === 'maximum-latency') &&
+      this.options.shouldDeferAutomaticSave?.(reason) === true
+    );
   }
 
   private clearTimers(): void {

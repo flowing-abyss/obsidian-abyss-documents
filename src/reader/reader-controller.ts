@@ -58,7 +58,7 @@ import {
   AnnotationInteractionController,
   type AnnotationInteractionControllerOptions,
 } from './annotation-interaction-controller.js';
-import { AnnotationProjection } from './annotation-projection.js';
+import { AnnotationProjection, type AnnotationProjectionRow } from './annotation-projection.js';
 import type { AnnotationToolbarIntent } from './annotation-toolbar.js';
 import {
   applyAnnotationTransfer,
@@ -175,6 +175,13 @@ interface NativeEditableSessionFactory extends DocumentSession {
   ): NativeEditableSaveSession | null;
 }
 
+interface NativeRevisionWrite {
+  readonly native: NativeEditableSaveSession;
+  readonly reason: SaveReason;
+  readonly revision: number;
+  readonly session: DocumentSession;
+}
+
 interface AnnotationEditorViewport extends DocumentViewport {
   readonly annotationEditor: PdfAnnotationEditor | null;
 }
@@ -242,6 +249,13 @@ class SaveDiscardedError extends SaveConflictError {
   }
 }
 
+class AutomaticSaveDeferredError extends Error {
+  constructor() {
+    super('Automatic PDF annotation saving yielded to an open annotation editor.');
+    this.name = 'AutomaticSaveDeferredError';
+  }
+}
+
 export class ReaderController {
   private queue: Promise<void> = Promise.resolve();
   private activeOpen: AbortController | null = null;
@@ -285,6 +299,7 @@ export class ReaderController {
   private saveAbort: AbortController | null = null;
   private recoveryAbort: AbortController | null = null;
   private unregisterSaveBroadcast: (() => void) | null = null;
+  private unregisterAnnotationEditorClose: (() => void) | null = null;
   private lastAutosaveFailureKey: string | null = null;
   private lastAnnotationFailureKey: string | null = null;
   private lastAnnotationExportPreparationFailureKey: string | null = null;
@@ -299,6 +314,8 @@ export class ReaderController {
   private currentFile: TFile | null = null;
   private currentHost: HTMLElement | null = null;
   private lifecycleFlushActive = false;
+  private manualSaveOverrideDepth = 0;
+  private readonly automaticSaveWakeListeners = new Set<() => void>();
   private annotationLoadTestFault: AnnotationLoadTestFault | null = null;
   private annotationLoadTestSnapshotState: MutableAnnotationLoadTestSnapshot =
     emptyAnnotationLoadTestSnapshot();
@@ -395,12 +412,18 @@ export class ReaderController {
   }
 
   async saveDocument(): Promise<void> {
-    if ((await this.shell?.flushAnnotationEditor()) === false)
-      throw new DOMException(
-        'The annotation editor still has changes that could not be persisted.',
-        'InvalidStateError',
-      );
-    await this.autosave?.flush();
+    this.manualSaveOverrideDepth += 1;
+    this.wakeDeferredAutomaticSave();
+    try {
+      if ((await this.shell?.flushAnnotationEditor()) === false)
+        throw new DOMException(
+          'The annotation editor still has changes that could not be persisted.',
+          'InvalidStateError',
+        );
+      await this.autosave?.flush();
+    } finally {
+      this.manualSaveOverrideDepth -= 1;
+    }
   }
 
   setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null): void {
@@ -626,16 +649,27 @@ export class ReaderController {
     });
     if (native === null) return;
     scheduler = new AutosaveScheduler(
-      async (revision, _reason) => this.saveNativeRevision(session, native, revision),
+      async (revision, reason) => this.saveNativeRevision(session, native, revision, reason),
       {
         onFailure: (cause, _generation, reason) => {
           if (cause instanceof SaveDiscardedError) return;
           this.reportSaveFailure(session.descriptor.path, cause, reason);
         },
+        shouldDeferAutomaticSave: () => this.shell?.annotationEditorOpen === true,
       },
     );
     this.nativeSaveSession = native;
     this.autosave = scheduler;
+    this.unregisterAnnotationEditorClose?.();
+    const interaction = this.annotationInteractionController;
+    this.unregisterAnnotationEditorClose =
+      this.shell?.onAnnotationEditorClose(() => {
+        const resume = async (): Promise<void> => {
+          await interaction?.waitForNativeEditorNeutralization();
+          if (this.autosave === scheduler) await scheduler.resumeAutomaticSave();
+        };
+        resume().catch(() => undefined);
+      }) ?? null;
     this.registerNativeSaveBroadcast(session, native, scheduler);
   }
 
@@ -829,13 +863,14 @@ export class ReaderController {
     session: DocumentSession,
     native: NativeEditableSaveSession,
     revision: number,
+    reason: SaveReason,
   ): Promise<void> {
     const finishSave = beginReaderTimedOperation('annotation-save');
     const abort = new AbortController();
     let verified = false;
     this.saveAbort = abort;
     try {
-      await this.writeNativeRevision(session, native, revision, abort.signal);
+      await this.writeNativeRevision({ native, reason, revision, session }, abort.signal);
       verified = true;
       recordSuccessfulAnnotationSave();
       if (revision >= native.pendingRevision) {
@@ -849,22 +884,58 @@ export class ReaderController {
   }
 
   private async writeNativeRevision(
-    session: DocumentSession,
-    native: NativeEditableSaveSession,
-    revision: number,
+    write: NativeRevisionWrite,
     signal: AbortSignal,
   ): Promise<void> {
+    const { native, reason, revision, session } = write;
     const request: NativeDocumentSaveRequest = {
       path: session.descriptor.path,
       baseToken: native.baseToken,
       revision,
       source: native,
+      ...(isAutomaticSaveReason(reason)
+        ? {
+            beforePrepare: () => {
+              this.requireAutomaticSaveWindow();
+            },
+          }
+        : {}),
     };
     try {
       await this.saveCoordinator?.save(request, signal);
     } catch (cause) {
+      if (cause instanceof AutomaticSaveDeferredError) {
+        await this.awaitAutomaticSaveWindow(signal);
+        await this.writeNativeRevision(write, signal);
+        return;
+      }
       await this.resolveNativeSaveConflict(request, cause, signal);
     }
+  }
+
+  private requireAutomaticSaveWindow(): void {
+    if (this.manualSaveOverrideDepth > 0 || this.shell?.annotationEditorOpen !== true) return;
+    throw new AutomaticSaveDeferredError();
+  }
+
+  private async awaitAutomaticSaveWindow(signal: AbortSignal): Promise<void> {
+    const shell = this.shell;
+    if (shell === null) return;
+    while (
+      this.manualSaveOverrideDepth === 0 &&
+      this.shell === shell &&
+      shell.annotationEditorOpen
+    ) {
+      await this.waitForAutomaticSaveWake(shell, signal);
+    }
+  }
+
+  private waitForAutomaticSaveWake(shell: ReaderShell, signal: AbortSignal): Promise<void> {
+    return waitForAnnotationEditorCloseOrWake(shell, signal, this.automaticSaveWakeListeners);
+  }
+
+  private wakeDeferredAutomaticSave(): void {
+    for (const listener of [...this.automaticSaveWakeListeners]) listener();
   }
 
   private async resolveNativeSaveConflict(
@@ -908,7 +979,7 @@ export class ReaderController {
       )
         return;
       if (source !== native) {
-        if (native.isDirty) {
+        if (native.isDirty || this.shell?.annotationEditorPendingChanges === true) {
           scheduler.pauseForFailure(
             new SaveConflictError(session.descriptor.path, native.baseToken, token),
             native.pendingRevision,
@@ -1200,7 +1271,8 @@ export class ReaderController {
       this.autosave === scheduler &&
       this.currentFile === file &&
       this.currentHost === host &&
-      !native.isDirty
+      !native.isDirty &&
+      this.shell?.annotationEditorPendingChanges !== true
     );
   }
 
@@ -1410,18 +1482,45 @@ export class ReaderController {
 
   private async flushBeforeRelease(): Promise<void> {
     this.lifecycleFlushActive = true;
+    const interaction = annotationInteractionOf(this.viewport);
+    const host = this.currentHost;
+    const hostWasInert = host?.inert ?? false;
     try {
-      if ((await this.shell?.flushAnnotationEditor()) === false)
-        throw new DOMException(
-          'The annotation editor still has changes that could not be persisted.',
-          'InvalidStateError',
-        );
+      await this.prepareInteractionForRelease(interaction, host);
       await this.autosave?.flush();
     } catch (cause) {
-      if (!(cause instanceof SaveDiscardedError)) throw cause;
+      this.handleReleaseFlushFailure(cause, interaction, host, hostWasInert);
     } finally {
       this.lifecycleFlushActive = false;
     }
+  }
+
+  private async prepareInteractionForRelease(
+    interaction: PdfAnnotationInteraction | null,
+    host: HTMLElement | null,
+  ): Promise<void> {
+    const shell = this.shell;
+    if ((await shell?.flushAnnotationEditor()) === false)
+      throw new DOMException(
+        'The annotation editor still has changes that could not be persisted.',
+        'InvalidStateError',
+      );
+    this.closeAnnotationEditorForRelease(shell);
+    if (host !== null) host.inert = true;
+    await interaction?.suspendInteractions?.();
+    await this.annotationInteractionController?.waitForNativeEditorNeutralization();
+  }
+
+  private handleReleaseFlushFailure(
+    cause: unknown,
+    interaction: PdfAnnotationInteraction | null,
+    host: HTMLElement | null,
+    hostWasInert: boolean,
+  ): void {
+    if (cause instanceof SaveDiscardedError) return;
+    interaction?.resumeInteractions?.();
+    if (host !== null) host.inert = hostWasInert;
+    throw cause;
   }
 
   private resetReaderState(): void {
@@ -1441,6 +1540,8 @@ export class ReaderController {
   }
 
   private releaseSaveLifecycle(): void {
+    this.unregisterAnnotationEditorClose?.();
+    this.unregisterAnnotationEditorClose = null;
     this.autosave?.destroy();
     this.autosave = null;
     this.saveAbort?.abort(new DOMException('The PDF view was closed.', 'AbortError'));
@@ -2216,14 +2317,16 @@ export class ReaderController {
     retainAnnotationActivation = false,
     onFailure?: () => void,
   ): void {
-    if (!retainAnnotationActivation) this.cancelAnnotationActivation();
+    if (!retainAnnotationActivation) {
+      this.cancelAnnotationActivation();
+      this.annotationInteractionController?.invalidate('navigation');
+    }
     const viewport = this.viewport;
     const shell = this.shell;
     if (viewport === null || shell === null || viewport.pageCount === 0) {
       onFailure?.();
       return;
     }
-    this.annotationInteractionController?.invalidate('navigation');
     const target = Math.min(viewport.pageCount - 1, Math.max(0, Math.floor(location.pageIndex)));
     const destination: DocumentLocation = { ...location, pageIndex: target };
     this.navigationPageIndex = target;
@@ -2428,7 +2531,11 @@ export class ReaderController {
     this.currentAnnotations = this.annotationProjection.annotations();
     annotationEditorOf(this.viewport)?.setAnnotationProjection(
       this.annotationProjection.snapshot().map((row) => ({
+        aliases: [row.provisionalId, ...(row.aliases ?? [])].filter(
+          (alias): alias is string => alias !== undefined,
+        ),
         annotation: annotationForActivation(row.annotation, row.writable),
+        ...(row.runtimeId === undefined ? {} : { editorUid: row.runtimeId }),
         stableId: row.nativeId,
       })),
     );
@@ -2439,12 +2546,13 @@ export class ReaderController {
   private projectedAnnotationForStableId(stableId: string): DocumentAnnotation | null {
     const id = stableId.trim();
     if (id.length === 0) return null;
-    const row = this.annotationProjection.snapshot().find((candidate) => {
-      if (candidate.nativeId === id || candidate.provisionalId === id) return true;
-      return candidate.annotation.identity.kind === 'stable'
-        ? candidate.annotation.identity.id === id
-        : candidate.annotation.identity.fingerprint === id;
-    });
+    const rows = this.annotationProjection.snapshot();
+    const row =
+      uniqueProjectedRow(rows, (candidate) => candidate.nativeId === id) ??
+      uniqueProjectedRow(rows, (candidate) => candidate.runtimeId === id) ??
+      uniqueProjectedRow(rows, (candidate) => candidate.provisionalId === id) ??
+      uniqueProjectedRow(rows, (candidate) => projectedAnnotationIdentity(candidate) === id) ??
+      uniqueProjectedRow(rows, (candidate) => candidate.aliases?.includes(id) === true);
     return row === undefined ? null : annotationForActivation(row.annotation, row.writable);
   }
 
@@ -2696,6 +2804,38 @@ function annotationInteractionOf(
   return (viewport as AnnotationInteractionViewport).annotationInteraction;
 }
 
+function isAutomaticSaveReason(reason: SaveReason): boolean {
+  return reason === 'autosave' || reason === 'maximum-latency';
+}
+
+function waitForAnnotationEditorCloseOrWake(
+  shell: ReaderShell,
+  signal: AbortSignal,
+  wakeListeners: Set<() => void>,
+): Promise<void> {
+  if (signal.aborted)
+    return Promise.reject(new DOMException('Saving PDF annotations was cancelled.', 'AbortError'));
+  return new Promise<void>((resolve, reject) => {
+    let unregister = (): void => undefined;
+    const cleanup = (): void => {
+      unregister();
+      signal.removeEventListener('abort', onAbort);
+      wakeListeners.delete(onWake);
+    };
+    const onAbort = (): void => {
+      cleanup();
+      reject(new DOMException('Saving PDF annotations was cancelled.', 'AbortError'));
+    };
+    const onWake = (): void => {
+      cleanup();
+      resolve();
+    };
+    unregister = shell.onAnnotationEditorClose(onWake);
+    wakeListeners.add(onWake);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function annotationSelectionProjectionOf(
   viewport: DocumentViewport,
 ): AnnotationSelectionProjectionViewport | null {
@@ -2732,6 +2872,20 @@ function annotationToolForMode(mode: PdfAnnotationLogicalMode): PdfAnnotationToo
   if (mode === 'ink') return 'ink';
   if (mode === 'freetext') return 'freetext';
   return 'select';
+}
+
+function uniqueProjectedRow(
+  rows: readonly AnnotationProjectionRow[],
+  matches: (row: AnnotationProjectionRow) => boolean,
+): AnnotationProjectionRow | undefined {
+  const candidates = rows.filter(matches);
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function projectedAnnotationIdentity(row: AnnotationProjectionRow): string {
+  return row.annotation.identity.kind === 'stable'
+    ? row.annotation.identity.id
+    : row.annotation.identity.fingerprint;
 }
 
 function annotationReadOnlyReason(

@@ -216,7 +216,7 @@
 
 .abyss-documents .abyss-annotation-editor-popover {
   position: fixed;
-  z-index: var(--layer-popover);
+  z-index: calc(var(--layer-modal) + 1);
   box-sizing: border-box;
   display: flex;
   width: max-content;
@@ -1167,16 +1167,6 @@
   .abyss-documents .abyss-reader-toolbar-page-field {
     min-width: 2.75rem;
   }
-}
-
-.abyss-documents .abyss-annotation-hit-surface {
-  position: absolute;
-  z-index: 100001;
-  padding: 0;
-  cursor: pointer;
-  pointer-events: auto;
-  background: transparent;
-  border: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

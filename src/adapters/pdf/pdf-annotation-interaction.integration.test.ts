@@ -174,6 +174,7 @@ function oneShotFixture() {
     interaction,
     {
       closeAnnotationEditor,
+      flushAnnotationEditor: async () => true,
       openAnnotationEditor(request) {
         opened.push(request);
         return true;

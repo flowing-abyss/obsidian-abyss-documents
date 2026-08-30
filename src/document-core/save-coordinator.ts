@@ -98,6 +98,7 @@ export interface NativeDocumentSaveRequest {
   readonly baseToken: BaseToken;
   readonly revision: number;
   readonly source: NativeSaveSource;
+  readonly beforePrepare?: ((signal: AbortSignal) => void) | undefined;
   readonly overwrite?: boolean;
 }
 
@@ -215,6 +216,8 @@ export class DocumentSaveCoordinator {
     request: NativeDocumentSaveRequest,
     signal: AbortSignal,
   ): Promise<PreparedNativeSave> {
+    request.beforePrepare?.(signal);
+    throwIfAborted(signal);
     const retained = this.retained.get(request.source);
     if (retained?.revision === request.revision) return retained.prepared;
     const prepared = await request.source.prepare(request.revision, signal);
@@ -263,6 +266,7 @@ function normalizeRequest(request: NativeDocumentSaveRequest): NativeDocumentSav
     baseToken: Object.freeze({ ...request.baseToken }),
     revision: request.revision,
     source: request.source,
+    ...(request.beforePrepare === undefined ? {} : { beforePrepare: request.beforePrepare }),
     overwrite: request.overwrite === true,
   });
 }

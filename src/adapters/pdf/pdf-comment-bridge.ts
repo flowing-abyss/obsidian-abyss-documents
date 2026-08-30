@@ -102,8 +102,15 @@ export interface PdfAnnotationUpdate {
 interface PdfAnnotationFocusOptions {
   readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
   readonly editableOnly?: boolean;
+  readonly editorUid?: string | undefined;
   readonly forceReadonly?: boolean;
   readonly preserveSelection?: boolean;
+}
+
+interface SelectedAnnotationFocusRequest {
+  readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
+  readonly editableOnly: boolean;
+  readonly forceReadonly: boolean;
 }
 
 interface PendingCommentDialogReservation extends PdfCommentDialogReservation {
@@ -364,14 +371,14 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
 
   private tryFocusAnnotation(id: string, options: PdfAnnotationFocusOptions): boolean {
     if (options.forceReadonly === true) this.bindings.delete(id);
+    const lookupId = annotationFocusLookupId(id, options.editorUid);
     if (options.preserveSelection === true)
-      return this.focusSelectedAnnotation(
-        id,
-        options.editableOnly === true,
-        options.forceReadonly === true,
-        options.clientPosition,
-      );
-    const native = this.findReadyNativeEditor(id, false);
+      return this.focusSelectedAnnotation(id, lookupId, {
+        clientPosition: options.clientPosition,
+        editableOnly: options.editableOnly === true,
+        forceReadonly: options.forceReadonly === true,
+      });
+    const native = this.findReadyNativeEditor(lookupId, false);
     if (native !== null) {
       if (options.forceReadonly === true)
         return this.focusReadonlyNativeAnnotation(
@@ -389,21 +396,25 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   private focusSelectedAnnotation(
-    id: string,
-    editableOnly: boolean,
-    forceReadonly: boolean,
-    clientPosition?: { readonly x: number; readonly y: number },
+    stableId: string,
+    lookupId: string,
+    request: SelectedAnnotationFocusRequest,
   ): boolean {
-    const native = this.findReadyNativeEditor(id, true);
+    const native = this.findReadyNativeEditor(lookupId, true);
     if (native === null) return false;
-    if (forceReadonly)
-      return this.focusReadonlyNativeAnnotation(native.editor, id, native.node, clientPosition);
-    if (editableOnly && !isSupportedNativeEditor(native.editor)) return false;
+    if (request.forceReadonly)
+      return this.focusReadonlyNativeAnnotation(
+        native.editor,
+        stableId,
+        native.node,
+        request.clientPosition,
+      );
+    if (request.editableOnly && !isSupportedNativeEditor(native.editor)) return false;
     this.clearBindingsForEditor(native.editor);
-    this.bindingIds.set(native.editor, id);
+    this.bindingIds.set(native.editor, stableId);
     return this.publishFocus(native.editor, {
       anchor: native.node.getBoundingClientRect(),
-      clientPosition,
+      clientPosition: request.clientPosition,
       isEditable: true,
       isSelected: true,
     });
@@ -699,6 +710,13 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       candidates.set(editorRuntimeId(editor), editor);
     }
     return candidates.size === 1 ? candidates.values().next().value : undefined;
+  }
+
+  nativeEditorUidForAnnotation(annotationId: string): string | null {
+    const id = annotationId.trim();
+    const editor = this.bindings.get(id)?.editor ?? this.findReadyNativeEditor(id, false)?.editor;
+    const uid = editor?.uid?.trim();
+    return uid === undefined || uid.length === 0 ? null : uid;
   }
 
   updateAnnotations(update: PdfAnnotationUpdate): boolean {
@@ -1475,6 +1493,11 @@ function annotationType(editor: PdfCommentEditor): DocumentAnnotation['type'] {
   if (editor.mode === 15 || editor.editorType === 'ink') return 'ink';
   if (editor.mode === 3 || editor.editorType === 'freetext') return 'free-text';
   return 'unsupported';
+}
+
+function annotationFocusLookupId(stableId: string, editorUid: string | undefined): string {
+  const normalized = editorUid?.trim();
+  return normalized === undefined || normalized.length === 0 ? stableId : normalized;
 }
 
 function isPdfCommentUiManager(value: unknown): value is PdfCommentUiManager {
