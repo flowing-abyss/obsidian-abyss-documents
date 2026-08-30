@@ -6629,6 +6629,11 @@
 }
 
 .abyss-documents .abyss-reader-sidebar {
+  position: absolute;
+  z-index: var(--layer-modal);
+  inset-block: 0;
+  inset-inline-start: 0;
+  box-sizing: border-box;
   display: flex;
   width: var(--abyss-reader-sidebar-width);
   max-width: 36%;
@@ -6638,19 +6643,14 @@
   flex-direction: column;
   border-inline-end: var(--border-width) solid var(--background-modifier-border);
   background: var(--background-primary);
+  box-shadow: var(--shadow-l);
 }
 
 .abyss-documents .abyss-reader-sidebar.is-mobile {
-  position: absolute;
-  z-index: var(--layer-modal);
-  inset-block: 0;
-  inset-inline-start: 0;
-  box-sizing: border-box;
   width: min(var(--abyss-reader-sidebar-width), 90%);
   max-width: 90%;
   padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
   padding-inline-start: env(safe-area-inset-left);
-  box-shadow: var(--shadow-l);
 }
 
 .abyss-documents .abyss-reader-sidebar[hidden],
@@ -7264,6 +7264,7 @@
   --abyss-reader-image-dim: 0;
 
   position: absolute;
+  z-index: 0;
   inset: 0;
   background: var(--abyss-reader-background);
   overflow: auto;
@@ -7307,16 +7308,10 @@
 
 @container abyss-reader (inline-size <= 600px) {
   .abyss-documents .abyss-reader-sidebar {
-    position: absolute;
-    z-index: var(--layer-modal);
-    inset-block: 0;
-    inset-inline-start: 0;
-    box-sizing: border-box;
     width: min(var(--abyss-reader-sidebar-width), 90%);
     max-width: 90%;
     padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
     padding-inline-start: env(safe-area-inset-left);
-    box-shadow: var(--shadow-l);
   }
 
   .abyss-documents .abyss-reader-toolbar {

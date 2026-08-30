@@ -499,7 +499,8 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.selectionAbort?.abort();
     this.selectionAbort = null;
     this.lastQuery = normalizedQuery;
-    this.dispatchFind(normalizedQuery, false, '');
+    if (normalizedQuery.length === 0) this.eventBus.dispatch('findbarclose', { source: this });
+    else this.dispatchFind(normalizedQuery, false, '');
     this.searchAbort?.abort();
     const abortController = new AbortController();
     this.searchAbort = abortController;

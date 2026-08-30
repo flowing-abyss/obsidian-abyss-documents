@@ -25,21 +25,31 @@ export interface AnnotationSaveOracleSnapshot {
   saves: number;
 }
 
-export async function readAnnotationSaveLifecycleSnapshot(): Promise<AnnotationSaveOracleSnapshot> {
+export async function readAnnotationSaveLifecycleSnapshot(
+  leafId?: string,
+): Promise<AnnotationSaveOracleSnapshot> {
   const runner = browser as unknown as {
-    executeObsidian<T>(callback: (context: { app: App }) => T): Promise<T>;
+    executeObsidian<T>(
+      callback: (context: { app: App }, input: string | null) => T,
+      input: string | null,
+    ): Promise<T>;
   };
-  const snapshot = await runner.executeObsidian(({ app }) => {
-    const view = app.workspace.getMostRecentLeaf()?.view as
-      AnnotationSaveLifecycleViewBoundary | undefined;
+  const snapshot = await runner.executeObsidian(({ app }, targetLeafId) => {
+    const leaf =
+      targetLeafId === null
+        ? app.workspace.getMostRecentLeaf()
+        : app.workspace.getLeafById(targetLeafId);
+    const view = leaf?.view as AnnotationSaveLifecycleViewBoundary | undefined;
     return view?.annotationSaveLifecycleSnapshot() ?? null;
-  });
+  }, leafId ?? null);
   if (snapshot === null) throw new Error('Annotation save lifecycle is unavailable.');
   return snapshot;
 }
 
-export async function captureAnnotationSaveBaseline(): Promise<AnnotationSaveBaseline> {
-  const snapshot = await readAnnotationSaveLifecycleSnapshot();
+export async function captureAnnotationSaveBaseline(
+  leafId?: string,
+): Promise<AnnotationSaveBaseline> {
+  const snapshot = await readAnnotationSaveLifecycleSnapshot(leafId);
   return {
     failures: snapshot.failures,
     minimumCommittedRevision: snapshot.pendingRevision + 1,

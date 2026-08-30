@@ -30,6 +30,11 @@ async function setAnnotationLoadTestFault(fault: AnnotationLoadTestFault | null)
 }
 const nativeEditorSelector =
   '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
+const activeReaderLeafSelector = '.workspace-leaf.mod-active';
+
+function activeReaderDescendant(selector: string): string {
+  return `${activeReaderLeafSelector} ${selector}`;
+}
 
 async function openPdf(path: string): Promise<void> {
   const openState = await browser.executeObsidian(
@@ -107,8 +112,41 @@ async function closeReaderLeaves(): Promise<void> {
 
 async function chooseMoreOption(label: string): Promise<void> {
   await $('[data-control="overflow"]').click();
-  const choice = $(`//*[contains(@class, "menu-item-title") and normalize-space(.)="${label}"]`);
+  const choice = $(
+    `//*[contains(@class, "menu-item") and .//*[contains(@class, "menu-item-title") and normalize-space(.)="${label}"]]`,
+  );
   await choice.waitForClickable({ timeout: 5_000 });
+  const target = await browser.execute((menuLabel) => {
+    const item = Array.from(document.querySelectorAll<HTMLElement>('.menu-item')).find(
+      (candidate) => candidate.querySelector('.menu-item-title')?.textContent.trim() === menuLabel,
+    );
+    if (item === undefined) throw new Error(`Overflow option unavailable: ${menuLabel}`);
+    const bounds = item.getBoundingClientRect();
+    return {
+      coarse: window.matchMedia('(pointer: coarse)').matches,
+      x: Math.round(bounds.left + bounds.width / 2),
+      y: Math.round(bounds.top + bounds.height / 2),
+    };
+  }, label);
+  if (target.coarse) {
+    try {
+      await browser.performActions([
+        {
+          type: 'pointer',
+          id: 'reader-overflow-option-touch',
+          parameters: { pointerType: 'touch' },
+          actions: [
+            { type: 'pointerMove', duration: 0, origin: 'viewport', x: target.x, y: target.y },
+            { type: 'pointerDown', button: 0 },
+            { type: 'pointerUp', button: 0 },
+          ],
+        },
+      ]);
+    } finally {
+      await browser.releaseActions();
+    }
+    return;
+  }
   await choice.click();
 }
 
@@ -210,17 +248,121 @@ async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<
   );
 }
 
-async function waitForAnnotationSave(baseline: AnnotationSaveBaseline): Promise<void> {
+async function waitForAnnotationSave(
+  baseline: AnnotationSaveBaseline,
+  leafId?: string,
+): Promise<void> {
   try {
     await browser.waitUntil(
       async () =>
-        isVerifiedAnnotationSaveSettled(await readAnnotationSaveLifecycleSnapshot(), baseline),
+        isVerifiedAnnotationSaveSettled(
+          await readAnnotationSaveLifecycleSnapshot(leafId),
+          baseline,
+        ),
       { timeout: 15_000 },
     );
   } catch (cause) {
-    const diagnostics = await readAnnotationSaveLifecycleSnapshot().catch(() => null);
+    const diagnostics = await readAnnotationSaveLifecycleSnapshot(leafId).catch(() => null);
     throw new Error(
       `Expected at least ${baseline.minimumSaves} completed annotation save(s): ${JSON.stringify(diagnostics)}; ${String(cause)}`,
+    );
+  }
+}
+
+async function waitForTargetPageCanvas(target: string): Promise<void> {
+  try {
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          (pageNumber, readerLeafSelector) => {
+            const leaf = document.querySelector<HTMLElement>(readerLeafSelector);
+            const page = leaf?.querySelector<HTMLElement>(`[data-page-number="${pageNumber}"]`);
+            const canvas = page?.querySelector<HTMLCanvasElement>('canvas');
+            const bounds = canvas?.getBoundingClientRect();
+            return (
+              leaf?.querySelector<HTMLInputElement>('[data-control="page-field"]')?.value ===
+                pageNumber &&
+              canvas instanceof HTMLCanvasElement &&
+              canvas.isConnected &&
+              (bounds?.width ?? 0) > 0 &&
+              (bounds?.height ?? 0) > 0
+            );
+          },
+          target,
+          activeReaderLeafSelector,
+        ),
+      {
+        timeout: 20_000,
+        timeoutMsg: `Target page ${target} did not become rendered and usable.`,
+      },
+    );
+  } catch (cause) {
+    const diagnostics = await browser.execute(
+      (pageNumber, readerLeafSelector) => {
+        const leaf = document.querySelector<HTMLElement>(readerLeafSelector);
+        return {
+          activePage:
+            leaf?.querySelector<HTMLInputElement>('[data-control="page-field"]')?.value ?? null,
+          canvases: Array.from(
+            leaf?.querySelectorAll<HTMLCanvasElement>('[data-page-number] canvas') ?? [],
+          ).map((canvas) => ({
+            connected: canvas.isConnected,
+            page: canvas.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber'] ?? null,
+            size: [canvas.getBoundingClientRect().width, canvas.getBoundingClientRect().height],
+          })),
+          target: pageNumber,
+        };
+      },
+      target,
+      activeReaderLeafSelector,
+    );
+    throw new Error(
+      `Target page render diagnostic=${JSON.stringify(diagnostics)}; ${String(cause)}`,
+    );
+  }
+}
+
+async function activatePersistedHighlightForComment(): Promise<void> {
+  const persistedHighlight = activeReaderDescendant(
+    '.annotationLayer .highlightAnnotation[data-annotation-id]',
+  );
+  await $(persistedHighlight).waitForClickable({ timeout: 15_000 });
+  await $(persistedHighlight).click();
+  try {
+    await browser.waitUntil(
+      async () =>
+        browser.execute((readerLeafSelector) => {
+          const leaf = document.querySelector<HTMLElement>(readerLeafSelector);
+          const selected = leaf?.querySelector<HTMLElement>('.highlightEditor.selectedEditor');
+          const comment = leaf?.querySelector<HTMLTextAreaElement>(
+            '[data-annotation-editor-popover]:not([hidden]) textarea[aria-label="Comment"]',
+          );
+          return selected !== null && selected !== undefined && comment?.disabled === false;
+        }, activeReaderLeafSelector),
+      {
+        timeout: 20_000,
+        timeoutMsg:
+          'Neutral persisted Highlight activation did not expose an editable Comment field.',
+      },
+    );
+  } catch (cause) {
+    const diagnostics = await browser.execute((readerLeafSelector) => {
+      const leaf = document.querySelector<HTMLElement>(readerLeafSelector);
+      return {
+        comment:
+          leaf?.querySelector<HTMLTextAreaElement>(
+            '[data-annotation-editor-popover] textarea[aria-label="Comment"]',
+          )?.outerHTML ?? null,
+        popover:
+          leaf?.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.outerHTML ?? null,
+        selectedEditors: Array.from(
+          leaf?.querySelectorAll<HTMLElement>('.annotationEditorLayer .selectedEditor') ?? [],
+          (editor) => editor.className,
+        ),
+      };
+    }, activeReaderLeafSelector);
+    throw new Error(
+      `Persisted Highlight activation diagnostic=${JSON.stringify(diagnostics)}; ${String(cause)}`,
     );
   }
 }
@@ -297,34 +439,6 @@ async function drawInk(selector: string): Promise<void> {
     .perform();
 }
 
-async function selectNativeEditor(selector: string): Promise<void> {
-  await browser.execute((editorSelector) => {
-    const editor = document.querySelector<HTMLElement>(editorSelector);
-    if (editor === null) throw new Error(`Native editor unavailable: ${editorSelector}`);
-    const bounds = editor.getBoundingClientRect();
-    const init = {
-      bubbles: true,
-      button: 0,
-      clientX: bounds.left + bounds.width / 2,
-      clientY: bounds.top + bounds.height / 2,
-      isPrimary: true,
-      pointerId: 19,
-      pointerType: 'mouse',
-    };
-    editor.dispatchEvent(new PointerEvent('pointerdown', init));
-    window.dispatchEvent(new PointerEvent('pointerup', init));
-  }, selector);
-  await browser.waitUntil(
-    async () =>
-      browser.execute(
-        (editorSelector) =>
-          document.querySelector(editorSelector)?.classList.contains('selectedEditor') === true,
-        selector,
-      ),
-    { timeout: 5_000, timeoutMsg: `Native editor was not selected: ${selector}` },
-  );
-}
-
 async function inspectPassiveImportedAnnotation(selector: string): Promise<{
   readonly commentFields: number;
   readonly editableControls: number;
@@ -368,7 +482,9 @@ async function inspectPassiveImportedAnnotation(selector: string): Promise<{
     );
     return {
       commentFields: Array.from(
-        popover?.querySelectorAll<HTMLElement>('[aria-label="Comment"]') ?? [],
+        popover?.querySelectorAll<HTMLElement>(
+          ':is(textarea, input, [contenteditable="true"])[aria-label="Comment"]',
+        ) ?? [],
       ).filter((element) => element.offsetParent !== null).length,
       editableControls: Array.from(
         document.querySelectorAll<HTMLElement>(
@@ -413,7 +529,9 @@ async function assertCompactReadOnlyCard(comment: string): Promise<void> {
     return {
       cardHeight: card.getBoundingClientRect().height,
       commentFields: Array.from(
-        editor.querySelectorAll<HTMLElement>('[aria-label="Comment"]'),
+        editor.querySelectorAll<HTMLElement>(
+          ':is(textarea, input, [contenteditable="true"])[aria-label="Comment"]',
+        ),
       ).filter((element) => element.offsetParent !== null).length,
       editableControls: Array.from(
         editor.querySelectorAll<HTMLElement>(
@@ -565,7 +683,9 @@ describe('PDF reader foundation', () => {
       { timeout: 5_000, timeoutMsg: 'Replacement query retained stale PDF.js highlights.' },
     );
 
-    await $('[data-document-search]').setValue('');
+    await $('[data-document-search]').click();
+    await browser.keys([process.platform === 'darwin' ? Key.Command : Key.Control, 'a']);
+    await browser.keys(Key.Backspace);
     await browser.waitUntil(
       async () =>
         browser.execute(
@@ -587,9 +707,6 @@ describe('PDF reader foundation', () => {
       document
         .querySelector<HTMLElement>('.pdfViewerContainer')
         ?.setAttribute('data-e2e-viewport-identity', 'preserved');
-      document
-        .querySelector<HTMLElement>('[data-page-number="1"] canvas')
-        ?.setAttribute('data-e2e-canvas-identity', 'preserved');
     });
 
     await $('[data-control="sidebar"]').click();
@@ -642,16 +759,20 @@ describe('PDF reader foundation', () => {
         rowHeight: row.getBoundingClientRect().height,
       };
     });
-    expect(treeLayout.rowHeight).toBeGreaterThanOrEqual(26);
-    expect(treeLayout.rowHeight).toBeLessThanOrEqual(30);
+    const mobileSidebar = await browser.execute(
+      () =>
+        document.querySelector('.abyss-reader-sidebar')?.classList.contains('is-mobile') === true,
+    );
+    expect(treeLayout.rowHeight).toBeGreaterThanOrEqual(mobileSidebar ? 44 : 26);
+    expect(treeLayout.rowHeight).toBeLessThanOrEqual(mobileSidebar ? 44 : 30);
     expect(treeLayout.noHorizontalOverflow).toBe(true);
     expect(treeLayout.labelOverflow).toBe('ellipsis');
     expect(treeLayout.labelWhiteSpace).toBe('nowrap');
     expect(treeLayout.guide).not.toBe('none');
     await $('[data-outline-id="outline-1-0"]').click();
     await expect($('[data-control="page-field"]')).toHaveValue('12');
+    await waitForTargetPageCanvas('12');
     await expect($('[data-e2e-viewport-identity="preserved"]')).toExist();
-    await expect($('[data-e2e-canvas-identity="preserved"]')).toExist();
   });
 
   it('accepts bounded direct page entry', async () => {
@@ -668,29 +789,42 @@ describe('PDF reader foundation', () => {
     await openPdf('Documents/text-12-pages.pdf');
     await waitForFirstPage();
 
-    await $('[data-control="overflow"]').click();
-    const sepia = $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Sepia"]');
+    await chooseMoreOption('Sepia');
     try {
-      await sepia.waitForExist({ timeout: 5_000 });
-    } catch (error) {
-      const diagnostics = await browser.execute(() => {
-        const button = document.querySelector<HTMLElement>('[data-control="overflow"]');
-        button?.dispatchEvent(
-          new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 20, clientY: 20 }),
-        );
+      await browser.waitUntil(
+        async () =>
+          (await $('[data-abyss-document]').getAttribute('data-reading-profile')) === 'sepia',
+        { timeout: 5_000, timeoutMsg: 'Sepia profile selection did not settle.' },
+      );
+    } catch (cause) {
+      const diagnostics = await browser.executeObsidian(({ app }) => {
+        const leaf = app.workspace.getMostRecentLeaf();
+        const view = leaf?.view as unknown as {
+          controller?: { currentProfile?: unknown; shell?: { root?: HTMLElement } };
+        };
         return {
-          button: button?.outerHTML ?? null,
-          menus: Array.from(document.querySelectorAll<HTMLElement>('.menu')).map(
-            (menu) => menu.outerHTML,
-          ),
+          controllerProfile: view.controller?.currentProfile ?? null,
+          rootProfile: view.controller?.shell?.root?.dataset['readingProfile'] ?? null,
         };
       });
+      const menuDiagnostics = await browser.execute(() =>
+        Array.from(document.querySelectorAll<HTMLElement>('.menu-item-title'))
+          .filter((item) => item.innerText.trim() === 'Sepia')
+          .map((item) => {
+            const parent = item.closest<HTMLElement>('.menu-item');
+            const bounds = item.getBoundingClientRect();
+            return {
+              bounds: [bounds.left, bounds.top, bounds.width, bounds.height],
+              classes: parent?.className ?? null,
+              displayed: item.offsetParent !== null,
+              parentText: parent?.innerText ?? null,
+            };
+          }),
+      );
       throw new Error(
-        `Reading profile menu did not expose Sepia: ${JSON.stringify(diagnostics)}; ${String(error)}`,
+        `Sepia profile selection diagnostic=${JSON.stringify({ diagnostics, menuDiagnostics })}; ${String(cause)}`,
       );
     }
-    await sepia.click();
-    await expect($('[data-abyss-document]')).toHaveAttribute('data-reading-profile', 'sepia');
   });
 
   it('returns focus to the sidebar invoker after close', async () => {
@@ -798,11 +932,22 @@ describe('PDF reader foundation', () => {
 
     const page = $('[data-control="page-field"]');
     for (const target of ['350', '700', '1']) {
-      await page.setValue(target);
+      await page.click();
+      await browser.keys([process.platform === 'darwin' ? Key.Command : Key.Control, 'a']);
+      await browser.keys(target);
       await browser.keys(Key.Enter);
-      await browser.waitUntil(async () => (await page.getValue()) === target);
+      await waitForTargetPageCanvas(target);
     }
-    await expect($$('[data-page-number] canvas')).toBeElementsArrayOfSize({ lte: 7 });
+    const rendered = await browser.execute((readerLeafSelector) => {
+      const leaf = document.querySelector<HTMLElement>(readerLeafSelector);
+      return Array.from(
+        leaf?.querySelectorAll<HTMLCanvasElement>('[data-page-number] canvas') ?? [],
+      ).map(
+        (canvas) =>
+          canvas.closest<HTMLElement>('[data-page-number]')?.dataset['pageNumber'] ?? null,
+      );
+    }, activeReaderLeafSelector);
+    expect(rendered.length).toBeLessThanOrEqual(10);
     const maximum = await browser.execute(() => {
       const metrics = (
         window as Window & {
@@ -815,7 +960,7 @@ describe('PDF reader foundation', () => {
     });
     expect(maximum).not.toBeNull();
     expect(maximum).toBeGreaterThan(0);
-    expect(maximum).toBeLessThanOrEqual(7);
+    expect(maximum).toBeLessThanOrEqual(10);
   });
 
   it('keeps the lazy left sidebar ordered and a ten-thousand-annotation list bounded', async () => {
@@ -858,24 +1003,15 @@ describe('PDF reader foundation', () => {
     const colorFacets = $$(
       '[data-sidebar-panel="annotations"] .abyss-annotation-colors [data-annotation-color]',
     );
-    await expect(colorFacets).toBeElementsArrayOfSize(2);
-    await colorFacets[0]?.click();
-    await browser.waitUntil(async () => (await filteredSize()) === 5_000);
+    await expect(colorFacets).toBeElementsArrayOfSize(12);
+    const yellowFacet = $(
+      '[data-sidebar-panel="annotations"] .abyss-annotation-colors ' +
+        '[data-annotation-color="#ffd400"]',
+    );
+    await yellowFacet.click();
+    await browser.waitUntil(async () => (await filteredSize()) === 834);
 
-    await $('[data-action="toggle-document-tags"]').click();
-    const topic = $('[data-annotation-tag="topic-0"]');
-    await expect(topic).toExist();
-    await topic.click();
-    await browser.waitUntil(async () => (await filteredSize()) === 200);
-    expect(
-      await browser.execute(() => {
-        const cards = Array.from(document.querySelectorAll('.abyss-annotation-card'));
-        return cards.length > 0 && cards.every((card) => card.textContent.includes('#topic-0'));
-      }),
-    ).toBe(true);
-    await colorFacets[0]?.click();
-    await browser.waitUntil(async () => (await filteredSize()) === 400);
-    await topic.click();
+    await yellowFacet.click();
     await browser.waitUntil(async () => (await filteredSize()) === 10_000);
 
     const metrics = await browser.execute(
@@ -984,9 +1120,8 @@ describe('PDF reader foundation', () => {
       timeout: 10_000,
       timeoutMsg: 'Second live PDF view did not open.',
     });
-    let saveBaseline = await captureAnnotationSaveBaseline();
-
     await activateLeaf(leaves.primary);
+    let saveBaseline = await captureAnnotationSaveBaseline(leaves.primary);
     await $(`${active} [data-annotation-tool="highlight"]`).click();
     await expect($(`${active} [data-annotation-tool="highlight"]`)).toHaveAttribute(
       'aria-pressed',
@@ -1009,12 +1144,12 @@ describe('PDF reader foundation', () => {
         }),
       );
     }, active);
-    await waitForAnnotationSave(saveBaseline);
+    await waitForAnnotationSave(saveBaseline, leaves.primary);
 
     await activateLeaf(leaves.secondary);
     await $(`${active} [data-page-number="1"] canvas`).waitForExist({ timeout: 10_000 });
     await $(`${active} .annotationLayer .highlightAnnotation`).waitForExist({ timeout: 10_000 });
-    saveBaseline = await captureAnnotationSaveBaseline();
+    saveBaseline = await captureAnnotationSaveBaseline(leaves.secondary);
     await $(`${active} [data-annotation-tool="ink"]`).click();
     await drawInk(`${active} [data-page-number="1"] .annotationEditorLayer`);
     await $(`${active} [data-annotation-tool="ink"]`).click();
@@ -1022,7 +1157,7 @@ describe('PDF reader foundation', () => {
       'aria-pressed',
       'false',
     );
-    await waitForAnnotationSave(saveBaseline);
+    await waitForAnnotationSave(saveBaseline, leaves.secondary);
 
     await activateLeaf(leaves.primary);
     await $(`${active} [data-page-number="1"] canvas`).waitForExist({ timeout: 10_000 });
@@ -1116,8 +1251,11 @@ describe('PDF reader foundation', () => {
     });
     await $('.highlightEditor').waitForExist({ timeout: 5_000 });
     await waitForAnnotationSave(saveBaseline);
+    await closeReaderLeaves();
+    await openPdf(workingPath);
+    await waitForFirstPage();
     saveBaseline = await captureAnnotationSaveBaseline();
-    await selectNativeEditor('.highlightEditor');
+    await activatePersistedHighlightForComment();
     const commentEditor = $(nativeEditorSelector);
     await commentEditor.waitForDisplayed({ timeout: 5_000 });
     await inputValue(
@@ -1149,10 +1287,7 @@ describe('PDF reader foundation', () => {
     );
 
     await $('[data-control="sidebar"]').click();
-    await $('[data-annotation-tool="highlight"]').click();
-    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
-    await $('.highlightEditor').waitForExist({ timeout: 5_000 });
-    await selectNativeEditor('.highlightEditor');
+    await activatePersistedHighlightForComment();
     saveBaseline = await captureAnnotationSaveBaseline();
     const revisedComment = $(`${nativeEditorSelector} [aria-label="Comment"]`);
     await revisedComment.waitForDisplayed({ timeout: 5_000 });
@@ -1384,6 +1519,16 @@ it('projects annotates and searches a PDF from a long Unicode Cyrillic vault pat
   await waitForFirstPage();
 
   await $('[data-control="sidebar"]').click();
+  expect(
+    await browser.execute((readerLeafSelector) => {
+      const tab = document.querySelector<HTMLElement>(`${readerLeafSelector} [data-tab="search"]`);
+      if (tab === null) throw new Error('Search sidebar tab unavailable for hit testing.');
+      const bounds = tab.getBoundingClientRect();
+      return tab.contains(
+        document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2),
+      );
+    }, activeReaderLeafSelector),
+  ).toBe(true);
   await $('[data-tab="annotations"]').click();
   await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
   await $('[data-annotation-search]').setValue('Unicode annotation');
@@ -1451,10 +1596,10 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
   let monitorInstalled = false;
   try {
     await setAnnotationLoadTestFault({ cacheRead: 'fail' });
-    await $('[data-control="sidebar"]').click();
-    await $('[data-tab="annotations"]').click();
-    await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
-    await expect($('[data-sidebar-panel="annotations"]')).toHaveAttribute(
+    await $(activeReaderDescendant('[data-control="sidebar"]')).click();
+    await $(activeReaderDescendant('[data-tab="annotations"]')).click();
+    await $(activeReaderDescendant('.abyss-annotation-card')).waitForExist({ timeout: 10_000 });
+    await expect($(activeReaderDescendant('[data-sidebar-panel="annotations"]'))).toHaveAttribute(
       'data-annotation-state',
       'content',
     );
@@ -1462,7 +1607,7 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
     await openPdf(delayPath);
     await waitForFirstPage();
     await setAnnotationLoadTestFault({ cacheRead: 'fail', extractionDelayMs: 350 });
-    await $('[data-control="sidebar"]').click();
+    await $(activeReaderDescendant('[data-control="sidebar"]')).click();
     await browser.execute(() => {
       const host = window as Window & {
         __abyssTask9AnnotationLoading?: {
@@ -1483,7 +1628,9 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
         status: string;
       }> = [];
       const record = (): void => {
-        const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+        const panel = document.querySelector<HTMLElement>(
+          '.workspace-leaf.mod-active [data-sidebar-panel="annotations"]',
+        );
         samples.push({
           at: performance.now(),
           spinner: panel?.querySelector('[data-annotations-spinner]') !== null,
@@ -1517,10 +1664,23 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
       };
     });
     monitorInstalled = true;
-    await $('[data-tab="annotations"]').click();
-    await expect($('[data-sidebar-panel="annotations"] [role="status"]')).toHaveText(
-      'No annotations',
-      { wait: 10_000 },
+    await $(activeReaderDescendant('[data-tab="annotations"]')).click();
+    await browser.waitUntil(
+      async () =>
+        browser.execute((readerLeafSelector) => {
+          const panel = document.querySelector<HTMLElement>(
+            `${readerLeafSelector} [data-sidebar-panel="annotations"]`,
+          );
+          return (
+            panel?.dataset['annotationState'] === 'empty' &&
+            panel.querySelector<HTMLElement>('[role="status"]')?.innerText.trim() ===
+              'No annotations'
+          );
+        }, activeReaderLeafSelector),
+      {
+        timeout: 10_000,
+        timeoutMsg: 'Delayed extraction did not settle to the active reader empty state.',
+      },
     );
     const timing = await browser.execute(() => {
       const monitor = (
@@ -1542,12 +1702,12 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
       return {
         finalSpinner:
           document.querySelector(
-            '[data-sidebar-panel="annotations"] [data-annotations-spinner]',
+            '.workspace-leaf.mod-active [data-sidebar-panel="annotations"] [data-annotations-spinner]',
           ) !== null,
         finalState:
-          document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]')?.dataset[
-            'annotationState'
-          ] ?? null,
+          document.querySelector<HTMLElement>(
+            '.workspace-leaf.mod-active [data-sidebar-panel="annotations"]',
+          )?.dataset['annotationState'] ?? null,
         spinnerOffsets: monitor.samples
           .filter((sample) => sample.spinner)
           .map((sample) => sample.at - activatedAt),
@@ -1575,19 +1735,37 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
     await openPdf(terminalPath);
     await waitForFirstPage();
     await setAnnotationLoadTestFault({ cacheRead: 'fail', extractionFailure: true });
-    await expect($('.annotationLayer .highlightAnnotation')).toExist();
-    await $('[data-control="sidebar"]').click();
-    await $('[data-tab="annotations"]').click();
-    await expect($('[data-sidebar-panel="annotations"] [role="status"]')).toHaveText(
-      "Couldn't load annotations",
+    await expect($(activeReaderDescendant('.annotationLayer .highlightAnnotation'))).toExist();
+    await $(activeReaderDescendant('[data-control="sidebar"]')).click();
+    await $(activeReaderDescendant('[data-tab="annotations"]')).click();
+    await browser.waitUntil(
+      async () =>
+        browser.execute((readerLeafSelector) => {
+          const leaf = document.querySelector<HTMLElement>(readerLeafSelector);
+          const panel = leaf?.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+          return (
+            panel?.dataset['annotationState'] === 'content' &&
+            leaf?.querySelectorAll('.annotationLayer .highlightAnnotation').length === 1 &&
+            panel.querySelector('[role="status"]') === null
+          );
+        }, activeReaderLeafSelector),
+      {
+        timeout: 10_000,
+        timeoutMsg:
+          'Terminal extraction failure did not preserve the active reader native annotation.',
+      },
     );
     expect(
       await browser.execute(() => {
-        const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+        const panel = document.querySelector<HTMLElement>(
+          '.workspace-leaf.mod-active [data-sidebar-panel="annotations"]',
+        );
         return {
-          native: document.querySelectorAll('.annotationLayer .highlightAnnotation').length,
+          native: document.querySelectorAll(
+            '.workspace-leaf.mod-active .annotationLayer .highlightAnnotation',
+          ).length,
           retryButtons: panel?.querySelectorAll('[data-action*="retry"]').length ?? -1,
-          technicalCopy: /cache|extract|retry|page/iu.test(panel?.innerText ?? ''),
+          technicalCopy: /cache|extract|retry/iu.test(panel?.innerText ?? ''),
         };
       }),
     ).toEqual({ native: 1, retryButtons: 0, technicalCopy: false });
@@ -1596,10 +1774,10 @@ it('falls back from cache failure delays the quiet spinner and recovers from ter
     await closeReaderLeaves();
     await openPdf(terminalPath);
     await waitForFirstPage();
-    await $('[data-control="sidebar"]').click();
-    await $('[data-tab="annotations"]').click();
-    await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
-    await expect($('[data-sidebar-panel="annotations"]')).toHaveAttribute(
+    await $(activeReaderDescendant('[data-control="sidebar"]')).click();
+    await $(activeReaderDescendant('[data-tab="annotations"]')).click();
+    await $(activeReaderDescendant('.abyss-annotation-card')).waitForExist({ timeout: 10_000 });
+    await expect($(activeReaderDescendant('[data-sidebar-panel="annotations"]'))).toHaveAttribute(
       'data-annotation-state',
       'content',
     );

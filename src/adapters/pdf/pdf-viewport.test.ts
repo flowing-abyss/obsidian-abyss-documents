@@ -3367,7 +3367,7 @@ describe('PdfDocumentViewport', () => {
     ).toBe('needle');
   });
 
-  it('aborts prior extraction for each query and clears public find matches for empty input', async () => {
+  it('aborts prior extraction and closes PDF.js find highlighting for empty input', async () => {
     const fixture = await mountedViewport(3);
     const signals: AbortSignal[] = [];
     vi.spyOn(fixture.search, 'search').mockImplementation(async (query, signal, emit) => {
@@ -3396,10 +3396,10 @@ describe('PdfDocumentViewport', () => {
     expect(signals).toHaveLength(3);
     expect(signals.slice(0, 2).every((signal) => signal.aborted)).toBe(true);
     expect(signals[2]?.aborted).toBe(false);
-    const findEvents = fixture.runtime.state.eventBus?.dispatched.filter(
-      ({ name }) => name === 'find',
-    );
-    expect(findEvents?.[findEvents.length - 1]?.data['query']).toBe('');
+    expect(fixture.runtime.state.eventBus?.dispatched.slice(-1)[0]).toMatchObject({
+      name: 'findbarclose',
+      data: { source: fixture.viewport },
+    });
     await fixture.viewport.destroy();
   });
 

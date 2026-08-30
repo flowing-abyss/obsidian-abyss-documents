@@ -448,11 +448,13 @@ describe('PDF.js style build', () => {
       (node) =>
         node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
     );
+    expect(topLevelDeclarations(root, '.abyss-documents .abyss-reader-sidebar')).toMatchObject({
+      position: 'absolute',
+      'inset-inline-start': '0',
+    });
     expect(
       mobileDeclarations(narrowReader, '.abyss-documents .abyss-reader-sidebar'),
     ).toMatchObject({
-      position: 'absolute',
-      'inset-inline-start': '0',
       width: 'min(var(--abyss-reader-sidebar-width), 90%)',
     });
     expect(mobileDeclarations(viewportMobile, '.abyss-documents .abyss-reader-sidebar')).toEqual(
