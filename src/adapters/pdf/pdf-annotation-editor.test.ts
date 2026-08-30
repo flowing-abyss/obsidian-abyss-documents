@@ -89,10 +89,14 @@ class FakeEventBus {
 interface MutableAnnotationStorage {
   [Symbol.iterator](): IterableIterator<[string, unknown]>;
   addEditor: ReturnType<typeof vi.fn<(type: number, id?: string) => void>>;
+  editorSnapshot(id: string): Record<string, unknown> | null;
+  isModified(): boolean;
+  mutateEditor(id: string, value: Record<string, unknown>): void;
   onAnnotationEditor: ((type: number | null) => void) | null;
   onResetModified: (() => void) | null;
   onSetModified: (() => void) | null;
   resetModified: ReturnType<typeof vi.fn<() => void>>;
+  setValue(id: string, value: Record<string, unknown>): void;
   readonly serializable?: never;
 }
 
@@ -100,16 +104,30 @@ function storage(): MutableAnnotationStorage {
   let modified = false;
   let editorSequence = 0;
   const entries = new Map<string, unknown>();
+  const markModified = (): void => {
+    if (modified) return;
+    modified = true;
+    value.onSetModified?.();
+  };
   const value: MutableAnnotationStorage = {
     [Symbol.iterator]: () => entries.entries(),
     addEditor: vi.fn((type: number, id = `fixture-editor-${++editorSequence}`) => {
       entries.set(id, selectedEditor(id, type));
-      if (!modified) {
-        modified = true;
-        value.onSetModified?.();
-      }
+      markModified();
       value.onAnnotationEditor?.(type);
     }),
+    editorSnapshot: (id) => {
+      const editor = entries.get(id);
+      return typeof editor === 'object' && editor !== null ? { ...editor } : null;
+    },
+    isModified: () => modified,
+    mutateEditor: (id, patch) => {
+      const editor = entries.get(id);
+      if (typeof editor !== 'object' || editor === null)
+        throw new Error(`Expected a stored editor for ${id}.`);
+      Object.assign(editor, patch);
+      markModified();
+    },
     onAnnotationEditor: null,
     onResetModified: null,
     onSetModified: null,
@@ -118,6 +136,10 @@ function storage(): MutableAnnotationStorage {
       modified = false;
       value.onResetModified?.();
     }),
+    setValue: (id, entry) => {
+      entries.set(id, { ...entry });
+      markModified();
+    },
   };
   Object.defineProperty(value, 'serializable', {
     configurable: false,
@@ -3428,15 +3450,19 @@ describe('PdfAnnotationEditor lifecycle', () => {
     );
   });
 
-  it('treats native editor activation as not mutation before one real color change', async () => {
+  it('re-arms a clean imported-editor activation so the first native edit becomes a saved revision', async () => {
     const current = fixture();
     const projected = createdAnnotation('', { id: 'imported-highlight' });
     const selected = selectedEditor('imported-highlight', 9);
     const uiManager = manager(selected);
     const mutations = vi.fn();
-    const dirty = vi.fn();
+    let revision = 0;
+    const dirtyStates: boolean[] = [];
     current.editor.onMutation(mutations);
-    current.editor.onDirty(dirty);
+    current.editor.onDirty((dirty) => {
+      dirtyStates.push(dirty);
+      if (dirty) revision += 1;
+    });
     current.editor.setAnnotationProjection([
       { annotation: projected, stableId: 'imported-highlight' },
     ]);
@@ -3460,7 +3486,12 @@ describe('PdfAnnotationEditor lifecycle', () => {
       },
     });
     uiManager.updateParams.mockImplementation(() => {
-      current.annotationStorage.onSetModified?.();
+      current.annotationStorage.mutateEditor('imported-highlight', { color: '#64d8cb' });
+    });
+    current.saveDocument.mockImplementation(async () => {
+      const snapshot = current.annotationStorage.editorSnapshot('imported-highlight');
+      current.annotationStorage.resetModified();
+      return new TextEncoder().encode(JSON.stringify(snapshot));
     });
 
     await expect(
@@ -3469,13 +3500,57 @@ describe('PdfAnnotationEditor lifecycle', () => {
     await Promise.resolve();
 
     expect(mutations).not.toHaveBeenCalled();
-    expect(dirty).not.toHaveBeenCalled();
+    expect(dirtyStates).toEqual([]);
+    expect(current.annotationStorage.resetModified).toHaveBeenCalledOnce();
+    expect(current.annotationStorage.isModified()).toBe(false);
 
     await current.editor.setParameter('highlight-color', '#64d8cb');
 
     expect(uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#64d8cb');
     expect(mutations).toHaveBeenCalledOnce();
-    expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+    expect(dirtyStates).toEqual([true]);
+    expect(revision).toBe(1);
+    expect(current.annotationStorage.isModified()).toBe(true);
+
+    const saved = await current.editor.save(new AbortController().signal);
+    expect(JSON.parse(new TextDecoder().decode(saved))).toMatchObject({ color: '#64d8cb' });
+  });
+
+  it('never clears a genuine dirty baseline while materializing an imported editor', async () => {
+    const current = fixture();
+    const projected = createdAnnotation('', { id: 'imported-highlight' });
+    const selected = selectedEditor('imported-highlight', 9);
+    const uiManager = manager(selected);
+    current.annotationStorage.setValue('genuine-dirty-baseline', { value: 1 });
+    current.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'imported-highlight' },
+    ]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(current.viewer, 'annotationEditorMode');
+    if (descriptor?.get === undefined || descriptor.set === undefined)
+      throw new Error('Expected the fixture viewer mode accessor.');
+    const getMode = descriptor.get.bind(current.viewer);
+    const setMode = descriptor.set.bind(current.viewer);
+    Object.defineProperty(current.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: getMode,
+      set(request: { readonly editId?: string; readonly mode: number }) {
+        if (request.editId === 'imported-highlight') {
+          current.annotationStorage.addEditor(9, request.editId);
+        }
+        setMode(request);
+      },
+    });
+
+    await expect(
+      current.editor.focusAnnotation('imported-highlight', { kind: 'sidebar' }),
+    ).resolves.toBe('editable');
+
+    expect(current.annotationStorage.resetModified).not.toHaveBeenCalled();
+    expect(current.annotationStorage.isModified()).toBe(true);
   });
 
   it('owns only the target callbacks after asynchronous PDF.js editor materialization', async () => {
@@ -3518,8 +3593,8 @@ describe('PdfAnnotationEditor lifecycle', () => {
     const activation = current.editor.focusAnnotation('deferred-highlight', { kind: 'sidebar' });
     await setterStarted.promise;
 
-    // A genuine mutation races while PDF.js is still awaiting page/editor deserialization.
-    current.annotationStorage.onSetModified?.();
+    // A genuine storage mutation races while PDF.js is still awaiting editor deserialization.
+    current.annotationStorage.setValue('concurrent-genuine-mutation', { value: 1 });
     rendering.resolve();
     await materialization;
 
@@ -3528,6 +3603,8 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
     expect(mutations).toHaveBeenCalledOnce();
     expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+    expect(current.annotationStorage.resetModified).not.toHaveBeenCalled();
+    expect(current.annotationStorage.isModified()).toBe(true);
   });
 
   it('does not suppress a genuine mutation while activation resolution is pending', async () => {

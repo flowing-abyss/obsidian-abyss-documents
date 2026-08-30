@@ -1279,6 +1279,26 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
+  it('makes a mouse-context invoking card the roving focus restoration target', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onActivate: vi.fn(), onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0), annotation(1)]);
+    const cards = Array.from(root.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'));
+    const first = cards[0];
+    const second = cards[1];
+    if (first === undefined || second === undefined)
+      throw new Error('Expected two annotation cards.');
+    first.focus();
+
+    second.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+
+    expect(root.doc.activeElement).toBe(second);
+    expect(cards.map((card) => card.tabIndex)).toEqual([-1, 0]);
+    panel.destroy();
+    root.remove();
+  });
+
   it('shows one background failure state without throwing', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });

@@ -424,28 +424,6 @@ async function mutateOnlyHighlight(
   }
 }
 
-async function failedRealSave(
-  bytes: Uint8Array,
-  kind: 'abort' | 'reject',
-): Promise<{ readonly after: string; readonly before: string; readonly rejected: boolean }> {
-  const before = sha256(bytes);
-  const session = await nativeSession(bytes);
-  let rejected = false;
-  try {
-    if (kind === 'reject') await session.loadingTask.destroy();
-    const signal =
-      kind === 'abort' ? AbortSignal.abort('semantic cancellation') : new AbortController().signal;
-    try {
-      await session.annotationEditor.save(signal);
-    } catch {
-      rejected = true;
-    }
-  } finally {
-    await destroySession(session).catch(() => undefined);
-  }
-  return { after: sha256(bytes), before, rejected };
-}
-
 function semanticError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
@@ -469,12 +447,6 @@ const edited = await mutateOnlyHighlight(first, {
   kind: 'edit',
 });
 const editedReopen = await reopenedHighlights(edited);
-const failures = await Promise.all(
-  (['abort', 'reject'] as const).map(async (kind) => ({
-    kind,
-    ...(await failedRealSave(edited, kind)),
-  })),
-);
 const deleted = await mutateOnlyHighlight(edited, { kind: 'delete' });
 const repeatFirst = await createHighlight(original, {
   color: '#ffd400',
@@ -492,7 +464,6 @@ const repeatSecond = await createHighlight(repeatFirst, {
 const result = {
   deletedReopen: await reopenedHighlights(deleted),
   editedReopen,
-  failures,
   firstHash: sha256(first),
   firstReopen,
   originalHash: sha256(original),

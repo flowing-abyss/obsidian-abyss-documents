@@ -151,6 +151,7 @@ interface MutableAnnotationStorage {
   onAnnotationEditor: ((type: number | null) => void) | null;
   onResetModified: (() => void) | null;
   onSetModified: (() => void) | null;
+  resetModified(): void;
 }
 
 interface PdfAnnotationEditorDependencies {
@@ -198,6 +199,7 @@ interface ActivationMaterialization {
   readonly baselineEditors: ReadonlySet<object>;
   editorConsumed: boolean;
   readonly mode: number;
+  resetInProgress: boolean;
   setConsumed: boolean;
 }
 
@@ -1533,6 +1535,7 @@ export class PdfAnnotationEditor {
       baselineEditors: new Set(this.nativeStorageEditors()),
       editorConsumed: false,
       mode,
+      resetInProgress: false,
       setConsumed: false,
     };
     this.activationMaterialization = materialization;
@@ -1564,6 +1567,12 @@ export class PdfAnnotationEditor {
     if (materialization.setConsumed || materialization.editorConsumed) return false;
     if (this.materializedActivationEditor(materialization) === null) return false;
     materialization.setConsumed = true;
+    materialization.resetInProgress = true;
+    try {
+      this.storage.resetModified();
+    } finally {
+      materialization.resetInProgress = false;
+    }
     return true;
   }
 
@@ -2490,6 +2499,7 @@ export class PdfAnnotationEditor {
     };
     const ownedReset = (): void => {
       previousReset?.();
+      if (this.activationMaterialization?.resetInProgress === true) return;
       this.emitDirty(false);
     };
     this.callbackOwnership = {

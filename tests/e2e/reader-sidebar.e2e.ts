@@ -1029,15 +1029,26 @@ describe('PDF reader sidebar', () => {
       { key: 'F10', shiftKey: true },
     ] as const;
     for (const gesture of gestures) {
-      const prevented = await browser.execute(({ key, shiftKey }) => {
-        const card = document.querySelector<HTMLButtonElement>(
+      const activation = await browser.execute(({ key, shiftKey }) => {
+        const current = document.querySelector<HTMLButtonElement>(
           '.abyss-annotation-card[tabindex="0"]',
         );
+        const card =
+          key === 'contextmenu'
+            ? (Array.from(
+                document.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'),
+              ).find((candidate) => candidate !== current) ?? null)
+            : current;
         if (card === null) throw new Error('Explicit annotation activation target is missing.');
+        const rowId = card.dataset['annotationRowId'];
+        if (rowId === undefined) throw new Error('Annotation activation target has no row id.');
         if (key === 'contextmenu') {
+          const elsewhere = document.querySelector<HTMLInputElement>('[data-annotation-search]');
+          if (elsewhere === null) throw new Error('Annotation search focus target is missing.');
+          elsewhere.focus();
           const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
           card.dispatchEvent(event);
-          return event.defaultPrevented;
+          return { prevented: event.defaultPrevented, rowId };
         }
         const event = new KeyboardEvent('keydown', {
           bubbles: true,
@@ -1046,9 +1057,9 @@ describe('PDF reader sidebar', () => {
           shiftKey,
         });
         card.dispatchEvent(event);
-        return event.defaultPrevented;
+        return { prevented: event.defaultPrevented, rowId };
       }, gesture);
-      expect(prevented).toBe(true);
+      expect(activation.prevented).toBe(true);
       await expect($('[data-annotation-editor-popover]')).toBeDisplayed();
       const editorGeometry = await browser.execute(() => {
         const editors = Array.from(
@@ -1069,8 +1080,17 @@ describe('PDF reader sidebar', () => {
       expect(editorGeometry).toEqual({ count: 1, insideViewport: true, notOrigin: true });
       await browser.keys(Key.Escape);
       expect(
-        await browser.execute(() => document.activeElement?.matches('.abyss-annotation-card')),
-      ).toBe(true);
+        await browser.execute((rowId) => {
+          const active = document.activeElement as HTMLElement | null;
+          return {
+            activeRowId: active?.dataset['annotationRowId'] ?? null,
+            invokingTabIndex:
+              document.querySelector<HTMLButtonElement>(
+                `.abyss-annotation-card[data-annotation-row-id="${CSS.escape(rowId)}"]`,
+              )?.tabIndex ?? null,
+          };
+        }, activation.rowId),
+      ).toEqual({ activeRowId: activation.rowId, invokingTabIndex: 0 });
     }
     await setCoarseAnnotationGeometry(true);
     await waitForAnnotationWindowToSettle();

@@ -537,6 +537,7 @@ export class AnnotationsPanel {
     });
     button.addEventListener('contextmenu', (event) => {
       event.preventDefault();
+      button.focus();
       this.activateCard(button, clientPosition(event, button));
     });
     this.cardButtons.set(rowId, button);
@@ -733,6 +734,8 @@ export class AnnotationsPanel {
     button: HTMLButtonElement,
     position: { readonly x: number; readonly y: number } | undefined,
   ): void {
+    const rowId = button.dataset['annotationRowId'];
+    if (rowId !== undefined) this.setRovingRow(rowId);
     const annotation = this.cardAnnotations.get(button);
     if (annotation !== undefined) this.activate(annotation, position);
   }

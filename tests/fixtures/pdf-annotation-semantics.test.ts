@@ -1,16 +1,20 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import type { FileStats, TFile, Vault } from 'obsidian';
+import { App, TFile as MockTFile } from 'obsidian-test-mocks/obsidian';
 import { describe, expect, it } from 'vitest';
+import { PdfWriteBoundary, baseTokenFor } from '../../src/adapters/pdf/pdf-write-boundary.js';
+import {
+  DocumentSaveCoordinator,
+  type BaseToken,
+} from '../../src/document-core/save-coordinator.js';
 
 interface SemanticResult {
   readonly deletedReopen: ReadonlyArray<Record<string, unknown>>;
   readonly editedReopen: ReadonlyArray<Record<string, unknown>>;
-  readonly failures: ReadonlyArray<{
-    readonly after: string;
-    readonly before: string;
-    readonly kind: 'abort' | 'reject';
-    readonly rejected: boolean;
-  }>;
   readonly firstHash: string;
   readonly firstReopen: ReadonlyArray<Record<string, unknown>>;
   readonly originalHash: string;
@@ -89,6 +93,87 @@ async function realPdfJsSemantics(options: SemanticProcessOptions = {}): Promise
 }
 
 describe('real PDF.js annotation semantic bytes oracle', () => {
+  it('keeps a disposable file hash unchanged when the real save boundary rejects or aborts', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'abyss-pdf-write-'));
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const sourceFile = app.vault.getAbstractFileByPath('Books/Guide.pdf');
+    if (!(sourceFile instanceof MockTFile)) throw new Error('Expected a disposable PDF fixture.');
+    Object.assign(sourceFile, {
+      stat: { ctime: 1, mtime: 10, size: 6 } satisfies FileStats,
+    });
+    const source = sourceFile.asOriginalType2__();
+    const diskPath = path.join(directory, source.path);
+    const original = new Uint8Array([37, 80, 68, 70, 45, 49]);
+    const prepared = new Uint8Array([37, 80, 68, 70, 45, 50]);
+    const digest = async (): Promise<string> =>
+      createHash('sha256')
+        .update(await readFile(diskPath))
+        .digest('hex');
+    try {
+      await mkdir(path.dirname(diskPath), { recursive: true });
+      await writeFile(diskPath, original);
+      const vault = {
+        getFileByPath: (requested: string) => (requested === source.path ? source : null),
+        readBinary: async () => {
+          const bytes = await readFile(diskPath);
+          return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        },
+        modifyBinary: async (_file: TFile, bytes: ArrayBuffer) => {
+          await writeFile(diskPath, new Uint8Array(bytes));
+          source.stat.mtime += 1;
+          source.stat.size = bytes.byteLength;
+        },
+      } as Pick<Vault, 'getFileByPath' | 'readBinary' | 'modifyBinary'>;
+      const verifyPdf = async (bytes: Uint8Array): Promise<void> => {
+        if (bytes[bytes.byteLength - 1] === 50) throw new Error('parser rejected prepared bytes');
+      };
+      const coordinator = new DocumentSaveCoordinator(new PdfWriteBoundary(vault), verifyPdf);
+      const before = await digest();
+      const rejectedBaseToken: BaseToken = await baseTokenFor(original, source.stat.mtime);
+      const rejectedSource = {
+        commit: () => undefined,
+        prepare: async () => ({ revision: 1, baseToken: rejectedBaseToken, bytes: prepared }),
+      };
+
+      await expect(
+        coordinator.save(
+          {
+            path: source.path,
+            baseToken: rejectedBaseToken,
+            revision: 1,
+            source: rejectedSource,
+          },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ stage: 'parser-reopen', restored: true });
+      expect(await digest()).toBe(before);
+
+      const abortedBaseToken = await baseTokenFor(original, source.stat.mtime);
+      const abort = new AbortController();
+      const abortedSource = {
+        commit: () => undefined,
+        prepare: async () => {
+          abort.abort(new DOMException('cancelled before write', 'AbortError'));
+          return { revision: 2, baseToken: abortedBaseToken, bytes: prepared };
+        },
+      };
+      await expect(
+        coordinator.save(
+          {
+            path: source.path,
+            baseToken: abortedBaseToken,
+            revision: 2,
+            source: abortedSource,
+          },
+          abort.signal,
+        ),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(await digest()).toBe(before);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   it(
     'preserves page, quadPoints, fill, comment, edit, delete, hash, and repeat semantics',
     { timeout: 30_000 },
@@ -114,12 +199,6 @@ describe('real PDF.js annotation semantic bytes oracle', () => {
         pageIndex: 0,
       });
       expect(result.editedReopen[0]?.['quadPoints']).toEqual(first[0]?.['quadPoints']);
-
-      expect(result.failures).toEqual([
-        expect.objectContaining({ kind: 'abort', rejected: true }),
-        expect.objectContaining({ kind: 'reject', rejected: true }),
-      ]);
-      for (const failure of result.failures) expect(failure.after).toBe(failure.before);
 
       expect(result.deletedReopen).toHaveLength(0);
       expect(result.repeatFirstReopen).toHaveLength(1);
