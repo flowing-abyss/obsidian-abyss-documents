@@ -12,7 +12,7 @@ import { PdfDocumentAdapter } from './adapters/pdf/pdf-adapter.js';
 import { PdfRuntimeLoader } from './adapters/pdf/pdf-runtime.js';
 import { PdfWriteBoundary } from './adapters/pdf/pdf-write-boundary.js';
 import { AnnotationCache } from './annotation-cache.js';
-import type { AnnotationSink, DocumentAnnotation } from './document-core/annotations.js';
+import type { DocumentAnnotation } from './document-core/annotations.js';
 import type { DocumentSession, DocumentViewport } from './document-core/document.js';
 import { DocumentSaveCoordinator } from './document-core/save-coordinator.js';
 import AbyssDocumentsPlugin from './main.js';
@@ -180,8 +180,23 @@ async function loadedReader(
 }
 
 describe('AbyssDocumentsPlugin', () => {
-  it('contains clipboard transfer failure with one annotation/file Notice and diagnostic', async () => {
-    const created = documentSession('transfer');
+  it('contains annotation transfer failures without exposing card action buttons', async () => {
+    const reader = await loadedReader(DEFAULT_DATA, documentSession('transfer'));
+    const controller = (
+      reader.view as unknown as {
+        controller: {
+          services: {
+            annotationTransfer?: {
+              build(annotation: DocumentAnnotation, file: TFile): unknown;
+              copyAnnotationLink(annotation: DocumentAnnotation, file: TFile): Promise<void>;
+            };
+          };
+        };
+      }
+    ).controller;
+    const transfer = controller.services.annotationTransfer;
+    const file = reader.view.file;
+    if (transfer === undefined || file === null) throw new Error('Expected annotation transfer.');
     const item = {
       ...({} as DocumentAnnotation),
       identity: { kind: 'stable' as const, id: 'committed-one' as never },
@@ -201,40 +216,21 @@ describe('AbyssDocumentsPlugin', () => {
       tags: [],
       links: [],
     };
-    Object.assign(created.session, {
-      listAnnotations: async (_signal: AbortSignal, sink: AnnotationSink) => {
-        sink([item]);
-      },
-    });
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const reader = await loadedReader(DEFAULT_DATA, created);
-    reader.view.contentEl.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
-    reader.view.contentEl
-      .querySelector<HTMLButtonElement>('[data-sidebar-tab="annotations"]')
-      ?.click();
-    await vi.waitFor(() => {
-      expect(
-        reader.view.contentEl.querySelector('[data-action="copy-annotation-link"]'),
-      ).not.toBeNull();
-    });
-    reader.view.contentEl
-      .querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]')
-      ?.click();
-    await vi.waitFor(() => {
-      expect(notice).toHaveBeenCalledWith(
-        'Could not copy annotation committed-one from Books/Guide.pdf.',
-        undefined,
-      );
-    });
+
+    expect(() => transfer.build(item, file)).not.toThrow();
+    await transfer.copyAnnotationLink(item, file);
+
+    expect(notice).toHaveBeenCalledWith(
+      'Could not copy annotation committed-one from Books/Guide.pdf.',
+      undefined,
+    );
     expect(log).toHaveBeenCalledWith(
       '[abyss-documents] Failed to transfer PDF annotation',
-      expect.objectContaining({
-        action: 'copy',
-        annotation: 'committed-one',
-        file: 'Books/Guide.pdf',
-      }),
+      expect.objectContaining({ action: 'copy', annotation: 'committed-one' }),
     );
+    expect(reader.view.contentEl.querySelector('[data-action="copy-annotation-link"]')).toBeNull();
   });
   it('wires cached comment suggestions into the active reader PDF source path', async () => {
     const suggest = vi

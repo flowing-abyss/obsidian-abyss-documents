@@ -19,11 +19,19 @@ export interface OutlineItem {
   readonly children: readonly OutlineItem[];
 }
 
-export interface DocumentLocation {
-  readonly pageIndex: number;
-  readonly x?: number;
-  readonly y?: number;
-}
+export type DocumentLocation =
+  | {
+      readonly coordinateSpace?: never;
+      readonly pageIndex: number;
+      readonly x?: never;
+      readonly y?: never;
+    }
+  | {
+      readonly coordinateSpace: 'page-points-top-left' | 'pdf-points-bottom-left';
+      readonly pageIndex: number;
+      readonly x?: number;
+      readonly y?: number;
+    };
 
 export interface PdfPageRect {
   readonly x: number;

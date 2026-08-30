@@ -30,8 +30,6 @@ export interface ReaderSidebarCallbacks {
   readonly onClose: () => void;
   readonly onAnnotationNavigate?: (location: DocumentLocation) => void;
   readonly onAnnotationActivate?: (activation: AnnotationPanelActivation) => void;
-  readonly onAnnotationCopy?: (annotation: DocumentAnnotation) => void;
-  readonly onAnnotationInsert?: (annotation: DocumentAnnotation) => void;
   readonly onAnnotationTransfer?: (annotation: DocumentAnnotation, transfer: DataTransfer) => void;
   readonly onAnnotationTransferFailure?: (annotation: DocumentAnnotation, cause: unknown) => void;
   readonly onTabChange: (tab: ReaderSidebarTab) => void;
@@ -222,10 +220,6 @@ function annotationPanelOptions(callbacks: ReaderSidebarCallbacks): AnnotationsP
     Object.assign(options, { colorMeanings: callbacks.annotationColorMeanings });
   if (callbacks.annotationColorNames !== undefined)
     Object.assign(options, { colorNames: callbacks.annotationColorNames });
-  if (callbacks.onAnnotationCopy !== undefined)
-    Object.assign(options, { onCopy: callbacks.onAnnotationCopy });
-  if (callbacks.onAnnotationInsert !== undefined)
-    Object.assign(options, { onInsert: callbacks.onAnnotationInsert });
   if (callbacks.onAnnotationTransfer !== undefined)
     Object.assign(options, { onTransfer: callbacks.onAnnotationTransfer });
   if (callbacks.onAnnotationTransferFailure !== undefined)

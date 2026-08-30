@@ -190,6 +190,11 @@ describe('ReaderShell', () => {
       { annotation: first, key: 'duplicate-first', nativeId: 'native-first', writable: false },
       { annotation: second, key: 'duplicate-second', nativeId: 'native-second', writable: false },
     ]);
+    const secondCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="duplicate-second"]',
+    );
+    if (secondCard === null) throw new Error('Expected the second duplicate card.');
+    vi.spyOn(secondCard, 'getBoundingClientRect').mockReturnValue(new DOMRect(40, 60, 180, 72));
 
     const activation = shell.resolveAnnotationActivation('duplicate-second');
     if (activation === null) throw new Error('Expected the second duplicate activation.');
@@ -200,7 +205,7 @@ describe('ReaderShell', () => {
         onDelete: vi.fn(),
         onUpdate: vi.fn(),
         palette: [],
-        position: activation.position,
+        position: activation.clientPosition,
         target: { annotation: activation.annotation, kind: 'readonly' },
       },
       { preserveResolvedRow: true },

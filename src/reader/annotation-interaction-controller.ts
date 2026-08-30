@@ -228,6 +228,7 @@ export class AnnotationInteractionController {
       this.closeActiveSelection();
       return;
     }
+    if (!isUsableClientPosition(focus.position)) return;
     const target = this.annotationFocusTarget(focus, first);
     const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
@@ -411,6 +412,17 @@ export class AnnotationInteractionController {
       });
     });
   }
+}
+
+function isUsableClientPosition(
+  position: { readonly x: number; readonly y: number } | undefined,
+): position is { readonly x: number; readonly y: number } {
+  return (
+    position !== undefined &&
+    Number.isFinite(position.x) &&
+    Number.isFinite(position.y) &&
+    (position.x !== 0 || position.y !== 0)
+  );
 }
 
 function isAbortFailure(cause: unknown): boolean {

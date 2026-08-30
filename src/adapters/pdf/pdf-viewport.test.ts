@@ -1540,6 +1540,9 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'annotationEditorLayer' })
       .createDiv({ cls: 'highlightEditor selectedEditor' });
     nativeNode.id = 'native-highlight';
+    vi.spyOn(nativeNode, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 20, width: 100, x: 10, y: 20 }),
+    );
     const native = {
       comment: 'Original',
       elementBeforePopup: nativeNode,
@@ -1639,8 +1642,16 @@ describe('PdfDocumentViewport', () => {
     }
 
     await fixture.viewport.goTo({ pageIndex: 2 });
-    await fixture.viewport.goTo({ pageIndex: 1, x: 12 });
-    await fixture.viewport.goTo({ pageIndex: 0, y: 24 });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 1,
+      x: 12,
+    });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 0,
+      y: 24,
+    });
     fixture.viewport.setScale(1.75);
     fixture.viewport.setScale('page-fit');
     fixture.viewport.focus();
@@ -1652,6 +1663,73 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.currentScaleValue).toBe('page-fit');
     expect(viewer.focus).toHaveBeenCalledOnce();
   });
+
+  it('converts top-left coordinate space to PDF bottom-left without shifting absolute crop x', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+    vi.mocked(fixture.documentProxy.getPage).mockResolvedValue({
+      rotate: 0,
+      view: [10, 20, 610, 820],
+    } as unknown as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+    eventBus.dispatch('pagesinit', {});
+
+    await fixture.viewport.goTo({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+
+    expect(linkService.positions).toEqual([[1, 20, 771]]);
+  });
+
+  it('passes bottom-left coordinate space through unchanged', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const linkService = fixture.runtime.state.linkService;
+    if (eventBus === undefined || linkService === undefined)
+      throw new Error('Expected viewer components.');
+    eventBus.dispatch('pagesinit', {});
+
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 0,
+      x: 20,
+      y: 49,
+    });
+
+    expect(linkService.positions).toEqual([[1, 20, 49]]);
+  });
+
+  it.each([0, 90, 180, 270])(
+    'keeps the same top-left PDF destination at rotation %i without rotating twice',
+    async (rotation) => {
+      const fixture = await mountedViewport(3);
+      const eventBus = fixture.runtime.state.eventBus;
+      const linkService = fixture.runtime.state.linkService;
+      if (eventBus === undefined || linkService === undefined)
+        throw new Error('Expected viewer components.');
+      // eslint-disable-next-line @typescript-eslint/unbound-method -- the Vitest mock is configured, never invoked detached
+      vi.mocked(fixture.documentProxy.getPage).mockResolvedValue({
+        rotate: rotation,
+        view: [0, 0, 595, 842],
+      } as unknown as Awaited<ReturnType<PDFDocumentProxy['getPage']>>);
+      eventBus.dispatch('pagesinit', {});
+
+      await fixture.viewport.goTo({
+        coordinateSpace: 'page-points-top-left',
+        pageIndex: 0,
+        x: 20,
+        y: 49,
+      });
+
+      expect(linkService.positions).toEqual([[1, 20, 793]]);
+    },
+  );
 
   it('maps every pages and scrolling combination through public PDF.js setters', async () => {
     const fixture = await mountedViewport(8);
@@ -2212,8 +2290,18 @@ describe('PdfDocumentViewport', () => {
       imageDim: 0.1,
     });
 
-    await fixture.viewport.goTo({ pageIndex: 2, x: 12, y: 34 });
-    await fixture.viewport.goTo({ pageIndex: 3, x: 56, y: 78 });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 12,
+      y: 34,
+    });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 3,
+      x: 56,
+      y: 78,
+    });
 
     expect(linkService.positions).toEqual([]);
     expect(linkService.pages).toEqual([]);
@@ -2232,7 +2320,12 @@ describe('PdfDocumentViewport', () => {
       throw new Error('Expected viewer components.');
     }
     eventBus.dispatch('pagesinit', {});
-    await fixture.viewport.goTo({ pageIndex: 2, x: 12, y: 34 });
+    await fixture.viewport.goTo({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 12,
+      y: 34,
+    });
     viewer.currentPageNumber = 1;
 
     fixture.viewport.setReadingColors({

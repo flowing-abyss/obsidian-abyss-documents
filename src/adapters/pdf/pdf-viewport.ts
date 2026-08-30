@@ -407,7 +407,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.pendingLocation = { ...location };
       return;
     }
-    this.navigateTo(location);
+    await this.navigateTo(location);
     const viewer = this.requireMounted(this.viewer);
     this.refitPageHeight(viewer);
   }
@@ -1103,7 +1103,9 @@ export class PdfDocumentViewport implements DocumentViewport {
       const location = this.pendingLocation ?? this.locationForRebind(state);
       this.pendingLocation = null;
       this.latestLocation = { ...location };
-      this.navigateTo(location);
+      void this.navigateTo(location).catch((cause: unknown) => {
+        this.handleRenderError(state.pageNumber, cause);
+      });
       const scale = this.explicitScaleRequest ? this.requestedScale : this.scaleFromState(state);
       this.applyScale(viewer, scale, this.scaleRequestRevision);
     } catch (cause) {
@@ -1216,14 +1218,22 @@ export class PdfDocumentViewport implements DocumentViewport {
       : { ...this.latestLocation };
   }
 
-  private navigateTo(location: DocumentLocation): void {
+  private async navigateTo(location: DocumentLocation): Promise<void> {
     const linkService = this.requireMounted(this.linkService);
     const pageNumber = location.pageIndex + 1;
-    if (location.x === undefined && location.y === undefined) {
+    if (location.coordinateSpace === undefined) {
       linkService.goToPage(pageNumber);
       return;
     }
-    linkService.goToXY(pageNumber, location.x ?? 0, location.y ?? 0);
+    let y = location.y ?? 0;
+    if (location.coordinateSpace === 'page-points-top-left') {
+      const page = await this.pdf.getPage(pageNumber);
+      const pageTop = page.view[3];
+      if (pageTop === undefined)
+        throw new TypeError('The PDF page crop box is missing its top coordinate.');
+      y = pageTop - y;
+    }
+    linkService.goToXY(pageNumber, location.x ?? 0, y);
   }
 
   private flushPendingLocation(): void {
@@ -1236,7 +1246,9 @@ export class PdfDocumentViewport implements DocumentViewport {
       return;
     const location = this.pendingLocation;
     this.pendingLocation = null;
-    this.navigateTo(location);
+    void this.navigateTo(location).catch((cause: unknown) => {
+      this.handleRenderError(location.pageIndex + 1, cause);
+    });
   }
 
   private clearPendingInteractions(): void {

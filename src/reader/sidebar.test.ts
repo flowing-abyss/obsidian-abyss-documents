@@ -99,16 +99,14 @@ describe('ReaderSidebar', () => {
 
     expect(onAnnotationActivate).toHaveBeenCalledWith({
       annotation: item,
-      location: { pageIndex: 0, x: 4, y: 8 },
+      location: { coordinateSpace: 'page-points-top-left', pageIndex: 0, x: 4, y: 8 },
       nativeId: 'native-overlap-second',
       rowId: 'stable-row',
     });
   });
-  it('forwards optional drag, copy, and insert callbacks into annotation cards', () => {
-    const onAnnotationCopy = vi.fn();
-    const onAnnotationInsert = vi.fn();
+  it('forwards the optional drag callback into annotation cards', () => {
     const onAnnotationTransfer = vi.fn();
-    const handlers = { ...callbacks(), onAnnotationCopy, onAnnotationInsert, onAnnotationTransfer };
+    const handlers = { ...callbacks(), onAnnotationTransfer };
     const sidebar = new ReaderSidebar(createDiv(), handlers);
     const item = {
       ...({} as DocumentAnnotation),
@@ -136,11 +134,7 @@ describe('ReaderSidebar', () => {
     row.dispatchEvent(
       Object.assign(new Event('dragstart', { bubbles: true }), { dataTransfer: transfer }),
     );
-    sidebar.root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]')?.click();
-    sidebar.root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]')?.click();
     expect(onAnnotationTransfer).toHaveBeenCalledWith(item, transfer);
-    expect(onAnnotationCopy).toHaveBeenCalledWith(item);
-    expect(onAnnotationInsert).toHaveBeenCalledWith(item);
   });
   it('keeps sidebar DOM absent until an explicit open and remembers the selected tab', () => {
     const host = createDiv();

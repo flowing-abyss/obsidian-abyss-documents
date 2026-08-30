@@ -124,7 +124,9 @@ function locationFromDestination(
   if (destinationMode(destination) !== 'XYZ') return { pageIndex };
   const x = coordinate(destination[2]);
   const y = coordinate(destination[3]);
+  if (x === undefined && y === undefined) return { pageIndex };
   return {
+    coordinateSpace: 'pdf-points-bottom-left',
     pageIndex,
     ...(x === undefined ? {} : { x }),
     ...(y === undefined ? {} : { y }),

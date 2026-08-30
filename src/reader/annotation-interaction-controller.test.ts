@@ -381,6 +381,27 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it('opens a single annotation editor only after a finite native or sidebar anchor exists', () => {
+    const test = fixture();
+    const focused = nativeAnnotation('Anchored once');
+
+    test.emitAnnotationFocus({ annotations: [focused], editable: true });
+    expect(test.opened).toEqual([]);
+
+    test.emitAnnotationFocus({
+      annotations: [focused],
+      editable: true,
+      position: { x: 72, y: 288 },
+    });
+
+    expect(test.opened).toHaveLength(1);
+    expect(test.opened[0]).toMatchObject({
+      position: { x: 72, y: 288 },
+      target: { annotation: focused, kind: 'annotation' },
+    });
+    test.controller.destroy();
+  });
+
   it('routes sidebar activation through the public interaction boundary exactly once', async () => {
     const test = fixture();
     test.emitSelection(textSelection('stale-selection'));

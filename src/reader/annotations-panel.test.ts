@@ -7,7 +7,7 @@ import {
   readerPerformanceSnapshot,
 } from '../reader-performance.js';
 import type { AnnotationProjectionRow } from './annotation-projection.js';
-import { AnnotationsPanel } from './annotations-panel.js';
+import { AnnotationsPanel, type AnnotationPanelActivation } from './annotations-panel.js';
 import { ownerWindow } from './owner-dom.js';
 
 function annotation(
@@ -319,9 +319,14 @@ describe('AnnotationsPanel', () => {
 
     expect(panel.resolveActivation('row-second')).toEqual({
       annotation: refreshedSecond,
-      location: { pageIndex: 1, x: 0, y: 0 },
+      clientPosition: { x: 64, y: 340 },
+      location: {
+        coordinateSpace: 'page-points-top-left',
+        pageIndex: 1,
+        x: 0,
+        y: 0,
+      },
       nativeId: 'native-second',
-      position: { x: 64, y: 340 },
       rowId: 'row-second',
     });
     expect(
@@ -1101,294 +1106,6 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
-  it('keeps Copy and Insert contextual', () => {
-    const root = createDiv();
-    root.doc.body.append(root);
-    const panel = new AnnotationsPanel(root, {
-      onNavigate: vi.fn(),
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
-    });
-    panel.setAnnotations([annotation(0)]);
-    const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
-    const actions = root.querySelector<HTMLElement>('.abyss-annotation-card-actions');
-    const origin = ownerWindow(root).createEl('button');
-    root.doc.body.append(origin);
-    origin.focus();
-    expect(actions?.dataset['contextual']).toBe('');
-    expect(row?.hasAttribute('data-actions-open')).toBe(false);
-
-    row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-
-    expect(row?.hasAttribute('data-actions-open')).toBe(true);
-    expect(root.doc.activeElement).toBe(origin);
-    origin.remove();
-    root.remove();
-  });
-
-  it('keeps actions reachable without hover', () => {
-    const root = createDiv();
-    root.doc.body.append(root);
-    const onCopy = vi.fn();
-    const panel = new AnnotationsPanel(root, {
-      onNavigate: vi.fn(),
-      onCopy,
-      onInsert: vi.fn(),
-    });
-    panel.setAnnotations([annotation(0)]);
-    const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
-    const card = root.querySelector<HTMLElement>('.abyss-annotation-card');
-    const copy = root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]');
-    copy?.focus();
-    expect(root.doc.activeElement).toBe(copy);
-
-    card?.dispatchEvent(
-      Object.assign(new Event('pointerup', { bubbles: true }), { pointerType: 'touch' }),
-    );
-    expect(row?.hasAttribute('data-actions-open')).toBe(true);
-    copy?.click();
-    expect(onCopy).toHaveBeenCalledOnce();
-    root.remove();
-  });
-
-  it('closes contextual actions when interaction moves away', () => {
-    const root = createDiv();
-    root.doc.body.append(root);
-    const panel = new AnnotationsPanel(root, {
-      onNavigate: vi.fn(),
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
-    });
-    panel.setAnnotations([annotation(0)]);
-    const row = root.querySelector<HTMLElement>('.abyss-annotation-card-row');
-    row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-    expect(row?.hasAttribute('data-actions-open')).toBe(true);
-    const outside = ownerWindow(root).createEl('button');
-    root.doc.body.append(outside);
-
-    outside.dispatchEvent(new Event('pointerdown', { bubbles: true }));
-
-    expect(row?.hasAttribute('data-actions-open')).toBe(false);
-    panel.destroy();
-    outside.remove();
-    root.remove();
-  });
-
-  it('preserves contextual action focus through virtual rerenders and restores the card on Escape', async () => {
-    const root = createDiv();
-    root.doc.body.append(root);
-    const panel = new AnnotationsPanel(root, {
-      onNavigate: vi.fn(),
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
-    });
-    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
-    const insert = root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
-    insert?.focus();
-    expect(root.doc.activeElement).toBe(insert);
-
-    ownerWindow(root).dispatchEvent(new Event('resize'));
-    await new Promise<void>((resolve) => {
-      ownerWindow(root).requestAnimationFrame(() => {
-        resolve();
-      });
-    });
-    expect(root.querySelector('[data-action="insert-annotation"]')).toBe(insert);
-    expect(root.doc.activeElement).toBe(insert);
-
-    panel.setCurrentPage(0);
-
-    const restored = root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
-    expect(root.doc.activeElement).toBe(restored);
-    restored?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
-    expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-0');
-    expect(
-      root
-        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
-        ?.hasAttribute('data-actions-open'),
-    ).toBe(false);
-    expect(
-      root
-        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
-        ?.hasAttribute('data-actions-suppressed'),
-    ).toBe(true);
-    panel.setCurrentPage(0);
-    expect(
-      root
-        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
-        ?.hasAttribute('data-actions-suppressed'),
-    ).toBe(true);
-    const outside = ownerWindow(root).createEl('button');
-    root.doc.body.append(outside);
-    outside.dispatchEvent(new Event('pointerdown', { bubbles: true }));
-    expect(root.querySelector('[data-actions-suppressed]')).toBeNull();
-    outside.remove();
-    root.remove();
-  });
-
-  it('retains the focused contextual row while resize recalibrates a deep virtual window', () => {
-    const root = createDiv();
-    root.doc.body.append(root);
-    const owner = ownerWindow(root);
-    const frames: FrameRequestCallback[] = [];
-    vi.spyOn(owner, 'requestAnimationFrame').mockImplementation((callback) => {
-      frames.push(callback);
-      return frames.length;
-    });
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
-      this: HTMLElement,
-    ) {
-      return DOMRect.fromRect({
-        height: this.classList.contains('abyss-annotation-card-row') ? 130 : 0,
-        width: 260,
-      });
-    });
-    const panel = new AnnotationsPanel(root, {
-      onNavigate: vi.fn(),
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
-    });
-    panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
-    for (let index = 0; index < 4; index += 1) {
-      frames.shift()?.(index);
-    }
-    const scrollHost = annotationScrollHost(root);
-    scrollHost.scrollTop = 600 * 112;
-    scrollHost.dispatchEvent(new Event('scroll'));
-    for (let index = 4; index < 8; index += 1) {
-      frames.shift()?.(index);
-    }
-    const insert = root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]');
-    const rowId = insert?.closest<HTMLElement>('[data-annotation-row-id]')?.dataset[
-      'annotationRowId'
-    ];
-    insert?.focus();
-
-    scrollHost.scrollTop += 130;
-    scrollHost.dispatchEvent(new Event('scroll'));
-
-    expect(insert?.isConnected).toBe(true);
-    expect(owner.document.activeElement).toBe(insert);
-
-    const footerControl = root.querySelector<HTMLButtonElement>('[data-annotation-color]');
-    footerControl?.focus();
-    scrollHost.scrollTop += 130;
-    scrollHost.dispatchEvent(new Event('scroll'));
-
-    expect(insert?.isConnected).toBe(true);
-    expect(owner.document.activeElement).toBe(footerControl);
-
-    owner.dispatchEvent(new Event('resize'));
-    for (let index = 8; index < 12; index += 1) {
-      frames.shift()?.(index);
-    }
-
-    expect(insert?.isConnected).toBe(true);
-    expect(owner.document.activeElement).toBe(footerControl);
-    expect(
-      insert?.closest<HTMLElement>('[data-annotation-row-id]')?.dataset['annotationRowId'],
-    ).toBe(rowId);
-    panel.destroy();
-    root.remove();
-  });
-
-  it('does not rehydrate contextual state after focus moves to a different virtual row', () => {
-    const root = createDiv();
-    root.doc.body.append(root);
-    const panel = new AnnotationsPanel(root, {
-      onNavigate: vi.fn(),
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
-    });
-    panel.setAnnotations(Array.from({ length: 100 }, (_, index) => annotation(index)));
-    const firstInsert = root.querySelector<HTMLButtonElement>(
-      '[data-annotation-card-id="annotation-0"] [data-action="insert-annotation"]',
-    );
-    firstInsert?.focus();
-    firstInsert?.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
-    expect(
-      root
-        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
-        ?.hasAttribute('data-actions-suppressed'),
-    ).toBe(true);
-
-    panel.setCurrentPage(50);
-    root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-50"]')?.focus();
-    panel.setCurrentPage(0);
-
-    expect(
-      root
-        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
-        ?.hasAttribute('data-actions-suppressed'),
-    ).toBe(false);
-    expect(root.querySelector('[data-actions-open]')).toBeNull();
-    root.remove();
-  });
-
-  it('uses the first touch only to reveal persistent actions and suppress navigation', () => {
-    const root = createDiv();
-    const onNavigate = vi.fn();
-    const panel = new AnnotationsPanel(root, {
-      onNavigate,
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
-    });
-    panel.setAnnotations([annotation(0), annotation(1)]);
-    const firstCard = root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-0"]');
-    firstCard?.dispatchEvent(
-      Object.assign(new Event('pointerup', { bubbles: true, cancelable: true }), {
-        pointerType: 'touch',
-      }),
-    );
-    const generatedClick = new MouseEvent('click', { bubbles: true, cancelable: true });
-    firstCard?.dispatchEvent(generatedClick);
-
-    expect(onNavigate).not.toHaveBeenCalled();
-    expect(generatedClick.defaultPrevented).toBe(true);
-    expect(
-      root
-        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
-        ?.hasAttribute('data-actions-open'),
-    ).toBe(true);
-    panel.setCurrentPage(1);
-    expect(
-      root
-        .querySelector<HTMLElement>('[data-annotation-card-id="annotation-0"]')
-        ?.hasAttribute('data-actions-open'),
-    ).toBe(true);
-
-    root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-0"]')?.click();
-    expect(onNavigate).toHaveBeenCalledOnce();
-    panel.setAnnotations([annotation(0), annotation(1)]);
-    expect(root.querySelector('[data-actions-open]')).toBeNull();
-  });
-
-  it('does not arm card navigation suppression when touch originates on an action', () => {
-    const root = createDiv();
-    root.doc.body.append(root);
-    const onCopy = vi.fn();
-    const onNavigate = vi.fn();
-    const panel = new AnnotationsPanel(root, {
-      onCopy,
-      onInsert: vi.fn(),
-      onNavigate,
-    });
-    panel.setAnnotations([annotation(0)]);
-    const copy = root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]');
-    copy?.focus();
-    copy?.dispatchEvent(
-      Object.assign(new Event('pointerup', { bubbles: true, cancelable: true }), {
-        pointerType: 'touch',
-      }),
-    );
-    copy?.click();
-    root.querySelector<HTMLButtonElement>('.abyss-annotation-card')?.click();
-
-    expect(onCopy).toHaveBeenCalledOnce();
-    expect(onNavigate).toHaveBeenCalledOnce();
-    root.remove();
-  });
-
   it('keeps imported color facets bounded and finds a late color on demand', () => {
     beginPluginActivation();
     endPluginActivation();
@@ -1433,10 +1150,32 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
-  it('activates the exact projected annotation from focus, click, Enter, and Space', () => {
+  it('focus does not activate while roving with arrows, Home, and End', () => {
     const root = createDiv();
     root.doc.body.append(root);
-    const onActivate = vi.fn();
+    const onActivate = vi.fn<(activation: AnnotationPanelActivation) => void>();
+    const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn() });
+    panel.setAnnotations([annotation(0), annotation(1), annotation(2)]);
+    const first = root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-0"]');
+    if (first === null) throw new Error('Expected the first annotation card.');
+
+    first.focus();
+    for (const key of ['ArrowDown', 'ArrowUp', 'End', 'Home']) {
+      root.doc.activeElement?.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key }),
+      );
+    }
+
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(root.doc.activeElement).toBe(first);
+    panel.destroy();
+    root.remove();
+  });
+
+  it('emits one identical explicit activation for click, contextmenu, and activation keys', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onActivate = vi.fn<(activation: AnnotationPanelActivation) => void>();
     const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn() });
     const overlapping = [
       {
@@ -1460,47 +1199,76 @@ describe('AnnotationsPanel', () => {
       '.abyss-annotation-card[data-annotation-row-id="overlap-second-row"]',
     );
     if (second === null) throw new Error('Expected the second overlapping annotation card.');
+    vi.spyOn(second, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 40, width: 240, x: 64, y: 288 }),
+    );
 
     second.focus();
-    second.click();
-    second.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }));
-    second.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
+    onActivate.mockClear();
+    second.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, cancelable: true, clientX: 64, clientY: 328 }),
+    );
+    second.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 64,
+        clientY: 328,
+      }),
+    );
+    for (const init of [
+      { key: 'Enter' },
+      { key: ' ' },
+      { key: 'ContextMenu' },
+      { key: 'F10', shiftKey: true },
+    ] satisfies KeyboardEventInit[]) {
+      second.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+      );
+    }
 
-    expect(onActivate).toHaveBeenCalledTimes(4);
-    expect(onActivate).toHaveBeenLastCalledWith({
+    const expected = {
       annotation: overlapping[1]?.annotation,
-      location: { pageIndex: 0, x: 0, y: 0 },
+      clientPosition: { x: 64, y: 328 },
+      location: {
+        coordinateSpace: 'page-points-top-left',
+        pageIndex: 0,
+        x: 0,
+        y: 0,
+      },
       nativeId: 'native-second',
       rowId: 'overlap-second-row',
-    });
+    };
+    expect(onActivate.mock.calls.map(([activation]) => activation)).toEqual(
+      Array.from({ length: 6 }, () => expected),
+    );
     const selected = root.querySelectorAll('.abyss-annotation-card[aria-current="true"]');
     expect(selected).toHaveLength(1);
     expect(selected[0]?.getAttribute('data-annotation-row-id')).toBe('overlap-second-row');
+    panel.destroy();
     root.remove();
   });
 
-  it('deduplicates one pointer focus-and-click gesture and ignores internal focus restoration', () => {
+  it('context menu activation prevents default and exposes no Copy or Insert surface', () => {
     const root = createDiv();
     root.doc.body.append(root);
     const onActivate = vi.fn();
-    const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn() });
-    panel.setAnnotations([annotation(0), annotation(1)]);
-    const first = root.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-0"]');
-    if (first === null) throw new Error('Expected first annotation card.');
+    const panel = new AnnotationsPanel(root, {
+      onActivate,
+      onNavigate: vi.fn(),
+    });
+    panel.setAnnotations([annotation(0)]);
+    const card = root.querySelector<HTMLButtonElement>('.abyss-annotation-card');
+    if (card === null) throw new Error('Expected an annotation card.');
+    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
 
-    first.dispatchEvent(new Event('pointerdown', { bubbles: true }));
-    first.focus();
-    first.click();
+    card.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
     expect(onActivate).toHaveBeenCalledOnce();
-
-    panel.setFilter({ query: '', colors: new Set() });
-    expect(root.doc.activeElement?.getAttribute('data-annotation-id')).toBe('annotation-0');
-    expect(onActivate).toHaveBeenCalledOnce();
-
-    root.doc.activeElement?.dispatchEvent(
-      new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }),
-    );
-    expect(onActivate).toHaveBeenCalledTimes(2);
+    expect(root.querySelector('.abyss-annotation-card-actions')).toBeNull();
+    expect(root.textContent).not.toMatch(/Copy|Insert/u);
+    panel.destroy();
     root.remove();
   });
 
@@ -1511,12 +1279,10 @@ describe('AnnotationsPanel', () => {
     expect(root.querySelector('[role="status"]')?.textContent).toBe("Couldn't load annotations");
   });
 
-  it('sets drag payloads and exposes keyboard/mobile Copy and Insert actions', () => {
+  it('sets drag payloads without exposing a separate card action surface', () => {
     const root = createDiv();
     const onTransfer = vi.fn();
-    const onCopy = vi.fn();
-    const onInsert = vi.fn();
-    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn(), onTransfer, onCopy, onInsert });
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn(), onTransfer });
     const item = annotation(2);
     panel.setAnnotations([item]);
     const row = root.querySelector<HTMLElement>('[draggable="true"]');
@@ -1525,11 +1291,8 @@ describe('AnnotationsPanel', () => {
     row.dispatchEvent(
       Object.assign(new Event('dragstart', { bubbles: true }), { dataTransfer: transfer }),
     );
-    root.querySelector<HTMLButtonElement>('[data-action="copy-annotation-link"]')?.click();
-    root.querySelector<HTMLButtonElement>('[data-action="insert-annotation"]')?.click();
     expect(onTransfer).toHaveBeenCalledWith(item, transfer);
-    expect(onCopy).toHaveBeenCalledWith(item);
-    expect(onInsert).toHaveBeenCalledWith(item);
+    expect(root.querySelector('.abyss-annotation-card-actions')).toBeNull();
   });
 
   it('keeps uncommitted annotations silent with no transfer surface', () => {
@@ -1537,8 +1300,6 @@ describe('AnnotationsPanel', () => {
     const panel = new AnnotationsPanel(root, {
       onNavigate: vi.fn(),
       onTransfer: vi.fn(),
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
     });
     panel.setAnnotations([
       { ...annotation(1), identity: { kind: 'legacy', fingerprint: 'pending' } },
@@ -1555,8 +1316,6 @@ describe('AnnotationsPanel', () => {
     const panel = new AnnotationsPanel(root, {
       onNavigate: vi.fn(),
       onTransfer: vi.fn(),
-      onCopy: vi.fn(),
-      onInsert: vi.fn(),
     });
     panel.setAnnotations([
       {
@@ -1658,10 +1417,30 @@ describe('AnnotationsPanel', () => {
     root.querySelectorAll<HTMLButtonElement>('[data-annotation-id]').forEach((card) => {
       card.click();
     });
-    expect(onNavigate).toHaveBeenNthCalledWith(1, { pageIndex: 0, x: 0, y: 0 });
-    expect(onNavigate).toHaveBeenNthCalledWith(2, { pageIndex: 1, x: 2, y: 3 });
-    expect(onNavigate).toHaveBeenNthCalledWith(3, { pageIndex: 2, x: 6, y: 7 });
-    expect(onNavigate).toHaveBeenNthCalledWith(4, { pageIndex: 3, x: 10, y: 11 });
+    expect(onNavigate).toHaveBeenNthCalledWith(1, {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 0,
+      y: 0,
+    });
+    expect(onNavigate).toHaveBeenNthCalledWith(2, {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 1,
+      x: 2,
+      y: 3,
+    });
+    expect(onNavigate).toHaveBeenNthCalledWith(3, {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 2,
+      x: 6,
+      y: 7,
+    });
+    expect(onNavigate).toHaveBeenNthCalledWith(4, {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 3,
+      x: 10,
+      y: 11,
+    });
 
     panel.setFilter({ query: 'missing', colors: new Set() });
     expect(root.textContent).toContain('No matching annotations');

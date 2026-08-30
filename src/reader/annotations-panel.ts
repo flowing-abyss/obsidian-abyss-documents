@@ -16,7 +16,6 @@ const LOADING_SPINNER_DELAY_MS = 250;
 type AnnotationPanelState = 'loading' | 'empty' | 'content' | 'filtered-empty' | 'unavailable';
 
 interface AnnotationFocusTarget {
-  readonly action: string | null;
   readonly rowId: string;
 }
 
@@ -44,20 +43,19 @@ export interface AnnotationColorFacet {
 
 export interface AnnotationPanelActivation {
   readonly annotation: DocumentAnnotation;
+  readonly clientPosition?: { readonly x: number; readonly y: number };
   readonly location: DocumentLocation;
   readonly nativeId: string;
   readonly rowId: string;
 }
 
 export interface ResolvedAnnotationPanelActivation extends AnnotationPanelActivation {
-  readonly position: { readonly x: number; readonly y: number };
+  readonly clientPosition: { readonly x: number; readonly y: number };
 }
 
 export interface AnnotationsPanelOptions {
   readonly colorMeanings?: Readonly<Record<string, string>>;
   readonly colorNames?: Readonly<Record<string, string>>;
-  readonly onCopy?: (annotation: DocumentAnnotation) => void;
-  readonly onInsert?: (annotation: DocumentAnnotation) => void;
   readonly onActivate?: (activation: AnnotationPanelActivation) => void;
   readonly onNavigate: (location: DocumentLocation) => void;
   readonly onTransfer?: (annotation: DocumentAnnotation, transfer: DataTransfer) => void;
@@ -105,12 +103,6 @@ export class AnnotationsPanel {
   private estimateCalibrated = false;
   private focusedTarget: AnnotationFocusTarget | null = null;
   private lastFocusedVisualAnchor: AnnotationVisualAnchor | null = null;
-  private openActionsRowId: string | null = null;
-  private pointerFocusRowId: string | null = null;
-  private suppressClickActivationRowId: string | null = null;
-  private suppressFocusActivationRowId: string | null = null;
-  private suppressedActionsRowId: string | null = null;
-  private touchNavigationGuardRowId: string | null = null;
   private destroyed = false;
   private readonly onScroll = (): void => {
     if (this.destroyed || !this.updateWindowFromScroll()) return;
@@ -126,7 +118,6 @@ export class AnnotationsPanel {
     const target = event.target;
     if (!(target instanceof ownerWindow(this.root).Element)) return;
     const row = target.closest<HTMLElement>('.abyss-annotation-card-row');
-    this.closeContextActionsExcept(row);
     if (!this.root.contains(target)) {
       this.focusedTarget = null;
       this.lastFocusedVisualAnchor = null;
@@ -137,35 +128,10 @@ export class AnnotationsPanel {
       return;
     }
     const rowId = row.dataset['annotationRowId'];
-    const action = target.closest<HTMLElement>('[data-action]')?.dataset['action'] ?? null;
-    this.restoreContextualActions(row, rowId, action);
-    if (rowId !== undefined) {
-      this.setRovingRow(rowId);
-      this.handleCardFocus(target, rowId);
-    }
-    this.focusedTarget = rowId === undefined ? null : { action, rowId };
+    if (rowId !== undefined) this.setRovingRow(rowId);
+    this.focusedTarget = rowId === undefined ? null : { rowId };
     this.lastFocusedVisualAnchor = this.visualAnchorFor(row, rowId);
   };
-  private readonly onDocumentPointerDown = (event: PointerEvent): void => {
-    const target = event.target;
-    const element =
-      target instanceof ownerWindow(this.root).Element ? (target as HTMLElement) : null;
-    const row = element?.closest<HTMLElement>('.abyss-annotation-card-row') ?? null;
-    this.pointerFocusRowId =
-      element?.closest<HTMLElement>('.abyss-annotation-card')?.dataset['annotationRowId'] ?? null;
-    this.suppressClickActivationRowId = null;
-    this.closeContextActionsExcept(row);
-  };
-
-  private handleCardFocus(target: Element, rowId: string): void {
-    if (target.closest('.abyss-annotation-card') === null) return;
-    if (this.suppressFocusActivationRowId === rowId) {
-      this.suppressFocusActivationRowId = null;
-      return;
-    }
-    this.activateRow(rowId);
-    if (this.pointerFocusRowId === rowId) this.suppressClickActivationRowId = rowId;
-  }
 
   constructor(
     host: HTMLElement,
@@ -208,7 +174,6 @@ export class AnnotationsPanel {
     this.scrollHost.removeEventListener('scroll', this.onScroll);
     ownerWindow(this.root).removeEventListener('resize', this.onResize);
     ownerWindow(this.root).document.removeEventListener('focusin', this.onDocumentFocusIn);
-    ownerWindow(this.root).document.removeEventListener('pointerdown', this.onDocumentPointerDown);
     this.colorSearch.removeEventListener('input', this.onColorSearchInput);
     if (this.measurementFrame !== null) {
       ownerWindow(this.root).cancelAnimationFrame(this.measurementFrame);
@@ -232,7 +197,6 @@ export class AnnotationsPanel {
     this.scrollHost.addEventListener('scroll', this.onScroll);
     ownerWindow(this.root).addEventListener('resize', this.onResize);
     ownerWindow(this.root).document.addEventListener('focusin', this.onDocumentFocusIn);
-    ownerWindow(this.root).document.addEventListener('pointerdown', this.onDocumentPointerDown);
     this.colorSearch.addEventListener('input', this.onColorSearchInput);
     this.query.addEventListener('input', () => {
       this.filter = { ...this.filter, query: this.query.value };
@@ -269,7 +233,7 @@ export class AnnotationsPanel {
     this.clearResolutionFeedback();
     this.clearLoadingTimer();
     this.loadingVisible = false;
-    this.resetContextualActions();
+    this.resetFocusTracking();
     this.projectionRows = null;
     this.provisionalRowIds.clear();
     this.annotations = [...annotations];
@@ -354,12 +318,13 @@ export class AnnotationsPanel {
     if (annotation === undefined || !this.selectRow(rowId, false)) return null;
     const card = this.cardButtons.get(rowId);
     if (card === undefined || !this.list.contains(card)) return null;
-    const { bottom, left } = card.getBoundingClientRect();
+    const position = cardPosition(card);
+    if (position === undefined) return null;
     return {
       annotation,
-      location: location(annotation),
+      clientPosition: position,
+      location: annotationLocation(annotation),
       nativeId: this.nativeIds.get(annotation) ?? annotationId(annotation),
-      position: { x: left, y: bottom },
       rowId,
     };
   }
@@ -374,7 +339,7 @@ export class AnnotationsPanel {
     this.windowStart = clampWindowStart(index - SCROLL_OVERSCAN, this.filtered.length);
     this.render();
     if (focus) {
-      this.focusWithoutActivation(this.cardButtons.get(rowId) ?? null, rowId);
+      this.focusCard(this.cardButtons.get(rowId) ?? null, rowId);
     }
     return true;
   }
@@ -548,14 +513,13 @@ export class AnnotationsPanel {
     const rowId = this.rowId(annotation);
     let row = this.cardRows.get(rowId);
     if (row === undefined) {
-      row = this.cardRow(rowId);
+      row = this.cardRow();
       this.cardRows.set(rowId, row);
     }
     const button = this.cardButton(rowId);
     this.updateCardButton(button, annotation, index, rowId);
     this.updateCardRow(row, annotation, index, rowId);
     if (button.parentElement !== row) row.prepend(button);
-    this.updateCardActions(row, annotation);
     return row;
   }
 
@@ -570,6 +534,10 @@ export class AnnotationsPanel {
     });
     button.addEventListener('keydown', (event) => {
       this.onCardKeyDown(button, event);
+    });
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      this.activateCard(button, clientPosition(event, button));
     });
     this.cardButtons.set(rowId, button);
     return button;
@@ -599,47 +567,21 @@ export class AnnotationsPanel {
     );
   }
 
-  private updateCardActions(row: HTMLElement, annotation: DocumentAnnotation): void {
-    const retained = row.querySelector<HTMLElement>(':scope > .abyss-annotation-card-actions');
-    if (
-      !isTransferableAnnotation(annotation) ||
-      (this.options.onCopy === undefined && this.options.onInsert === undefined)
-    ) {
-      retained?.remove();
-      return;
-    }
-    if (retained !== null) return;
-    row.append(this.cardActions(row));
-  }
-
   private onCardClick(button: HTMLButtonElement, event: MouseEvent): void {
-    const current = this.cardAnnotations.get(button);
-    if (current === undefined) return;
-    const currentRowId = this.rowId(current);
-    if (this.touchNavigationGuardRowId === currentRowId) {
-      this.touchNavigationGuardRowId = null;
-      this.suppressClickActivationRowId = null;
-      this.pointerFocusRowId = null;
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    if (this.suppressClickActivationRowId === currentRowId) {
-      this.suppressClickActivationRowId = null;
-      this.pointerFocusRowId = null;
-      return;
-    }
-    this.activate(current);
+    this.activateCard(button, clientPosition(event, button));
   }
 
   private onCardKeyDown(button: HTMLButtonElement, event: KeyboardEvent): void {
     const current = this.cardAnnotations.get(button);
     if (current === undefined) return;
-    if (event.key === 'Enter' || event.key === ' ') {
+    if (
+      event.key === 'Enter' ||
+      event.key === ' ' ||
+      event.key === 'ContextMenu' ||
+      (event.key === 'F10' && event.shiftKey)
+    ) {
       event.preventDefault();
-      this.suppressClickActivationRowId = null;
-      this.pointerFocusRowId = null;
-      this.activate(current);
+      this.activate(current, cardPosition(button));
       return;
     }
     this.onKeyDown(event, Number(button.dataset['annotationIndex'] ?? 0));
@@ -696,51 +638,10 @@ export class AnnotationsPanel {
     return note;
   }
 
-  private cardRow(rowId: string): HTMLElement {
+  private cardRow(): HTMLElement {
     const row = ownerWindow(this.root).createEl('article');
     row.className = 'abyss-annotation-card-row';
     row.setAttribute('role', 'listitem');
-    row.addEventListener('contextmenu', (event) => {
-      if (row.querySelector('.abyss-annotation-card-actions') === null) return;
-      event.preventDefault();
-      this.openActionsRowId = rowId;
-      this.suppressedActionsRowId = null;
-      row.dataset['actionsOpen'] = '';
-      row.removeAttribute('data-actions-suppressed');
-    });
-    row.addEventListener('pointerup', (event) => {
-      const target = event.target;
-      const card =
-        target instanceof ownerWindow(this.root).Element
-          ? target.closest('.abyss-annotation-card')
-          : null;
-      if (
-        event.pointerType !== 'touch' ||
-        card?.closest('.abyss-annotation-card-row') !== row ||
-        this.openActionsRowId === rowId
-      )
-        return;
-      this.openActionsRowId = rowId;
-      this.suppressedActionsRowId = null;
-      this.touchNavigationGuardRowId = rowId;
-      row.dataset['actionsOpen'] = '';
-      row.removeAttribute('data-actions-suppressed');
-    });
-    row.addEventListener('keydown', (event) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      this.openActionsRowId = null;
-      this.touchNavigationGuardRowId = null;
-      this.suppressedActionsRowId = rowId;
-      row.removeAttribute('data-actions-open');
-      row.dataset['actionsSuppressed'] = '';
-      this.focusWithoutActivation(
-        row.querySelector<HTMLElement>('.abyss-annotation-card'),
-        rowId,
-        true,
-      );
-    });
     row.addEventListener('dragstart', (event) => {
       const annotation = this.annotationForRow(row);
       if (
@@ -767,10 +668,6 @@ export class AnnotationsPanel {
   ): void {
     row.dataset['annotationCardId'] = annotationId(annotation);
     row.dataset['annotationRowId'] = rowId;
-    if (this.openActionsRowId === rowId) row.dataset['actionsOpen'] = '';
-    else delete row.dataset['actionsOpen'];
-    if (this.suppressedActionsRowId === rowId) row.dataset['actionsSuppressed'] = '';
-    else delete row.dataset['actionsSuppressed'];
     row.setAttribute('aria-posinset', String(index + 1));
     row.setAttribute('aria-setsize', String(this.filtered.length));
     row.draggable = isTransferableAnnotation(annotation);
@@ -779,42 +676,6 @@ export class AnnotationsPanel {
   private annotationForRow(row: HTMLElement): DocumentAnnotation | null {
     const button = row.querySelector<HTMLButtonElement>('.abyss-annotation-card');
     return button === null ? null : (this.cardAnnotations.get(button) ?? null);
-  }
-
-  private cardActions(row: HTMLElement): HTMLElement {
-    const actions = ownerWindow(this.root).createDiv();
-    actions.className = 'abyss-annotation-card-actions';
-    actions.dataset['contextual'] = '';
-    actions.setAttribute('aria-label', 'Annotation actions');
-    if (this.options.onCopy !== undefined) {
-      actions.append(
-        this.actionButton('copy-annotation-link', 'Copy annotation link', () => {
-          const annotation = this.annotationForRow(row);
-          if (annotation !== null) this.options.onCopy?.(annotation);
-        }),
-      );
-    }
-    if (this.options.onInsert !== undefined) {
-      actions.append(
-        this.actionButton('insert-annotation', 'Insert into active Markdown note', () => {
-          const annotation = this.annotationForRow(row);
-          if (annotation !== null) this.options.onInsert?.(annotation);
-        }),
-      );
-    }
-    return actions;
-  }
-
-  private actionButton(action: string, label: string, callback: () => void): HTMLButtonElement {
-    const button = ownerWindow(this.root).createEl('button');
-    button.type = 'button';
-    button.className = 'clickable-icon abyss-annotation-card-action';
-    button.dataset['action'] = action;
-    button.setAttribute('aria-label', label);
-    setTooltip(button, label);
-    button.textContent = action === 'copy-annotation-link' ? 'Copy' : 'Insert';
-    button.addEventListener('click', callback);
-    return button;
   }
 
   private onKeyDown(event: KeyboardEvent, index: number): void {
@@ -868,12 +729,18 @@ export class AnnotationsPanel {
     }
   }
 
-  private activateRow(rowId: string): void {
-    const annotation = this.filtered.find((candidate) => this.rowId(candidate) === rowId);
-    if (annotation !== undefined) this.activate(annotation);
+  private activateCard(
+    button: HTMLButtonElement,
+    position: { readonly x: number; readonly y: number } | undefined,
+  ): void {
+    const annotation = this.cardAnnotations.get(button);
+    if (annotation !== undefined) this.activate(annotation, position);
   }
 
-  private activate(annotation: DocumentAnnotation): void {
+  private activate(
+    annotation: DocumentAnnotation,
+    clientPosition?: { readonly x: number; readonly y: number },
+  ): void {
     const rowId = this.rowId(annotation);
     this.clearResolutionFeedback();
     this.selectedRowId = rowId;
@@ -885,7 +752,8 @@ export class AnnotationsPanel {
     }
     const target: AnnotationPanelActivation = {
       annotation,
-      location: location(annotation),
+      ...(clientPosition === undefined ? {} : { clientPosition }),
+      location: annotationLocation(annotation),
       nativeId: this.nativeIds.get(annotation) ?? annotationId(annotation),
       rowId,
     };
@@ -920,23 +788,13 @@ export class AnnotationsPanel {
     this.rovingRowId = candidate === undefined ? null : this.rowId(candidate);
     this.render();
     if (!snapshot.restoreFocus || candidate === undefined) return;
-    this.focusWithoutActivation(
+    this.focusCard(
       this.list.querySelector<HTMLElement>(
         `.abyss-annotation-card[data-annotation-row-id="${CSS.escape(this.rowId(candidate))}"]`,
       ),
       this.rowId(candidate),
       true,
     );
-  }
-
-  private restoreContextualActions(
-    row: HTMLElement,
-    rowId: string | undefined,
-    action: string | null,
-  ): void {
-    if (action === null || rowId === undefined || this.suppressedActionsRowId !== rowId) return;
-    this.suppressedActionsRowId = null;
-    row.removeAttribute('data-actions-suppressed');
   }
 
   private resetVirtualScroll(): void {
@@ -1090,29 +948,16 @@ export class AnnotationsPanel {
       this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row[data-annotation-row-id]'),
     ).find((candidate) => candidate.dataset['annotationRowId'] === focus.rowId);
     if (row === undefined) return;
-    const actionName = focus.action;
-    const action =
-      actionName === null
-        ? null
-        : Array.from(row.querySelectorAll<HTMLElement>('[data-action]')).find(
-            (candidate) => candidate.dataset['action'] === actionName,
-          );
-    const target = action ?? row.querySelector<HTMLElement>('.abyss-annotation-card');
+    const target = row.querySelector<HTMLElement>('.abyss-annotation-card');
     if (target === null) return;
     const scrollTop = this.scrollHost.scrollTop;
-    this.focusWithoutActivation(target, focus.rowId);
+    this.focusCard(target, focus.rowId);
     this.scrollHost.scrollTop = scrollTop;
   }
 
-  private focusWithoutActivation(
-    target: HTMLElement | null,
-    rowId: string | null,
-    preventScroll = false,
-  ): void {
+  private focusCard(target: HTMLElement | null, rowId: string | null, preventScroll = false): void {
     if (target === null || rowId === null) return;
-    this.suppressFocusActivationRowId = rowId;
     target.focus({ preventScroll });
-    if (this.suppressFocusActivationRowId === rowId) this.suppressFocusActivationRowId = null;
   }
 
   private visualAnchorFor(
@@ -1133,7 +978,6 @@ export class AnnotationsPanel {
       const rowId = row?.dataset['annotationRowId'];
       if (rowId !== undefined) {
         return {
-          action: activeElement.closest<HTMLElement>('[data-action]')?.dataset['action'] ?? null,
           rowId,
         };
       }
@@ -1212,39 +1056,9 @@ export class AnnotationsPanel {
     this.contextStatus.replaceChildren();
   }
 
-  private closeContextActionsExcept(exception: Element | null): void {
-    const exceptionRowId =
-      exception instanceof ownerWindow(this.root).HTMLElement
-        ? (exception.dataset['annotationRowId'] ?? null)
-        : null;
-    const contextualRowIds = [
-      this.openActionsRowId,
-      this.suppressedActionsRowId,
-      this.touchNavigationGuardRowId,
-    ].filter((rowId): rowId is string => rowId !== null);
-    const crossesContextBoundary =
-      exceptionRowId === null || contextualRowIds.some((rowId) => rowId !== exceptionRowId);
-    if (crossesContextBoundary) {
-      this.openActionsRowId = null;
-      this.suppressedActionsRowId = null;
-      this.touchNavigationGuardRowId = null;
-    }
-    const rows = Array.from(
-      this.root.querySelectorAll<HTMLElement>('[data-actions-open], [data-actions-suppressed]'),
-    );
-    for (const row of rows) {
-      if (!crossesContextBoundary && row === exception) continue;
-      row.removeAttribute('data-actions-open');
-      row.removeAttribute('data-actions-suppressed');
-    }
-  }
-
-  private resetContextualActions(): void {
+  private resetFocusTracking(): void {
     this.focusedTarget = null;
     this.lastFocusedVisualAnchor = null;
-    this.openActionsRowId = null;
-    this.suppressedActionsRowId = null;
-    this.touchNavigationGuardRowId = null;
   }
 
   private colorFacetAccessibleLabel(facet: AnnotationColorFacet): string {
@@ -1406,6 +1220,26 @@ function measuredCardHeight(card: HTMLElement): number {
   return rectHeight + (Number.isFinite(margin) ? margin : 0);
 }
 
+function clientPosition(
+  event: MouseEvent,
+  card: HTMLElement,
+): { readonly x: number; readonly y: number } | undefined {
+  if (
+    Number.isFinite(event.clientX) &&
+    Number.isFinite(event.clientY) &&
+    (event.clientX !== 0 || event.clientY !== 0)
+  )
+    return { x: event.clientX, y: event.clientY };
+  return cardPosition(card);
+}
+
+function cardPosition(card: HTMLElement): { readonly x: number; readonly y: number } | undefined {
+  const { bottom, left } = card.getBoundingClientRect();
+  if (!Number.isFinite(left) || !Number.isFinite(bottom) || (left === 0 && bottom === 0))
+    return undefined;
+  return { x: left, y: bottom };
+}
+
 function clampWindowStart(start: number, length: number): number {
   return Math.max(0, Math.min(Math.floor(start), Math.max(0, length - MAX_CARDS)));
 }
@@ -1470,20 +1304,33 @@ function nonEmpty(value: string | null | undefined): string | null {
   return trimmed.length === 0 ? null : trimmed;
 }
 
-function location(annotation: DocumentAnnotation): DocumentLocation {
+export function annotationLocation(annotation: DocumentAnnotation): DocumentLocation {
   if (annotation.anchor.kind !== 'fixed-page') return { pageIndex: 0 };
   const { geometry } = annotation.anchor;
   if (geometry.kind === 'point')
-    return { pageIndex: annotation.anchor.pageIndex, ...geometry.point };
+    return {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: annotation.anchor.pageIndex,
+      ...geometry.point,
+    };
   if (geometry.kind === 'rectangle')
     return {
+      coordinateSpace: 'page-points-top-left',
       pageIndex: annotation.anchor.pageIndex,
       x: geometry.rectangle.x,
       y: geometry.rectangle.y,
     };
   if (geometry.kind === 'quadrilaterals')
-    return { pageIndex: annotation.anchor.pageIndex, ...geometry.quadrilaterals[0]?.topLeft };
-  return { pageIndex: annotation.anchor.pageIndex, ...geometry.paths[0]?.[0] };
+    return {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: annotation.anchor.pageIndex,
+      ...geometry.quadrilaterals[0]?.topLeft,
+    };
+  return {
+    coordinateSpace: 'page-points-top-left',
+    pageIndex: annotation.anchor.pageIndex,
+    ...geometry.paths[0]?.[0],
+  };
 }
 
 function normalize(value: string): string {

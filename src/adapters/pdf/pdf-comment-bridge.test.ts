@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { asAnnotationId, type DocumentAnnotation } from '../../document-core/annotations.js';
 import {
   PdfCommentBridge,
@@ -7,6 +7,16 @@ import {
   type PdfCommentMutationFailure,
 } from './pdf-comment-bridge.js';
 import { PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE } from './pdf-runtime.js';
+
+beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
+    DOMRect.fromRect({ height: 20, width: 100, x: 10, y: 20 }),
+  );
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function editor(
   comment = '',
@@ -34,7 +44,7 @@ function editor(
       value = next;
     },
     editorType,
-    elementBeforePopup: options.anchor,
+    elementBeforePopup: options.anchor === undefined ? document.body : options.anchor,
     focusCommentButton: vi.fn(),
     getData: () => ({
       annotationType: mode,
@@ -1122,6 +1132,87 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     const missingFocus = bridge.focusAnnotation('missing', missing.signal);
     missing.abort();
     await expect(missingFocus).resolves.toBe(false);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('uses a fresh sidebar anchor when the writable native anchor is unavailable', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor' });
+    node.id = 'sidebar-anchor-fallback';
+    vi.spyOn(node, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect());
+    const native = editor('Fallback', { anchor: null, uid: node.id });
+    const manager = uiManager(native);
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) focused.push(focus);
+    });
+
+    await expect(
+      bridge.focusAnnotation(node.id, undefined, undefined, {
+        clientPosition: { x: 72, y: 288 },
+      }),
+    ).resolves.toBe(true);
+
+    expect(focused).toHaveLength(1);
+    expect(focused[0]?.position).toEqual({ x: 72, y: 288 });
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('prefers a connected native anchor over the sidebar anchor', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor' });
+    node.id = 'native-anchor-wins';
+    const anchor = layer.createDiv();
+    vi.spyOn(anchor, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 40, width: 120, x: 140, y: 210 }),
+    );
+    const native = editor('Native', { anchor, uid: node.id });
+    const manager = uiManager(native);
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) focused.push(focus);
+    });
+
+    await expect(
+      bridge.focusAnnotation(node.id, undefined, undefined, {
+        clientPosition: { x: 72, y: 288 },
+      }),
+    ).resolves.toBe(true);
+
+    expect(focused[0]?.position).toEqual({ x: 140, y: 250 });
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('does not emit a native annotation focus at zero when neither anchor exists', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor' });
+    node.id = 'missing-native-anchor';
+    vi.spyOn(node, 'getBoundingClientRect').mockReturnValue(DOMRect.fromRect());
+    const native = editor('Missing', { anchor: null, uid: node.id });
+    const manager = uiManager(native);
+    manager.getEditor.mockReturnValue(native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) focused.push(focus);
+    });
+
+    await expect(bridge.focusAnnotation(node.id)).resolves.toBe(false);
+
+    expect(focused).toEqual([]);
     bridge.dispose();
     host.remove();
   });

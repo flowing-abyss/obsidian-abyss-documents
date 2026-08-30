@@ -233,6 +233,9 @@ describe('PDF annotation interaction integration', () => {
         if (request.editId === 'persisted-highlight') {
           const node = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
           node.id = 'runtime-highlight';
+          vi.spyOn(node, 'getBoundingClientRect').mockReturnValue(
+            DOMRect.fromRect({ height: 28, width: 160, x: 80, y: 120 }),
+          );
           const native: PdfCommentEditor = {
             comment: '',
             editorType: 'highlight',
@@ -337,6 +340,9 @@ describe('PDF annotation interaction integration', () => {
       .createDiv({ cls: 'annotationEditorLayer' })
       .createDiv({ cls: 'highlightEditor selectedEditor' });
     nativeNode.id = 'autosave-target';
+    vi.spyOn(nativeNode, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 28, width: 160, x: 80, y: 120 }),
+    );
     const native: PdfCommentEditor = {
       get comment() {
         return commentValue;

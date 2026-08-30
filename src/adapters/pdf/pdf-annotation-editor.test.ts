@@ -207,6 +207,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
         signal?: AbortSignal,
         projected?: DocumentAnnotation,
         options?: {
+          readonly clientPosition?: { readonly x: number; readonly y: number };
           readonly editableOnly?: boolean;
           readonly forceReadonly?: boolean;
           readonly preserveSelection?: boolean;
@@ -1055,6 +1056,36 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect.any(AbortSignal),
       annotation,
       { editableOnly: true, preserveSelection: true },
+    );
+  });
+
+  it('forwards the fresh sidebar anchor through one native annotation activation', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: 'sidebar-anchored-highlight' });
+    current.editor.setAnnotationProjection([
+      { annotation, stableId: 'sidebar-anchored-highlight' },
+    ]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(selectedEditor('sidebar-anchored-highlight', 9)),
+    });
+
+    await expect(
+      current.editor.focusAnnotation('sidebar-anchored-highlight', {
+        clientPosition: { x: 72, y: 288 },
+        kind: 'sidebar',
+      }),
+    ).resolves.toBe('editable');
+
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+      'sidebar-anchored-highlight',
+      expect.any(AbortSignal),
+      annotation,
+      {
+        clientPosition: { x: 72, y: 288 },
+        editableOnly: true,
+        preserveSelection: true,
+      },
     );
   });
 

@@ -90,7 +90,7 @@ export type PdfCommentDialogCloseReason =
 export interface PdfAnnotationFocus {
   readonly annotations: readonly DocumentAnnotation[];
   readonly editable: boolean;
-  readonly position: { readonly x: number; readonly y: number };
+  readonly position?: { readonly x: number; readonly y: number } | undefined;
 }
 
 export interface PdfAnnotationUpdate {
@@ -100,6 +100,7 @@ export interface PdfAnnotationUpdate {
 }
 
 interface PdfAnnotationFocusOptions {
+  readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
   readonly editableOnly?: boolean;
   readonly forceReadonly?: boolean;
   readonly preserveSelection?: boolean;
@@ -214,12 +215,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       return;
     const source = selected.includes(editor) ? editor : selected[0];
     if (source === undefined) return;
-    this.publishFocus(
-      source,
-      true,
-      this.activeSourceEditable,
-      popupAnchor(source)?.getBoundingClientRect(),
-    );
+    this.publishFocus(source, {
+      anchor: popupAnchor(source)?.getBoundingClientRect(),
+      isEditable: this.activeSourceEditable,
+      isSelected: true,
+    });
   }
 
   beginPersistence(): void {
@@ -270,12 +270,25 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     const internalId = selectedEditorId(node);
     const editor = internalId.length === 0 ? undefined : manager?.getEditor?.(internalId);
     if (editor !== undefined) {
-      this.publishFocus(editor, true, true, node.getBoundingClientRect());
+      this.publishFocus(editor, {
+        anchor: node.getBoundingClientRect(),
+        isEditable: true,
+        isSelected: true,
+      });
       return;
     }
+    this.focusImportedNode(node);
+  }
+
+  private focusImportedNode(
+    node: HTMLElement,
+    clientPosition?: { readonly x: number; readonly y: number },
+  ): boolean {
+    const internalId = selectedEditorId(node);
     const id = importedAnnotationId(node, internalId);
-    if (id.length === 0 || !node.matches('.annotationLayer [data-annotation-id]')) return;
-    const anchor = node.getBoundingClientRect();
+    if (id.length === 0 || !node.matches('.annotationLayer [data-annotation-id]')) return false;
+    const position = firstClientPosition(node.getBoundingClientRect(), clientPosition);
+    if (position === undefined) return false;
     this.emitFocus({
       annotations: [
         mergeProjectedAnnotation(
@@ -284,8 +297,9 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         ),
       ],
       editable: false,
-      position: { x: anchor.left, y: anchor.bottom },
+      position,
     });
+    return true;
   }
 
   async focusAnnotation(
@@ -355,39 +369,54 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         id,
         options.editableOnly === true,
         options.forceReadonly === true,
+        options.clientPosition,
       );
     const native = this.findReadyNativeEditor(id, false);
     if (native !== null) {
       if (options.forceReadonly === true)
-        return this.focusReadonlyNativeAnnotation(native.editor, id, native.node);
+        return this.focusReadonlyNativeAnnotation(
+          native.editor,
+          id,
+          native.node,
+          options.clientPosition,
+        );
       if (options.editableOnly === true && !isSupportedNativeEditor(native.editor)) return false;
-      return this.focusWritableAnnotation(native.editor, native.manager, id);
+      return this.focusWritableAnnotation(native, id, options.clientPosition);
     }
     return options.editableOnly === true && options.forceReadonly !== true
       ? false
-      : this.focusImportedAnnotation(id);
+      : this.focusImportedAnnotation(id, options.clientPosition);
   }
 
   private focusSelectedAnnotation(
     id: string,
     editableOnly: boolean,
     forceReadonly: boolean,
+    clientPosition?: { readonly x: number; readonly y: number },
   ): boolean {
     const native = this.findReadyNativeEditor(id, true);
     if (native === null) return false;
-    if (forceReadonly) return this.focusReadonlyNativeAnnotation(native.editor, id, native.node);
+    if (forceReadonly)
+      return this.focusReadonlyNativeAnnotation(native.editor, id, native.node, clientPosition);
     if (editableOnly && !isSupportedNativeEditor(native.editor)) return false;
     this.clearBindingsForEditor(native.editor);
     this.bindingIds.set(native.editor, id);
-    this.publishFocus(native.editor, true, true, native.node.getBoundingClientRect());
-    return true;
+    return this.publishFocus(native.editor, {
+      anchor: native.node.getBoundingClientRect(),
+      clientPosition,
+      isEditable: true,
+      isSelected: true,
+    });
   }
 
   private focusReadonlyNativeAnnotation(
     editor: PdfCommentEditor,
     stableId: string,
     node: HTMLElement,
+    clientPosition?: { readonly x: number; readonly y: number },
   ): boolean {
+    const position = firstClientPosition(node.getBoundingClientRect(), clientPosition);
+    if (position === undefined) return false;
     this.clearBindingsForEditor(editor);
     this.bindingIds.set(editor, stableId);
     this.activeSource = editor;
@@ -402,10 +431,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         }),
       ],
       editable: false,
-      position: {
-        x: node.getBoundingClientRect().left,
-        y: node.getBoundingClientRect().bottom,
-      },
+      position,
     });
     return true;
   }
@@ -427,20 +453,25 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     return null;
   }
 
-  private focusImportedAnnotation(id: string): boolean {
+  private focusImportedAnnotation(
+    id: string,
+    clientPosition?: { readonly x: number; readonly y: number },
+  ): boolean {
     const imported = Array.from(
       this.host.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]'),
     ).find((node) => node.dataset['annotationId'] === id);
     if (imported === undefined) return false;
-    this.focusFromPointer(imported);
-    return true;
+    return this.focusImportedNode(imported, clientPosition);
   }
 
   private focusWritableAnnotation(
-    editor: PdfCommentEditor,
-    manager: PdfCommentUiManager,
+    native: ReadyNativeEditor,
     stableId: string,
+    clientPosition?: { readonly x: number; readonly y: number },
   ): boolean {
+    const { editor, manager, node } = native;
+    const position = focusedEditorPosition(editor, node, clientPosition);
+    if (position === undefined) return false;
     this.clearBindingsForEditor(editor);
     this.bindingIds.set(editor, stableId);
     manager.setSelected(editor);
@@ -457,7 +488,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     this.emitFocus({
       annotations: [annotation],
       editable,
-      position: focusedEditorPosition(editor),
+      position,
     });
     return true;
   }
@@ -537,7 +568,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         this.commitReservedSelection(reservation, editor, manager);
         return;
       }
-      this.publishFocus(editor, true, true, { bottom: posY, left: posX });
+      this.publishFocus(editor, {
+        anchor: { bottom: posY, left: posX },
+        isEditable: true,
+        isSelected: true,
+      });
     } catch (cause) {
       const failure = asError(cause);
       if (reservation !== null) this.cancelReservation(reservation, failure);
@@ -747,15 +782,25 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       this.destroyPopup();
       return;
     }
-    this.publishFocus(editor, isSelected, isEditable, popupAnchor(editor)?.getBoundingClientRect());
+    this.publishFocus(editor, {
+      anchor: popupAnchor(editor)?.getBoundingClientRect(),
+      isEditable,
+      isSelected,
+    });
   }
 
   private publishFocus(
     editor: PdfCommentEditor,
-    isSelected: boolean,
-    isEditable: boolean,
-    anchor: Pick<DOMRect, 'bottom' | 'left'> | undefined,
-  ): void {
+    request: {
+      readonly anchor?: Pick<DOMRect, 'bottom' | 'left'> | undefined;
+      readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
+      readonly isEditable: boolean;
+      readonly isSelected: boolean;
+    },
+  ): boolean {
+    const { anchor, clientPosition, isEditable, isSelected } = request;
+    const position = firstClientPosition(anchor, clientPosition);
+    if (position === undefined) return false;
     this.popupDestroyRevision += 1;
     this.activeSourceEditable = isEditable;
     const manager = this.sidebarUiManager;
@@ -778,8 +823,9 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     this.emitFocus({
       annotations,
       editable,
-      position: { x: anchor?.left ?? 0, y: anchor?.bottom ?? 0 },
+      position,
     });
+    return true;
   }
 
   private selectedEditors(
@@ -930,7 +976,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
 
   updatePopupColor(editor: PdfCommentEditor): void {
     if (this.activeSource !== editor) return;
-    this.publishFocus(editor, true, true, popupAnchor(editor)?.getBoundingClientRect());
+    this.publishFocus(editor, {
+      anchor: popupAnchor(editor)?.getBoundingClientRect(),
+      isEditable: true,
+      isSelected: true,
+    });
   }
 
   destroy(): void {
@@ -1158,12 +1208,38 @@ function setFocusedCommentButton(editor: PdfCommentEditor): void {
   editor.setCommentButtonStates?.({ hasPopup: true, selected: true });
 }
 
-function focusedEditorPosition(editor: PdfCommentEditor): {
-  readonly x: number;
-  readonly y: number;
-} {
-  const anchor = popupAnchor(editor)?.getBoundingClientRect();
-  return { x: anchor?.left ?? 0, y: anchor?.bottom ?? 0 };
+function focusedEditorPosition(
+  editor: PdfCommentEditor,
+  node: HTMLElement,
+  clientPosition?: { readonly x: number; readonly y: number },
+): { readonly x: number; readonly y: number } | undefined {
+  const popup = popupAnchor(editor);
+  return firstClientPosition(
+    popup?.isConnected === true ? popup.getBoundingClientRect() : undefined,
+    node.isConnected
+      ? firstClientPosition(node.getBoundingClientRect(), clientPosition)
+      : clientPosition,
+  );
+}
+
+function firstClientPosition(
+  primary:
+    Pick<DOMRect, 'bottom' | 'left'> | { readonly x: number; readonly y: number } | undefined,
+  fallback?: { readonly x: number; readonly y: number },
+): { readonly x: number; readonly y: number } | undefined {
+  let position = fallback;
+  if (primary !== undefined)
+    position = 'left' in primary ? { x: primary.left, y: primary.bottom } : primary;
+  if (
+    position === undefined ||
+    !Number.isFinite(position.x) ||
+    !Number.isFinite(position.y) ||
+    (position.x === 0 && position.y === 0)
+  )
+    return primary === undefined || fallback === position
+      ? undefined
+      : firstClientPosition(fallback);
+  return position;
 }
 
 function readOnlyAnnotationFromNode(node: HTMLElement, id: string): DocumentAnnotation {

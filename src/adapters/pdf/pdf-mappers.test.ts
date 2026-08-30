@@ -57,7 +57,12 @@ describe('mapPdfOutline', () => {
           {
             id: 'outline-0-0',
             label: 'Details',
-            target: { pageIndex: 3, x: 12, y: 34 },
+            target: {
+              coordinateSpace: 'pdf-points-bottom-left',
+              pageIndex: 3,
+              x: 12,
+              y: 34,
+            },
             children: [],
           },
         ],
@@ -84,5 +89,18 @@ describe('mapPdfOutline', () => {
     ]);
 
     expect(outline[0]?.target).toEqual({ pageIndex: 2 });
+  });
+
+  it('marks Outline XYZ coordinate space as bottom-left without changing finite coordinates', async () => {
+    const outline = await mapPdfOutline(pdfDocument(), [
+      { title: 'Position', dest: [2, { name: 'XYZ' }, 20, 49], items: [] },
+    ]);
+
+    expect(outline[0]?.target).toEqual({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 20,
+      y: 49,
+    });
   });
 });

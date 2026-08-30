@@ -66,7 +66,7 @@ import {
   type AnnotationHrefReference,
   type AnnotationTransferService,
 } from './annotation-transfer.js';
-import type { AnnotationPanelActivation } from './annotations-panel.js';
+import { annotationLocation, type AnnotationPanelActivation } from './annotations-panel.js';
 import { ReaderShell, type ReaderShellIntent } from './reader-shell.js';
 import { ReadingProfileService, type ObsidianTheme } from './reading-profiles.js';
 import type { SaveConflictAction } from './save-conflict-modal.js';
@@ -1790,14 +1790,6 @@ export class ReaderController {
       transfer === undefined || file === null
         ? {}
         : {
-            onAnnotationCopy: (annotation) => {
-              transfer.copyAnnotationLink(annotation, file).catch((cause: unknown) => {
-                console.error('[abyss-documents] Failed to contain annotation copy', { cause });
-              });
-            },
-            onAnnotationInsert: (annotation) => {
-              transfer.insertAnnotationIntoActiveMarkdown(annotation, file);
-            },
             onAnnotationTransfer: (annotation, dataTransfer) => {
               applyAnnotationTransfer(dataTransfer, transfer.build(annotation, file));
             },
@@ -2104,9 +2096,20 @@ export class ReaderController {
           this.openReadOnlyAnnotationActivation(shell, activation, abort);
           return;
         }
+        const resolved = shell.resolveAnnotationActivation(activation.rowId);
         void interactionController
-          .activateAnnotation(activation.nativeId, { kind: 'sidebar', signal: abort.signal })
-          .catch(() => 'cancelled' as const)
+          .activateAnnotation(activation.nativeId, {
+            clientPosition: resolved?.clientPosition,
+            kind: 'sidebar',
+            signal: abort.signal,
+          })
+          .catch((cause: unknown) => {
+            if (!abort.signal.aborted && !isAbortFailure(cause))
+              this.reportAnnotationFailure('open PDF annotation', cause, {
+                annotation: annotationDiagnosticIdentity(activation.annotation),
+              });
+            return 'cancelled' as const;
+          })
           .finally(() => {
             this.finishAnnotationActivation(abort);
           });
@@ -2132,11 +2135,7 @@ export class ReaderController {
       this.finishAnnotationActivation(abort);
       return;
     }
-    if (!sameDocumentLocation(activation.location, resolved.location)) {
-      this.finishAnnotationActivation(abort);
-      return;
-    }
-    const { annotation, position } = resolved;
+    const { annotation, clientPosition: position } = resolved;
     shell.openAnnotationEditor(
       {
         target: { kind: 'readonly', annotation },
@@ -2571,22 +2570,6 @@ function annotationFailurePage(cause: unknown): number | null {
   return null;
 }
 
-function annotationLocation(annotation: DocumentAnnotation): DocumentLocation {
-  if (annotation.anchor.kind !== 'fixed-page') return { pageIndex: 0 };
-  const { geometry } = annotation.anchor;
-  if (geometry.kind === 'point')
-    return { pageIndex: annotation.anchor.pageIndex, ...geometry.point };
-  if (geometry.kind === 'rectangle')
-    return {
-      pageIndex: annotation.anchor.pageIndex,
-      x: geometry.rectangle.x,
-      y: geometry.rectangle.y,
-    };
-  if (geometry.kind === 'quadrilaterals')
-    return { pageIndex: annotation.anchor.pageIndex, ...geometry.quadrilaterals[0]?.topLeft };
-  return { pageIndex: annotation.anchor.pageIndex, ...geometry.paths[0]?.[0] };
-}
-
 function annotationDiagnosticIdentity(annotation: DocumentAnnotation): string {
   return annotation.identity.kind === 'stable'
     ? annotation.identity.id
@@ -2676,10 +2659,6 @@ function annotationForActivation(
       metadata: unavailable,
     },
   };
-}
-
-function sameDocumentLocation(left: DocumentLocation, right: DocumentLocation): boolean {
-  return left.pageIndex === right.pageIndex && left.x === right.x && left.y === right.y;
 }
 
 function annotationToolForMode(mode: PdfAnnotationLogicalMode): PdfAnnotationTool {

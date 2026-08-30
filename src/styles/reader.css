@@ -826,42 +826,6 @@
   border-bottom: var(--border-width) solid var(--background-modifier-border);
 }
 
-.abyss-documents .abyss-annotation-card-actions {
-  position: absolute;
-  z-index: 1;
-  inset-block-start: calc(var(--size-4-2) + var(--border-width));
-  inset-inline-end: var(--size-2-2);
-  display: flex;
-  gap: var(--size-2-1);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 80ms ease-out;
-}
-
-.abyss-documents .abyss-annotation-card-row:hover .abyss-annotation-card-actions,
-.abyss-documents .abyss-annotation-card-row:focus-within .abyss-annotation-card-actions,
-.abyss-documents .abyss-annotation-card-row[data-actions-open] .abyss-annotation-card-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.abyss-documents
-  .abyss-annotation-card-row[data-actions-suppressed]
-  .abyss-annotation-card-actions {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.abyss-documents .abyss-annotation-card-action {
-  width: auto;
-  min-width: max(36px, var(--abyss-annotation-action-height));
-  min-height: var(--abyss-annotation-action-height);
-  padding: 2px var(--size-2-2);
-  border-radius: var(--radius-s);
-  background: var(--background-primary);
-  font-size: var(--font-ui-smaller);
-}
-
 .abyss-documents .abyss-annotation-comment-suggestions {
   max-height: min(14rem, 40vh);
   overflow: auto;

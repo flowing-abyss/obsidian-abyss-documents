@@ -571,7 +571,12 @@ describe('ReaderController', () => {
       expect(call?.[1].kind).toBe('sidebar');
       expect(call?.[1].signal).toBeInstanceOf(AbortSignal);
     });
-    expect(createdViewport.goTo).toHaveBeenCalledWith({ pageIndex: 0, x: 10, y: 20 });
+    expect(createdViewport.goTo).toHaveBeenCalledWith({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 10,
+      y: 20,
+    });
     expect(
       shell.created.root.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]')
         ?.value,
@@ -597,6 +602,109 @@ describe('ReaderController', () => {
     ).toBe('overlap-second editor');
     expect(openEditor).toHaveBeenCalledOnce();
     extraction.resolve();
+  });
+
+  it('uses the fresh post-navigation sidebar anchor for one writable annotation editor', async () => {
+    const [pdf] = files('Books/Fresh-sidebar-anchor.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const navigation = deferred<undefined>();
+    const createdViewport = interactiveViewport();
+    createdViewport.goTo.mockImplementationOnce(async () => navigation.promise);
+    const createdSession = session(pdf.path, createdViewport);
+    const extraction = deferred<void>();
+    Object.assign(createdSession.value, { listAnnotations: async () => extraction.promise });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'fresh-sidebar-anchor',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 20, y: 49, width: 100, height: 12 }],
+          selectedText: 'Fresh anchor',
+          color: '#ffd400',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+    const card = shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-id="fresh-sidebar-anchor"]',
+    );
+    if (card === null || card === undefined) throw new Error('Expected an annotation card.');
+    let rect = DOMRect.fromRect({ height: 40, width: 240, x: 10, y: 20 });
+    vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => rect);
+
+    card.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.goTo).toHaveBeenCalledOnce();
+    });
+    rect = DOMRect.fromRect({ height: 52, width: 312, x: 72, y: 236 });
+    navigation.resolve(undefined);
+
+    await vi.waitFor(() => {
+      expect(createdViewport.focusAnnotation).toHaveBeenCalledOnce();
+    });
+    expect(createdViewport.focusAnnotation.mock.lastCall?.[1]).toMatchObject({
+      clientPosition: { x: 72, y: 288 },
+      kind: 'sidebar',
+    });
+    await Promise.resolve();
+    const failure = new Error('Native focus failed');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    createdViewport.focusAnnotation.mockRejectedValueOnce(failure);
+    card.click();
+    await vi.waitFor(() => {
+      expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to edit PDF annotation', {
+        action: 'open PDF annotation',
+        annotation: 'fresh-sidebar-anchor',
+        path: pdf.path,
+        cause: failure,
+      });
+    });
+    await Promise.resolve();
+    createdViewport.focusAnnotation.mockRejectedValueOnce(failure);
+    card.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.focusAnnotation).toHaveBeenCalledTimes(3);
+    });
+    await Promise.resolve();
+    createdViewport.focusAnnotation.mockRejectedValueOnce(
+      new DOMException('Native focus cancelled', 'AbortError'),
+    );
+    card.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.focusAnnotation).toHaveBeenCalledTimes(4);
+    });
+    await Promise.resolve();
+    createdViewport.focusAnnotation.mockImplementationOnce(
+      (_id, source) =>
+        new Promise((_, reject) => {
+          source.signal?.addEventListener(
+            'abort',
+            () => {
+              reject(new DOMException('Native focus cancelled', 'AbortError'));
+            },
+            { once: true },
+          );
+        }),
+    );
+    card.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.focusAnnotation).toHaveBeenCalledTimes(5);
+    });
+    extraction.resolve();
+    await controller.close();
   });
 
   it('preserves verified editability across an omitted mounted patch but honors explicit false', async () => {
@@ -1035,7 +1143,12 @@ describe('ReaderController', () => {
     expect(shell.created.sidebar?.annotationsPanel.root.textContent).toContain(
       'Final live comment',
     );
-    expect(createdViewport.goTo).toHaveBeenCalledWith({ pageIndex: 0, x: 4, y: 5 });
+    expect(createdViewport.goTo).toHaveBeenCalledWith({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 0,
+      x: 4,
+      y: 5,
+    });
   });
 
   it('does not let a theme refresh starve extraction during a pending mutation', async () => {
@@ -1970,7 +2083,12 @@ describe('ReaderController', () => {
     });
     expect(listAnnotations).toHaveBeenCalledOnce();
     expect(shell.created.sidebar?.activeTab).toBe('annotations');
-    expect(createdViewport.goTo).toHaveBeenCalledWith({ pageIndex: 1, x: 10, y: 20 });
+    expect(createdViewport.goTo).toHaveBeenCalledWith({
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 1,
+      x: 10,
+      y: 20,
+    });
 
     await controller.resolveAnnotationLink({
       id: 'missing',
@@ -2047,9 +2165,24 @@ describe('ReaderController', () => {
       page: 1,
       fingerprint: 'highlight:reflowable:x',
     });
-    expect(createdViewport.goTo).toHaveBeenNthCalledWith(1, { pageIndex: 1, x: 1, y: 2 });
-    expect(createdViewport.goTo).toHaveBeenNthCalledWith(2, { pageIndex: 2, x: 3, y: 4 });
-    expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, { pageIndex: 3, x: 7, y: 8 });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(1, {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 1,
+      x: 1,
+      y: 2,
+    });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(2, {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 2,
+      x: 3,
+      y: 4,
+    });
+    expect(createdViewport.goTo).toHaveBeenNthCalledWith(3, {
+      coordinateSpace: 'page-points-top-left',
+      pageIndex: 3,
+      x: 7,
+      y: 8,
+    });
     expect(createdViewport.goTo).toHaveBeenNthCalledWith(4, { pageIndex: 0 });
     await controller.resolveAnnotationLink({
       id: 'old',
@@ -2313,8 +2446,8 @@ describe('ReaderController', () => {
     expect(shell.created.root.isConnected).toBe(false);
   });
 
-  it('cancels read-only details when the resolved row moves after navigation starts', async () => {
-    const [pdf] = files('Books/Signed-row-moved.pdf');
+  it('cancels read-only details when the shell becomes stale after navigation starts', async () => {
+    const [pdf] = files('Books/Signed-stale-shell.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const navigation = deferred<undefined>();
     const createdViewport = viewport();
@@ -2353,27 +2486,18 @@ describe('ReaderController', () => {
     const card = shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
       '[data-annotation-id="signed-row-moved"]',
     );
-    const rowId = card?.dataset['annotationRowId'];
-    if (card === null || card === undefined || rowId === undefined)
+    if (card === null || card === undefined)
       throw new Error('Expected a mounted signed annotation row.');
+    vi.spyOn(card, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 52, width: 312, x: 72, y: 236 }),
+    );
     const openAnnotationEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
     card.click();
     await vi.waitFor(() => {
       expect(createdViewport.goTo).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 0 }));
     });
-    const moved = {
-      ...annotation,
-      anchor: {
-        kind: 'fixed-page' as const,
-        pageIndex: 1,
-        coordinateSpace: 'page-points-top-left' as const,
-        geometry: { kind: 'point' as const, point: { x: 30, y: 40 } },
-      },
-      comment: 'Moved signed details',
-    } satisfies DocumentAnnotation;
-    shell.created.sidebar?.annotationsPanel.setProjectedAnnotations([
-      { annotation: moved, key: rowId, nativeId: 'signed-row-moved', writable: false },
-    ]);
+    const controllerState = controller as unknown as { shell: ReaderShell | null };
+    controllerState.shell = null;
     navigation.resolve(undefined);
 
     await vi.waitFor(() => {
@@ -2386,6 +2510,7 @@ describe('ReaderController', () => {
     expect(
       shell.created.root.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.hidden,
     ).toBe(true);
+    controllerState.shell = shell.created;
     await controller.close();
   });
 

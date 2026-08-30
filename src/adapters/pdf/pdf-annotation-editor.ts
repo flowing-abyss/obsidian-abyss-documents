@@ -21,6 +21,7 @@ export type PdfEditableAnnotationKind = 'highlight' | 'ink' | 'freetext';
 export type PdfAnnotationActivationResult = 'editable' | 'readonly' | 'cancelled';
 
 export type PdfAnnotationActivationSource = {
+  readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
   readonly kind: 'root-click' | 'root-context' | 'sidebar';
   readonly preserveNativeSelection?: boolean | undefined;
   readonly signal?: AbortSignal | undefined;
@@ -265,6 +266,7 @@ interface SuppressedNativeToolbar {
 }
 
 interface AnnotationActivation {
+  readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
   readonly clearDeadline: () => void;
   readonly controller: AbortController;
   readonly deadline: number;
@@ -416,11 +418,16 @@ export class PdfAnnotationEditor {
     const id = stableId.trim();
     if (id.length === 0 || source.signal?.aborted === true || this.destroyed)
       return Promise.resolve('cancelled');
-    return this.startAnnotationActivation(id, source.signal, async (activation) => {
-      const projected = await this.resolveProjectedAnnotation(id, activation);
-      if (!this.isCurrentActivation(activation) || projected === null) return 'cancelled';
-      return this.focusResolvedAnnotation(id, source, projected, activation);
-    });
+    return this.startAnnotationActivation(
+      id,
+      source.signal,
+      source.clientPosition,
+      async (activation) => {
+        const projected = await this.resolveProjectedAnnotation(id, activation);
+        if (!this.isCurrentActivation(activation) || projected === null) return 'cancelled';
+        return this.focusResolvedAnnotation(id, source, projected, activation);
+      },
+    );
   }
 
   private focusResolvedAnnotation(
@@ -448,6 +455,7 @@ export class PdfAnnotationEditor {
   ): Promise<PdfAnnotationActivationResult> {
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+        ...clientPositionOptions(activation.clientPosition),
         forceReadonly: true,
       }),
       activation.controller.signal,
@@ -466,6 +474,7 @@ export class PdfAnnotationEditor {
     if (!this.isCurrentActivation(activation)) return 'cancelled';
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+        ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
         preserveSelection: true,
       }),
@@ -484,7 +493,7 @@ export class PdfAnnotationEditor {
   }): Promise<PdfAnnotationActivationResult> {
     const id = request.id.trim();
     if (id.length === 0 || this.destroyed) return Promise.resolve('cancelled');
-    return this.startAnnotationActivation(id, undefined, (activation) =>
+    return this.startAnnotationActivation(id, undefined, undefined, (activation) =>
       this.activateWithinEpoch({ ...request, id }, undefined, activation),
     );
   }
@@ -492,6 +501,7 @@ export class PdfAnnotationEditor {
   private startAnnotationActivation(
     id: string,
     externalSignal: AbortSignal | undefined,
+    clientPosition: { readonly x: number; readonly y: number } | undefined,
     run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>,
   ): Promise<PdfAnnotationActivationResult> {
     const current = this.activeActivation;
@@ -509,6 +519,7 @@ export class PdfAnnotationEditor {
     const settled = deferred<PdfAnnotationActivationResult>();
     let deadlineTimer: number | null = null;
     const activation: AnnotationActivation = {
+      clientPosition,
       clearDeadline: () => {
         const timer = deadlineTimer;
         deadlineTimer = null;
@@ -586,7 +597,10 @@ export class PdfAnnotationEditor {
         activation.id,
         controller.signal,
         projected,
-        { forceReadonly: true },
+        {
+          ...clientPositionOptions(activation.clientPosition),
+          forceReadonly: true,
+        },
       );
       const focused = await Promise.race([
         focusing,
@@ -717,6 +731,7 @@ export class PdfAnnotationEditor {
   ): Promise<boolean> {
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+        ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
         preserveSelection: true,
       }),
@@ -750,7 +765,10 @@ export class PdfAnnotationEditor {
         activation.id,
         activation.controller.signal,
         projected,
-        { forceReadonly: true },
+        {
+          ...clientPositionOptions(activation.clientPosition),
+          forceReadonly: true,
+        },
       ),
       activation.controller.signal,
     );
@@ -2458,6 +2476,12 @@ function queuedToolLifecycleError(): DOMException {
 
 function remainingDeadlineMs(deadline: number): number {
   return Math.max(0, deadline - Date.now());
+}
+
+function clientPositionOptions(
+  clientPosition: { readonly x: number; readonly y: number } | undefined,
+): { readonly clientPosition?: { readonly x: number; readonly y: number } | undefined } {
+  return clientPosition === undefined ? {} : { clientPosition };
 }
 
 function deferred<T>(): {

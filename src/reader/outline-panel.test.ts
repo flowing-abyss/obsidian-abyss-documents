@@ -19,7 +19,12 @@ const outline: readonly OutlineItem[] = [
       {
         id: 'section-1',
         label: 'Section 1',
-        target: { pageIndex: 2, x: 12, y: 24 },
+        target: {
+          coordinateSpace: 'pdf-points-bottom-left',
+          pageIndex: 2,
+          x: 12,
+          y: 24,
+        },
         children: [],
       },
       { id: 'missing', label: 'Unresolved destination', target: null, children: [] },
@@ -553,7 +558,12 @@ describe('OutlinePanel', () => {
     panel.render(outline);
 
     panel.root.querySelector<HTMLElement>('[data-outline-id="section-1"]')?.click();
-    expect(navigate).toHaveBeenCalledWith({ pageIndex: 2, x: 12, y: 24 });
+    expect(navigate).toHaveBeenCalledWith({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 12,
+      y: 24,
+    });
 
     panel.render([]);
     expect(panel.root.textContent).toContain('No outline available.');
@@ -611,7 +621,12 @@ describe('OutlinePanel', () => {
       }),
     );
 
-    expect(navigate).toHaveBeenCalledWith({ pageIndex: 2, x: 12, y: 24 });
+    expect(navigate).toHaveBeenCalledWith({
+      coordinateSpace: 'pdf-points-bottom-left',
+      pageIndex: 2,
+      x: 12,
+      y: 24,
+    });
     expect(section?.getAttribute('aria-current')).toBe('location');
     expect(
       panel.root.querySelector('[data-outline-id="chapter-1"]')?.hasAttribute('aria-current'),
