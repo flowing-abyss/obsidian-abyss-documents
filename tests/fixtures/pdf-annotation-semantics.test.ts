@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -18,13 +18,66 @@ interface SemanticResult {
   readonly repeatFirstReopen: ReadonlyArray<Record<string, unknown>>;
 }
 
-function realPdfJsSemantics(): SemanticResult {
+interface SemanticProcessOptions {
+  readonly arguments?: readonly string[];
+  readonly watchdogMs?: number;
+}
+
+function runSemanticProcess(options: SemanticProcessOptions = {}): Promise<string> {
   const runner = path.join(import.meta.dirname, 'pdf-annotation-semantics-runner.mts');
-  const stdout = execFileSync(process.execPath, ['--import', 'tsx', runner], {
-    cwd: path.resolve(import.meta.dirname, '..', '..'),
-    encoding: 'utf8',
-    maxBuffer: 8 * 1024 * 1024,
+  const watchdogMs = options.watchdogMs ?? 20_000;
+  const child = spawn(
+    process.execPath,
+    options.arguments === undefined ? ['--import', 'tsx', runner] : [...options.arguments],
+    {
+      cwd: path.resolve(import.meta.dirname, '..', '..'),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  return new Promise((resolve, reject) => {
+    let stderr = '';
+    let stdout = '';
+    let watchdogFailure: Error | null = null;
+    const watchdog = setTimeout(() => {
+      watchdogFailure = new Error(
+        `The semantic runner exceeded its ${String(watchdogMs)} ms watchdog and was terminated.`,
+      );
+      child.kill('SIGKILL');
+    }, watchdogMs);
+    child.stderr.setEncoding('utf8');
+    child.stdout.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.once('error', (cause) => {
+      clearTimeout(watchdog);
+      reject(cause);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(watchdog);
+      if (watchdogFailure !== null) {
+        reject(watchdogFailure);
+        return;
+      }
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+      const stderrSuffix = stderr.length === 0 ? '' : `\n${stderr}`;
+      reject(
+        new Error(
+          `The semantic runner exited with code ${String(code)} and signal ${String(signal)}.${stderrSuffix}`,
+        ),
+      );
+    });
   });
+}
+
+async function realPdfJsSemantics(options: SemanticProcessOptions = {}): Promise<SemanticResult> {
+  const stdout = await runSemanticProcess(options);
   const prefix = 'ABYSS_SEMANTIC_RESULT=';
   const resultLine = stdout
     .split(/\r?\n/u)
@@ -39,8 +92,8 @@ describe('real PDF.js annotation semantic bytes oracle', () => {
   it(
     'preserves page, quadPoints, fill, comment, edit, delete, hash, and repeat semantics',
     { timeout: 30_000 },
-    () => {
-      const result = realPdfJsSemantics();
+    async () => {
+      const result = await realPdfJsSemantics();
       const first = result.firstReopen;
 
       expect(first).toHaveLength(1);
@@ -77,4 +130,13 @@ describe('real PDF.js annotation semantic bytes oracle', () => {
       ]);
     },
   );
+
+  it('terminates a child that never reaches a lifecycle result', async () => {
+    await expect(
+      realPdfJsSemantics({
+        arguments: ['--eval', 'setTimeout(() => process.exit(0), 100)'],
+        watchdogMs: 20,
+      }),
+    ).rejects.toThrow('The semantic runner exceeded its 20 ms watchdog and was terminated.');
+  });
 });

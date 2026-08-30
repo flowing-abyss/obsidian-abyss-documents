@@ -87,7 +87,8 @@ class FakeEventBus {
 }
 
 interface MutableAnnotationStorage {
-  addEditor: ReturnType<typeof vi.fn<(type: number) => void>>;
+  [Symbol.iterator](): IterableIterator<[string, unknown]>;
+  addEditor: ReturnType<typeof vi.fn<(type: number, id?: string) => void>>;
   onAnnotationEditor: ((type: number | null) => void) | null;
   onResetModified: (() => void) | null;
   onSetModified: (() => void) | null;
@@ -97,8 +98,12 @@ interface MutableAnnotationStorage {
 
 function storage(): MutableAnnotationStorage {
   let modified = false;
+  let editorSequence = 0;
+  const entries = new Map<string, unknown>();
   const value: MutableAnnotationStorage = {
-    addEditor: vi.fn((type: number) => {
+    [Symbol.iterator]: () => entries.entries(),
+    addEditor: vi.fn((type: number, id = `fixture-editor-${++editorSequence}`) => {
+      entries.set(id, selectedEditor(id, type));
       if (!modified) {
         modified = true;
         value.onSetModified?.();
@@ -2207,8 +2212,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       get: getMode,
       set(request: { readonly editId?: string; readonly mode: number }) {
         if (request.editId === 'imported-highlight') {
-          current.annotationStorage.onAnnotationEditor?.(9);
-          current.annotationStorage.onSetModified?.();
+          current.annotationStorage.addEditor(9, request.editId);
         }
         setMode(request);
       },
@@ -2228,6 +2232,58 @@ describe('PdfAnnotationEditor lifecycle', () => {
     await current.editor.setParameter('highlight-color', '#64d8cb');
 
     expect(uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#64d8cb');
+    expect(mutations).toHaveBeenCalledOnce();
+    expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it('owns only the target callbacks after asynchronous PDF.js editor materialization', async () => {
+    const current = fixture();
+    const projected = createdAnnotation('', { id: 'deferred-highlight' });
+    const selected = selectedEditor('deferred-highlight', 9);
+    const uiManager = manager(selected);
+    const rendering = deferred<void>();
+    const setterStarted = deferred<void>();
+    let materialization = Promise.resolve();
+    const mutations = vi.fn();
+    const dirty = vi.fn();
+    current.editor.onMutation(mutations);
+    current.editor.onDirty(dirty);
+    current.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'deferred-highlight' },
+    ]);
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(current.viewer, 'annotationEditorMode');
+    if (descriptor?.get === undefined || descriptor.set === undefined)
+      throw new Error('Expected the fixture viewer mode accessor.');
+    const getMode = descriptor.get.bind(current.viewer);
+    const setMode = descriptor.set.bind(current.viewer);
+    Object.defineProperty(current.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: getMode,
+      set(request: { readonly editId?: string; readonly mode: number }) {
+        setterStarted.resolve();
+        materialization = rendering.promise.then(() => {
+          if (request.editId !== undefined)
+            current.annotationStorage.addEditor(request.mode, request.editId);
+          setMode(request);
+        });
+      },
+    });
+
+    const activation = current.editor.focusAnnotation('deferred-highlight', { kind: 'sidebar' });
+    await setterStarted.promise;
+
+    // A genuine mutation races while PDF.js is still awaiting page/editor deserialization.
+    current.annotationStorage.onSetModified?.();
+    rendering.resolve();
+    await materialization;
+
+    await expect(activation).resolves.toBe('editable');
+    await Promise.resolve();
+
     expect(mutations).toHaveBeenCalledOnce();
     expect(dirty).toHaveBeenCalledExactlyOnceWith(true);
   });

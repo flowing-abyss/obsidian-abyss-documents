@@ -146,6 +146,7 @@ interface PdfNativeEditorReference {
 }
 
 interface MutableAnnotationStorage {
+  [Symbol.iterator]?(): IterableIterator<[string, unknown]>;
   onAnnotationEditor: ((type: number | null) => void) | null;
   onResetModified: (() => void) | null;
   onSetModified: (() => void) | null;
@@ -189,6 +190,14 @@ interface PendingModeChange {
   readonly reject: (reason: Error) => void;
   readonly listener: (event: unknown) => void;
   readonly resolve: () => void;
+}
+
+interface ActivationMaterialization {
+  readonly activation: AnnotationActivation;
+  readonly baselineEditors: ReadonlySet<object>;
+  editorConsumed: boolean;
+  readonly mode: number;
+  setConsumed: boolean;
 }
 
 interface PendingAnnotationFocus {
@@ -305,7 +314,7 @@ export class PdfAnnotationEditor {
   private contextualEditSession: ContextualEditSession | null = null;
   private pendingContextualSaveRestore: ContextualSaveRestore | null = null;
   private activationEpoch = 0;
-  private activationMaterializationDepth = 0;
+  private activationMaterialization: ActivationMaterialization | null = null;
   private activeActivation: AnnotationActivation | null = null;
   private annotationResolver: PdfAnnotationResolver | null = null;
   private readonly projectedAnnotations = new Map<string, DocumentAnnotation>();
@@ -1072,6 +1081,7 @@ export class PdfAnnotationEditor {
     if (wait.signal?.aborted === true) throw abortReason(wait.signal);
     if (this.dependencies.viewer.annotationEditorMode === mode) return;
     this.cancelPendingModeChange('The PDF annotation tool change was superseded.');
+    const materialization = this.beginActivationMaterialization(mode, options);
     await new Promise<void>((resolve, reject) => {
       let timeoutId: number | null =
         wait.signal === undefined
@@ -1129,30 +1139,105 @@ export class PdfAnnotationEditor {
         this.pendingModeChange = null;
         reject(asError(cause));
       }
+    }).finally(() => {
+      if (this.activationMaterialization === materialization) {
+        this.activationMaterialization = null;
+      }
     });
   }
 
   private requestNativeMode(mode: number, options: PdfAnnotationModeOptions): void {
+    this.dependencies.viewer.annotationEditorMode = {
+      mode,
+      ...(options.isFromKeyboard === undefined ? {} : { isFromKeyboard: options.isFromKeyboard }),
+      ...(options.editId === undefined
+        ? {}
+        : {
+            editComment: options.editComment === true,
+            editId: options.editId,
+          }),
+    };
+  }
+
+  private beginActivationMaterialization(
+    mode: number,
+    options: PdfAnnotationModeOptions,
+  ): ActivationMaterialization | null {
     const activation = this.activeActivation;
-    const ownsActivationMaterialization =
-      activation !== null &&
-      options.editId === activation.id &&
-      this.isCurrentActivation(activation);
-    if (ownsActivationMaterialization) this.activationMaterializationDepth += 1;
-    try {
-      this.dependencies.viewer.annotationEditorMode = {
-        mode,
-        ...(options.isFromKeyboard === undefined ? {} : { isFromKeyboard: options.isFromKeyboard }),
-        ...(options.editId === undefined
-          ? {}
-          : {
-              editComment: options.editComment === true,
-              editId: options.editId,
-            }),
-      };
-    } finally {
-      if (ownsActivationMaterialization) this.activationMaterializationDepth -= 1;
+    if (
+      activation === null ||
+      options.editId !== activation.id ||
+      !this.isCurrentActivation(activation)
+    )
+      return null;
+    const materialization: ActivationMaterialization = {
+      activation,
+      baselineEditors: new Set(this.nativeStorageEditors()),
+      editorConsumed: false,
+      mode,
+      setConsumed: false,
+    };
+    this.activationMaterialization = materialization;
+    return materialization;
+  }
+
+  private consumeActivationMaterializationCallback(
+    callback: 'editor' | 'set',
+    type?: number | null,
+  ): boolean {
+    const materialization = this.activationMaterialization;
+    if (materialization === null || !this.isCurrentActivation(materialization.activation))
+      return false;
+    if (callback === 'editor') return this.consumeMaterializedEditor(materialization, type);
+    return this.consumeMaterializedSet(materialization);
+  }
+
+  private consumeMaterializedEditor(
+    materialization: ActivationMaterialization,
+    type: number | null | undefined,
+  ): boolean {
+    if (materialization.editorConsumed || type !== materialization.mode) return false;
+    if (this.materializedActivationEditor(materialization) === null) return false;
+    materialization.editorConsumed = true;
+    return true;
+  }
+
+  private consumeMaterializedSet(materialization: ActivationMaterialization): boolean {
+    if (materialization.setConsumed || materialization.editorConsumed) return false;
+    if (this.materializedActivationEditor(materialization) === null) return false;
+    materialization.setConsumed = true;
+    return true;
+  }
+
+  private materializedActivationEditor(
+    materialization: ActivationMaterialization,
+  ): PdfNativeEditorReference | null {
+    for (const editor of this.nativeStorageEditors()) {
+      if (materialization.baselineEditors.has(editor)) continue;
+      if (editor.mode !== materialization.mode) continue;
+      if (nativeEditorAnnotationId(editor) === materialization.activation.id) return editor;
     }
+    return null;
+  }
+
+  private nativeStorageEditors(): PdfNativeEditorReference[] {
+    const iterator = this.storage[Symbol.iterator];
+    if (iterator === undefined) return [];
+    const editors: PdfNativeEditorReference[] = [];
+    try {
+      for (const [, value] of iterator.call(this.storage)) {
+        const candidate = record(value) as PdfNativeEditorReference | null;
+        if (
+          candidate !== null &&
+          typeof candidate.mode === 'number' &&
+          nativeEditorAnnotationId(candidate) !== undefined
+        )
+          editors.push(candidate);
+      }
+    } catch {
+      return [];
+    }
+    return editors;
   }
 
   setParameter(parameter: PdfAnnotationParameter, value: unknown): Promise<void> {
@@ -1994,13 +2079,13 @@ export class PdfAnnotationEditor {
     const previousReset = this.storage.onResetModified;
     const ownedEditor = (type: number | null): void => {
       previousEditor?.(type);
-      if (this.activationMaterializationDepth > 0) return;
+      if (this.consumeActivationMaterializationCallback('editor', type)) return;
       this.emitMutation();
       for (const listener of [...this.editorAddedListeners]) listener(type);
     };
     const ownedSet = (): void => {
       previousSet?.();
-      if (this.activationMaterializationDepth > 0) return;
+      if (this.consumeActivationMaterializationCallback('set')) return;
       this.emitMutation();
       if (!this.saving) this.emitDirty(true);
     };
