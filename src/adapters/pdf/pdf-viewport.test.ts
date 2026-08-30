@@ -1141,6 +1141,87 @@ describe('PdfDocumentViewport', () => {
     });
   });
 
+  it('reports one pre-waiter editing-state selection failure at the page boundary', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null)
+      throw new Error('Expected mounted annotation editing.');
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let activation: Promise<'editable' | 'readonly' | 'cancelled'> | null = null;
+    try {
+      const id = 'native-pre-waiter-selection-failure';
+      const cause = new Error('pre-waiter selected editor accessor failed');
+      const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+      if (root === null) throw new Error('Expected PDF root.');
+      const nativeNode = root
+        .createDiv({ cls: 'annotationEditorLayer' })
+        .createDiv({ cls: 'highlightEditor selectedEditor' });
+      nativeNode.id = id;
+      vi.spyOn(nativeNode, 'getBoundingClientRect').mockReturnValue({
+        left: 110,
+        top: 220,
+        right: 150,
+        bottom: 240,
+        width: 40,
+        height: 20,
+        x: 110,
+        y: 220,
+        toJSON: () => ({}),
+      });
+      const native = {
+        ...nativeHighlight(id),
+        elementBeforePopup: nativeNode,
+      };
+      const uiManager = annotationManager(undefined, [[id, native]]);
+      let failDuringModeChange = false;
+      let failed = false;
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: () => {
+          if (failDuringModeChange && !failed) {
+            failed = true;
+            throw cause;
+          }
+          return failed ? native : undefined;
+        },
+      });
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+      editor.setAnnotationProjection([{ annotation: writableHighlight(id), stableId: id }]);
+      const events: ViewportEvent[] = [];
+      fixture.viewport.onEvent((event) => events.push(event));
+      viewer.annotationEditorRequestHook = (request) => {
+        const mode = typeof request === 'number' ? request : request.mode;
+        if (mode !== 9) return;
+        failDuringModeChange = true;
+        eventBus.dispatch('editingstateschanged', {
+          source: uiManager,
+          details: { hasSelectedEditor: true },
+        });
+      };
+      const focusAnnotation = editor.focusAnnotation.bind(editor);
+      vi.spyOn(editor, 'focusAnnotation').mockImplementation((stableId, source) => {
+        activation = focusAnnotation(stableId, source);
+        return activation;
+      });
+
+      nativeNode.click();
+
+      expect(activation).not.toBeNull();
+      await expect(activation).rejects.toBe(cause);
+      expect(events).toEqual([
+        { type: 'annotation-mutation-error', action: 'open-annotation', cause },
+      ]);
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+    } finally {
+      diagnostic.mockRestore();
+      await fixture.viewport.destroy();
+    }
+  });
+
   it('reports one manager-sourced editing-state selection failure at the page boundary', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;

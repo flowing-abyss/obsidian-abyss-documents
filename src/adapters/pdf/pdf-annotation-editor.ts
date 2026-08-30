@@ -247,7 +247,6 @@ interface ContextualSaveRestore {
 }
 
 interface ContextualEditSession {
-  readonly activation: AnnotationActivation | null;
   closing: Promise<void> | null;
   guarded: boolean;
   id: string;
@@ -260,8 +259,13 @@ interface ContextualEditSession {
   toolbarObserver: MutationObserver | null;
 }
 
-interface RequestedEditorWaiter {
-  readonly fail: (cause: unknown) => void;
+interface ContextualActivationFailureOwner {
+  readonly activation: AnnotationActivation;
+  cause: Error | null;
+  containmentAttempted: boolean;
+  readonly controller: AbortController;
+  interrupt: ((cause: Error) => void) | null;
+  readonly removeActivationAbort: () => void;
   readonly session: ContextualEditSession;
 }
 
@@ -274,6 +278,7 @@ interface SuppressedNativeToolbar {
 interface AnnotationActivation {
   readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
   readonly clearDeadline: () => void;
+  contextualFailureOwner: ContextualActivationFailureOwner | null;
   readonly controller: AbortController;
   readonly deadline: number;
   readonly epoch: number;
@@ -283,7 +288,6 @@ interface AnnotationActivation {
   readonly promise: Promise<PdfAnnotationActivationResult>;
   projected: DocumentAnnotation | null;
   readonly removeExternalAbort: () => void;
-  requestedEditorWaiter: RequestedEditorWaiter | null;
   timedOut: boolean;
 }
 
@@ -321,6 +325,7 @@ export class PdfAnnotationEditor {
   private saving = false;
   private logicalMode: PdfAnnotationLogicalMode = 'neutral';
   private contextualEditSession: ContextualEditSession | null = null;
+  private contextualActivationFailureOwner: ContextualActivationFailureOwner | null = null;
   private readonly reportedContextualEditingStateFailures = new WeakSet<ContextualEditSession>();
   private pendingContextualSaveRestore: ContextualSaveRestore | null = null;
   private activationEpoch = 0;
@@ -373,7 +378,6 @@ export class PdfAnnotationEditor {
     };
     const mode = this.modeFor(request.kind);
     const session: ContextualEditSession = {
-      activation: null,
       closing: null,
       guarded: false,
       id: editId,
@@ -534,6 +538,7 @@ export class PdfAnnotationEditor {
         deadlineTimer = null;
         if (timer !== null) window.clearTimeout(timer);
       },
+      contextualFailureOwner: null,
       controller,
       deadline: Date.now() + ANNOTATION_ACTIVATION_TIMEOUT_MS,
       epoch: ++this.activationEpoch,
@@ -545,7 +550,6 @@ export class PdfAnnotationEditor {
       removeExternalAbort: () => {
         externalSignal?.removeEventListener('abort', onExternalAbort);
       },
-      requestedEditorWaiter: null,
       timedOut: false,
     };
     deadlineTimer = window.setTimeout(() => {
@@ -556,8 +560,19 @@ export class PdfAnnotationEditor {
       );
     }, remainingDeadlineMs(activation.deadline));
     this.activeActivation = activation;
+    this.runAnnotationActivation(activation, run, settled);
+    return activation.promise;
+  }
+
+  private runAnnotationActivation(
+    activation: AnnotationActivation,
+    run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>,
+    settled: ReturnType<typeof deferred<PdfAnnotationActivationResult>>,
+  ): void {
     run(activation)
-      .catch((cause: unknown) => {
+      .catch(async (cause: unknown): Promise<PdfAnnotationActivationResult> => {
+        const contextualRejection = this.rejectRecordedContextualFailure(activation);
+        if (contextualRejection !== null) await contextualRejection;
         if (
           !this.isOwnedActivation(activation) ||
           activation.controller.signal.aborted ||
@@ -566,24 +581,38 @@ export class PdfAnnotationEditor {
           return 'cancelled' as const;
         throw cause;
       })
-      .then(async (result) => {
-        const finalResult =
-          result === 'cancelled' && activation.timedOut
-            ? await this.focusTimedOutProjection(activation)
-            : result;
-        settled.resolve(this.isOwnedActivation(activation) ? finalResult : 'cancelled');
-      })
+      .then((result) => this.settleAnnotationActivationResult(result, activation, settled))
       .catch((cause: unknown) => {
-        settled.reject(asError(cause));
+        settled.reject(this.contextualActivationFailureCause(activation) ?? asError(cause));
       })
       .finally(() => {
-        activation.clearDeadline();
-        activation.removeExternalAbort();
-        this.clearPendingAnnotationFocus(activation);
-        if (this.activeActivation === activation) this.activeActivation = null;
+        this.cleanupAnnotationActivation(activation);
       })
       .catch(() => undefined);
-    return activation.promise;
+  }
+
+  private async settleAnnotationActivationResult(
+    result: PdfAnnotationActivationResult,
+    activation: AnnotationActivation,
+    settled: ReturnType<typeof deferred<PdfAnnotationActivationResult>>,
+  ): Promise<void> {
+    const contextualRejection = this.rejectRecordedContextualFailure(activation);
+    if (contextualRejection !== null) await contextualRejection;
+    const finalResult =
+      result === 'cancelled' && activation.timedOut
+        ? await this.focusTimedOutProjection(activation)
+        : result;
+    const rejectionAfterFallback = this.rejectRecordedContextualFailure(activation);
+    if (rejectionAfterFallback !== null) await rejectionAfterFallback;
+    settled.resolve(this.isOwnedActivation(activation) ? finalResult : 'cancelled');
+  }
+
+  private cleanupAnnotationActivation(activation: AnnotationActivation): void {
+    activation.clearDeadline();
+    activation.removeExternalAbort();
+    this.clearPendingAnnotationFocus(activation);
+    this.clearContextualActivationFailureOwner(activation);
+    if (this.activeActivation === activation) this.activeActivation = null;
   }
 
   private async resolveProjectedAnnotation(
@@ -681,12 +710,16 @@ export class PdfAnnotationEditor {
     projected: DocumentAnnotation | undefined,
     activation: AnnotationActivation,
   ): Promise<PdfAnnotationActivationResult> {
-    if (!this.isCurrentActivation(activation) || isAbortFailure(cause)) {
-      return session === null
-        ? 'cancelled'
-        : this.failContextualActivation(session, projected, activation);
+    if (session === null) {
+      if (!this.isCurrentActivation(activation) || isAbortFailure(cause)) return 'cancelled';
+      throw cause;
     }
-    if (session === null) throw cause;
+    const contextualFailure = this.contextualActivationFailureCause(activation);
+    if (contextualFailure !== null)
+      return this.rejectAfterContextualContainment(contextualFailure, session, activation);
+    if (!this.isCurrentActivation(activation) || isAbortFailure(cause))
+      return this.failContextualActivation(session, projected, activation);
+    this.recordContextualActivationFailure(session, cause);
     return this.rejectAfterContextualContainment(cause, session, activation);
   }
 
@@ -695,35 +728,100 @@ export class PdfAnnotationEditor {
     session: ContextualEditSession,
     activation: AnnotationActivation,
   ): Promise<never> {
+    const contextualFailure = this.contextualActivationFailureCause(activation);
+    const primaryCause = contextualFailure ?? asError(cause);
+    if (!this.claimContextualFailureContainment(activation, contextualFailure)) throw primaryCause;
+    const containmentSignal = contextualFailure === null ? activation.controller.signal : undefined;
     try {
-      await this.containFailedContextualEntry(session, activation.controller.signal);
+      await this.containFailedContextualEntry(session, containmentSignal);
     } catch (containmentCause) {
-      let finalContainmentCause = containmentCause;
-      if (
-        session.phase !== 'closing' &&
-        session.closing === null &&
-        this.contextualEditSession === session
-      ) {
-        try {
-          await this.closeContextualEditSession(session, {
-            signal: activation.controller.signal,
-          });
-        } catch (closingCause) {
-          finalContainmentCause = closingCause;
-        }
-      }
-      if (
-        finalContainmentCause !== cause &&
-        this.isCurrentActivation(activation) &&
-        !isAbortFailure(finalContainmentCause)
-      ) {
-        console.warn(
-          '[abyss-documents] Failed to contain the PDF annotation editor after activation failure',
-          { cause: asError(finalContainmentCause) },
-        );
-      }
+      await this.handleContextualContainmentFailure({
+        activation,
+        containmentCause,
+        containmentSignal,
+        contextualFailure,
+        primaryCause,
+        session,
+      });
     }
-    throw cause;
+    throw primaryCause;
+  }
+
+  private claimContextualFailureContainment(
+    activation: AnnotationActivation,
+    contextualFailure: Error | null,
+  ): boolean {
+    if (contextualFailure === null) return true;
+    const owner = activation.contextualFailureOwner;
+    if (owner === null || owner.containmentAttempted) return false;
+    owner.containmentAttempted = true;
+    return true;
+  }
+
+  private async handleContextualContainmentFailure(context: {
+    readonly activation: AnnotationActivation;
+    readonly containmentCause: unknown;
+    readonly containmentSignal: AbortSignal | undefined;
+    readonly contextualFailure: Error | null;
+    readonly primaryCause: Error;
+    readonly session: ContextualEditSession;
+  }): Promise<void> {
+    const finalCause = await this.retryContextualContainment(context);
+    this.reportSecondaryContextualContainmentFailure(finalCause, context);
+  }
+
+  private async retryContextualContainment(context: {
+    readonly containmentCause: unknown;
+    readonly containmentSignal: AbortSignal | undefined;
+    readonly session: ContextualEditSession;
+  }): Promise<unknown> {
+    if (!this.canRetryContextualContainment(context.session)) return context.containmentCause;
+    try {
+      await this.closeContextualEditSession(
+        context.session,
+        context.containmentSignal === undefined ? {} : { signal: context.containmentSignal },
+      );
+      return context.containmentCause;
+    } catch (closingCause) {
+      return closingCause;
+    }
+  }
+
+  private canRetryContextualContainment(session: ContextualEditSession): boolean {
+    return (
+      session.phase !== 'closing' &&
+      session.closing === null &&
+      this.contextualEditSession === session
+    );
+  }
+
+  private reportSecondaryContextualContainmentFailure(
+    cause: unknown,
+    context: {
+      readonly activation: AnnotationActivation;
+      readonly contextualFailure: Error | null;
+      readonly primaryCause: Error;
+    },
+  ): void {
+    if (
+      cause === context.primaryCause ||
+      isAbortFailure(cause) ||
+      !this.ownsContextualContainment(context.activation, context.contextualFailure)
+    )
+      return;
+    console.warn(
+      '[abyss-documents] Failed to contain the PDF annotation editor after activation failure',
+      { cause: asError(cause) },
+    );
+  }
+
+  private ownsContextualContainment(
+    activation: AnnotationActivation,
+    contextualFailure: Error | null,
+  ): boolean {
+    return contextualFailure === null
+      ? this.isCurrentActivation(activation)
+      : this.isOwnedActivation(activation);
   }
 
   private async prepareContextualActivation(activation: AnnotationActivation): Promise<boolean> {
@@ -757,7 +855,6 @@ export class PdfAnnotationEditor {
     activation: AnnotationActivation,
   ): ContextualEditSession {
     const session: ContextualEditSession = {
-      activation,
       closing: null,
       guarded: false,
       id: request.id,
@@ -769,6 +866,25 @@ export class PdfAnnotationEditor {
       suppressedToolbars: new Map(),
       toolbarObserver: null,
     };
+    const controller = new AbortController();
+    const onActivationAbort = (): void => {
+      controller.abort(abortReason(activation.controller.signal));
+    };
+    if (activation.controller.signal.aborted) onActivationAbort();
+    else activation.controller.signal.addEventListener('abort', onActivationAbort, { once: true });
+    const failureOwner: ContextualActivationFailureOwner = {
+      activation,
+      cause: null,
+      containmentAttempted: false,
+      controller,
+      interrupt: null,
+      removeActivationAbort: () => {
+        activation.controller.signal.removeEventListener('abort', onActivationAbort);
+      },
+      session,
+    };
+    activation.contextualFailureOwner = failureOwner;
+    this.contextualActivationFailureOwner = failureOwner;
     this.contextualEditSession = session;
     return session;
   }
@@ -778,15 +894,16 @@ export class PdfAnnotationEditor {
     session: ContextualEditSession,
     activation: AnnotationActivation,
   ): Promise<boolean> {
+    const signal = this.contextualActivationSignal(session, activation);
     await this.changeMode(
       session.mode,
       { editComment: request.editComment, editId: request.id },
-      { signal: activation.controller.signal },
+      { signal },
     );
     if (!this.isActiveContextualSession(session, activation)) return false;
     if (!(await this.waitForRequestedEditor(session, activation))) return false;
     if (!this.isCurrentActivation(activation)) return false;
-    await waitWithSignal(nextTask(), activation.controller.signal);
+    await waitWithSignal(nextTask(), signal);
     if (!this.isActiveContextualSession(session, activation)) return false;
     if (!this.isRequestedEditorSelected(session)) return false;
     this.guardContextualEditSession(session);
@@ -800,13 +917,14 @@ export class PdfAnnotationEditor {
     session: ContextualEditSession,
     activation: AnnotationActivation,
   ): Promise<boolean> {
+    const signal = this.contextualActivationSignal(session, activation);
     const focused = await waitWithSignal(
-      this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+      this.dependencies.commentBridge.focusAnnotation(id, signal, projected, {
         ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
         preserveSelection: true,
       }),
-      activation.controller.signal,
+      signal,
     );
     if (!this.isActiveContextualSession(session, activation) || !focused) return false;
     this.releaseActivationFocus(activation, true);
@@ -853,15 +971,22 @@ export class PdfAnnotationEditor {
     session: ContextualEditSession,
     activation: AnnotationActivation,
   ): Promise<boolean> {
-    const signal = activation.controller.signal;
-    if (this.isRequestedEditorSelected(session)) return Promise.resolve(true);
+    const owner = activation.contextualFailureOwner;
+    const signal = this.contextualActivationSignal(session, activation);
+    try {
+      if (this.isRequestedEditorSelected(session)) return Promise.resolve(true);
+    } catch (cause) {
+      return Promise.reject(
+        this.recordContextualActivationFailure(session, cause) ?? asError(cause),
+      );
+    }
     return new Promise((resolve, reject) => {
       let settled = false;
       const cleanup = (): void => {
         this.dependencies.eventBus.off('editingstateschanged', check);
         this.dependencies.eventBus.off('editorsrendered', check);
         signal.removeEventListener('abort', onAbort);
-        if (activation.requestedEditorWaiter === waiter) activation.requestedEditorWaiter = null;
+        if (owner?.interrupt === fail) owner.interrupt = null;
       };
       const finish = (selected: boolean): void => {
         if (settled) return;
@@ -869,11 +994,11 @@ export class PdfAnnotationEditor {
         cleanup();
         resolve(selected);
       };
-      const fail = (cause: unknown): void => {
+      const fail = (cause: Error): void => {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(asError(cause));
+        reject(cause);
       };
       const check = (): void => {
         if (settled) return;
@@ -881,19 +1006,70 @@ export class PdfAnnotationEditor {
           if (signal.aborted || this.contextualEditSession !== session) finish(false);
           else if (this.isRequestedEditorSelected(session)) finish(true);
         } catch (cause) {
-          fail(cause);
+          const failure = this.recordContextualActivationFailure(session, cause);
+          if (failure === null) fail(asError(cause));
         }
       };
       const onAbort = (): void => {
         finish(false);
       };
-      const waiter: RequestedEditorWaiter = { fail, session };
-      activation.requestedEditorWaiter = waiter;
+      if (owner?.session === session) owner.interrupt = fail;
       this.dependencies.eventBus.on('editingstateschanged', check);
       this.dependencies.eventBus.on('editorsrendered', check);
       signal.addEventListener('abort', onAbort, { once: true });
       check();
     });
+  }
+
+  private contextualActivationSignal(
+    session: ContextualEditSession,
+    activation: AnnotationActivation,
+  ): AbortSignal {
+    const owner = activation.contextualFailureOwner;
+    return owner?.session === session ? owner.controller.signal : activation.controller.signal;
+  }
+
+  private contextualFailureOwnerForSession(
+    session: ContextualEditSession,
+  ): ContextualActivationFailureOwner | null {
+    const owner = this.contextualActivationFailureOwner;
+    return owner?.session === session ? owner : null;
+  }
+
+  private contextualActivationFailureCause(activation: AnnotationActivation): Error | null {
+    return activation.contextualFailureOwner?.cause ?? null;
+  }
+
+  private rejectRecordedContextualFailure(activation: AnnotationActivation): Promise<never> | null {
+    const owner = activation.contextualFailureOwner;
+    const cause = owner?.cause ?? null;
+    if (owner === null || cause === null) return null;
+    return this.rejectAfterContextualContainment(cause, owner.session, activation);
+  }
+
+  private recordContextualActivationFailure(
+    session: ContextualEditSession,
+    cause: unknown,
+  ): Error | null {
+    const owner = this.contextualFailureOwnerForSession(session);
+    if (owner === null) return null;
+    if (owner.cause !== null) return owner.cause;
+    if (!this.isCurrentActivation(owner.activation) || isAbortFailure(cause)) return null;
+    const failure = asError(cause);
+    owner.cause = failure;
+    owner.interrupt?.(failure);
+    if (!owner.controller.signal.aborted) owner.controller.abort(failure);
+    return failure;
+  }
+
+  private clearContextualActivationFailureOwner(activation: AnnotationActivation): void {
+    const owner = activation.contextualFailureOwner;
+    if (owner === null) return;
+    owner.interrupt = null;
+    owner.removeActivationAbort();
+    activation.contextualFailureOwner = null;
+    if (this.contextualActivationFailureOwner === owner)
+      this.contextualActivationFailureOwner = null;
   }
 
   private isCurrentActivation(activation: AnnotationActivation): boolean {
@@ -1631,7 +1807,6 @@ export class PdfAnnotationEditor {
       return null;
     }
     const restoredSession: ContextualEditSession = {
-      activation: null,
       closing: null,
       guarded: false,
       id: contextualRestore.id,
@@ -1915,6 +2090,7 @@ export class PdfAnnotationEditor {
     this.dependencies.commentBridge.refreshAnnotationFocus?.();
     const session = this.contextualEditSession;
     if (session === null) return;
+    if (this.shouldIgnoreContextualEditingState(session)) return;
     try {
       this.applyContextualEditingState(session, record(data['details'])?.['hasSelectedEditor']);
     } catch (cause) {
@@ -1922,21 +2098,30 @@ export class PdfAnnotationEditor {
     }
   };
 
+  private shouldIgnoreContextualEditingState(session: ContextualEditSession): boolean {
+    const failureOwner = this.contextualFailureOwnerForSession(session);
+    return (
+      failureOwner !== null &&
+      (failureOwner.cause !== null || !this.isCurrentActivation(failureOwner.activation))
+    );
+  }
+
   private handleContextualEditingStateFailure(
     session: ContextualEditSession,
     cause: unknown,
   ): void {
-    const activation = session.activation;
-    const waiter = activation?.requestedEditorWaiter;
-    if (
-      activation !== null &&
-      waiter?.session === session &&
-      this.isCurrentActivation(activation)
-    ) {
-      waiter.fail(cause);
+    const failureOwner = this.contextualFailureOwnerForSession(session);
+    if (failureOwner !== null) {
+      if (
+        failureOwner.cause !== null ||
+        !this.isCurrentActivation(failureOwner.activation) ||
+        isAbortFailure(cause)
+      )
+        return;
+      this.recordContextualActivationFailure(session, cause);
       return;
     }
-    if (activation?.controller.signal.aborted === true || isAbortFailure(cause)) return;
+    if (isAbortFailure(cause)) return;
     if (this.reportedContextualEditingStateFailures.has(session)) return;
     this.reportedContextualEditingStateFailures.add(session);
     console.error('[abyss-documents] Failed to synchronize the PDF annotation editor selection', {
@@ -1992,6 +2177,8 @@ export class PdfAnnotationEditor {
     signal?: AbortSignal,
   ): Promise<void> {
     if (this.contextualEditSession !== session) return;
+    const failureOwner = this.contextualFailureOwnerForSession(session);
+    if (failureOwner !== null && failureOwner.cause !== null) session.phase = 'closing';
     this.guardContextualEditSession(session);
     await this.closeContextualEditSession(session, signal === undefined ? {} : { signal });
   }
@@ -2023,7 +2210,7 @@ export class PdfAnnotationEditor {
   }
 
   private suppressContextualToolbar(session: ContextualEditSession): void {
-    if (session.toolbarObserver !== null) return;
+    if (this.contextualToolbarSuppressionUnavailable(session)) return;
     const editor = session.manager.firstSelectedEditor;
     if (nativeEditorAnnotationId(editor) !== session.id) return;
     const anchor = editor?.elementBeforePopup;
@@ -2053,6 +2240,10 @@ export class PdfAnnotationEditor {
       childList: true,
       subtree: true,
     });
+  }
+
+  private contextualToolbarSuppressionUnavailable(session: ContextualEditSession): boolean {
+    return session.phase === 'closing' || session.toolbarObserver !== null;
   }
 
   private closeContextualEditSession(

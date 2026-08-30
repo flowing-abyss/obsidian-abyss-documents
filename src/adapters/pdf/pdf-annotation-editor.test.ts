@@ -1345,6 +1345,336 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('rejects an editing-state failure during mode change before waiter installation', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    const id = 'pre-waiter-editing-state-failure';
+    const cause = new Error('pre-waiter selected editor accessor failed');
+    let failDuringModeChange = false;
+    let failed = false;
+    const selected = selectedEditor(id, 9);
+    const selectedAccessor = vi.fn(() => {
+      if (failDuringModeChange && !failed) {
+        failed = true;
+        throw cause;
+      }
+      return failed ? selected : undefined;
+    });
+    const onModeChange = (event: unknown): void => {
+      if ((event as { readonly mode?: number }).mode !== 9) return;
+      failDuringModeChange = true;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+    };
+    const uiManager = manager();
+    try {
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: selectedAccessor,
+      });
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      current.eventBus.on('annotationeditormodechanged', onModeChange);
+      const rejections: unknown[] = [];
+
+      activation = current.editor.focusAnnotation(id, { kind: 'root-click' });
+      void activation.catch((failure: unknown) => {
+        rejections.push(failure);
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).rejects.toBe(cause);
+      expect(rejections).toEqual([cause]);
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      current.eventBus.off('annotationeditormodechanged', onModeChange);
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      diagnostic.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects the first selection inspection failure while installing the waiter', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    const id = 'waiter-installation-selection-failure';
+    const cause = new Error('initial waiter selection inspection failed');
+    let failSelectionChecks = false;
+    const uiManager = manager();
+    const onModeChange = (event: unknown): void => {
+      if ((event as { readonly mode?: number }).mode === 9) failSelectionChecks = true;
+    };
+    try {
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: () => {
+          if (failSelectionChecks) throw cause;
+          return undefined;
+        },
+      });
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      current.eventBus.on('annotationeditormodechanged', onModeChange);
+
+      activation = current.editor.focusAnnotation(id, { kind: 'root-click' });
+      void activation.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).rejects.toBe(cause);
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      current.eventBus.off('annotationeditormodechanged', onModeChange);
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      diagnostic.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects an editing-state failure after waiter cleanup before focus settlement', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      const id = 'post-waiter-editing-state-failure';
+      const cause = new Error('post-waiter selected editor accessor failed');
+      const selected = selectedEditor(id, 9);
+      const focused = deferred<boolean>();
+      let selectedReady = false;
+      let failNextCheck = false;
+      const selectedAccessor = vi.fn(() => {
+        if (failNextCheck) {
+          failNextCheck = false;
+          throw cause;
+        }
+        return selectedReady ? selected : undefined;
+      });
+      const uiManager = manager();
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: selectedAccessor,
+      });
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.commentBridge.focusAnnotation.mockImplementation(() => focused.promise);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+
+      activation = current.editor.focusAnnotation(id, { kind: 'root-click' });
+      void activation.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(2);
+      selectedReady = true;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+      focused.resolve(true);
+      await Promise.resolve();
+
+      failNextCheck = true;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).rejects.toBe(cause);
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      diagnostic.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('preserves an editing-state failure over an immediate activation abort', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      const id = 'failure-before-immediate-abort';
+      const cause = new Error('selection failure must beat abort');
+      let failNextCheck = false;
+      const selectedAccessor = vi.fn(() => {
+        if (failNextCheck) {
+          failNextCheck = false;
+          throw cause;
+        }
+        return undefined;
+      });
+      const uiManager = manager();
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: selectedAccessor,
+      });
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      const external = new AbortController();
+
+      activation = current.editor.focusAnnotation(id, {
+        kind: 'root-click',
+        signal: external.signal,
+      });
+      void activation.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      failNextCheck = true;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      external.abort(new DOMException('Superseded immediately after failure.', 'AbortError'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).rejects.toBe(cause);
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      diagnostic.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles repeated editing-state failures from the first cause and clears resources', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      const id = 'repeated-editing-state-failure';
+      const firstCause = new Error('first selection accessor failure');
+      const secondCause = new Error('second selection accessor failure');
+      const thrownCauses: Error[] = [];
+      let failSelectionChecks = false;
+      let nestedFailureDispatched = false;
+      const selectedAccessor = vi.fn(() => {
+        if (!failSelectionChecks) return undefined;
+        if (!nestedFailureDispatched) {
+          nestedFailureDispatched = true;
+          current.eventBus.dispatch('editingstateschanged', {
+            source: uiManager,
+            details: { hasSelectedEditor: true },
+          });
+          thrownCauses.push(secondCause);
+          throw secondCause;
+        }
+        const cause = firstCause;
+        thrownCauses.push(cause);
+        throw cause;
+      });
+      const uiManager = manager();
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: selectedAccessor,
+      });
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      const rejections: unknown[] = [];
+
+      activation = current.editor.focusAnnotation(id, { kind: 'root-click' });
+      void activation.catch((failure: unknown) => {
+        rejections.push(failure);
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(2);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(1);
+      failSelectionChecks = true;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).rejects.toBe(firstCause);
+      expect(rejections).toEqual([firstCause]);
+      expect(thrownCauses).toEqual([firstCause, secondCause]);
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(warning).not.toHaveBeenCalled();
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+
+      const checksAfterSettlement = selectedAccessor.mock.calls.length;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      expect(selectedAccessor).toHaveBeenCalledTimes(checksAfterSettlement);
+      expect(rejections).toEqual([firstCause]);
+    } finally {
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      warning.mockRestore();
+      diagnostic.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('routes the earlier editing-state selection failure to its activation exactly once', async () => {
     vi.useFakeTimers();
     const current = fixture();
@@ -1448,6 +1778,145 @@ describe('PdfAnnotationEditor lifecycle', () => {
         '[abyss-documents] Failed to synchronize the PDF annotation editor selection',
         { annotationId: 'direct-contextual-highlight', cause },
       );
+    } finally {
+      diagnostic.mockRestore();
+      current.editor.destroy();
+    }
+  });
+
+  it('keeps an abort-shaped editing-state failure quiet during activation', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      const id = 'abort-shaped-editing-state-failure';
+      const abort = new Error('Selection inspection was cancelled.');
+      abort.name = 'AbortError';
+      let failSelectionChecks = false;
+      const uiManager = manager();
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: () => {
+          if (failSelectionChecks) throw abort;
+          return undefined;
+        },
+      });
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+
+      activation = current.editor.focusAnnotation(id, { kind: 'root-click' });
+      void activation.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      failSelectionChecks = true;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).resolves.toBe('cancelled');
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(current.editor.hasContextualEdit).toBe(true);
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      diagnostic.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a superseded editing-state accessor failure quiet', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let activation: Promise<PdfAnnotationActivationResult> | null = null;
+    try {
+      const id = 'superseded-editing-state-failure';
+      const external = new AbortController();
+      const cause = new Error('stale selection accessor failed');
+      let failSelectionChecks = false;
+      const uiManager = manager();
+      Object.defineProperty(uiManager, 'firstSelectedEditor', {
+        configurable: true,
+        get: () => {
+          if (!failSelectionChecks) return undefined;
+          external.abort(new DOMException('Activation was superseded.', 'AbortError'));
+          throw cause;
+        },
+      });
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+
+      activation = current.editor.focusAnnotation(id, {
+        kind: 'root-click',
+        signal: external.signal,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      failSelectionChecks = true;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      await expect(activation).resolves.toBe('cancelled');
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(current.eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+      expect(current.eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await current.editor.abortInteraction('Test cleanup.');
+      await activation?.catch(() => 'cancelled');
+      diagnostic.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps an abort-shaped editing-state failure quiet outside activation', async () => {
+    const current = fixture();
+    const uiManager = manager(selectedEditor('direct-contextual-abort', 9));
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    await current.editor.editAnnotation({
+      editComment: false,
+      id: 'direct-contextual-abort',
+      kind: 'highlight',
+    });
+    Object.defineProperty(uiManager, 'firstSelectedEditor', {
+      configurable: true,
+      get: () => {
+        const abort = new Error('Selection inspection was cancelled.');
+        abort.name = 'AbortError';
+        throw abort;
+      },
+    });
+    const diagnostic = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      current.eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+
+      expect(diagnostic).not.toHaveBeenCalled();
+      expect(current.editor.hasContextualEdit).toBe(true);
     } finally {
       diagnostic.mockRestore();
       current.editor.destroy();
