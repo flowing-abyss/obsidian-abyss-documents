@@ -287,6 +287,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private pendingPagesInit: PdfEventListener | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private resizeFrame: number | null = null;
+  private resizeTargetHasArea = true;
   private pendingLocation: DocumentLocation | null = null;
   private latestLocation: DocumentLocation | null = null;
   private navigationRequestRevision = 0;
@@ -1300,11 +1301,32 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.latestLocation = null;
   }
 
-  private readonly onResize = (): void => {
+  private readonly onResize: ResizeObserverCallback = (entries): void => {
+    const root = this.root;
+    const rootEntry = root === null ? undefined : entries.find((entry) => entry.target === root);
+    if (rootEntry !== undefined) {
+      this.resizeTargetHasArea =
+        rootEntry.contentRect.width > 0 && rootEntry.contentRect.height > 0;
+    }
+    if (!this.resizeTargetHasArea) {
+      if (this.resizeFrame !== null) window.cancelAnimationFrame(this.resizeFrame);
+      this.resizeFrame = null;
+      return;
+    }
     if (this.resizeFrame !== null || this.destroyPromise !== null) return;
     this.resizeFrame = window.requestAnimationFrame(() => {
       this.resizeFrame = null;
-      if (!this.pagesInitialized || this.colorRebindActive || this.destroyPromise !== null) return;
+      const currentRoot = this.root;
+      if (
+        !this.resizeTargetHasArea ||
+        currentRoot === null ||
+        currentRoot.clientWidth <= 0 ||
+        currentRoot.clientHeight <= 0 ||
+        !this.pagesInitialized ||
+        this.colorRebindActive ||
+        this.destroyPromise !== null
+      )
+        return;
       const viewer = this.viewer;
       if (viewer === null) return;
       const fitScale = this.fitScaleForResize(viewer);

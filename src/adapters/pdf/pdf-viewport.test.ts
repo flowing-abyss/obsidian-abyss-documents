@@ -2431,9 +2431,12 @@ describe('PdfDocumentViewport', () => {
     expect(viewer.currentScale).toBeCloseTo(0.1, 5);
   });
 
-  it('recomputes fit presets when the document host resizes and disconnects on destroy', async () => {
-    let resize: (() => void) | undefined;
-    const observe = vi.fn();
+  it('recomputes fit presets only while the host has area and disconnects on destroy', async () => {
+    let resize: ((width?: number, height?: number) => void) | undefined;
+    let observedTarget: Element | undefined;
+    const observe = vi.fn((target: Element) => {
+      observedTarget = target;
+    });
     const disconnect = vi.fn();
     let scheduledFrame: FrameRequestCallback | undefined;
     const requestFrame = vi
@@ -2447,8 +2450,17 @@ describe('PdfDocumentViewport', () => {
       .mockImplementation(() => undefined);
     class FakeResizeObserver {
       constructor(callback: ResizeObserverCallback) {
-        resize = () => {
-          callback([], this as unknown as ResizeObserver);
+        resize = (width = 900, height = 700) => {
+          if (observedTarget === undefined) throw new Error('Expected an observed viewport root.');
+          callback(
+            [
+              {
+                contentRect: { height, width },
+                target: observedTarget,
+              } as ResizeObserverEntry,
+            ],
+            this as unknown as ResizeObserver,
+          );
         };
       }
 
@@ -2463,10 +2475,19 @@ describe('PdfDocumentViewport', () => {
       if (eventBus === undefined || viewer === undefined || resize === undefined) {
         throw new Error('Expected viewer components and a resize observer.');
       }
+      let hostHidden = false;
+      let hostWidth = 900;
+      let hostHeight = 700;
+      Object.defineProperties(viewer.options.container, {
+        clientHeight: { configurable: true, get: () => hostHeight },
+        clientWidth: { configurable: true, get: () => hostWidth },
+      });
       let currentScaleValue = 'page-width';
       const assignScale = vi.fn((value: string) => {
         currentScaleValue = value;
+        if (hostHidden) console.error('offsetParent is not set -- cannot scroll');
       });
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       Object.defineProperty(viewer, 'currentScaleValue', {
         configurable: true,
         get: () => currentScaleValue,
@@ -2488,6 +2509,26 @@ describe('PdfDocumentViewport', () => {
       resize();
       scheduledFrame?.(1);
       expect(assignScale).toHaveBeenCalledWith('page-fit');
+      assignScale.mockClear();
+      error.mockClear();
+
+      resize();
+      const staleFrame = scheduledFrame;
+      hostHidden = true;
+      hostWidth = 0;
+      hostHeight = 0;
+      staleFrame?.(2);
+      expect(assignScale).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      resize(0, 0);
+
+      hostHidden = false;
+      hostWidth = 900;
+      hostHeight = 700;
+      resize(900, 700);
+      scheduledFrame?.(3);
+      expect(assignScale).toHaveBeenCalledExactlyOnceWith('page-fit');
+      expect(error).not.toHaveBeenCalled();
       resize();
       await fixture.viewport.destroy();
       expect(disconnect).toHaveBeenCalledOnce();
