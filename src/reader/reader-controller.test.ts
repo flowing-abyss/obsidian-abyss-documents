@@ -5156,130 +5156,160 @@ describe('ReaderController', () => {
     }
   });
 
-  it('waits for pending selection creation and its verified save before immediate close', async () => {
-    const [pdf] = files('Books/Close-pending-selection.pdf');
-    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
-    const createdViewport = interactiveViewport();
-    const creation = deferred<DocumentAnnotation>();
-    const creationState: { markDirty?: () => void; signal?: AbortSignal } = {};
-    createdViewport.commitSelection.mockImplementation((_token, _action, signal) => {
-      if (signal === undefined) throw new Error('Expected a selection creation signal.');
-      creationState.signal = signal;
-      const onAbort = () => {
-        creation.reject(signal.reason);
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      return creation.promise.finally(() => {
-        signal.removeEventListener('abort', onAbort);
-      });
-    });
-    const createdSession = session(pdf.path, createdViewport);
-    const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
-    let dirty = false;
-    let pendingRevision = 0;
-    const commit = vi.fn(() => {
-      dirty = false;
-    });
-    const destroy = vi.fn();
-    const source: NativeEditableSaveSession = {
-      baseToken,
-      get isDirty() {
-        return dirty;
-      },
-      get pendingRevision() {
-        return pendingRevision;
-      },
-      prepare: vi.fn(async (revision: number) => ({
-        baseToken,
-        bytes: new Uint8Array([1]),
-        revision,
-      })),
-      commit,
-      destroy,
-    };
-    Object.assign(createdSession.value, {
-      annotationCapabilities: { readOnlyReason: null },
-      capabilities: new Set(['annotation-write']),
-      createNativeEditableSession(onRevision: (revision: number) => void) {
-        creationState.markDirty = () => {
-          dirty = true;
-          pendingRevision = 1;
-          onRevision(1);
+  it.each(['pointer-away', 'focus-away'] as const)(
+    'captures pending selection before %s navigation and waits for its verified save',
+    async (dismissal) => {
+      const [pdf] = files('Books/Close-pending-selection.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdViewport = interactiveViewport();
+      const creation = deferred<DocumentAnnotation>();
+      const creationState: {
+        layerVisible: boolean;
+        markDirty?: () => void;
+        selectionCaptured?: boolean;
+        signal?: AbortSignal;
+      } = { layerVisible: true };
+      createdViewport.commitSelection.mockImplementation((_token, _action, signal) => {
+        if (signal === undefined) throw new Error('Expected a selection creation signal.');
+        creationState.signal = signal;
+        const captured = creationState.layerVisible;
+        creationState.selectionCaptured = captured;
+        const onAbort = () => {
+          creation.reject(signal.reason);
         };
-        return source;
-      },
-    });
-    const verified = deferred<{
-      readonly verified: true;
-      readonly generation: number;
-      readonly sha256: string;
-      readonly byteSize: number;
-      readonly committedAt: never;
-    }>();
-    const save = vi.fn(async (request: NativeDocumentSaveRequest, signal: AbortSignal) => {
-      const prepared = await request.source.prepare(request.revision, signal);
-      const token = await verified.promise;
-      await request.source.commit(prepared, {
-        byteSize: token.byteSize,
-        mtime: 20,
-        sha256: token.sha256,
-      });
-      return token;
-    });
-    const shell = capturingShellFactory();
-    const controller = new ReaderController(
-      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
-      shell.createShell,
-      undefined,
-      { saveCoordinator: { save } },
-    );
-    await controller.open(pdf, createDiv());
-    createdViewport.emitSelection(pdfSelection('close-pending-selection'));
-    shell.created.root.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
-    await vi.waitFor(() => {
-      expect(createdViewport.commitSelection).toHaveBeenCalledOnce();
-    });
-
-    const closing = controller.close();
-    const earlyState = await Promise.race([
-      closing.then(
-        () => 'closed' as const,
-        () => 'failed' as const,
-      ),
-      new Promise<'pending'>((resolve) =>
+        signal.addEventListener('abort', onAbort, { once: true });
         window.setTimeout(() => {
-          resolve('pending');
-        }, 0),
-      ),
-    ]);
-    expect(earlyState).toBe('pending');
-    expect(creationState.signal?.aborted).toBe(false);
-    expect(createdSession.close).not.toHaveBeenCalled();
+          if (!captured) {
+            creation.reject(new DOMException('The PDF selection layer was hidden.', 'AbortError'));
+            return;
+          }
+          creationState.markDirty?.();
+          creation.resolve(
+            annotationRecord('created-close-pending', 0, {
+              kind: 'point',
+              point: { x: 0, y: 0 },
+            }),
+          );
+        }, 5);
+        return creation.promise.finally(() => {
+          signal.removeEventListener('abort', onAbort);
+        });
+      });
+      const createdSession = session(pdf.path, createdViewport);
+      const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      let dirty = false;
+      let pendingRevision = 0;
+      const commit = vi.fn(() => {
+        dirty = false;
+      });
+      const destroy = vi.fn();
+      const source: NativeEditableSaveSession = {
+        baseToken,
+        get isDirty() {
+          return dirty;
+        },
+        get pendingRevision() {
+          return pendingRevision;
+        },
+        prepare: vi.fn(async (revision: number) => ({
+          baseToken,
+          bytes: new Uint8Array([1]),
+          revision,
+        })),
+        commit,
+        destroy,
+      };
+      Object.assign(createdSession.value, {
+        annotationCapabilities: { readOnlyReason: null },
+        capabilities: new Set(['annotation-write']),
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          creationState.markDirty = () => {
+            dirty = true;
+            pendingRevision = 1;
+            onRevision(1);
+          };
+          return source;
+        },
+      });
+      const verified = deferred<{
+        readonly verified: true;
+        readonly generation: number;
+        readonly sha256: string;
+        readonly byteSize: number;
+        readonly committedAt: never;
+      }>();
+      const save = vi.fn(async (request: NativeDocumentSaveRequest, signal: AbortSignal) => {
+        const prepared = await request.source.prepare(request.revision, signal);
+        const token = await verified.promise;
+        await request.source.commit(prepared, {
+          byteSize: token.byteSize,
+          mtime: 20,
+          sha256: token.sha256,
+        });
+        return token;
+      });
+      const shell = capturingShellFactory();
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        shell.createShell,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+      createdViewport.emitSelection(pdfSelection('close-pending-selection'));
+      shell.created.root.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+      expect(createdViewport.commitSelection).toHaveBeenCalledOnce();
+      creationState.layerVisible = false;
+      const unrelated = document.body.createEl('button');
+      if (dismissal === 'pointer-away') {
+        unrelated.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+      } else {
+        unrelated.focus();
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
+      expect(
+        shell.created.root.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.hidden,
+      ).toBe(true);
 
-    creationState.markDirty?.();
-    creation.resolve(
-      annotationRecord('created-close-pending', 0, { kind: 'point', point: { x: 0, y: 0 } }),
-    );
-    await vi.waitFor(() => {
-      expect(save).toHaveBeenCalledOnce();
-    });
-    expect(destroy).not.toHaveBeenCalled();
-    expect(createdSession.close).not.toHaveBeenCalled();
-    verified.resolve({
-      verified: true,
-      generation: 1,
-      sha256: 'b'.repeat(64),
-      byteSize: 5,
-      committedAt: '2026-08-31T00:00:00.000Z' as never,
-    });
+      const closing = controller.close();
+      const earlyState = await Promise.race([
+        closing.then(
+          () => 'closed' as const,
+          () => 'failed' as const,
+        ),
+        new Promise<'pending'>((resolve) =>
+          window.setTimeout(() => {
+            resolve('pending');
+          }, 0),
+        ),
+      ]);
+      expect(earlyState).toBe('pending');
+      expect(creationState.selectionCaptured).toBe(true);
+      expect(creationState.signal?.aborted).toBe(false);
+      expect(createdSession.close).not.toHaveBeenCalled();
 
-    await closing;
+      await vi.waitFor(() => {
+        expect(save).toHaveBeenCalledOnce();
+      });
+      expect(destroy).not.toHaveBeenCalled();
+      expect(createdSession.close).not.toHaveBeenCalled();
+      verified.resolve({
+        verified: true,
+        generation: 1,
+        sha256: 'b'.repeat(64),
+        byteSize: 5,
+        committedAt: '2026-08-31T00:00:00.000Z' as never,
+      });
 
-    expect(commit).toHaveBeenCalledOnce();
-    expect(destroy).toHaveBeenCalledOnce();
-    expect(createdSession.close).toHaveBeenCalledOnce();
-    expect(creationState.signal?.aborted).toBe(false);
-  });
+      await closing;
+
+      expect(commit).toHaveBeenCalledOnce();
+      expect(destroy).toHaveBeenCalledOnce();
+      expect(createdSession.close).toHaveBeenCalledOnce();
+      expect(creationState.signal?.aborted).toBe(false);
+      unrelated.remove();
+    },
+  );
 
   it('preserves the dirty source view when a switch-boundary flush fails', async () => {
     const [first, second] = files('Books/First.pdf', 'Books/Second.pdf');

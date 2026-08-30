@@ -300,6 +300,16 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
   };
 }
 
+function requestPdfJsSelectionMode(
+  fixtureValue: ReturnType<typeof fixture>,
+  uiManager: ReturnType<typeof manager>,
+  kind: 'comment' | 'highlight' = 'highlight',
+): void {
+  uiManager[`${kind}Selection`].mockImplementation(() => {
+    fixtureValue.viewer.annotationEditorMode = { mode: 9 };
+  });
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -366,6 +376,28 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('hands the live selection to PDF.js before the commit promise yields', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    uiManager.highlightSelection.mockImplementation(() => {
+      fixtureValue.annotationStorage.addEditor(9);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    const committing = fixtureValue.editor.commitSelection('current', {
+      kind: 'highlight',
+      color: '#ffd400',
+    });
+
+    expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'created-native', kind: 'stable' },
+    });
+  });
+
   it('routes a throwing highlight accessor to the commit boundary exactly once', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
@@ -401,6 +433,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
   it('resolves highlight after dirty and NONE', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager);
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
       source: fixtureValue.viewer,
       uiManager,
@@ -442,6 +475,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
   it('adopts exactly one highlight created while PDF.js enters highlight mode', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager);
     fixtureValue.commentBridge.normalizeSelectionHighlight
       .mockReturnValueOnce(null)
       .mockReturnValue(createdAnnotation());
@@ -465,12 +499,13 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
 
     expect(fixtureValue.annotationStorage.addEditor).toHaveBeenCalledOnce();
-    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+    expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
   });
 
   it('adopts the highlight even when PDF.js omits its editor-added callback', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager);
     let created = false;
     fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() =>
       created ? createdAnnotation() : null,
@@ -495,12 +530,17 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
 
     expect(fixtureValue.annotationStorage.addEditor).not.toHaveBeenCalled();
-    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+    expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
   });
 
-  it('applies a comment seed to the one highlight PDF.js creates while entering mode', async () => {
+  it('applies a comment seed through PDF.js selection comment creation from NONE mode', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager, 'comment');
+    fixtureValue.commentBridge.reserveNextDialog.mockImplementation((seed) => ({
+      closed: Promise.resolve('external'),
+      opened: Promise.resolve(createdAnnotation(seed)),
+    }));
     fixtureValue.eventBus.on('annotationeditormodechanged', (event: unknown) => {
       if ((event as { readonly mode?: number }).mode !== 9) return;
       fixtureValue.selectionObserver.validate.mockReturnValue('stale');
@@ -520,18 +560,11 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ).resolves.toMatchObject({
       comment: 'Résumé — #review [[Source]]',
       identity: { id: 'created-native', kind: 'stable' },
-      links: ['Source'],
-      tags: ['review'],
     });
 
     expect(fixtureValue.annotationStorage.addEditor).toHaveBeenCalledOnce();
-    expect(uiManager.commentSelection).not.toHaveBeenCalled();
-    expect(fixtureValue.commentBridge.updateAnnotations).toHaveBeenCalledExactlyOnceWith({
-      annotations: [
-        expect.objectContaining({ identity: { id: 'created-native', kind: 'stable' } }),
-      ],
-      comment: 'Résumé — #review [[Source]]',
-    });
+    expect(uiManager.commentSelection).toHaveBeenCalledOnce();
+    expect(fixtureValue.commentBridge.updateAnnotations).not.toHaveBeenCalled();
   });
 
   it('resolves a created highlight when annotation storage was already dirty', async () => {
@@ -559,6 +592,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
   it('suppresses transient native highlight mode', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager);
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
       source: fixtureValue.viewer,
       uiManager,
@@ -726,6 +760,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       closed: closed.promise,
     });
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager, 'comment');
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
       source: fixtureValue.viewer,
       uiManager,
@@ -813,6 +848,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
         closed: closed.promise,
       });
       const uiManager = manager();
+      requestPdfJsSelectionMode(fixtureValue, uiManager, 'comment');
       fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
         source: fixtureValue.viewer,
         uiManager,
@@ -880,6 +916,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
   it('waits for source-confirmed NONE before an aborted interaction settles', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager);
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
       source: fixtureValue.viewer,
       uiManager,
@@ -4387,6 +4424,7 @@ describe('PdfAnnotationEditor save boundary', () => {
   it('waits for source-confirmed NONE before saving a completed interaction', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const uiManager = manager();
+    requestPdfJsSelectionMode(fixtureValue, uiManager);
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
       source: fixtureValue.viewer,
       uiManager,

@@ -1244,10 +1244,6 @@ export class PdfAnnotationEditor {
       );
       this.emitColor(action.color);
       this.setLogicalMode('one-shot');
-      await waitWithSignal(
-        this.changeMode(this.dependencies.annotationEditorType.HIGHLIGHT),
-        transaction.controller.signal,
-      );
       const resolved = await this.resolveSelectionAnnotation({
         action,
         highlight,
@@ -1387,7 +1383,12 @@ export class PdfAnnotationEditor {
     transaction: PendingSelectionTransaction,
     reservation: SelectionHighlightReservation,
   ): Promise<DocumentAnnotation> {
+    // PDF.js 6.2.108 snapshots the live DOM selection inside this call before
+    // its asynchronous mode switch. Keep it before the first await so a view
+    // transition cannot invalidate the selection geometry.
+    // Source: https://github.com/mozilla/pdf.js/blob/v6.2.108/src/display/editor/tools.js
     manager.highlightSelection('abyss-selection');
+    await this.enterCapturedSelectionMode(transaction);
     return waitWithSignal(reservation.created, transaction.controller.signal);
   }
 
@@ -1401,11 +1402,21 @@ export class PdfAnnotationEditor {
       transaction.controller.signal,
     );
     manager.commentSelection('abyss-selection');
+    await this.enterCapturedSelectionMode(transaction);
     const annotation = await waitWithSignal(reservation.opened, transaction.controller.signal);
     transaction.clearTimeout();
     await waitWithSignal(reservation.closed, transaction.controller.signal);
     transaction.armTimeout();
     return annotation;
+  }
+
+  private async enterCapturedSelectionMode(
+    transaction: PendingSelectionTransaction,
+  ): Promise<void> {
+    await waitWithSignal(
+      this.changeMode(this.dependencies.annotationEditorType.HIGHLIGHT),
+      transaction.controller.signal,
+    );
   }
 
   async setQuickHighlight(state: {

@@ -84,6 +84,9 @@ class IntegrationEventBus {
 function oneShotFixture() {
   const eventBus = new IntegrationEventBus();
   const selectionListeners = new Set<(selection: PdfTextSelection | null) => void>();
+  let materialized = false;
+  let selectionLive = true;
+  let viewHidden = false;
   const annotationStorage = {
     onAnnotationEditor: null as ((type: number | null) => void) | null,
     onResetModified: null as (() => void) | null,
@@ -109,7 +112,16 @@ function oneShotFixture() {
     getEditor: vi.fn(),
     getLayer: vi.fn(),
     highlightSelection: vi.fn(() => {
-      annotationStorage.onAnnotationEditor?.(9);
+      if (!selectionLive) return;
+      const capturedBeforeNavigation = !viewHidden;
+      selectionLive = false;
+      viewer.annotationEditorMode = { mode: 9 } as never;
+      queueMicrotask(() => {
+        if (!capturedBeforeNavigation) return;
+        materialized = true;
+        annotationStorage.onAnnotationEditor?.(9);
+        annotationStorage.onSetModified?.();
+      });
     }),
     redo: vi.fn(),
     undo: vi.fn(),
@@ -135,7 +147,7 @@ function oneShotFixture() {
       focusAnnotation: async () => true,
       nativeEditorIds: () => new Set<string>(),
       normalizeCreatedAnnotation: () => nativeAnnotation(),
-      normalizeSelectionHighlight: () => nativeAnnotation(),
+      normalizeSelectionHighlight: () => (materialized ? nativeAnnotation() : null),
       onAnnotationFocus: () => () => undefined,
       reserveNextDialog: () => ({
         closed: Promise.resolve('external'),
@@ -151,7 +163,7 @@ function oneShotFixture() {
         selectionListeners.add(listener);
         return () => selectionListeners.delete(listener);
       },
-      validate: () => 'current',
+      validate: () => (selectionLive ? 'current' : 'stale'),
     },
     viewer,
   });
@@ -174,8 +186,14 @@ function oneShotFixture() {
     closeAnnotationEditor,
     controller,
     emitSelection(selection: PdfTextSelection | null) {
+      selectionLive = selection !== null;
       for (const listener of selectionListeners) listener(selection);
     },
+    hideViewAndInvalidateSelection() {
+      viewHidden = true;
+      selectionLive = false;
+    },
+    manager,
     opened,
   };
 }
@@ -192,6 +210,25 @@ describe('PDF annotation interaction integration', () => {
       request.onCreate({ color: '#ffd400', comment: '', selection }),
     ).resolves.toMatchObject({ identity: { id: 'created-native', kind: 'stable' } });
 
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+    test.controller.destroy();
+  });
+
+  it('captures selection geometry before immediate navigation hides the PDF view', async () => {
+    const test = oneShotFixture();
+    const selection = textSelection('immediate-navigation');
+    test.emitSelection(selection);
+    const request = test.opened[0];
+    if (request === undefined) throw new Error('Expected a unified selection request.');
+
+    const creating = request.onCreate({ color: '#ffd400', comment: '', selection });
+    const capturedInCreationStack = test.manager.highlightSelection.mock.calls.length === 1;
+    test.hideViewAndInvalidateSelection();
+
+    await expect(creating).resolves.toMatchObject({
+      identity: { id: 'created-native', kind: 'stable' },
+    });
+    expect(capturedInCreationStack).toBe(true);
     expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
     test.controller.destroy();
   });

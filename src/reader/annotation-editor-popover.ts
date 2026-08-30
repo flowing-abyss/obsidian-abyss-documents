@@ -93,6 +93,7 @@ interface AnnotationCreationDraft {
 
 interface AnnotationCreationJob {
   cancelled: boolean;
+  deferredCloseReason: AnnotationEditorCloseReason | null;
   readonly generation: number;
   readonly request: AnnotationEditorPopoverRequest;
   completed: boolean;
@@ -247,7 +248,7 @@ export class AnnotationEditorPopover {
       if (this.active === null) return;
       const target = event.target;
       if (target instanceof ownerWindow(this.host).Element && this.element.contains(target)) return;
-      if (this.isAnnotationOwnerTarget(target)) return;
+      if (this.isAnnotationInteractionTarget(target)) return;
       this.close('click-away');
     });
     this.listenDocument('focusin', (event) => {
@@ -255,14 +256,14 @@ export class AnnotationEditorPopover {
       this.cancelFocusAwayTimer();
       const target = event.target;
       if (target instanceof ownerWindow(this.host).Element && this.element.contains(target)) return;
-      if (this.isAnnotationOwnerTarget(target)) return;
+      if (this.isAnnotationFocusTarget(target)) return;
       this.focusAwayTimer = ownerWindow(this.host).setTimeout(() => {
         this.focusAwayTimer = null;
         if (this.active === null) return;
         const focused = this.host.ownerDocument.activeElement;
         if (
           (focused instanceof ownerWindow(this.host).Element && this.element.contains(focused)) ||
-          this.isAnnotationOwnerTarget(focused)
+          this.isAnnotationFocusTarget(focused)
         )
           return;
         this.close('focus-away');
@@ -289,14 +290,24 @@ export class AnnotationEditorPopover {
     });
   }
 
-  private isAnnotationOwnerTarget(target: EventTarget | null): boolean {
+  private isAnnotationInteractionTarget(target: EventTarget | null): boolean {
     return (
       target instanceof ownerWindow(this.host).Element &&
-      (target.matches('.annotationEditorLayer.disabled.nonEditing') ||
-        target.closest(
-          '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)',
-        ) !== null ||
+      this.host.contains(target) &&
+      (target.closest(
+        '.annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor).selectedEditor',
+      ) !== null ||
         target.closest('.abyss-annotation-card[aria-current="true"]') !== null)
+    );
+  }
+
+  private isAnnotationFocusTarget(target: EventTarget | null): boolean {
+    if (this.isAnnotationInteractionTarget(target)) return true;
+    return (
+      this.active?.target.kind === 'annotation' &&
+      target instanceof ownerWindow(this.host).Element &&
+      this.host.contains(target) &&
+      target.matches('.annotationEditorLayer.disabled.nonEditing')
     );
   }
 
@@ -355,6 +366,8 @@ export class AnnotationEditorPopover {
   open(request: AnnotationEditorPopoverRequest): boolean {
     if (this.destroyed)
       throw new DOMException('Annotation editor popover destroyed.', 'InvalidStateError');
+    const deferredCloseReason = this.selectionCreation?.deferredCloseReason;
+    if (deferredCloseReason !== null && deferredCloseReason !== undefined) return false;
     if (!this.flushPendingMetadata()) return false;
     if (this.active === null) this.capturePreviousFocus();
     this.openGeneration += 1;
@@ -378,6 +391,7 @@ export class AnnotationEditorPopover {
     const request = this.active;
     if (request === null) return true;
     if (!this.flushPendingMetadata()) return false;
+    if (this.deferPendingSelectionClose(request, reason, restoreFocus)) return true;
     this.cancelPendingSelectionCreation(request);
     this.cancelFocusAwayTimer();
     this.openGeneration += 1;
@@ -544,6 +558,9 @@ export class AnnotationEditorPopover {
             console.error('[abyss-documents] Could not create selection annotation', { cause });
           }
           return false;
+        })
+        .finally(() => {
+          this.finishDeferredSelectionClose(job);
         });
     } catch (cause) {
       this.selectionCreationState = 'draft';
@@ -560,6 +577,7 @@ export class AnnotationEditorPopover {
     return {
       cancelled: false,
       completed: false,
+      deferredCloseReason: null,
       draft: this.captureCreationDraft(comment),
       generation,
       pendingUpdate: null,
@@ -611,10 +629,8 @@ export class AnnotationEditorPopover {
     };
     if (update.color === undefined && update.comment === undefined) return true;
     job.pendingUpdate = update;
-    if (job.request.onUpdate(update) === false) {
-      this.pendingCreationUpdates.add(job);
-      return false;
-    }
+    this.pendingCreationUpdates.add(job);
+    if (job.request.onUpdate(update) === false) return false;
     job.pendingUpdate = null;
     this.pendingCreationUpdates.delete(job);
     return true;
@@ -888,6 +904,40 @@ export class AnnotationEditorPopover {
     if (request.target.kind !== 'selection' || this.selectionCreationState !== 'pending') return;
     if (this.selectionCreation?.request === request) this.selectionCreation.cancelled = true;
     this.selectionCreationState = 'draft';
+  }
+
+  private deferPendingSelectionClose(
+    request: AnnotationEditorPopoverRequest,
+    reason: AnnotationEditorCloseReason,
+    restoreFocus: boolean,
+  ): boolean {
+    if (reason !== 'click-away' && reason !== 'focus-away') return false;
+    const job = this.selectionCreation;
+    if (
+      request.target.kind !== 'selection' ||
+      this.selectionCreationState !== 'pending' ||
+      job?.request !== request
+    )
+      return false;
+    job.deferredCloseReason = reason;
+    this.cancelFocusAwayTimer();
+    this.openGeneration += 1;
+    this.active = null;
+    this.placement = null;
+    this.commentDirty = false;
+    this.element.hidden = true;
+    this.host.ownerDocument.getSelection()?.removeAllRanges();
+    if (restoreFocus) this.restoreFocus();
+    this.previousFocus = null;
+    return true;
+  }
+
+  private finishDeferredSelectionClose(job: AnnotationCreationJob): void {
+    const reason = job.deferredCloseReason;
+    if (reason === null) return;
+    job.deferredCloseReason = null;
+    if (this.selectionCreation === job) this.selectionCreation = null;
+    job.request.onClose(reason);
   }
 
   private place(x: number, y: number, target: AnnotationEditorTarget): void {
