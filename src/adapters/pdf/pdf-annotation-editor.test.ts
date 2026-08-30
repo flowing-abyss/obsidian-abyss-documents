@@ -290,7 +290,9 @@ function deferred<T>() {
 
 interface AnnotationActivationInternals {
   readonly activeActivation: {
-    readonly contextualFailureOwner: unknown;
+    readonly contextualFailureOwner: {
+      removeActivationAbort(): void;
+    } | null;
   } | null;
   readonly contextualActivationFailureOwner: unknown;
 }
@@ -1245,6 +1247,129 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('preserves an editable UI when one cleanup step fails before public success', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const id = 'editable-cleanup-failure';
+    const cause = new Error('editable activation cleanup failed');
+    const external = new AbortController();
+    const removeExternalAbort = vi
+      .spyOn(external.signal, 'removeEventListener')
+      .mockImplementation(() => {
+        throw cause;
+      });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(selectedEditor(id, 9)),
+      });
+
+      const activation = current.editor.focusAnnotation(id, {
+        kind: 'root-click',
+        signal: external.signal,
+      });
+      const observed = activation.then((result) => {
+        const internals = activationInternals(current.editor);
+        expect(result).toBe('editable');
+        expect(internals.activeActivation).toBeNull();
+        expect(internals.contextualActivationFailureOwner).toBeNull();
+        expect(current.editor.hasContextualEdit).toBe(true);
+        expect(current.modeRequests.filter((request) => request['mode'] === 0)).toHaveLength(0);
+        expect(warning).toHaveBeenCalledExactlyOnceWith(
+          '[abyss-documents] Failed to clean up the PDF annotation activation',
+          { annotationId: id, cause },
+        );
+        expect(vi.getTimerCount()).toBe(0);
+        return result;
+      });
+      const observation = expect(observed).resolves.toBe('editable');
+
+      await vi.advanceTimersByTimeAsync(0);
+      await observation;
+      expect(current.editor.hasContextualEdit).toBe(true);
+    } finally {
+      warning.mockRestore();
+      removeExternalAbort.mockRestore();
+      await current.editor.abortInteraction('Test cleanup.');
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('attempts every cleanup step and preserves editable success with one aggregate warning', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const id = 'multiple-editable-cleanup-failures';
+    const externalFailure = new Error('external abort cleanup failed');
+    const ownerFailure = new Error('owner abort cleanup failed');
+    const external = new AbortController();
+    const removeExternalAbort = vi
+      .spyOn(external.signal, 'removeEventListener')
+      .mockImplementation(() => {
+        throw externalFailure;
+      });
+    const removeOwnerAbort = vi.fn(() => {
+      throw ownerFailure;
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id }), stableId: id },
+      ]);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(selectedEditor(id, 9)),
+      });
+      current.commentBridge.focusAnnotation.mockImplementation(async () => {
+        const owner = activationInternals(current.editor).activeActivation?.contextualFailureOwner;
+        if (owner === null || owner === undefined)
+          throw new Error('Expected an activation failure owner before bridge focus.');
+        owner.removeActivationAbort = removeOwnerAbort;
+        return true;
+      });
+
+      const activation = current.editor.focusAnnotation(id, {
+        kind: 'root-click',
+        signal: external.signal,
+      });
+      const observed = activation.then((result) => {
+        const internals = activationInternals(current.editor);
+        expect(result).toBe('editable');
+        expect(removeExternalAbort).toHaveBeenCalledOnce();
+        expect(removeOwnerAbort).toHaveBeenCalledOnce();
+        expect(internals.activeActivation).toBeNull();
+        expect(internals.contextualActivationFailureOwner).toBeNull();
+        expect(current.editor.hasContextualEdit).toBe(true);
+        expect(current.modeRequests.filter((request) => request['mode'] === 0)).toHaveLength(0);
+        expect(warning).toHaveBeenCalledOnce();
+        const warningContext = warning.mock.calls[0]?.[1] as
+          { readonly annotationId?: unknown; readonly cause?: unknown } | undefined;
+        expect(warningContext?.annotationId).toBe(id);
+        expect(warningContext?.cause).toBeInstanceOf(AggregateError);
+        expect((warningContext?.cause as AggregateError).errors).toEqual([
+          externalFailure,
+          ownerFailure,
+        ]);
+        expect(vi.getTimerCount()).toBe(0);
+        return result;
+      });
+      const observation = expect(observed).resolves.toBe('editable');
+
+      await vi.advanceTimersByTimeAsync(0);
+      await observation;
+    } finally {
+      warning.mockRestore();
+      removeExternalAbort.mockRestore();
+      await current.editor.abortInteraction('Test cleanup.');
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves the primary rejection and releases ownership when cleanup also fails', async () => {
     vi.useFakeTimers();
     const current = fixture();
@@ -1281,7 +1406,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
         expect(current.modeRequests.filter((request) => request['mode'] === 0)).toHaveLength(1);
         expect(warning).toHaveBeenCalledExactlyOnceWith(
           '[abyss-documents] Failed to clean up the PDF annotation activation',
-          { cause: secondary },
+          { annotationId: id, cause: secondary },
         );
         expect(vi.getTimerCount()).toBe(0);
         return 'observed' as const;
@@ -1299,7 +1424,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
-  it('rejects a cleanup failure instead of publishing an otherwise successful activation', async () => {
+  it('preserves a successful readonly UI when cleanup fails', async () => {
     vi.useFakeTimers();
     const current = fixture();
     const id = 'successful-cleanup-failure';
@@ -1324,22 +1449,72 @@ describe('PdfAnnotationEditor lifecycle', () => {
         kind: 'sidebar',
         signal: external.signal,
       });
-      const observed = activation.then(
-        () => 'unexpected' as const,
-        (rejection: unknown) => {
-          const internals = activationInternals(current.editor);
-          expect(rejection).toBe(cause);
-          expect(internals.activeActivation).toBeNull();
-          expect(internals.contextualActivationFailureOwner).toBeNull();
-          expect(current.editor.hasContextualEdit).toBe(false);
-          expect(vi.getTimerCount()).toBe(0);
-          expect(warning).not.toHaveBeenCalled();
-          return 'observed' as const;
-        },
-      );
+      const observed = activation.then((result) => {
+        const internals = activationInternals(current.editor);
+        expect(result).toBe('readonly');
+        expect(internals.activeActivation).toBeNull();
+        expect(internals.contextualActivationFailureOwner).toBeNull();
+        expect(current.editor.hasContextualEdit).toBe(false);
+        expect(warning).toHaveBeenCalledExactlyOnceWith(
+          '[abyss-documents] Failed to clean up the PDF annotation activation',
+          { annotationId: id, cause },
+        );
+        expect(vi.getTimerCount()).toBe(0);
+        return result;
+      });
 
       await vi.advanceTimersByTimeAsync(0);
-      await expect(observed).resolves.toBe('observed');
+      await expect(observed).resolves.toBe('readonly');
+    } finally {
+      warning.mockRestore();
+      removeExternalAbort.mockRestore();
+      await current.editor.abortInteraction('Test cleanup.');
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects cleanup failure after cancellation because no annotation UI was established', async () => {
+    vi.useFakeTimers();
+    const current = fixture();
+    const id = 'cancelled-cleanup-failure';
+    const cause = new Error('cancelled activation cleanup failed');
+    const external = new AbortController();
+    const removeExternalAbort = vi
+      .spyOn(external.signal, 'removeEventListener')
+      .mockImplementation(() => {
+        throw cause;
+      });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      current.editor.setAnnotationProjection([
+        { annotation: createdAnnotation('', { id, writable: false }), stableId: id },
+      ]);
+      current.commentBridge.focusAnnotation.mockResolvedValueOnce(false);
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+
+      const activation = current.editor.focusAnnotation(id, {
+        kind: 'sidebar',
+        signal: external.signal,
+      });
+      const observed = activation.catch((rejection: unknown) => {
+        const internals = activationInternals(current.editor);
+        expect(rejection).toBe(cause);
+        expect(internals.activeActivation).toBeNull();
+        expect(internals.contextualActivationFailureOwner).toBeNull();
+        expect(current.editor.hasContextualEdit).toBe(false);
+        expect(warning).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+        return 'observed' as const;
+      });
+      const observation = expect(observed).resolves.toBe('observed');
+
+      await vi.advanceTimersByTimeAsync(0);
+      await observation;
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
     } finally {
       warning.mockRestore();
       removeExternalAbort.mockRestore();

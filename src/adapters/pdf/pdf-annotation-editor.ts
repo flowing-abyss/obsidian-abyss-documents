@@ -637,12 +637,13 @@ export class PdfAnnotationEditor {
     settled: ReturnType<typeof deferred<PdfAnnotationActivationResult>>,
   ): void {
     const cleanupFailure = this.cleanupAnnotationActivation(activation);
+    const establishedUi = settlement.kind === 'resolved' && settlement.value !== 'cancelled';
     try {
-      if (cleanupFailure !== null && settlement.kind === 'rejected')
-        this.reportSecondaryAnnotationActivationCleanupFailure(cleanupFailure, settlement.cause);
+      if (cleanupFailure !== null && (settlement.kind === 'rejected' || establishedUi))
+        this.reportAnnotationActivationCleanupFailure(activation.id, cleanupFailure);
     } finally {
       const publishedSettlement: AnnotationActivationSettlement =
-        cleanupFailure !== null && settlement.kind === 'resolved'
+        cleanupFailure !== null && settlement.kind === 'resolved' && !establishedUi
           ? { cause: cleanupFailure, kind: 'rejected' }
           : settlement;
       if (publishedSettlement.kind === 'resolved') settled.resolve(publishedSettlement.value);
@@ -651,12 +652,12 @@ export class PdfAnnotationEditor {
   }
 
   private cleanupAnnotationActivation(activation: AnnotationActivation): Error | null {
-    let failure: Error | null = null;
+    const failures: Error[] = [];
     const attempt = (cleanup: () => void): void => {
       try {
         cleanup();
       } catch (cause) {
-        failure ??= asError(cause);
+        failures.push(asError(cause));
       }
     };
     attempt(activation.clearDeadline);
@@ -670,15 +671,17 @@ export class PdfAnnotationEditor {
     attempt(() => {
       if (this.activeActivation === activation) this.activeActivation = null;
     });
-    return failure;
+    if (failures.length === 0) return null;
+    if (failures.length === 1) return failures[0] ?? null;
+    return new AggregateError(failures, 'Failed to clean up the PDF annotation activation.');
   }
 
-  private reportSecondaryAnnotationActivationCleanupFailure(
+  private reportAnnotationActivationCleanupFailure(
+    annotationId: string,
     cleanupFailure: Error,
-    primaryCause: Error,
   ): void {
-    if (cleanupFailure === primaryCause || isAbortFailure(cleanupFailure)) return;
     console.warn('[abyss-documents] Failed to clean up the PDF annotation activation', {
+      annotationId,
       cause: cleanupFailure,
     });
   }

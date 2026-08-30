@@ -1018,6 +1018,81 @@ describe('PdfDocumentViewport', () => {
     expect(contextmenu.defaultPrevented).toBe(true);
   });
 
+  it('does not emit a page failure when editable activation cleanup fails', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null)
+      throw new Error('Expected mounted annotation editing.');
+    const id = 'native-editable-cleanup-failure';
+    const cause = new Error('native editable activation cleanup failed');
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const nativeNode = root
+      .createDiv({ cls: 'annotationEditorLayer' })
+      .createDiv({ cls: 'highlightEditor selectedEditor' });
+    nativeNode.id = id;
+    vi.spyOn(nativeNode, 'getBoundingClientRect').mockReturnValue({
+      left: 110,
+      top: 220,
+      right: 150,
+      bottom: 240,
+      width: 40,
+      height: 20,
+      x: 110,
+      y: 220,
+      toJSON: () => ({}),
+    });
+    const native = { ...nativeHighlight(id), elementBeforePopup: nativeNode };
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(native, [[id, native]]),
+    });
+    editor.setAnnotationProjection([{ annotation: writableHighlight(id), stableId: id }]);
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const originalFocusAnnotation = editor.focusAnnotation.bind(editor);
+    let activation: Promise<'editable' | 'readonly' | 'cancelled'> | null = null;
+    let cleanupInjected = false;
+    vi.spyOn(editor, 'focusAnnotation').mockImplementation((stableId, source) => {
+      activation = originalFocusAnnotation(stableId, source);
+      const activeActivation = (
+        editor as unknown as {
+          readonly activeActivation: { clearDeadline: () => void } | null;
+        }
+      ).activeActivation;
+      if (activeActivation === null) throw new Error('Expected an active annotation activation.');
+      const originalClearDeadline = activeActivation.clearDeadline;
+      activeActivation.clearDeadline = () => {
+        originalClearDeadline();
+        cleanupInjected = true;
+        throw cause;
+      };
+      return activation;
+    });
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      nativeNode.click();
+
+      expect(activation).not.toBeNull();
+      await expect(activation).resolves.toBe('editable');
+      expect(cleanupInjected).toBe(true);
+      expect(editor.hasContextualEdit).toBe(true);
+      expect(viewer.annotationEditorRequests.filter((request) => request['mode'] === 0)).toEqual(
+        [],
+      );
+      expect(events.filter((event) => event.type === 'annotation-mutation-error')).toEqual([]);
+      expect(warning).toHaveBeenCalledExactlyOnceWith(
+        '[abyss-documents] Failed to clean up the PDF annotation activation',
+        { annotationId: id, cause },
+      );
+    } finally {
+      warning.mockRestore();
+      await fixture.viewport.destroy();
+    }
+  });
+
   it('reports one genuine native-page annotation activation failure', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
