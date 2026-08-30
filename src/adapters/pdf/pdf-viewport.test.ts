@@ -1141,6 +1141,70 @@ describe('PdfDocumentViewport', () => {
     });
   });
 
+  it('reports one manager-sourced editing-state selection failure at the page boundary', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    const viewer = fixture.runtime.state.viewer;
+    const editor = fixture.viewport.annotationEditor;
+    if (eventBus === undefined || viewer === undefined || editor === null)
+      throw new Error('Expected mounted annotation editing.');
+    const id = 'native-editing-state-selection-failure';
+    const uiManager = annotationManager();
+    const cause = new Error('editing-state selected editor accessor failed');
+    let failSelectionChecks = false;
+    const selectedAccessor = vi.fn(() => {
+      if (failSelectionChecks) throw cause;
+      return undefined;
+    });
+    Object.defineProperty(uiManager, 'firstSelectedEditor', {
+      configurable: true,
+      get: selectedAccessor,
+    });
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    editor.setAnnotationProjection([{ annotation: writableHighlight(id), stableId: id }]);
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = id;
+
+    annotation.click();
+    await vi.waitFor(() => {
+      expect(eventBus.listeners.get('editingstateschanged')).toHaveLength(2);
+      expect(eventBus.listeners.get('editorsrendered')).toHaveLength(1);
+    });
+    failSelectionChecks = true;
+    expect(() => {
+      eventBus.dispatch('editingstateschanged', {
+        source: uiManager,
+        details: { hasSelectedEditor: true },
+      });
+    }).not.toThrow();
+
+    await vi.waitFor(() => {
+      expect(events).toEqual([
+        { type: 'annotation-mutation-error', action: 'open-annotation', cause },
+      ]);
+    });
+    expect(eventBus.listeners.get('editingstateschanged')).toHaveLength(1);
+    expect(eventBus.listeners.get('editorsrendered')).toHaveLength(0);
+    const checksAfterSettlement = selectedAccessor.mock.calls.length;
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+    await Promise.resolve();
+    expect(selectedAccessor).toHaveBeenCalledTimes(checksAfterSettlement);
+    expect(events).toEqual([
+      { type: 'annotation-mutation-error', action: 'open-annotation', cause },
+    ]);
+  });
+
   it.each([
     ['underlineAnnotation', 'underline', 'imported-underline'],
     ['textAnnotation', 'text-note', 'imported-text-note'],
