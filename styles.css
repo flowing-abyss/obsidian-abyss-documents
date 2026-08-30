@@ -7283,10 +7283,14 @@
 }
 
 /* The unified editor is primary; PDF.js still owns hit-testing and selection beneath it. */
-/* stylelint-disable-next-line selector-class-pattern -- PDF.js requires these public class names. */
-.abyss-documents :is(.annotationEditorLayer, .textLayer) .editToolbar {
-  display: none;
+/* stylelint-disable selector-class-pattern -- PDF.js requires these public class names. */
+.abyss-documents
+  :is(.annotationLayer, .annotationEditorLayer)
+  :is(.annotationCommentButton, .editToolbar),
+.abyss-documents .textLayer .editToolbar {
+  display: none !important;
 }
+/* stylelint-enable selector-class-pattern */
 
 @container abyss-reader (inline-size <= 760px) {
   .abyss-documents .abyss-reader-fit-control,

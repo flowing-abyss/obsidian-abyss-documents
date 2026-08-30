@@ -1,3 +1,4 @@
+import { JSDOM } from 'jsdom';
 import { readFile } from 'node:fs/promises';
 import postcss from 'postcss';
 import { describe, expect, it } from 'vitest';
@@ -20,6 +21,22 @@ function topLevelDeclarations(root, selector) {
     node.walkDecls((declaration) => values.set(declaration.prop, declaration.value));
   }
   return Object.fromEntries(values);
+}
+
+function matchingTopLevelDisplayRules(root, elements) {
+  const rules = [];
+  for (const node of root.nodes) {
+    if (node.type !== 'rule') continue;
+    const display = node.nodes.find((child) => child.type === 'decl' && child.prop === 'display');
+    if (!display) continue;
+    for (const selector of node.selectors) {
+      if (!elements.some((element) => element.matches(selector))) continue;
+      rules.push(
+        `${selector} { display: ${display.value}${display.important ? ' !important' : ''}; }`,
+      );
+    }
+  }
+  return rules.join('\n');
 }
 
 describe('PDF.js style build', () => {
@@ -162,6 +179,62 @@ describe('PDF.js style build', () => {
     expect(Object.fromEntries(declarations)).toMatchObject({
       'box-sizing': 'content-box',
     });
+  });
+
+  it('keeps only the unified contextual editor visible when PDF.js selects an annotation', async () => {
+    const markup = `
+      <div class="abyss-documents">
+        <div class="annotationLayer">
+          <button class="annotationCommentButton"></button>
+          <a class="highlightAnnotation"></a>
+        </div>
+        <div class="annotationEditorLayer">
+          <div class="highlightEditor selectedEditor">
+            <button class="annotationCommentButton selected"></button>
+            <div class="editToolbar"></div>
+          </div>
+        </div>
+        <div data-annotation-editor-popover></div>
+      </div>
+    `;
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const selectorDom = new JSDOM(markup);
+    const selectorDocument = selectorDom.window.document;
+    const matchingRules = matchingTopLevelDisplayRules(root, [
+      ...selectorDocument.querySelectorAll('.annotationCommentButton, .editToolbar'),
+      selectorDocument.querySelector('[data-annotation-editor-popover]'),
+      selectorDocument.querySelector('.highlightAnnotation'),
+    ]);
+    selectorDom.window.close();
+    const dom = new JSDOM(`
+      <style>
+      .abyss-documents :is(.annotationLayer, .annotationEditorLayer) .annotationCommentButton {
+        display: block;
+      }
+      .abyss-documents .annotationEditorLayer .selectedEditor .editToolbar {
+        display: flex;
+      }
+      ${matchingRules}
+      </style>
+      ${markup}
+    `);
+    const rendered = dom.window.document;
+    const nativeControls = [...rendered.querySelectorAll('.annotationCommentButton, .editToolbar')];
+
+    try {
+      expect(nativeControls.map((control) => dom.window.getComputedStyle(control).display)).toEqual(
+        ['none', 'none', 'none'],
+      );
+      expect(
+        dom.window.getComputedStyle(rendered.querySelector('[data-annotation-editor-popover]'))
+          .display,
+      ).not.toBe('none');
+      expect(
+        dom.window.getComputedStyle(rendered.querySelector('.highlightAnnotation')).display,
+      ).not.toBe('none');
+    } finally {
+      dom.window.close();
+    }
   });
 
   it('provides 44px-equivalent touch targets in the responsive reader layout', async () => {
