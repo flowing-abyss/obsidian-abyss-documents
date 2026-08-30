@@ -657,6 +657,16 @@ describe('PdfAnnotationEditor lifecycle', () => {
           getData: () => ({ id: 'persisted-id' }),
         };
       if (internalId === 'uid-only') return selectedEditor('public-id', 9);
+      if (internalId === 'non-hcm-color')
+        return {
+          ...selectedEditor('non-hcm-color', 9),
+          getNonHCMColor: () => [300, -3, Number.NaN],
+        };
+      if (internalId === 'authored-color')
+        return {
+          ...selectedEditor('authored-color', 15),
+          color: ' #AaBbCc ',
+        };
       if (internalId === 'blank-uid') return selectedEditor('   ', 9);
       if (internalId === 'unknown-mode') return selectedEditor('public-id', 99);
       if (internalId === 'invalid-mode') return { mode: '9', uid: 'public-id' };
@@ -681,6 +691,18 @@ describe('PdfAnnotationEditor lifecycle', () => {
       id: 'public-id',
       kind: 'highlight',
       mode: 9,
+    });
+    expect(fixtureValue.editor.resolveNativeEditor('non-hcm-color')).toEqual({
+      color: '#ff0000',
+      id: 'non-hcm-color',
+      kind: 'highlight',
+      mode: 9,
+    });
+    expect(fixtureValue.editor.resolveNativeEditor('authored-color')).toEqual({
+      color: '#aabbcc',
+      id: 'authored-color',
+      kind: 'ink',
+      mode: 15,
     });
     expect(fixtureValue.editor.resolveNativeEditor('missing')).toBeNull();
     expect(fixtureValue.editor.resolveNativeEditor('blank-uid')).toBeNull();
