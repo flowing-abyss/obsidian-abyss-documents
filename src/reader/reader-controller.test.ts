@@ -40,7 +40,7 @@ import {
   readerPerformanceSnapshot,
 } from '../reader-performance.js';
 import { DEFAULT_SETTINGS } from '../settings.js';
-import type { AnnotationProjection, AnnotationProjectionRow } from './annotation-projection.js';
+import { AnnotationProjection, type AnnotationProjectionRow } from './annotation-projection.js';
 import {
   ReaderController,
   type ReaderProfileState,
@@ -254,6 +254,7 @@ function interactiveViewport(pageCount = 3) {
     },
   );
   const updateAnnotations = vi.fn<PdfAnnotationInteraction['updateAnnotations']>(() => true);
+  const deleteAnnotations = vi.fn<PdfAnnotationInteraction['deleteAnnotations']>(() => true);
   const focusAnnotation = vi.fn<PdfAnnotationInteraction['focusAnnotation']>(
     async () => 'editable',
   );
@@ -263,7 +264,7 @@ function interactiveViewport(pageCount = 3) {
   const interaction: PdfAnnotationInteraction = {
     abortInteraction,
     commitSelection,
-    deleteAnnotations: () => true,
+    deleteAnnotations,
     focusAnnotation,
     onAnnotationFocus(listener) {
       annotationFocusListeners.add(listener);
@@ -298,6 +299,7 @@ function interactiveViewport(pageCount = 3) {
     ...created,
     abortInteraction,
     commitSelection,
+    deleteAnnotations,
     focusAnnotation,
     projectSelectionRects,
     resumeInteractions,
@@ -341,6 +343,14 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, reject, resolve };
+}
+
+async function waitForAnimationFrame(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => {
+      resolve();
+    });
+  });
 }
 
 function retainedNativeSession(
@@ -556,6 +566,7 @@ describe('ReaderController', () => {
         },
       });
     }
+    await waitForAnimationFrame();
     createdViewport.focusAnnotation.mockImplementation(async (nativeId) => {
       const target = annotationRecord(nativeId, 0, {
         kind: 'rectangle',
@@ -651,6 +662,7 @@ describe('ReaderController', () => {
         },
       },
     });
+    await waitForAnimationFrame();
     const card = shell.created.sidebar?.annotationsPanel.root.querySelector<HTMLButtonElement>(
       '[data-annotation-id="fresh-sidebar-anchor"]',
     );
@@ -776,6 +788,7 @@ describe('ReaderController', () => {
         },
       ],
     });
+    await waitForAnimationFrame();
     const omittedProjection = createdViewport.setAnnotationProjection.mock.lastCall?.[0];
     expect(omittedProjection?.[0]?.stableId).toBe('verified-highlight');
     expect(omittedProjection?.[0]?.annotation.capabilities.color.available).toBe(true);
@@ -794,6 +807,7 @@ describe('ReaderController', () => {
         },
       ],
     });
+    await waitForAnimationFrame();
     const lockedProjection = createdViewport.setAnnotationProjection.mock.lastCall?.[0];
     expect(lockedProjection?.[0]?.stableId).toBe('verified-highlight');
     expect(lockedProjection?.[0]?.annotation.capabilities.color.available).toBe(false);
@@ -898,6 +912,7 @@ describe('ReaderController', () => {
         },
       });
     }
+    await waitForAnimationFrame();
     let firstSignal: AbortSignal | undefined;
     createdViewport.focusAnnotation.mockImplementation(async (nativeId, source) => {
       if (nativeId === 'far-first') {
@@ -952,7 +967,7 @@ describe('ReaderController', () => {
     extraction.resolve();
   });
 
-  it('projects a native annotation event immediately without remounting the viewport', async () => {
+  it('projects a native annotation event on the next frame without remounting the viewport', async () => {
     const [pdf] = files('Books/Immediate-annotation.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
     const createdViewport = viewport();
@@ -988,6 +1003,7 @@ describe('ReaderController', () => {
         },
       },
     });
+    await waitForAnimationFrame();
 
     expect({
       visibleIds: shell.created.sidebar?.annotationsPanel.visibleIds(),
@@ -1143,6 +1159,7 @@ describe('ReaderController', () => {
       });
       controller.refreshReadingSettings();
     }
+    await waitForAnimationFrame();
     committedRevision = 1;
     extractionGate.resolve();
     await navigation;
@@ -1248,6 +1265,7 @@ describe('ReaderController', () => {
         },
       },
     });
+    await waitForAnimationFrame();
     rowMatrix.push({
       event: 'revision-2 upsert',
       rows: projectedAnnotationMatrix(controller),
@@ -1272,6 +1290,7 @@ describe('ReaderController', () => {
       });
     });
     controller.refreshReadingSettings();
+    await waitForAnimationFrame();
     rowMatrix.push({
       event: 'theme snapshot',
       rows: projectedAnnotationMatrix(controller),
@@ -1393,6 +1412,540 @@ describe('ReaderController', () => {
     expect(listAnnotations).toHaveBeenCalledOnce();
   });
 
+  it('does not resurrect an explicit user deletion from a stale mounted snapshot', async () => {
+    const [pdf] = files('Books/Stale-mounted-delete-race.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    Object.assign(createdSession.value, {
+      annotationCapabilities: { readOnlyReason: null },
+      capabilities: new Set(['annotation-write']),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    const snapshot = {
+      nativeId: 'deleted-native-id',
+      runtimeId: 'deleted-runtime-id',
+      provisionalId: 'deleted-selection-id',
+      pageIndex: 0,
+      type: 'highlight' as const,
+      rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+      selectedText: 'Delete me',
+      color: '#ffd400',
+      comment: '',
+      tags: [],
+      links: [],
+      writable: true,
+    };
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: { operation: 'upsert', annotation: snapshot },
+    });
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['deleted-native-id']);
+    });
+    const annotation = annotationRecord('deleted-native-id', 0, {
+      kind: 'rectangle',
+      rectangle: { x: 10, y: 20, width: 30, height: 8 },
+    });
+    createdViewport.emitAnnotationFocus({
+      annotations: [annotation],
+      editable: true,
+      position: { x: 20, y: 32 },
+    });
+    createdViewport.deleteAnnotations.mockImplementationOnce(() => {
+      createdViewport.emit({
+        type: 'annotation-change',
+        change: {
+          operation: 'remove',
+          nativeId: 'deleted-runtime-id',
+          provisionalId: 'deleted-selection-id',
+        },
+      });
+      return true;
+    });
+    const remove = shell.created.root.querySelector<HTMLButtonElement>(
+      '[data-action="delete-annotation"]',
+    );
+    if (remove === null) throw new Error('Expected annotation delete action.');
+
+    remove.click();
+    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    createdViewport.emit({ type: 'annotation-snapshot', annotations: [snapshot] });
+
+    await waitForAnimationFrame();
+    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([]);
+    await controller.close();
+  });
+
+  it('applies one indexed projection batch and renders once for a viewport burst', async () => {
+    const [pdf] = files('Books/Projection-burst.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    const applyBatch = vi.spyOn(AnnotationProjection.prototype, 'applyViewportBatch');
+    const render = vi.spyOn(
+      controller as unknown as { renderAnnotationProjection(shell: ReaderShell): void },
+      'renderAnnotationProjection',
+    );
+    for (let index = 0; index < 50; index += 1) {
+      createdViewport.emit({
+        type: 'annotation-change',
+        change: {
+          operation: 'upsert',
+          annotation: {
+            nativeId: `burst-${String(index)}`,
+            pageIndex: 0,
+            type: 'highlight',
+            rects: [{ x: index, y: 20, width: 30, height: 8 }],
+            tags: [],
+            links: [],
+            writable: true,
+          },
+        },
+      });
+    }
+    createdViewport.emit({
+      type: 'annotation-snapshot',
+      annotations: Array.from({ length: 50 }, (_, index) => ({
+        nativeId: `burst-${String(index)}`,
+        pageIndex: 0,
+        type: 'highlight' as const,
+        rects: [{ x: index, y: 20, width: 30, height: 8 }],
+        tags: [],
+        links: [],
+        writable: true,
+      })),
+    });
+
+    expect(applyBatch).not.toHaveBeenCalled();
+    await waitForAnimationFrame();
+
+    expect(applyBatch).toHaveBeenCalledOnce();
+    expect(applyBatch.mock.calls[0]?.[0]).toHaveLength(51);
+    expect(render).toHaveBeenCalledOnce();
+    expect(projectedAnnotationMatrix(controller)).toHaveLength(50);
+    await controller.close();
+  });
+
+  it('keeps a synchronous user update over a conflicting queued viewport removal', async () => {
+    const [pdf] = files('Books/Queued-remove-after-update.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'updated-row',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+          comment: 'Before',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+    await waitForAnimationFrame();
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'updated-row' },
+    });
+    createdViewport.emit({
+      type: 'annotation-snapshot',
+      annotations: [
+        {
+          nativeId: 'updated-row',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+          comment: 'Stale snapshot',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+        {
+          nativeId: 'unrelated-row',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 40, y: 20, width: 30, height: 8 }],
+          comment: 'Unrelated snapshot',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      ],
+    });
+    const mutate = controller as unknown as {
+      projectAnnotationUpdate(
+        viewport: DocumentViewport,
+        shell: ReaderShell,
+        update: { readonly annotations: readonly DocumentAnnotation[]; readonly comment: string },
+      ): void;
+    };
+    mutate.projectAnnotationUpdate(createdViewport.value, shell.created, {
+      annotations: [
+        annotationRecord('updated-row', 0, {
+          kind: 'rectangle',
+          rectangle: { x: 10, y: 20, width: 30, height: 8 },
+        }),
+      ],
+      comment: 'After',
+    });
+
+    await waitForAnimationFrame();
+    expect(projectedAnnotationMatrix(controller)).toMatchObject([
+      { comment: 'After', nativeId: 'updated-row' },
+      { comment: 'Unrelated snapshot', nativeId: 'unrelated-row' },
+    ]);
+    await controller.close();
+  });
+
+  it('keeps a synchronous selection creation over a conflicting queued viewport removal', async () => {
+    const [pdf] = files('Books/Queued-remove-after-create.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'selection-create' },
+    });
+    const mutate = controller as unknown as {
+      projectSelectionCreation(
+        viewport: DocumentViewport,
+        shell: ReaderShell,
+        creation: {
+          readonly color: string;
+          readonly comment: string;
+          readonly selection: PdfTextSelection;
+        },
+      ): void;
+    };
+    mutate.projectSelectionCreation(createdViewport.value, shell.created, {
+      color: '#ffd400',
+      comment: 'Created synchronously',
+      selection: pdfSelection('selection-create'),
+    });
+
+    await waitForAnimationFrame();
+    expect(projectedAnnotationMatrix(controller)).toMatchObject([
+      {
+        comment: 'Created synchronously',
+        nativeId: 'selection-create',
+        provisionalId: 'selection-create',
+      },
+    ]);
+    await controller.close();
+  });
+
+  it('fences queued stale snapshots before authoritative verification releases a tombstone', async () => {
+    const [pdf] = files('Books/Verified-delete-before-frame.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    const snapshot = {
+      nativeId: 'verified-delete',
+      pageIndex: 0,
+      type: 'highlight' as const,
+      rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+      tags: [],
+      links: [],
+      writable: true,
+    };
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: { operation: 'upsert', annotation: snapshot },
+    });
+    await waitForAnimationFrame();
+    const mutate = controller as unknown as {
+      acceptVerifiedAnnotations(
+        annotations: readonly DocumentAnnotation[],
+        shell: ReaderShell,
+        confirmedRevision: number,
+      ): readonly DocumentAnnotation[];
+      projectAnnotationDelete(
+        viewport: DocumentViewport,
+        shell: ReaderShell,
+        annotations: readonly DocumentAnnotation[],
+      ): void;
+    };
+    mutate.projectAnnotationDelete(createdViewport.value, shell.created, [
+      annotationRecord('verified-delete', 0, {
+        kind: 'rectangle',
+        rectangle: { x: 10, y: 20, width: 30, height: 8 },
+      }),
+    ]);
+    createdViewport.emit({ type: 'annotation-snapshot', annotations: [snapshot] });
+
+    mutate.acceptVerifiedAnnotations([], shell.created, 0);
+    await waitForAnimationFrame();
+
+    expect(projectedAnnotationMatrix(controller)).toEqual([]);
+    await controller.close();
+  });
+
+  it('partially fences a newer mixed snapshot when verification confirms one deletion', async () => {
+    const [pdf] = files('Books/Verified-mixed-delete-before-frame.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    let pendingRevision = 0;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession: () => ({
+        baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+        committedRevision: 0,
+        get pendingRevision() {
+          return pendingRevision;
+        },
+        isDirty: true,
+        prepare: vi.fn(),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      }),
+    });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+      undefined,
+      { saveCoordinator: { save: vi.fn() } },
+    );
+    await controller.open(pdf, createDiv());
+    const snapshotA = {
+      nativeId: 'deleted-at-one',
+      pageIndex: 0,
+      type: 'highlight' as const,
+      rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+      comment: 'Stale A',
+      tags: [],
+      links: [],
+      writable: true,
+    };
+    const snapshotB = {
+      nativeId: 'current-at-two',
+      pageIndex: 0,
+      type: 'highlight' as const,
+      rects: [{ x: 50, y: 20, width: 30, height: 8 }],
+      comment: 'Current B',
+      tags: [],
+      links: [],
+      writable: true,
+    };
+    createdViewport.emit({
+      type: 'annotation-snapshot',
+      annotations: [snapshotA, { ...snapshotB, comment: 'Initial B' }],
+    });
+    await waitForAnimationFrame();
+    const mutate = controller as unknown as {
+      acceptVerifiedAnnotations(
+        annotations: readonly DocumentAnnotation[],
+        shell: ReaderShell,
+        confirmedRevision: number,
+      ): readonly DocumentAnnotation[];
+      projectAnnotationDelete(
+        viewport: DocumentViewport,
+        shell: ReaderShell,
+        annotations: readonly DocumentAnnotation[],
+      ): void;
+    };
+    pendingRevision = 1;
+    mutate.projectAnnotationDelete(createdViewport.value, shell.created, [
+      annotationRecord('deleted-at-one', 0, {
+        kind: 'rectangle',
+        rectangle: { x: 10, y: 20, width: 30, height: 8 },
+      }),
+    ]);
+    pendingRevision = 2;
+    createdViewport.emit({
+      type: 'annotation-snapshot',
+      annotations: [snapshotA, snapshotB],
+    });
+    const verifiedB = {
+      ...annotationRecord('current-at-two', 0, {
+        kind: 'rectangle',
+        rectangle: { x: 50, y: 20, width: 30, height: 8 },
+      }),
+      comment: 'Verified B',
+    };
+
+    mutate.acceptVerifiedAnnotations([verifiedB], shell.created, 1);
+    await waitForAnimationFrame();
+
+    expect(projectedAnnotationMatrix(controller)).toMatchObject([
+      { comment: 'Current B', nativeId: 'current-at-two' },
+    ]);
+    await controller.close();
+  });
+
+  it('retains the observed revision for every queued viewport event', async () => {
+    const [pdf] = files('Books/Mixed-projection-revisions.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    let pendingRevision = 1;
+    Object.assign(createdSession.value, {
+      createNativeEditableSession: () => ({
+        baseToken: { sha256: 'a'.repeat(64), byteSize: 4, mtime: 1 },
+        committedRevision: 0,
+        get pendingRevision() {
+          return pendingRevision;
+        },
+        isDirty: true,
+        prepare: vi.fn(),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      }),
+    });
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      undefined,
+      undefined,
+      { saveCoordinator: { save: vi.fn() } },
+    );
+    await controller.open(pdf, createDiv());
+    const applyBatch = vi.spyOn(AnnotationProjection.prototype, 'applyViewportBatch');
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'revision-one' },
+    });
+    pendingRevision = 2;
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'revision-two' },
+    });
+
+    await waitForAnimationFrame();
+
+    expect(applyBatch.mock.calls[0]?.[0].map((observation) => observation.revision)).toEqual([
+      1, 2,
+    ]);
+    await controller.close();
+  });
+
+  it('cancels a pending viewport projection batch when the reader closes', async () => {
+    const [pdf] = files('Books/Cancelled-projection-burst.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = viewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => {
+        frames.push(callback);
+        return 731;
+      });
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame');
+    const applyBatch = vi.spyOn(AnnotationProjection.prototype, 'applyViewportBatch');
+
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'cancelled-row',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+          tags: [],
+          links: [],
+        },
+      },
+    });
+    expect(requestFrame).toHaveBeenCalledOnce();
+
+    await controller.close();
+    expect(cancelFrame).toHaveBeenCalledWith(731);
+    frames[0]?.(0);
+    expect(applyBatch).not.toHaveBeenCalled();
+  });
+
+  it('cancels a pending viewport projection batch when a new session replaces it', async () => {
+    const [firstPdf, secondPdf] = files(
+      'Books/Replaced-projection-burst.pdf',
+      'Books/Replacement-session.pdf',
+    );
+    if (firstPdf === undefined || secondPdf === undefined)
+      throw new Error('Expected both PDF fixtures.');
+    const firstViewport = viewport();
+    const secondViewport = viewport();
+    const firstSession = session(firstPdf.path, firstViewport);
+    const secondSession = session(secondPdf.path, secondViewport);
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([
+        adapterFor(firstPdf.path, firstSession).value,
+        adapterFor(secondPdf.path, secondSession).value,
+      ]),
+    );
+    await controller.open(firstPdf, createDiv());
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return 913;
+    });
+    const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame');
+    const applyBatch = vi.spyOn(AnnotationProjection.prototype, 'applyViewportBatch');
+    firstViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'stale-session-row',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 30, height: 8 }],
+          tags: [],
+          links: [],
+        },
+      },
+    });
+
+    await controller.open(secondPdf, createDiv());
+    expect(cancelFrame).toHaveBeenCalledWith(913);
+    frames[0]?.(0);
+    expect(applyBatch).not.toHaveBeenCalled();
+    expect(projectedAnnotationMatrix(controller)).toEqual([]);
+    await controller.close();
+  });
+
   it('carries projection row identity through controller provisional reconciliation', async () => {
     const [pdf] = files('Books/Controller-row-identity.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');
@@ -1441,6 +1994,7 @@ describe('ReaderController', () => {
         },
       },
     });
+    await waitForAnimationFrame();
     const resolver = createdViewport.setAnnotationResolver.mock.calls[0]?.[0];
     if (resolver == null) throw new Error('Expected native annotation resolver.');
     shell.send({ type: 'open-sidebar', tab: 'annotations' });
@@ -2017,7 +2571,9 @@ describe('ReaderController', () => {
       },
     });
 
-    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['live-recovery']);
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual(['live-recovery']);
+    });
     expect(
       shell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]'),
     ).toBeNull();
@@ -2378,10 +2934,12 @@ describe('ReaderController', () => {
       },
     });
 
-    expect(
-      shell.created.sidebar?.annotationsPanel.root.querySelector('[data-annotation-header]')
-        ?.textContent,
-    ).toBe('Page 1 · Highlight');
+    await vi.waitFor(() => {
+      expect(
+        shell.created.sidebar?.annotationsPanel.root.querySelector('[data-annotation-header]')
+          ?.textContent,
+      ).toBe('Page 1 · Highlight');
+    });
   });
 
   it('renders the exact read-only reason and never calls a missing native editor', async () => {
@@ -3356,10 +3914,12 @@ describe('ReaderController', () => {
     expect(
       shell.created.sidebar?.annotationsPanel.root.querySelector('[data-action*="retry"]'),
     ).toBeNull();
-    expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([
-      'native-visible-during-failure',
-      'native-visible-after-failure',
-    ]);
+    await vi.waitFor(() => {
+      expect(shell.created.sidebar?.annotationsPanel.visibleIds()).toEqual([
+        'native-visible-during-failure',
+        'native-visible-after-failure',
+      ]);
+    });
     expect(
       shell.created.sidebar?.annotationsPanel.root.querySelector('[role="status"]'),
     ).toBeNull();
@@ -5041,6 +5601,7 @@ describe('ReaderController', () => {
           },
         },
       });
+      await vi.advanceTimersByTimeAsync(20);
 
       shell.created.sidebar?.annotationsPanel.root
         .querySelector<HTMLButtonElement>('[data-annotation-id="activation-highlight"]')

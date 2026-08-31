@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   AnnotationId,
   DocumentAnnotation,
@@ -197,6 +197,281 @@ describe('AnnotationProjection', () => {
     projection.reconcile([verifiedAnnotation('deleted-id')], 1);
 
     expect(projection.snapshot().map((row) => row.nativeId)).toEqual([]);
+  });
+
+  it('suppresses stale mounted aliases only after an explicit optimistic delete', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('runtime-id', 'selection-id'), 1);
+    projection.bindCommittedSelection('selection-id', verifiedAnnotation('runtime-id'), 1);
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        aliases: ['selection-id'],
+        nativeId: 'stable-id',
+        provisionalId: 'runtime-id',
+        runtimeId: 'runtime-id',
+      },
+    ]);
+    expect(projection.deleteOptimistically('stable-id', undefined, 2)).toBe(true);
+
+    for (const [nativeId, provisionalId, revision] of [
+      ['stable-id', undefined, 2],
+      ['runtime-id', undefined, 2],
+      ['selection-id', undefined, 3],
+      ['unrelated-native', 'selection-id', 3],
+    ] as const) {
+      projection.upsert(viewportAnnotation(nativeId, provisionalId), revision);
+    }
+
+    expect(projection.snapshot()).toEqual([]);
+  });
+
+  it('keeps an explicit delete pending through older verification and failed-save observations', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+    projection.deleteOptimistically('stable-id', undefined, 2);
+
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+    projection.upsert(viewportAnnotation('stable-id'), 4);
+
+    expect(projection.snapshot()).toEqual([]);
+  });
+
+  it('releases an explicit delete when a confirming revision proves the row absent', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+    projection.deleteOptimistically('stable-id', undefined, 2);
+
+    projection.reconcile([], 2);
+    projection.upsert(viewportAnnotation('stable-id'), 3);
+
+    expect(projection.snapshot().map((row) => row.nativeId)).toEqual(['stable-id']);
+  });
+
+  it('restores an explicit delete when a confirming revision authoritatively contains it', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+    projection.deleteOptimistically('stable-id', undefined, 2);
+
+    projection.reconcile(
+      [{ ...verifiedAnnotation('stable-id'), comment: 'Authoritatively present' }],
+      2,
+    );
+
+    expect(projection.snapshot()).toMatchObject([
+      { annotation: { comment: 'Authoritatively present' }, nativeId: 'stable-id' },
+    ]);
+  });
+
+  it('does not tombstone observational viewport removal', () => {
+    const projection = new AnnotationProjection();
+    projection.upsert(viewportAnnotation('stable-id'), 2);
+
+    projection.remove('stable-id', undefined, 2);
+    projection.upsert({ ...viewportAnnotation('stable-id'), comment: 'Remounted' }, 2);
+
+    expect(projection.snapshot()).toMatchObject([
+      { annotation: { comment: 'Remounted' }, nativeId: 'stable-id' },
+    ]);
+  });
+
+  it('clears explicit deletion state on reset', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([verifiedAnnotation('stable-id')], 1);
+    projection.deleteOptimistically('stable-id', undefined, 2);
+
+    projection.reset();
+    projection.upsert(viewportAnnotation('stable-id'), 2);
+
+    expect(projection.snapshot().map((row) => row.nativeId)).toEqual(['stable-id']);
+  });
+
+  it('applies a viewport burst with one temporary identity index and final-state deduplication', () => {
+    const projection = new AnnotationProjection();
+    for (let index = 0; index < 2_000; index += 1)
+      projection.upsert(viewportAnnotation(`stable-${String(index)}`));
+    const buildIndex = vi.spyOn(
+      projection as unknown as { buildViewportIdentityIndex(): unknown },
+      'buildViewportIdentityIndex',
+    );
+
+    expect(
+      projection.applyViewportBatch([
+        {
+          revision: 3,
+          event: {
+            type: 'annotation-change',
+            change: {
+              operation: 'upsert',
+              annotation: { ...viewportAnnotation('stable-1'), comment: 'Changed' },
+            },
+          },
+        },
+        {
+          revision: 3,
+          event: {
+            type: 'annotation-change',
+            change: { operation: 'remove', nativeId: 'stable-2' },
+          },
+        },
+        {
+          revision: 3,
+          event: {
+            type: 'annotation-snapshot',
+            annotations: [
+              { ...viewportAnnotation('stable-1'), comment: 'Changed' },
+              viewportAnnotation('stable-2000'),
+            ],
+          },
+        },
+      ]),
+    ).toBe(true);
+
+    expect(buildIndex).toHaveBeenCalledOnce();
+    expect(projection.snapshot()).toHaveLength(2_000);
+    expect(projection.snapshot().filter((row) => row.nativeId === 'stable-1')).toMatchObject([
+      { annotation: { comment: 'Changed' } },
+    ]);
+    expect(projection.snapshot().some((row) => row.nativeId === 'stable-2')).toBe(false);
+    expect(projection.snapshot().some((row) => row.nativeId === 'stable-2000')).toBe(true);
+  });
+
+  it('preserves viewport upsert-remove-upsert order inside one indexed batch', () => {
+    const projection = new AnnotationProjection();
+
+    projection.applyViewportBatch([
+      {
+        revision: 2,
+        event: {
+          type: 'annotation-change',
+          change: { operation: 'upsert', annotation: viewportAnnotation('stable-id') },
+        },
+      },
+      {
+        revision: 2,
+        event: {
+          type: 'annotation-change',
+          change: { operation: 'remove', nativeId: 'stable-id' },
+        },
+      },
+      {
+        revision: 2,
+        event: {
+          type: 'annotation-change',
+          change: {
+            operation: 'upsert',
+            annotation: { ...viewportAnnotation('stable-id'), comment: 'Final' },
+          },
+        },
+      },
+    ]);
+
+    expect(projection.snapshot()).toMatchObject([
+      { annotation: { comment: 'Final' }, nativeId: 'stable-id' },
+    ]);
+  });
+
+  it('preserves each viewport observation revision inside one batch', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile(
+      [verifiedAnnotation('revision-one'), verifiedAnnotation('revision-two')],
+      0,
+    );
+
+    projection.applyViewportBatch([
+      {
+        revision: 1,
+        event: {
+          type: 'annotation-change',
+          change: { operation: 'remove', nativeId: 'revision-one' },
+        },
+      },
+      {
+        revision: 2,
+        event: {
+          type: 'annotation-change',
+          change: {
+            operation: 'upsert',
+            annotation: {
+              ...viewportAnnotation('revision-two'),
+              comment: 'Pending revision two',
+            },
+          },
+        },
+      },
+    ]);
+    projection.reconcile(
+      [verifiedAnnotation('revision-one'), verifiedAnnotation('revision-two')],
+      1,
+    );
+
+    expect(
+      projection.snapshot().map((row) => ({
+        comment: row.annotation.comment,
+        nativeId: row.nativeId,
+      })),
+    ).toEqual([
+      { comment: '', nativeId: 'revision-one' },
+      { comment: 'Pending revision two', nativeId: 'revision-two' },
+    ]);
+  });
+
+  it('retains a newer identical snapshot across verification of its older creation revision', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([], 0);
+    const annotation = viewportAnnotation('same-snapshot');
+
+    projection.applyViewportBatch([
+      {
+        revision: 1,
+        event: {
+          type: 'annotation-change',
+          change: { operation: 'upsert', annotation },
+        },
+      },
+      {
+        revision: 2,
+        event: { type: 'annotation-snapshot', annotations: [annotation] },
+      },
+    ]);
+    projection.reconcile([], 1);
+
+    expect(projection.snapshot().map((row) => row.nativeId)).toEqual(['same-snapshot']);
+  });
+
+  it('uses indexed tombstone creation and lookup for many independent identities', () => {
+    const projection = new AnnotationProjection();
+    const count = 500;
+    for (let index = 0; index < count; index += 1)
+      projection.upsert(viewportAnnotation(`deleted-${String(index)}`));
+    const indexTombstone = vi.spyOn(
+      projection as unknown as { indexExplicitDeletionTombstone(): void },
+      'indexExplicitDeletionTombstone',
+    );
+    const lookupTombstone = vi.spyOn(
+      projection as unknown as { explicitDeletionTombstoneForSnapshot(): unknown },
+      'explicitDeletionTombstoneForSnapshot',
+    );
+    for (let index = 0; index < count; index += 1)
+      projection.deleteOptimistically(`deleted-${String(index)}`, undefined, 1);
+
+    projection.applyViewportBatch(
+      Array.from({ length: count }, (_, index) => ({
+        revision: 1,
+        event: {
+          type: 'annotation-change' as const,
+          change: {
+            operation: 'upsert' as const,
+            annotation: viewportAnnotation(`unrelated-${String(index)}`),
+          },
+        },
+      })),
+    );
+
+    expect(indexTombstone).toHaveBeenCalledTimes(count);
+    expect(lookupTombstone).toHaveBeenCalledTimes(count);
+    expect(projection.snapshot()).toHaveLength(count);
   });
 
   it('ignores an older verified revision after a newer revision was accepted', () => {

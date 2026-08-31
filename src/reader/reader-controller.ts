@@ -58,7 +58,13 @@ import {
   AnnotationInteractionController,
   type AnnotationInteractionControllerOptions,
 } from './annotation-interaction-controller.js';
-import { AnnotationProjection, type AnnotationProjectionRow } from './annotation-projection.js';
+import {
+  AnnotationProjection,
+  withoutViewportObservationIdentities,
+  type AnnotationProjectionRow,
+  type AnnotationProjectionViewportEvent,
+  type AnnotationProjectionViewportObservation,
+} from './annotation-projection.js';
 import type { AnnotationToolbarIntent } from './annotation-toolbar.js';
 import {
   applyAnnotationTransfer,
@@ -278,6 +284,9 @@ export class ReaderController {
   private annotationIntentFor: DocumentSession | null = null;
   private annotationProjectionRevision = 0;
   private readonly annotationProjection = new AnnotationProjection();
+  private annotationProjectionFrame: number | null = null;
+  private annotationProjectionFrameWindow: Window | null = null;
+  private annotationProjectionEvents: AnnotationProjectionViewportObservation[] = [];
   private annotationLiveRevision = 0;
   private annotationsLoadedFor: DocumentSession | null = null;
   private annotationsLoadingFor: DocumentSession | null = null;
@@ -621,6 +630,7 @@ export class ReaderController {
   }
 
   private resetAnnotationProjectionState(): void {
+    this.cancelAnnotationProjectionBatch();
     this.annotationAbort?.abort();
     this.annotationAbort = null;
     this.verifiedAnnotationAbort?.abort();
@@ -759,12 +769,10 @@ export class ReaderController {
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
     const revision = this.annotationMutationRevision();
+    this.invalidateQueuedAnnotationObservations(annotations.map(annotationDiagnosticIdentity));
     const changed = annotations.reduce((removed, annotation) => {
-      const id =
-        annotation.identity.kind === 'stable'
-          ? annotation.identity.id
-          : annotation.identity.fingerprint;
-      return this.annotationProjection.remove(id, undefined, revision) || removed;
+      const id = annotationDiagnosticIdentity(annotation);
+      return this.annotationProjection.deleteOptimistically(id, undefined, revision) || removed;
     }, false);
     if (changed) this.renderAnnotationProjection(shell);
   }
@@ -776,6 +784,10 @@ export class ReaderController {
     annotation: DocumentAnnotation,
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
+    this.invalidateQueuedAnnotationObservations([
+      creation.selection.token,
+      annotationDiagnosticIdentity(annotation),
+    ]);
     if (
       !this.annotationProjection.bindCommittedSelection(
         creation.selection.token,
@@ -794,6 +806,7 @@ export class ReaderController {
     creation: AnnotationEditorCreation,
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
+    this.invalidateQueuedAnnotationObservations([creation.selection.token]);
     if (
       this.annotationProjection.remove(
         creation.selection.token,
@@ -810,6 +823,9 @@ export class ReaderController {
     update: AnnotationEditorUpdate,
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
+    this.invalidateQueuedAnnotationObservations(
+      update.annotations.map(annotationDiagnosticIdentity),
+    );
     if (!this.annotationProjection.applyEditorUpdate(update, this.annotationMutationRevision()))
       return;
     this.annotationLiveRevision += 1;
@@ -822,6 +838,9 @@ export class ReaderController {
     update: AnnotationEditorUpdate,
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
+    this.invalidateQueuedAnnotationObservations(
+      update.annotations.map(annotationDiagnosticIdentity),
+    );
     if (!this.annotationProjection.applyEditorPreview(update)) return;
     this.renderAnnotationProjection(shell);
   }
@@ -835,6 +854,7 @@ export class ReaderController {
     const projector = annotationSelectionProjectionOf(viewport);
     if (projector === null) return;
     const selection = creation.selection;
+    this.invalidateQueuedAnnotationObservations([selection.token]);
     const decoded = decodeAnnotationComment(creation.comment);
     if (
       !this.annotationProjection.upsert(
@@ -2476,7 +2496,7 @@ export class ReaderController {
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
     if (isAnnotationProjectionEvent(event)) {
-      this.handleAnnotationProjectionEvent(shell, event);
+      this.queueAnnotationProjectionEvent(viewport, shell, event);
       return;
     }
     switch (event.type) {
@@ -2499,24 +2519,53 @@ export class ReaderController {
     }
   }
 
-  private handleAnnotationProjectionEvent(
+  private queueAnnotationProjectionEvent(
+    viewport: DocumentViewport,
     shell: ReaderShell,
-    event: Extract<ViewportEvent, { readonly type: 'annotation-change' | 'annotation-snapshot' }>,
+    event: AnnotationProjectionViewportEvent,
   ): void {
-    if (event.type === 'annotation-change') {
-      this.annotationLiveRevision += 1;
-      if (this.annotationProjection.apply(event.change, this.annotationMutationRevision()))
-        this.renderAnnotationProjection(shell);
-      return;
-    }
-    const changed = event.annotations.reduce(
-      (updated, annotation) =>
-        this.annotationProjection.upsert(annotation, this.annotationMutationRevision()) || updated,
-      false,
+    this.annotationProjectionEvents.push(
+      Object.freeze({ event, revision: this.annotationMutationRevision() }),
     );
-    if (!changed) return;
-    this.annotationLiveRevision += 1;
-    this.renderAnnotationProjection(shell);
+    if (this.annotationProjectionFrame !== null) return;
+    const owner = shell.root.win;
+    this.annotationProjectionFrameWindow = owner;
+    this.annotationProjectionFrame = owner.requestAnimationFrame(() => {
+      this.annotationProjectionFrame = null;
+      this.annotationProjectionFrameWindow = null;
+      const events = this.annotationProjectionEvents;
+      this.annotationProjectionEvents = [];
+      if (this.viewport !== viewport || this.shell !== shell || events.length === 0) return;
+      if (!this.annotationProjection.applyViewportBatch(events)) return;
+      this.annotationLiveRevision += events.length;
+      this.renderAnnotationProjection(shell);
+    });
+  }
+
+  private cancelAnnotationProjectionBatch(): void {
+    if (this.annotationProjectionFrame !== null && this.annotationProjectionFrameWindow !== null)
+      this.annotationProjectionFrameWindow.cancelAnimationFrame(this.annotationProjectionFrame);
+    this.annotationProjectionFrame = null;
+    this.annotationProjectionFrameWindow = null;
+    this.annotationProjectionEvents = [];
+  }
+
+  private invalidateQueuedAnnotationObservations(identities: Iterable<string>): void {
+    if (this.annotationProjectionEvents.length === 0) return;
+    const closure = this.annotationProjection.identityClosure(identities);
+    this.annotationProjectionEvents = this.annotationProjectionEvents.flatMap((observation) => {
+      const retained = withoutViewportObservationIdentities(observation, closure);
+      return retained === null ? [] : [retained];
+    });
+    if (this.annotationProjectionEvents.length === 0) this.cancelAnnotationProjectionBatch();
+  }
+
+  private fenceConfirmedAnnotationObservations(confirmedRevision: number): void {
+    if (this.annotationProjectionEvents.length === 0) return;
+    this.annotationProjectionEvents = this.annotationProjectionEvents.filter(
+      (observation) => observation.revision > confirmedRevision,
+    );
+    if (this.annotationProjectionEvents.length === 0) this.cancelAnnotationProjectionBatch();
   }
 
   private handlePageChange(
@@ -2575,6 +2624,11 @@ export class ReaderController {
     shell: ReaderShell,
     confirmedRevision: number,
   ): readonly DocumentAnnotation[] {
+    const confirmedDeletionIdentities =
+      this.annotationProjection.deletionIdentityClosureConfirmedBy(confirmedRevision);
+    if (confirmedDeletionIdentities.size > 0)
+      this.invalidateQueuedAnnotationObservations(confirmedDeletionIdentities);
+    this.fenceConfirmedAnnotationObservations(confirmedRevision);
     this.annotationProjection.reconcile(annotations, confirmedRevision);
     this.renderAnnotationProjection(shell);
     return this.currentAnnotations;

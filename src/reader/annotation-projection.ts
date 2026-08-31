@@ -8,7 +8,51 @@ import type {
 import type {
   ViewportAnnotationChange,
   ViewportAnnotationSnapshot,
+  ViewportEvent,
 } from '../document-core/document.js';
+
+export type AnnotationProjectionViewportEvent = Extract<
+  ViewportEvent,
+  { readonly type: 'annotation-change' | 'annotation-snapshot' }
+>;
+
+export interface AnnotationProjectionViewportObservation {
+  readonly event: AnnotationProjectionViewportEvent;
+  readonly revision: number;
+}
+
+export function withoutViewportObservationIdentities(
+  observation: AnnotationProjectionViewportObservation,
+  identities: ReadonlySet<string>,
+): AnnotationProjectionViewportObservation | null {
+  const event = observation.event;
+  if (event.type === 'annotation-snapshot') {
+    const annotations = event.annotations.filter(
+      (annotation) => !viewportSnapshotIntersects(annotation, identities),
+    );
+    if (annotations.length === event.annotations.length) return observation;
+    if (annotations.length === 0) return null;
+    return Object.freeze({
+      ...observation,
+      event: Object.freeze({ ...event, annotations }),
+    });
+  }
+  if (event.change.operation === 'upsert')
+    return viewportSnapshotIntersects(event.change.annotation, identities) ? null : observation;
+  return identities.has(event.change.nativeId) ||
+    (event.change.provisionalId !== undefined && identities.has(event.change.provisionalId))
+    ? null
+    : observation;
+}
+
+function viewportSnapshotIntersects(
+  snapshot: ViewportAnnotationSnapshot,
+  identities: ReadonlySet<string>,
+): boolean {
+  return uniqueAliases(snapshot.nativeId, snapshot.runtimeId, snapshot.provisionalId).some(
+    (identity) => identities.has(identity),
+  );
+}
 
 export interface AnnotationProjectionEditorUpdate {
   readonly annotations: readonly DocumentAnnotation[];
@@ -41,6 +85,12 @@ export class AnnotationProjection {
   private nextKey = 0;
   private confirmedRevision = 0;
   private pendingOperations: AnnotationProjectionOperation[] = [];
+  private readonly pendingOperationIndexes = new Map<string, number[]>();
+  private readonly explicitDeletionTombstones = new Set<AnnotationProjectionDeletionTombstone>();
+  private readonly explicitDeletionTombstoneByIdentity = new Map<
+    string,
+    AnnotationProjectionDeletionTombstone
+  >();
   private readonly editorOverlays = new WeakMap<
     AnnotationProjectionRow,
     AnnotationProjectionOverlay
@@ -65,6 +115,9 @@ export class AnnotationProjection {
     this.nextKey = 0;
     this.confirmedRevision = 0;
     this.pendingOperations = [];
+    this.pendingOperationIndexes.clear();
+    this.explicitDeletionTombstones.clear();
+    this.explicitDeletionTombstoneByIdentity.clear();
   }
 
   applyEditorUpdate(update: AnnotationProjectionEditorUpdate, revision = 0): boolean {
@@ -189,6 +242,7 @@ export class AnnotationProjection {
   }
 
   upsert(snapshot: ViewportAnnotationSnapshot, revision = 0): boolean {
+    if (this.explicitDeletionTombstoneForSnapshot(snapshot) !== undefined) return false;
     const changed = this.upsertRows(snapshot);
     if (changed && revision > this.confirmedRevision) {
       const row = this.rowForSnapshot(snapshot);
@@ -257,17 +311,219 @@ export class AnnotationProjection {
     return this.removeRows(nativeId, provisionalId);
   }
 
-  private recordOperation(operation: AnnotationProjectionOperation): void {
-    for (let index = this.pendingOperations.length - 1; index >= 0; index -= 1) {
-      const pending = this.pendingOperations[index];
-      if (pending === undefined || !operationsOverlap(pending, operation)) continue;
-      if (pending.kind === operation.kind && pending.revision === operation.revision) {
-        this.pendingOperations[index] = operation;
-        return;
-      }
-      break;
+  deleteOptimistically(nativeId: string, provisionalId?: string, revision = 0): boolean {
+    const identities = provisionalId === undefined ? [nativeId] : [nativeId, provisionalId];
+    const targets = projectionRowsForIdentities(this.rows, identities);
+    if (targets.length === 0) return false;
+    for (const row of targets)
+      this.indexExplicitDeletionTombstone(new Set(rowIdentityAliases(row)), revision);
+    if (revision > this.confirmedRevision) {
+      for (const row of targets)
+        this.recordOperation(
+          Object.freeze({
+            kind: 'remove',
+            nativeId: row.nativeId,
+            ...(row.provisionalId === undefined ? {} : { provisionalId: row.provisionalId }),
+            revision,
+          }),
+        );
     }
+    return this.removeTargetRows(targets);
+  }
+
+  applyViewportBatch(observations: readonly AnnotationProjectionViewportObservation[]): boolean {
+    if (observations.length === 0) return false;
+    const index = this.buildViewportIdentityIndex();
+    let changed = false;
+    for (const observation of observations)
+      changed =
+        this.applyIndexedViewportEvent(index, observation.event, observation.revision) || changed;
+    if (changed) this.rows = index.snapshot();
+    return changed;
+  }
+
+  identityClosure(identities: Iterable<string>): ReadonlySet<string> {
+    const closure = new Set(identities);
+    for (const row of projectionRowsForIdentities(this.rows, closure))
+      for (const identity of rowIdentityAliases(row)) closure.add(identity);
+    return closure;
+  }
+
+  deletionIdentityClosureConfirmedBy(confirmedRevision: number): ReadonlySet<string> {
+    const closure = new Set<string>();
+    for (const tombstone of this.explicitDeletionTombstones) {
+      if (tombstone.revision > confirmedRevision) continue;
+      for (const identity of tombstone.identities) closure.add(identity);
+    }
+    return closure;
+  }
+
+  private buildViewportIdentityIndex(): AnnotationProjectionViewportIndex {
+    return new AnnotationProjectionViewportIndex(this.rows, this.editorOverlays);
+  }
+
+  private applyIndexedViewportEvent(
+    index: AnnotationProjectionViewportIndex,
+    event: AnnotationProjectionViewportEvent,
+    revision: number,
+  ): boolean {
+    if (event.type === 'annotation-snapshot')
+      return event.annotations.reduce(
+        (changed, annotation) =>
+          this.applyIndexedViewportUpsert(index, annotation, revision) || changed,
+        false,
+      );
+    if (event.change.operation === 'upsert')
+      return this.applyIndexedViewportUpsert(index, event.change.annotation, revision);
+    this.recordIndexedViewportRemove(event.change, revision);
+    return index.removeByIdentity(event.change.nativeId, event.change.provisionalId);
+  }
+
+  private recordIndexedViewportRemove(
+    change: Extract<ViewportAnnotationChange, { readonly operation: 'remove' }>,
+    revision: number,
+  ): void {
+    if (revision <= this.confirmedRevision) return;
+    this.recordOperation(
+      Object.freeze({
+        kind: 'remove',
+        nativeId: change.nativeId,
+        ...(change.provisionalId === undefined ? {} : { provisionalId: change.provisionalId }),
+        revision,
+      }),
+    );
+  }
+
+  private applyIndexedViewportUpsert(
+    index: AnnotationProjectionViewportIndex,
+    snapshot: ViewportAnnotationSnapshot,
+    revision: number,
+  ): boolean {
+    if (this.explicitDeletionTombstoneForSnapshot(snapshot) !== undefined) return false;
+    const matches = index.rowsForSnapshot(snapshot);
+    const current = matches[0];
+    if (current !== undefined)
+      return this.updateIndexedViewportRow(index, matches, snapshot, revision);
+    const row = this.rowFromSnapshot(`annotation-row-${String(this.nextKey++)}`, snapshot);
+    index.append(row);
+    this.recordIndexedViewportUpsert(row, snapshot, revision);
+    return true;
+  }
+
+  private updateIndexedViewportRow(
+    index: AnnotationProjectionViewportIndex,
+    matches: readonly AnnotationProjectionRow[],
+    snapshot: ViewportAnnotationSnapshot,
+    revision: number,
+  ): boolean {
+    const current = matches[0];
+    if (current === undefined) return false;
+    const overlay = this.editorOverlays.get(current);
+    if (matches.length === 1 && rowMatchesSnapshot(current, snapshot, overlay)) {
+      this.recordIndexedViewportUpsert(current, snapshot, revision);
+      return false;
+    }
+    for (const duplicate of matches.slice(1)) index.remove(duplicate);
+    const updated = this.rowFromSnapshot(current.key, snapshot, overlay, current);
+    index.replace(current, updated);
+    if (overlay !== undefined) this.editorOverlays.set(updated, overlay);
+    this.recordIndexedViewportUpsert(updated, snapshot, revision);
+    return true;
+  }
+
+  private recordIndexedViewportUpsert(
+    row: AnnotationProjectionRow,
+    snapshot: ViewportAnnotationSnapshot,
+    revision: number,
+  ): void {
+    if (revision <= this.confirmedRevision) return;
+    this.recordOperation(Object.freeze({ key: row.key, kind: 'upsert', revision, snapshot }));
+  }
+
+  private indexExplicitDeletionTombstone(identities: ReadonlySet<string>, revision: number): void {
+    const overlapping = new Set<AnnotationProjectionDeletionTombstone>();
+    const closure = new Set(identities);
+    let causalRevision = revision;
+    for (const identity of identities) {
+      const tombstone = this.explicitDeletionTombstoneByIdentity.get(identity);
+      if (tombstone !== undefined) overlapping.add(tombstone);
+    }
+    for (const tombstone of overlapping) {
+      for (const identity of tombstone.identities) closure.add(identity);
+      causalRevision = Math.max(causalRevision, tombstone.revision);
+      this.removeExplicitDeletionTombstone(tombstone);
+    }
+    const tombstone = Object.freeze({ identities: closure, revision: causalRevision });
+    this.explicitDeletionTombstones.add(tombstone);
+    for (const identity of closure)
+      this.explicitDeletionTombstoneByIdentity.set(identity, tombstone);
+  }
+
+  private explicitDeletionTombstoneForSnapshot(
+    snapshot: ViewportAnnotationSnapshot,
+  ): AnnotationProjectionDeletionTombstone | undefined {
+    for (const identity of uniqueAliases(
+      snapshot.nativeId,
+      snapshot.runtimeId,
+      snapshot.provisionalId,
+    )) {
+      const tombstone = this.explicitDeletionTombstoneByIdentity.get(identity);
+      if (tombstone !== undefined) return tombstone;
+    }
+    return undefined;
+  }
+
+  private removeExplicitDeletionTombstone(tombstone: AnnotationProjectionDeletionTombstone): void {
+    this.explicitDeletionTombstones.delete(tombstone);
+    for (const identity of tombstone.identities) {
+      if (this.explicitDeletionTombstoneByIdentity.get(identity) === tombstone)
+        this.explicitDeletionTombstoneByIdentity.delete(identity);
+    }
+  }
+
+  private releaseConfirmedDeletionTombstones(confirmedRevision: number): void {
+    for (const tombstone of this.explicitDeletionTombstones) {
+      if (tombstone.revision <= confirmedRevision) this.removeExplicitDeletionTombstone(tombstone);
+    }
+  }
+
+  private recordOperation(operation: AnnotationProjectionOperation): void {
+    const overlappingIndex = this.latestOverlappingOperationIndex(operation);
+    const pending = overlappingIndex < 0 ? undefined : this.pendingOperations[overlappingIndex];
+    if (pending?.kind === operation.kind && pending.revision === operation.revision) {
+      this.pendingOperations[overlappingIndex] = operation;
+      this.indexPendingOperation(operation, overlappingIndex);
+      return;
+    }
+    const index = this.pendingOperations.length;
     this.pendingOperations.push(operation);
+    this.indexPendingOperation(operation, index);
+  }
+
+  private latestOverlappingOperationIndex(operation: AnnotationProjectionOperation): number {
+    let latest = -1;
+    for (const identity of operationIds(operation)) {
+      const indexes = this.pendingOperationIndexes.get(identity);
+      if (indexes === undefined) continue;
+      removeStaleOperationIndexes(indexes, identity, this.pendingOperations);
+      latest = Math.max(latest, indexes[indexes.length - 1] ?? -1);
+    }
+    return latest;
+  }
+
+  private indexPendingOperation(operation: AnnotationProjectionOperation, index: number): void {
+    for (const identity of operationIds(operation)) {
+      const indexes = this.pendingOperationIndexes.get(identity);
+      if (indexes === undefined) this.pendingOperationIndexes.set(identity, [index]);
+      else if (indexes[indexes.length - 1] !== index) indexes.push(index);
+    }
+  }
+
+  private rebuildPendingOperationIndexes(): void {
+    this.pendingOperationIndexes.clear();
+    this.pendingOperations.forEach((operation, index) => {
+      this.indexPendingOperation(operation, index);
+    });
   }
 
   private removeRows(nativeId: string, provisionalId?: string): boolean {
@@ -284,6 +540,10 @@ export class AnnotationProjection {
       )
         targets.push(provisional);
     }
+    return this.removeTargetRows(targets);
+  }
+
+  private removeTargetRows(targets: readonly AnnotationProjectionRow[]): boolean {
     const removedKeys = new Set(targets.map((row) => row.key));
     if (removedKeys.size === 0) return false;
     this.rows = this.rows.filter((row) => {
@@ -304,8 +564,12 @@ export class AnnotationProjection {
     if (confirmedRevision < this.confirmedRevision) return false;
     const previous = this.rows;
     this.releaseConfirmedOverlays(confirmedRevision);
+    this.releaseConfirmedDeletionTombstones(confirmedRevision);
+    const visibleVerified = verified.filter(
+      (annotation) => !this.explicitDeletionTombstoneByIdentity.has(annotationId(annotation)),
+    );
     const next = this.rowsFromVerified(
-      verified,
+      visibleVerified,
       options.retainUnmatched === true,
       confirmedRevision,
     );
@@ -352,6 +616,7 @@ export class AnnotationProjection {
     this.pendingOperations = this.pendingOperations.filter(
       (operation) => operation.revision > this.confirmedRevision,
     );
+    this.rebuildPendingOperationIndexes();
     this.rows = next;
     for (const operation of this.pendingOperations) this.replay(operation);
   }
@@ -690,6 +955,166 @@ type AnnotationProjectionOperation =
       readonly revision: number;
       readonly snapshot: ViewportAnnotationSnapshot;
     };
+
+interface AnnotationProjectionDeletionTombstone {
+  readonly identities: ReadonlySet<string>;
+  readonly revision: number;
+}
+
+class AnnotationProjectionViewportIndex {
+  private readonly rows: Array<AnnotationProjectionRow | undefined>;
+  private readonly slotByKey = new Map<string, number>();
+  private readonly native = new Map<string, Set<AnnotationProjectionRow>>();
+  private readonly runtime = new Map<string, Set<AnnotationProjectionRow>>();
+  private readonly provisional = new Map<string, Set<AnnotationProjectionRow>>();
+  private readonly annotation = new Map<string, Set<AnnotationProjectionRow>>();
+  private readonly aliases = new Map<string, Set<AnnotationProjectionRow>>();
+
+  constructor(
+    rows: readonly AnnotationProjectionRow[],
+    private readonly overlays: WeakMap<AnnotationProjectionRow, AnnotationProjectionOverlay>,
+  ) {
+    this.rows = [...rows];
+    rows.forEach((row, index) => {
+      this.slotByKey.set(row.key, index);
+      this.indexRow(row);
+    });
+  }
+
+  rowsForSnapshot(snapshot: ViewportAnnotationSnapshot): AnnotationProjectionRow[] {
+    const identities =
+      snapshot.provisionalId === undefined
+        ? [snapshot.nativeId]
+        : [snapshot.provisionalId, snapshot.nativeId];
+    const resolved = new Map<string, AnnotationProjectionRow>();
+    for (const identity of identities) {
+      const row = this.rowForIdentity(identity);
+      if (row !== undefined) resolved.set(row.key, row);
+    }
+    return [...resolved.values()];
+  }
+
+  removeByIdentity(nativeId: string, provisionalId?: string): boolean {
+    const targets = new Map<string, AnnotationProjectionRow>();
+    const native = this.rowForRemovalIdentity(nativeId);
+    if (native !== undefined) targets.set(native.key, native);
+    if (provisionalId !== undefined) {
+      const provisional = uniqueIndexedRow(
+        this.provisional.get(provisionalId),
+        (row) => row.provisionalId === provisionalId,
+      );
+      if (provisional !== null && provisional !== undefined)
+        targets.set(provisional.key, provisional);
+    }
+    for (const row of targets.values()) this.remove(row);
+    return targets.size > 0;
+  }
+
+  append(row: AnnotationProjectionRow): void {
+    this.slotByKey.set(row.key, this.rows.length);
+    this.rows.push(row);
+    this.indexRow(row);
+  }
+
+  replace(current: AnnotationProjectionRow, updated: AnnotationProjectionRow): void {
+    const slot = this.slotByKey.get(current.key);
+    if (slot === undefined) return;
+    this.unindexRow(current);
+    this.rows[slot] = updated;
+    this.indexRow(updated);
+  }
+
+  remove(row: AnnotationProjectionRow): void {
+    const slot = this.slotByKey.get(row.key);
+    if (slot === undefined) return;
+    this.slotByKey.delete(row.key);
+    this.unindexRow(row);
+    this.rows[slot] = undefined;
+    this.overlays.delete(row);
+  }
+
+  snapshot(): AnnotationProjectionRow[] {
+    return this.rows.filter((row): row is AnnotationProjectionRow => row !== undefined);
+  }
+
+  private rowForIdentity(identity: string): AnnotationProjectionRow | undefined {
+    for (const tier of [
+      this.native,
+      this.runtime,
+      this.provisional,
+      this.annotation,
+      this.aliases,
+    ]) {
+      const row = uniqueIndexedRow(tier.get(identity));
+      if (row !== null) return row;
+    }
+    return undefined;
+  }
+
+  private rowForRemovalIdentity(identity: string): AnnotationProjectionRow | undefined {
+    for (const tier of [this.native, this.runtime, this.annotation]) {
+      const row = uniqueIndexedRow(tier.get(identity));
+      if (row !== null) return row;
+    }
+    const provisional = uniqueIndexedRow(this.provisional.get(identity), (row) =>
+      isPendingSelectionPreview(row),
+    );
+    return provisional ?? undefined;
+  }
+
+  private indexRow(row: AnnotationProjectionRow): void {
+    addIndexedRow(this.native, row.nativeId, row);
+    addIndexedRow(this.runtime, row.runtimeId, row);
+    addIndexedRow(this.provisional, row.provisionalId, row);
+    addIndexedRow(this.annotation, annotationId(row.annotation), row);
+    for (const alias of row.aliases ?? []) addIndexedRow(this.aliases, alias, row);
+  }
+
+  private unindexRow(row: AnnotationProjectionRow): void {
+    removeIndexedRow(this.native, row.nativeId, row);
+    removeIndexedRow(this.runtime, row.runtimeId, row);
+    removeIndexedRow(this.provisional, row.provisionalId, row);
+    removeIndexedRow(this.annotation, annotationId(row.annotation), row);
+    for (const alias of row.aliases ?? []) removeIndexedRow(this.aliases, alias, row);
+  }
+}
+
+function addIndexedRow(
+  index: Map<string, Set<AnnotationProjectionRow>>,
+  identity: string | undefined,
+  row: AnnotationProjectionRow,
+): void {
+  if (identity === undefined) return;
+  const rows = index.get(identity);
+  if (rows === undefined) index.set(identity, new Set([row]));
+  else rows.add(row);
+}
+
+function removeIndexedRow(
+  index: Map<string, Set<AnnotationProjectionRow>>,
+  identity: string | undefined,
+  row: AnnotationProjectionRow,
+): void {
+  if (identity === undefined) return;
+  const rows = index.get(identity);
+  if (rows === undefined) return;
+  rows.delete(row);
+  if (rows.size === 0) index.delete(identity);
+}
+
+function uniqueIndexedRow(
+  rows: ReadonlySet<AnnotationProjectionRow> | undefined,
+  predicate: (row: AnnotationProjectionRow) => boolean = () => true,
+): AnnotationProjectionRow | undefined | null {
+  if (rows === undefined) return null;
+  let match: AnnotationProjectionRow | null = null;
+  for (const row of rows) {
+    if (!predicate(row)) continue;
+    if (match !== null) return undefined;
+    match = row;
+  }
+  return match;
+}
 
 function editorOverlay(
   current: AnnotationProjectionOverlay | undefined,
@@ -1226,15 +1651,17 @@ function isPendingSelectionPreview(row: AnnotationProjectionRow): boolean {
   return row.provisionalId !== undefined && row.nativeId === row.provisionalId;
 }
 
-function operationsOverlap(
-  left: AnnotationProjectionOperation,
-  right: AnnotationProjectionOperation,
-): boolean {
-  const leftIds = operationIds(left);
-  for (const id of operationIds(right)) {
-    if (leftIds.has(id)) return true;
+function removeStaleOperationIndexes(
+  indexes: number[],
+  identity: string,
+  operations: readonly AnnotationProjectionOperation[],
+): void {
+  while (indexes.length > 0) {
+    const index = indexes[indexes.length - 1];
+    const operation = index === undefined ? undefined : operations[index];
+    if (operation !== undefined && operationIds(operation).has(identity)) return;
+    indexes.pop();
   }
-  return false;
 }
 
 function operationIds(operation: AnnotationProjectionOperation): Set<string> {
