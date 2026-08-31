@@ -130,6 +130,198 @@ describe('PdfDomSelectionObserver', () => {
     observer.destroy();
   });
 
+  it('publishes pointerup before a same-turn render of the unchanged selected text layer', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text, 2, 10);
+    dispatchSelection(document);
+    primaryPointer(text, 'pointerup');
+    observer.handleTextLayerRendered(2);
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ input: 'pointer', pageIndex: 2, text: 'selected' }),
+    );
+    await nextFrame();
+    expect(listener).toHaveBeenCalledOnce();
+    observer.destroy();
+  });
+
+  it('invalidates the pending pointer snapshot when its selected text layer is replaced', async () => {
+    const root = selectionRoot();
+    const layer = root.querySelector<HTMLElement>('.textLayer');
+    const text = layer?.firstChild;
+    if (layer === null || text?.nodeType !== Node.TEXT_NODE)
+      throw new Error('Expected a text layer and text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text, 2, 10);
+    dispatchSelection(document);
+    primaryPointer(text, 'pointerup');
+    const replacement = createDiv({ cls: 'textLayer' });
+    replacement.append(document.createTextNode('Replacement text layer'));
+    layer.replaceWith(replacement);
+    document.getSelection()?.removeAllRanges();
+    dispatchSelection(document);
+    observer.handleTextLayerRendered(2);
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(null);
+    expect(observer.validate('unpublished-selection')).toBe('stale');
+    expect(observer.restore('unpublished-selection')).toBe('stale');
+    await nextFrame();
+    expect(listener).toHaveBeenCalledOnce();
+    observer.destroy();
+  });
+
+  it('does not publish a pending pointer snapshot for another page render', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text, 2, 10);
+    dispatchSelection(document);
+    primaryPointer(text, 'pointerup');
+    observer.handleTextLayerRendered(0);
+
+    expect(listener).not.toHaveBeenCalled();
+    await nextFrame();
+    expect(listener).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ input: 'pointer', pageIndex: 2, text: 'selected' }),
+    );
+    observer.destroy();
+  });
+
+  it('does not flush a pending collapsed pointer selection for another page render', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    document.getSelection()?.removeAllRanges();
+    dispatchSelection(document);
+    primaryPointer(text, 'pointerup');
+    observer.handleTextLayerRendered(0);
+
+    expect(listener).not.toHaveBeenCalled();
+    await nextFrame();
+    expect(listener).toHaveBeenCalledExactlyOnceWith(null);
+    observer.destroy();
+  });
+
+  it('keeps a finalized selection across unrelated page renders', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'pointer');
+    await nextFrame();
+    const finalized = listener.mock.calls[0]?.[0];
+    if (finalized === null || finalized === undefined)
+      throw new Error('Expected a finalized selection.');
+
+    observer.handleTextLayerRendered(0);
+    observer.handleTextLayerRendered(1);
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(finalized);
+    expect(observer.validate(finalized.token)).toBe('current');
+    observer.destroy();
+  });
+
+  it('keeps a finalized selection when its page reports the same connected text layer', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'pointer');
+    await nextFrame();
+    const finalized = listener.mock.calls[0]?.[0];
+    if (finalized === null || finalized === undefined)
+      throw new Error('Expected a finalized selection.');
+
+    observer.handleTextLayerRendered(2);
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(finalized);
+    expect(observer.validate(finalized.token)).toBe('current');
+    observer.destroy();
+  });
+
+  it('invalidates a finalized selection only when its captured text layer is replaced', async () => {
+    const root = selectionRoot();
+    const layer = root.querySelector<HTMLElement>('.textLayer');
+    const text = layer?.firstChild;
+    if (layer === null || text?.nodeType !== Node.TEXT_NODE)
+      throw new Error('Expected a text layer and text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'pointer');
+    await nextFrame();
+    const finalized = listener.mock.calls[0]?.[0];
+    if (finalized === null || finalized === undefined)
+      throw new Error('Expected a finalized selection.');
+    const replacement = createDiv({ cls: 'textLayer' });
+    replacement.append(document.createTextNode('Replacement text layer'));
+
+    layer.replaceWith(replacement);
+    observer.handleTextLayerRendered(2);
+
+    expect(listener.mock.calls.map(([selection]) => selection)).toEqual([finalized, null]);
+    expect(observer.validate(finalized.token)).toBe('stale');
+    observer.destroy();
+  });
+
+  it('clears both pending and finalized selections on explicit lifecycle invalidation', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text, 2, 6);
+    dispatchSelection(document);
+    primaryPointer(text, 'pointerup');
+    observer.invalidate();
+    await nextFrame();
+    expect(listener.mock.calls.map(([selection]) => selection)).toEqual([null]);
+
+    root.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowRight' }));
+    selectText(document, text, 2, 10);
+    dispatchSelection(document);
+    await nextFrame();
+    const finalized = listener.mock.calls[1]?.[0];
+    if (finalized === null || finalized === undefined)
+      throw new Error('Expected a finalized selection.');
+    observer.invalidate();
+
+    expect(listener.mock.calls.map(([selection]) => selection)).toEqual([null, finalized, null]);
+    expect(observer.validate(finalized.token)).toBe('stale');
+    observer.destroy();
+  });
+
   it('does not revive a drag selection after lifecycle invalidation', async () => {
     const root = selectionRoot();
     const text = root.querySelector('.textLayer')?.firstChild;
@@ -348,6 +540,27 @@ describe('PdfDomSelectionObserver', () => {
     expect(selections).toHaveLength(1);
   });
 
+  it('publishes only the latest immutable keyboard range scheduled for one frame', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    root.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowRight' }));
+
+    selectText(document, text, 0, 1);
+    dispatchSelection(document);
+    selectText(document, text, 2, 10);
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ input: 'keyboard', text: 'selected' }),
+    );
+    observer.destroy();
+  });
+
   it('dismisses collapsed outside and cross-page selections', async () => {
     const root = selectionRoot();
     const secondLayer = root.createDiv({ cls: 'textLayer' });
@@ -380,6 +593,30 @@ describe('PdfDomSelectionObserver', () => {
     await nextFrame();
 
     expect(selections).toEqual([null, null, null]);
+  });
+
+  it('cannot restore a finalized selection after a null publication clears it', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const selections: Array<PdfTextSelection | null> = [];
+    observer.onSelection((selection) => selections.push(selection));
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const finalized = selections[0];
+    if (finalized === null || finalized === undefined)
+      throw new Error('Expected a finalized selection.');
+
+    document.getSelection()?.removeAllRanges();
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(selections).toEqual([finalized, null]);
+    expect(observer.validate(finalized.token)).toBe('stale');
+    expect(observer.restore(finalized.token)).toBe('stale');
+    observer.destroy();
   });
 
   it('invalidates rapid reselection and stale action clicks', async () => {

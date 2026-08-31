@@ -802,11 +802,12 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.onScaleChanging(event);
     });
     this.bind('pagerendered', (event) => {
-      this.selectionObserverInstance?.invalidate();
       this.onPageRendered(event);
     });
-    this.bind('textlayerrendered', () => {
-      this.selectionObserverInstance?.invalidate();
+    this.bind('textlayerrendered', (event) => {
+      const pageNumber = positiveInteger(record(event)?.['pageNumber']);
+      if (pageNumber !== null)
+        this.selectionObserverInstance?.handleTextLayerRendered(pageNumber - 1);
       incrementReaderCounter('firstTextLayers');
       markReaderPerformanceOnce('first-text-layer');
       markReaderPerformance('text-layer');

@@ -51,6 +51,48 @@ async function nextFrame(): Promise<void> {
   });
 }
 
+function schedulePointerSelection(host: HTMLElement, pageNumber = 1): void {
+  if (!host.isConnected) document.body.append(host);
+  const root = host.querySelector<HTMLElement>('.pdfViewerContainer');
+  const page = host.querySelector<HTMLElement>(`[data-page-number="${String(pageNumber)}"]`);
+  if (root === null || page === null) throw new Error('Expected a mounted PDF page.');
+  const layer = page.createDiv({ cls: 'textLayer' });
+  const text = document.createTextNode('Pending viewport selection');
+  layer.append(text);
+  root.dispatchEvent(
+    new PointerEvent('pointerdown', {
+      bubbles: true,
+      button: 0,
+      isPrimary: true,
+      pointerId: 41,
+      pointerType: 'mouse',
+    }),
+  );
+  const range = document.createRange();
+  range.setStart(text, 0);
+  range.setEnd(text, 7);
+  Object.defineProperty(range, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => DOMRect.fromRect({ height: 12, width: 80, x: 10, y: 20 }),
+  });
+  Object.defineProperty(range, 'getClientRects', {
+    configurable: true,
+    value: () => [DOMRect.fromRect({ height: 12, width: 80, x: 10, y: 20 })],
+  });
+  document.getSelection()?.removeAllRanges();
+  document.getSelection()?.addRange(range);
+  document.dispatchEvent(new Event('selectionchange'));
+  text.dispatchEvent(
+    new PointerEvent('pointerup', {
+      bubbles: true,
+      button: 0,
+      isPrimary: true,
+      pointerId: 41,
+      pointerType: 'mouse',
+    }),
+  );
+}
+
 class FakeEventBus {
   readonly dispatched: Array<{ name: string; data: Record<string, unknown> }> = [];
   readonly listeners = new Map<string, Set<Listener>>();
@@ -1834,7 +1876,32 @@ describe('PdfDocumentViewport', () => {
     expect(invalidate).not.toHaveBeenCalled();
   });
 
-  it('invalidates on rerender zoom layout navigation save and session change', async () => {
+  it('preserves selection on page paint and routes only text-layer identity events', async () => {
+    const fixture = await mountedViewport(3);
+    const eventBus = fixture.runtime.state.eventBus;
+    if (eventBus === undefined) throw new Error('Expected a fake event bus.');
+    const observer = (
+      fixture.viewport as unknown as {
+        readonly selectionObserver: {
+          handleTextLayerRendered(pageIndex: number): void;
+          invalidate(): void;
+        };
+      }
+    ).selectionObserver;
+    const invalidate = vi.spyOn(observer, 'invalidate');
+    const handleTextLayerRendered = vi.spyOn(observer, 'handleTextLayerRendered');
+
+    eventBus.dispatch('pagerendered', { pageNumber: 1 });
+    eventBus.dispatch('pagerendered', { pageNumber: 2 });
+    eventBus.dispatch('textlayerrendered', { pageNumber: 1 });
+    eventBus.dispatch('textlayerrendered', { pageNumber: 3 });
+    eventBus.dispatch('textlayerrendered', { pageNumber: 'invalid' });
+
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(handleTextLayerRendered.mock.calls).toEqual([[0], [2]]);
+  });
+
+  it('invalidates selection on zoom layout navigation document rebind and session change', async () => {
     const fixture = await mountedViewport(3);
     const eventBus = fixture.runtime.state.eventBus;
     if (eventBus === undefined) throw new Error('Expected a fake event bus.');
@@ -1843,15 +1910,113 @@ describe('PdfDocumentViewport', () => {
     ).selectionObserver;
     const invalidate = vi.spyOn(observer, 'invalidate');
 
-    eventBus.dispatch('pagerendered', { pageNumber: 1 });
-    eventBus.dispatch('textlayerrendered', { pageNumber: 1 });
+    eventBus.dispatch('pagesinit', {});
+    let previousCalls = invalidate.mock.calls.length;
     fixture.viewport.setScale(1.5);
+    expect(invalidate.mock.calls.length).toBeGreaterThan(previousCalls);
+    previousCalls = invalidate.mock.calls.length;
     fixture.viewport.setLayout({ pages: 'facing', scrolling: 'page-by-page' });
+    expect(invalidate.mock.calls.length).toBeGreaterThan(previousCalls);
+    previousCalls = invalidate.mock.calls.length;
     await fixture.viewport.goTo({ pageIndex: 1 });
-    observer.invalidate(); // save
+    expect(invalidate.mock.calls.length).toBeGreaterThan(previousCalls);
+    previousCalls = invalidate.mock.calls.length;
+    fixture.viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#5b4636',
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
+    eventBus.dispatch('pagesinit', {});
+    expect(invalidate.mock.calls.length).toBeGreaterThan(previousCalls);
+    previousCalls = invalidate.mock.calls.length;
     observer.invalidate(); // session change
 
-    expect(invalidate).toHaveBeenCalledTimes(7);
+    expect(invalidate.mock.calls).toHaveLength(previousCalls + 1);
+  });
+
+  it('clears pending and finalized selection across the actual document rebind lifecycle', async () => {
+    const pendingFixture = await mountedViewport(3);
+    const pendingBus = pendingFixture.runtime.state.eventBus;
+    if (pendingBus === undefined) throw new Error('Expected a fake event bus.');
+    const pendingEvents: Array<PdfTextSelection | null> = [];
+    pendingFixture.viewport.selectionObserver.onSelection((selection) => {
+      pendingEvents.push(selection);
+    });
+    pendingBus.dispatch('pagesinit', {});
+    schedulePointerSelection(pendingFixture.host);
+
+    pendingFixture.viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#5b4636',
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
+    pendingBus.dispatch('pagesinit', {});
+    const pendingEventCount = pendingEvents.length;
+    await nextFrame();
+
+    expect(pendingEventCount).toBeGreaterThan(0);
+    expect(pendingEvents).toHaveLength(pendingEventCount);
+    expect(pendingEvents.every((selection) => selection === null)).toBe(true);
+    await pendingFixture.viewport.destroy();
+    pendingFixture.host.remove();
+
+    const finalizedFixture = await mountedViewport(3);
+    const finalizedBus = finalizedFixture.runtime.state.eventBus;
+    if (finalizedBus === undefined) throw new Error('Expected a fake event bus.');
+    const finalizedEvents: Array<PdfTextSelection | null> = [];
+    finalizedFixture.viewport.selectionObserver.onSelection((selection) => {
+      finalizedEvents.push(selection);
+    });
+    finalizedBus.dispatch('pagesinit', {});
+    schedulePointerSelection(finalizedFixture.host);
+    await nextFrame();
+    const finalizedIndex = finalizedEvents.findIndex((selection) => selection !== null);
+    const finalized = finalizedEvents[finalizedIndex];
+    if (finalized === null || finalized === undefined)
+      throw new Error('Expected a finalized viewport selection.');
+
+    finalizedFixture.viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#5b4636',
+      brightness: 1,
+      contrast: 1,
+      imageDim: 0,
+    });
+    finalizedBus.dispatch('pagesinit', {});
+    const finalizedEventCount = finalizedEvents.length;
+    await nextFrame();
+
+    expect(finalizedEventCount).toBeGreaterThan(finalizedIndex + 1);
+    expect(finalizedEvents).toHaveLength(finalizedEventCount);
+    expect(finalizedEvents[finalizedIndex]).toBe(finalized);
+    expect(finalizedEvents.slice(finalizedIndex + 1).every((selection) => selection === null)).toBe(
+      true,
+    );
+    expect(finalizedFixture.viewport.selectionObserver.validate(finalized.token)).toBe('stale');
+    await finalizedFixture.viewport.destroy();
+    finalizedFixture.host.remove();
+  });
+
+  it('destroys the selection observer with the viewport lifecycle', async () => {
+    const fixture = await mountedViewport(3);
+    const observer = (
+      fixture.viewport as unknown as { readonly selectionObserver: { destroy(): void } }
+    ).selectionObserver;
+    const destroy = vi.spyOn(observer, 'destroy');
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    fixture.viewport.selectionObserver.onSelection(listener);
+    schedulePointerSelection(fixture.host);
+
+    await fixture.viewport.destroy();
+    await nextFrame();
+
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(listener).not.toHaveBeenCalled();
+    fixture.host.remove();
   });
 
   it('marks only the successfully rendered page canvas as usable', async () => {

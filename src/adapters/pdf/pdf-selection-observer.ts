@@ -37,6 +37,17 @@ interface ActiveSelection extends SelectionIdentity {
   readonly token: string;
 }
 
+interface CapturedSelection extends SelectionIdentity {
+  readonly clientRect: PdfSelectionRect;
+  readonly clientRects: readonly PdfSelectionRect[];
+  readonly input: PdfTextSelection['input'];
+}
+
+interface PendingSelectionPublication {
+  readonly pageIndex: number | null;
+  readonly selection: CapturedSelection | null;
+}
+
 let nextObserverSession = 0;
 let nextSelectionIdentity = 0;
 
@@ -47,6 +58,7 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   private readonly session = ++nextObserverSession;
   private active: ActiveSelection | null = null;
   private frame: number | null = null;
+  private pendingPublication: PendingSelectionPublication | null = null;
   private revision = 0;
   private input: PdfTextSelection['input'] = 'keyboard';
   private pointerGesture: {
@@ -109,10 +121,32 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     return this.validate(token);
   }
 
+  handleTextLayerRendered(pageIndex: number): void {
+    if (this.destroyed) return;
+    const pending = this.pendingPublication;
+    if (pending !== null) {
+      if (pending.pageIndex !== pageIndex) return;
+      if (pending.selection !== null && !this.isCurrentTextLayer(pending.selection)) {
+        this.pendingPublication = null;
+        this.suppressPointerSelection = true;
+        this.cancelFrame();
+        this.publishCapturedSelection(null);
+        return;
+      }
+      this.publishPendingSelection();
+      return;
+    }
+    const active = this.active;
+    if (active?.pageIndex !== pageIndex) return;
+    if (this.isCurrentTextLayer(active)) return;
+    this.dismissPublishedSelection();
+  }
+
   invalidate(): void {
     if (this.destroyed) return;
     this.revision += 1;
     this.active = null;
+    this.pendingPublication = null;
     this.pointerGesture = null;
     this.touchGesture = false;
     this.suppressPointerSelection = true;
@@ -124,6 +158,7 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     if (this.destroyed) return;
     this.destroyed = true;
     this.active = null;
+    this.pendingPublication = null;
     this.cancelFrame();
     this.ownerDocument.removeEventListener('selectionchange', this.onSelectionChange);
     this.root.removeEventListener('pointerdown', this.onPointerDown);
@@ -140,21 +175,33 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   private readonly onSelectionChange = (): void => {
     if (
       this.destroyed ||
-      this.frame !== null ||
       this.pointerGesture !== null ||
       this.touchGesture ||
       this.suppressPointerSelection
     )
       return;
-    this.schedulePublication();
+    if (this.pendingPublication !== null && this.input !== 'keyboard') return;
+    const publication = this.capturePendingPublication();
+    if (publication.selection === null && this.active !== null && this.input !== 'keyboard') return;
+    this.schedulePublication(publication);
   };
 
-  private schedulePublication(): void {
-    if (this.destroyed || this.frame !== null) return;
+  private schedulePublication(publication: PendingSelectionPublication): void {
+    if (this.destroyed) return;
+    this.pendingPublication = publication;
+    if (this.frame !== null) return;
     this.frame = this.ownerWindow.requestAnimationFrame(() => {
       this.frame = null;
-      this.publishCurrentSelection();
+      this.publishPendingSelection();
     });
+  }
+
+  private publishPendingSelection(): void {
+    const publication = this.pendingPublication;
+    if (publication === null) return;
+    this.pendingPublication = null;
+    this.cancelFrame();
+    this.publishCapturedSelection(publication.selection);
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
@@ -214,7 +261,7 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
       return;
     }
     this.suppressPointerSelection = false;
-    this.schedulePublication();
+    this.schedulePublication(this.capturePendingPublication(event));
   };
 
   private readonly onTouchCancel = (): void => {
@@ -233,29 +280,49 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
       return;
     }
     this.suppressPointerSelection = false;
-    this.schedulePublication();
+    this.schedulePublication(this.capturePendingPublication(event));
   };
 
-  private publishCurrentSelection(): void {
-    const identity = this.selectionIdentity();
-    if (identity === null) {
+  private publishCapturedSelection(selection: CapturedSelection | null): void {
+    if (selection === null) {
       this.revision += 1;
+      this.active = null;
       this.emit(null);
       return;
     }
-    if (this.active !== null && sameSelection(identity, this.active)) return;
+    if (this.active !== null && sameSelection(selection, this.active)) return;
     this.revision += 1;
     const token = `${this.session}.${this.revision}.${++nextSelectionIdentity}`;
-    this.active = { ...identity, token };
-    const range = this.ownerDocument.getSelection()?.getRangeAt(0) ?? null;
+    this.active = { ...selection, token };
     this.emit({
       token,
-      text: identity.text,
-      pageIndex: identity.pageIndex,
+      text: selection.text,
+      pageIndex: selection.pageIndex,
+      clientRect: selection.clientRect,
+      clientRects: selection.clientRects,
+      input: selection.input,
+    });
+  }
+
+  private capturePendingPublication(event?: Event): PendingSelectionPublication {
+    const selection = this.captureSelection();
+    return {
+      selection,
+      pageIndex:
+        selection?.pageIndex ?? eventPageIndex(event, this.root) ?? this.active?.pageIndex ?? null,
+    };
+  }
+
+  private captureSelection(): CapturedSelection | null {
+    const identity = this.selectionIdentity();
+    if (identity === null) return null;
+    const range = this.ownerDocument.getSelection()?.getRangeAt(0) ?? null;
+    return {
+      ...identity,
       clientRect: selectionRect(range),
       clientRects: selectionRects(range),
       input: this.input,
-    });
+    };
   }
 
   private selectionIdentity(): SelectionIdentity | null {
@@ -284,12 +351,21 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     };
   }
 
+  private isCurrentTextLayer(selection: SelectionIdentity): boolean {
+    const { textLayer } = selection;
+    if (!textLayer.isConnected || !this.root.contains(textLayer)) return false;
+    const page = textLayer.closest<HTMLElement>('[data-page-number]');
+    if (page === null || !this.root.contains(page)) return false;
+    return page.querySelector('.textLayer') === textLayer;
+  }
+
   private emit(selection: PdfTextSelection | null): void {
     for (const listener of this.listeners) listener(selection);
   }
 
   private dismissPublishedSelection(): void {
     this.cancelFrame();
+    this.pendingPublication = null;
     if (this.active === null) return;
     this.revision += 1;
     this.active = null;
@@ -330,6 +406,15 @@ function eventTargetInside(event: Event, root: HTMLElement): boolean {
   if (point !== null && pointOutside(point, root.getBoundingClientRect())) return false;
   const target = event.target;
   return target !== null && 'nodeType' in target && root.contains(target as Node);
+}
+
+function eventPageIndex(event: Event | undefined, root: HTMLElement): number | null {
+  const target = event?.target;
+  if (target === null || target === undefined || !('nodeType' in target)) return null;
+  const node = target as Node;
+  if (!root.contains(node)) return null;
+  const element = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+  return element === null ? null : selectionPageIndex(element);
 }
 
 function eventClientPoint(event: Event): { readonly x: number; readonly y: number } | null {
