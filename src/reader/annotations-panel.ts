@@ -143,7 +143,7 @@ export class AnnotationsPanel {
     this.status = createStatus(owner);
     this.contextStatus = createContextStatus(owner);
     this.controls = owner.createDiv();
-    this.controls.className = 'abyss-annotation-controls';
+    this.controls.className = 'abyss-reader-panel-searchbar abyss-annotation-controls';
     this.query = owner.createEl('input');
     configureTextSearchInput(this.query);
     this.query.placeholder = 'Filter annotations';
@@ -1028,9 +1028,9 @@ export class AnnotationsPanel {
   private renderState(): void {
     this.root.dataset['annotationState'] = this.state;
     const hasControls = this.state === 'content' || this.state === 'filtered-empty';
-    this.controls.hidden = !hasControls;
+    this.controls.hidden = false;
     this.footer.hidden = !hasControls || this.displayColors.length === 0;
-    this.query.hidden = !hasControls;
+    this.query.hidden = false;
     this.list.hidden = this.state !== 'content';
     this.status.hidden =
       this.state === 'content' || (this.state === 'loading' && !this.loadingVisible);

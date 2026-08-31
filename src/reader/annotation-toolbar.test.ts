@@ -1,4 +1,4 @@
-import { Menu } from 'obsidian';
+import { addIcon, Menu } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import { AnnotationToolbar } from './annotation-toolbar.js';
 
@@ -38,7 +38,7 @@ describe('AnnotationToolbar', () => {
       Array.from(host.querySelectorAll<HTMLElement>('[data-annotation-tool]')).map(
         (button) => button.dataset['annotationTool'],
       ),
-    ).toEqual(['highlight', 'ink', 'freetext']);
+    ).toEqual(['select', 'highlight', 'ink', 'freetext']);
     expect(host.textContent).not.toContain('Underline');
     expect(host.textContent).not.toContain('Text Note');
     expect(
@@ -63,6 +63,30 @@ describe('AnnotationToolbar', () => {
     expect(
       host.querySelector('[data-annotation-tool="highlight"]')?.getAttribute('aria-label'),
     ).toContain('Key idea');
+    toolbar.destroy();
+    host.remove();
+  });
+
+  it('renders Select first as the default unsplit annotation control', () => {
+    addIcon('mouse-pointer-2', '<path data-select-icon="true" />');
+    const host = document.body.createDiv();
+    const onIntent = vi.fn();
+    const toolbar = new AnnotationToolbar(host, palette, null, onIntent);
+    const select = host.querySelector<HTMLButtonElement>('[data-annotation-tool="select"]');
+
+    expect(toolbar.root.firstElementChild).toBe(select);
+    expect(select?.getAttribute('aria-label')).toBe('Select');
+    expect(select?.getAttribute('aria-pressed')).toBe('true');
+    expect(select?.closest('.abyss-reader-split-control')).toBeNull();
+    expect(select?.getAttribute('aria-haspopup')).toBeNull();
+    expect(select?.querySelector('.abyss-reader-tool-color')).toBeNull();
+    expect(select?.querySelector('[data-select-icon="true"]')).not.toBeNull();
+    expect(select?.type).toBe('button');
+
+    select?.click();
+    expect(onIntent).toHaveBeenCalledOnce();
+    expect(onIntent).toHaveBeenCalledWith({ type: 'set-annotation-tool', tool: 'select' });
+
     toolbar.destroy();
     host.remove();
   });
@@ -513,8 +537,18 @@ describe('AnnotationToolbar', () => {
       'Signed PDF documents are opened read-only to preserve signatures.',
       vi.fn(),
     );
+    expect(host.querySelector<HTMLButtonElement>('[data-annotation-tool="select"]')?.disabled).toBe(
+      false,
+    );
     expect(
-      Array.from(host.querySelectorAll<HTMLButtonElement>('[data-annotation-tool]')).every(
+      Array.from(
+        host.querySelectorAll<HTMLButtonElement>(
+          '[data-annotation-tool]:not([data-annotation-tool="select"])',
+        ),
+      ).every((button) => button.disabled),
+    ).toBe(true);
+    expect(
+      Array.from(host.querySelectorAll<HTMLButtonElement>('.abyss-reader-split-menu')).every(
         (button) => button.disabled,
       ),
     ).toBe(true);

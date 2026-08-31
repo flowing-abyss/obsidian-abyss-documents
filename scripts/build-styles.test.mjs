@@ -168,6 +168,34 @@ describe('PDF.js style build', () => {
     });
   });
 
+  it('uses one native search geometry for every sidebar panel', async () => {
+    const root = postcss.parse(await readFile('styles.css', 'utf8'));
+    const searchbar = topLevelDeclarations(root, '.abyss-documents .abyss-reader-panel-searchbar');
+    const input = topLevelDeclarations(
+      root,
+      ".abyss-documents .abyss-reader-panel-searchbar > [role='searchbox']",
+    );
+
+    expect(searchbar).toMatchObject({
+      display: 'flex',
+      gap: 'var(--size-2-1)',
+      padding: 'var(--size-4-2)',
+    });
+    expect(input).toMatchObject({
+      'border-radius': 'var(--input-radius)',
+      height: 'var(--input-height)',
+    });
+    expect(
+      topLevelDeclarations(root, '.abyss-documents .abyss-reader-outline-controls'),
+    ).not.toHaveProperty('padding');
+    expect(
+      topLevelDeclarations(root, '.abyss-documents .abyss-annotation-controls'),
+    ).not.toHaveProperty('padding');
+    expect(
+      topLevelDeclarations(root, '.abyss-documents .abyss-reader-search-controls'),
+    ).not.toHaveProperty('padding');
+  });
+
   it('keeps PDF.js page geometry in content-box so canvas and text layers align', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
     const declarations = new Map();
@@ -257,7 +285,12 @@ describe('PDF.js style build', () => {
         'min-height': '2.75rem',
       },
     );
-    expect(mobileDeclarations(touch, '.abyss-documents .abyss-reader-search-input')).toMatchObject({
+    expect(
+      mobileDeclarations(
+        touch,
+        ".abyss-documents .abyss-reader-panel-searchbar > [role='searchbox']",
+      ),
+    ).toMatchObject({
       'min-height': '2.75rem',
     });
     expect(
@@ -279,9 +312,6 @@ describe('PDF.js style build', () => {
       inset: '50% auto auto 50%',
       transform: 'translate(-50%, -50%)',
     });
-    expect(
-      mobileDeclarations(touch, '.abyss-documents .abyss-reader-outline-search'),
-    ).toMatchObject({ 'min-height': '2.75rem' });
     expect(mobileDeclarations(touch, ".abyss-documents [data-action='retry']")).toMatchObject({
       'min-height': '2.75rem',
     });

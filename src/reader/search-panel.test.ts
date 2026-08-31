@@ -31,6 +31,15 @@ function enterQuery(panel: SearchPanel, query: string): void {
 }
 
 describe('SearchPanel', () => {
+  it('uses the shared always-visible sidebar search strip', () => {
+    const panel = new SearchPanel(createDiv(), callbacks());
+    const searchbar = panel.root.querySelector<HTMLElement>('.abyss-reader-panel-searchbar');
+
+    expect(searchbar?.classList.contains('abyss-reader-search-controls')).toBe(true);
+    expect(searchbar?.contains(panel.input)).toBe(true);
+    expect(panel.input.hidden).toBe(false);
+  });
+
   it('isolates search editing from PDF.js global Backspace and clipboard handlers', () => {
     const host = createDiv();
     host.doc.body.append(host);

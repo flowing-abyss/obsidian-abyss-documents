@@ -82,6 +82,17 @@ function press(panel: OutlinePanel, row: HTMLElement | undefined, key: string): 
 }
 
 describe('OutlinePanel', () => {
+  it('uses the shared always-visible sidebar search strip', () => {
+    const panel = new OutlinePanel(createDiv(), vi.fn());
+    panel.render([]);
+
+    const searchbar = panel.root.querySelector<HTMLElement>('.abyss-reader-panel-searchbar');
+    const input = panel.root.querySelector<HTMLInputElement>('[data-outline-search]');
+    expect(searchbar?.classList.contains('abyss-reader-outline-controls')).toBe(true);
+    expect(searchbar?.contains(input ?? null)).toBe(true);
+    expect(input?.hidden).toBe(false);
+  });
+
   it('isolates heading search from PDF.js global Backspace and clipboard handlers', () => {
     const host = createDiv();
     host.doc.body.append(host);

@@ -392,7 +392,7 @@ describe('AnnotationsPanel', () => {
     panel.setAnnotations([]);
 
     expect(root.querySelector('[data-annotations-status]')?.textContent).toBe('No annotations');
-    expect(root.querySelector<HTMLInputElement>('[data-annotation-search]')?.hidden).toBe(true);
+    expect(root.querySelector<HTMLInputElement>('[data-annotation-search]')?.hidden).toBe(false);
     expect(root.querySelector('[data-section="tags"]')).toBeNull();
     expect(root.querySelector('.abyss-annotation-card')).toBeNull();
   });
@@ -438,13 +438,18 @@ describe('AnnotationsPanel', () => {
     }
   });
 
-  it('hides controls and the color footer when empty', () => {
+  it('keeps the shared search strip visible and hides only the color footer when empty', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
 
     panel.setAnnotations([]);
 
-    expect(root.querySelector<HTMLElement>('.abyss-annotation-controls')?.hidden).toBe(true);
+    const controls = root.querySelector<HTMLElement>('.abyss-annotation-controls');
+    expect(controls?.classList.contains('abyss-reader-panel-searchbar')).toBe(true);
+    expect(controls?.hidden).toBe(false);
+    expect(controls?.querySelector<HTMLInputElement>('[data-annotation-search]')?.hidden).toBe(
+      false,
+    );
     expect(annotationFooter(root).hidden).toBe(true);
   });
 

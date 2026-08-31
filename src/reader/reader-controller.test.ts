@@ -2166,8 +2166,15 @@ describe('ReaderController', () => {
     ).toBe('true');
     createdViewport.emitMode('disabled');
     expect(
+      shell.created.annotationToolbar?.root
+        .querySelector('[data-annotation-tool="select"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    expect(
       Array.from(
-        shell.created.annotationToolbar?.root.querySelectorAll('[data-annotation-tool]') ?? [],
+        shell.created.annotationToolbar?.root.querySelectorAll(
+          '[data-annotation-tool]:not([data-annotation-tool="select"])',
+        ) ?? [],
       ).every((button) => button.getAttribute('aria-pressed') === 'false'),
     ).toBe(true);
     await controller.close();

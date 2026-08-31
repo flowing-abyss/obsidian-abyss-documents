@@ -72,9 +72,19 @@ export class AnnotationToolbar {
     if (readOnlyReason !== null) this.root.setAttribute('aria-description', readOnlyReason);
     host.append(this.root);
 
+    this.createSelectControl();
     this.createQuickControl(readOnlyReason);
     this.addToolControls(readOnlyReason);
     this.refreshToolPresentations();
+  }
+
+  private createSelectControl(): void {
+    const select = this.iconButton('Select', 'mouse-pointer-2');
+    select.dataset['annotationTool'] = 'select';
+    select.setAttribute('aria-pressed', 'true');
+    this.listen(select, 'click', () => {
+      this.chooseTool('select');
+    });
   }
 
   private createQuickControl(readOnlyReason: string | null): HTMLButtonElement {

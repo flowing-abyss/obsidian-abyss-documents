@@ -710,6 +710,31 @@ describe('ReaderToolbar', () => {
     toolbar.destroy();
   });
 
+  it('keeps default Select visible without representing it as Sticky Highlight in More', () => {
+    const entries = captureMenuItems();
+    const { host, toolbar } = fixture();
+    setToolbarWidth(host, 390);
+    const annotations = new AnnotationToolbar(
+      toolbar.annotationHost,
+      [{ color: '#ffd400', meaning: 'Key idea', name: 'Yellow' }],
+      null,
+      vi.fn(),
+    );
+
+    const select = host.querySelector<HTMLButtonElement>('[data-annotation-tool="select"]');
+    host.querySelector<HTMLButtonElement>('[data-control="overflow"]')?.click();
+    const toolTitles = entries
+      .filter(({ disabled, section }) => section === 'abyss-documents-tools' && !disabled)
+      .map(({ title }) => title);
+
+    expect(select?.getAttribute('aria-pressed')).toBe('true');
+    expect(toolTitles).not.toContain('Select');
+    expect(toolTitles).not.toContain('Sticky Highlight');
+
+    annotations.destroy();
+    toolbar.destroy();
+  });
+
   it('does not duplicate zoom and Fit actions in More for a wide reader leaf', () => {
     const entries = captureMenuItems();
     const { host } = fixture();

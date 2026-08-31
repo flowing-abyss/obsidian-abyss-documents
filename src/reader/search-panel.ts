@@ -271,7 +271,7 @@ export class SearchPanel {
   } {
     const owner = ownerWindow(this.root);
     const root = owner.createDiv();
-    root.className = 'abyss-reader-search-controls';
+    root.className = 'abyss-reader-panel-searchbar abyss-reader-search-controls';
     const input = owner.createEl('input');
     configureTextSearchInput(input);
     input.className = 'abyss-reader-search-input';
