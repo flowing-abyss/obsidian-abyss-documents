@@ -114,6 +114,7 @@ async function saveWithNativePdfjsEditors(
   });
   const runtimeViewer = { annotationEditorMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE };
   const annotationEditor = new PdfAnnotationEditor({
+    annotationRoot: container,
     annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
     annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
     commentBridge,
@@ -275,6 +276,7 @@ async function createNativeSelectionHighlight(
     },
   });
   const annotationEditor = new PdfAnnotationEditor({
+    annotationRoot: container,
     annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
     annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
     commentBridge,
@@ -434,6 +436,7 @@ async function editExistingNativeComment(
   });
   const runtimeViewer = { annotationEditorMode: PDFJS_ANNOTATION_EDITOR_TYPE.NONE };
   annotationEditor = new PdfAnnotationEditor({
+    annotationRoot: container,
     annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
     annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
     commentBridge,

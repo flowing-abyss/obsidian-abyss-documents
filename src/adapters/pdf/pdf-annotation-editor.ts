@@ -126,6 +126,7 @@ interface PdfAnnotationModeRequest extends PdfAnnotationToolOptions {
   readonly editComment?: boolean | undefined;
   readonly editId?: string | null | undefined;
   readonly mode: number;
+  readonly mustEnterInEditMode?: boolean | undefined;
 }
 
 interface PdfAnnotationModeOptions extends PdfAnnotationToolOptions {
@@ -171,6 +172,7 @@ interface MutableAnnotationStorage {
 }
 
 interface PdfAnnotationEditorDependencies {
+  readonly annotationRoot: HTMLElement;
   readonly annotationEditorParamsType: AnnotationEditorParameterConstants;
   readonly annotationEditorType: AnnotationEditorTypeConstants;
   readonly eventBus: PdfAnnotationEventBus;
@@ -355,6 +357,82 @@ function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
 }
 
+function optionalBoolean(data: Record<string, unknown>, key: string): boolean | undefined {
+  const value = data[key];
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+interface NativeAnnotationModeScope {
+  readonly annotationRoot: HTMLElement;
+}
+
+function nativeAnnotationContainerInScope(
+  container: unknown,
+  layerDiv: unknown,
+  annotationRoot: HTMLElement,
+): boolean {
+  const OwnerHTMLElement = annotationRoot.ownerDocument.defaultView?.HTMLElement;
+  if (
+    OwnerHTMLElement === undefined ||
+    !(container instanceof OwnerHTMLElement) ||
+    !(layerDiv instanceof OwnerHTMLElement)
+  )
+    return false;
+  return (
+    container.isConnected &&
+    layerDiv.isConnected &&
+    layerDiv.classList.contains('annotationLayer') &&
+    annotationRoot.contains(layerDiv) &&
+    layerDiv.contains(container) &&
+    container.closest('.annotationLayer') === layerDiv
+  );
+}
+
+function nativeAnnotationModeSourceMatches(
+  sourceValue: unknown,
+  editId: string,
+  mode: number,
+  scope: NativeAnnotationModeScope,
+): boolean {
+  const source = record(sourceValue);
+  if (source === null) return false;
+  const data = record(source['data']);
+  return (
+    source['annotationEditorType'] === mode &&
+    data?.['id'] === editId &&
+    nativeAnnotationContainerInScope(source['container'], source['layer'], scope.annotationRoot)
+  );
+}
+
+function nativeAnnotationModeRequest(
+  event: unknown,
+  types: AnnotationEditorTypeConstants,
+  annotationRoot: HTMLElement,
+): PdfAnnotationModeRequest | null {
+  const data = record(event);
+  if (data === null) return null;
+  const mode = data['mode'];
+  const editId = data['editId'];
+  if (
+    typeof mode !== 'number' ||
+    typeof editId !== 'string' ||
+    editId.trim().length === 0 ||
+    data['mustEnterInEditMode'] !== true ||
+    (mode !== types.FREETEXT && mode !== types.HIGHLIGHT && mode !== types.INK) ||
+    !nativeAnnotationModeSourceMatches(data['source'], editId, mode, {
+      annotationRoot,
+    })
+  )
+    return null;
+  return {
+    editComment: optionalBoolean(data, 'editComment'),
+    editId,
+    isFromKeyboard: optionalBoolean(data, 'isFromKeyboard'),
+    mode,
+    mustEnterInEditMode: true,
+  };
+}
+
 export class PdfAnnotationEditor {
   private readonly annotationFocusListeners = new Set<(focus: PdfAnnotationFocus | null) => void>();
   private readonly colorListeners = new Set<(color: string) => void>();
@@ -379,6 +457,7 @@ export class PdfAnnotationEditor {
   private saving = false;
   private logicalMode: PdfAnnotationLogicalMode = 'neutral';
   private contextualEditSession: ContextualEditSession | null = null;
+  private pendingContextualClose: Promise<void> | null = null;
   private contextualActivationFailureOwner: ContextualActivationFailureOwner | null = null;
   private readonly reportedContextualEditingStateFailures = new WeakSet<ContextualEditSession>();
   private pendingContextualSaveRestore: ContextualSaveRestore | null = null;
@@ -398,6 +477,7 @@ export class PdfAnnotationEditor {
     dependencies.eventBus.on('annotationeditoruimanager', this.onManager);
     dependencies.eventBus.on('annotationeditormodechanged', this.onNativeMode);
     dependencies.eventBus.on('editingstateschanged', this.onEditingState);
+    dependencies.eventBus.on('switchannotationeditormode', this.onNativeModeRequest);
     dependencies.eventBus.on('switchannotationeditorparams', this.onNativeParameter);
   }
 
@@ -518,11 +598,21 @@ export class PdfAnnotationEditor {
     )
       return Promise.resolve('cancelled');
     const id = this.projectedTargets.get(requestedId)?.canonicalId ?? requestedId;
+    const contextualClose = this.pendingContextualClose;
     return this.startAnnotationActivation(
       id,
       source.signal,
       source.clientPosition,
       async (activation) => {
+        if (contextualClose !== null) {
+          await waitWithSignal(contextualClose, activation.controller.signal);
+          try {
+            await waitWithSignal(nextTask(), activation.controller.signal);
+          } finally {
+            if (this.pendingContextualClose === contextualClose) this.pendingContextualClose = null;
+          }
+          if (!this.isCurrentActivation(activation)) return 'cancelled';
+        }
         const projected = await this.resolveProjectedAnnotation(id, activation);
         if (!this.isCurrentActivation(activation) || projected === null) return 'cancelled';
         return this.focusResolvedAnnotation(id, source, projected, activation);
@@ -1719,7 +1809,12 @@ export class PdfAnnotationEditor {
     }
     const contextual = this.contextualEditSession;
     if (contextual === null) return;
-    await this.closeContextualEditSession(contextual);
+    const closing = this.closeContextualEditSession(contextual);
+    this.pendingContextualClose = closing;
+    void closing.catch(() => {
+      if (this.pendingContextualClose === closing) this.pendingContextualClose = null;
+    });
+    await closing;
   }
 
   async suspendInteractions(): Promise<void> {
@@ -2290,6 +2385,7 @@ export class PdfAnnotationEditor {
     this.dependencies.eventBus.off('annotationeditoruimanager', this.onManager);
     this.dependencies.eventBus.off('annotationeditormodechanged', this.onNativeMode);
     this.dependencies.eventBus.off('editingstateschanged', this.onEditingState);
+    this.dependencies.eventBus.off('switchannotationeditormode', this.onNativeModeRequest);
     this.dependencies.eventBus.off('switchannotationeditorparams', this.onNativeParameter);
     if (transaction === null) {
       this.cancelPendingModeChange('The PDF annotation editor was destroyed.');
@@ -2461,6 +2557,38 @@ export class PdfAnnotationEditor {
     if (this.contextualEditSession?.mode === mode) return;
     this.setLogicalMode(this.logicalModeForNative(mode));
   };
+
+  private readonly onNativeModeRequest = (event: unknown): void => {
+    if (this.destroyed || !this.managerEventsEnabled) return;
+    const manager = this.manager;
+    if (manager === null) return;
+    const request = nativeAnnotationModeRequest(
+      event,
+      this.dependencies.annotationEditorType,
+      this.dependencies.annotationRoot,
+    );
+    if (request === null || !this.isCurrentNativeModeRequest(request, manager)) return;
+    this.dependencies.viewer.annotationEditorMode = request;
+  };
+
+  private isCurrentNativeModeRequest(
+    request: PdfAnnotationModeRequest,
+    manager: PdfAnnotationUiManager,
+  ): boolean {
+    const projected =
+      typeof request.editId === 'string' ? this.projectedTargets.get(request.editId) : undefined;
+    const kind = this.editableKindForMode(request.mode);
+    if (projected !== undefined)
+      return (
+        kind !== null && projected.annotation.type === (kind === 'freetext' ? 'free-text' : kind)
+      );
+    if (typeof request.editId !== 'string') return false;
+    const editor = manager.getEditor(request.editId);
+    return (
+      this.dependencies.commentBridge.nativeEditorIds(manager).has(request.editId) &&
+      editor?.mode === request.mode
+    );
+  }
 
   private releaseClosingContextualSession(mode: number): void {
     if (mode !== this.dependencies.annotationEditorType.NONE) return;

@@ -125,8 +125,8 @@ describe('PDF reader foundation on Android', () => {
       await $$('[data-region="annotation-toolbar"] [data-annotation-tool]').map((button) =>
         button.getAttribute('data-annotation-tool'),
       ),
-    ).toEqual(['highlight', 'ink', 'freetext']);
-    await expect($('[data-annotation-tool="select"]')).not.toExist();
+    ).toEqual(['select', 'highlight', 'ink', 'freetext']);
+    await expect($('[data-annotation-tool="select"]')).toHaveAttribute('aria-pressed', 'true');
     await expect($('[data-annotation-tool="underline"]')).not.toExist();
     await expect($('[data-annotation-tool="text-note"]')).not.toExist();
     const compactToolbar = await browser.execute(() => {
@@ -417,7 +417,13 @@ describe('PDF reader foundation on Android', () => {
               '[data-region="annotation-toolbar"] button',
             ),
           );
-          return buttons.length > 0 && buttons.every((button) => button.disabled);
+          const select = buttons.find((button) => button.dataset['annotationTool'] === 'select');
+          const editors = buttons.filter((button) => button.dataset['annotationTool'] !== 'select');
+          return (
+            select?.disabled === false &&
+            editors.length > 0 &&
+            editors.every((button) => button.disabled)
+          );
         }),
       ).toBe(true);
       await $('[data-control="sidebar"]').click();
@@ -430,9 +436,53 @@ describe('PDF reader foundation on Android', () => {
           document.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'),
         ).find((candidate) => candidate.innerText.includes(comment));
         if (card === undefined) throw new Error(`Read-only mobile card is missing: ${comment}`);
-        card.click();
+        card.dataset['mobileContextTarget'] = '';
       }, qualification.comment);
       const popover = $('[data-annotation-editor-popover]');
+      const target = await browser.execute(() => {
+        const card = document.querySelector<HTMLElement>('[data-mobile-context-target]');
+        if (card === null) throw new Error('Read-only mobile context target disappeared.');
+        const bounds = card.getBoundingClientRect();
+        return {
+          x: Math.round(bounds.left + bounds.width / 2),
+          y: Math.round(bounds.top + bounds.height / 2),
+        };
+      });
+      try {
+        await browser.performActions([
+          {
+            type: 'pointer',
+            id: 'annotation-card-short-tap',
+            parameters: { pointerType: 'touch' },
+            actions: [
+              { type: 'pointerMove', duration: 0, origin: 'viewport', ...target },
+              { type: 'pointerDown', button: 0 },
+              { type: 'pause', duration: 50 },
+              { type: 'pointerUp', button: 0 },
+            ],
+          },
+        ]);
+      } finally {
+        await browser.releaseActions();
+      }
+      await expect(popover).not.toBeDisplayed();
+      try {
+        await browser.performActions([
+          {
+            type: 'pointer',
+            id: 'annotation-card-long-press',
+            parameters: { pointerType: 'touch' },
+            actions: [
+              { type: 'pointerMove', duration: 0, origin: 'viewport', ...target },
+              { type: 'pointerDown', button: 0 },
+              { type: 'pause', duration: 650 },
+              { type: 'pointerUp', button: 0 },
+            ],
+          },
+        ]);
+      } finally {
+        await browser.releaseActions();
+      }
       await popover.waitForDisplayed({ timeout: 5_000 });
       const readOnlyGeometry = await browser.execute(() => {
         const editor = document.querySelector<HTMLElement>('[data-annotation-editor-popover]');

@@ -13,3 +13,21 @@ export interface ReaderOwnerWindow extends Window {
 export function ownerWindow(element: HTMLElement): ReaderOwnerWindow {
   return element.win as ReaderOwnerWindow;
 }
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button, input, select, summary, textarea, [contenteditable]:not([contenteditable="false"]), [role="button"], [tabindex]';
+
+export function focusableTarget(
+  target: EventTarget | null,
+  owner: ReaderOwnerWindow,
+): HTMLElement | null {
+  if (!(target instanceof owner.Element)) return null;
+  const candidate = target.closest<HTMLElement>(FOCUSABLE_SELECTOR);
+  if (
+    candidate === null ||
+    candidate.tabIndex < 0 ||
+    candidate.matches(':disabled, [aria-disabled="true"]')
+  )
+    return null;
+  return candidate;
+}

@@ -53,6 +53,91 @@ async function openAnnotations(path: string): Promise<void> {
   await expect($('[data-tab="annotations"][aria-selected="true"]')).toExist();
 }
 
+async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<void> {
+  await browser.executeObsidian(
+    async ({ app }, input) => {
+      const bytes = await app.vault.adapter.readBinary(input.sourcePath);
+      const existing = app.vault.getAbstractFileByPath(input.targetPath);
+      if (existing !== null) await app.fileManager.trashFile(existing);
+      await app.vault.createBinary(input.targetPath, bytes);
+    },
+    { sourcePath, targetPath },
+  );
+}
+
+async function dragFixtureText(): Promise<void> {
+  await browser.waitUntil(
+    async () =>
+      browser.executeObsidian(({ app }) => {
+        const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+          containerEl?: HTMLElement;
+          controller?: {
+            viewport?: {
+              annotationEditorInstance?: {
+                manager?: {
+                  getLayer?(
+                    pageIndex: number,
+                  ): { hasTextLayer?(layer: HTMLElement): boolean } | undefined;
+                };
+              };
+            };
+          };
+        };
+        const root = view.containerEl?.querySelector<HTMLElement>('[data-abyss-document]');
+        const textLayer = root?.querySelector<HTMLElement>('[data-page-number="1"] .textLayer');
+        return (
+          textLayer instanceof HTMLElement &&
+          root?.querySelectorAll('[data-page-number="1"] .textLayer span')[1] !== undefined &&
+          view.controller?.viewport?.annotationEditorInstance?.manager
+            ?.getLayer?.(0)
+            ?.hasTextLayer?.(textLayer) === true
+        );
+      }),
+    { timeout: 10_000, timeoutMsg: 'PDF.js editor did not bind to selectable fixture text.' },
+  );
+  const points = await browser.execute(async () => {
+    const text = document.querySelectorAll<HTMLElement>(
+      '[data-page-number="1"] .textLayer span',
+    )[1];
+    if (text === undefined) throw new Error('Selectable fixture text is missing.');
+    const bounds = text.getBoundingClientRect();
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+    return {
+      end: {
+        x: Math.round(bounds.left + bounds.width * 0.8),
+        y: Math.round(bounds.top + bounds.height / 2),
+      },
+      start: {
+        x: Math.round(bounds.left + bounds.width * 0.2),
+        y: Math.round(bounds.top + bounds.height / 2),
+      },
+    };
+  });
+  try {
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'sidebar-search-native-selection',
+        parameters: { pointerType: 'mouse' },
+        actions: [
+          { type: 'pointerMove', duration: 0, origin: 'viewport', ...points.start },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pointerMove', duration: 400, origin: 'viewport', ...points.end },
+          { type: 'pause', duration: 150 },
+        ],
+      },
+    ]);
+  } finally {
+    await browser.releaseActions();
+  }
+  const selectedText = await browser.execute(() => window.getSelection()?.toString().trim() ?? '');
+  if (selectedText.length === 0) throw new Error('Trusted PDF text drag selected nothing.');
+}
+
 async function selectedPdfEditorSnapshot(): Promise<{
   readonly color: string | null;
   readonly count: number;
@@ -72,7 +157,18 @@ async function selectedPdfEditorSnapshot(): Promise<{
     const editor = viewport?.annotationEditorInstance?.manager?.firstSelectedEditor ?? null;
     const storage = viewport?.pdf?.annotationStorage ?? null;
     if (editor === null || storage?.size === undefined)
-      throw new Error('Expected a selected PDF.js editor with annotation storage.');
+      throw new Error(
+        `Expected a selected PDF.js editor with annotation storage: ${JSON.stringify({
+          hasEditorInstance: viewport?.annotationEditorInstance !== undefined,
+          hasManager: viewport?.annotationEditorInstance?.manager != null,
+          selectedEditorCount: document.querySelectorAll('.annotationEditorLayer .selectedEditor')
+            .length,
+          storageSize: storage?.size ?? null,
+          visiblePopoverCount: Array.from(
+            document.querySelectorAll<HTMLElement>('[data-annotation-editor-popover]'),
+          ).filter((popover) => !popover.hidden).length,
+        })}`,
+      );
     return { color: editor.color ?? null, count: storage.size };
   });
 }
@@ -603,46 +699,145 @@ describe('PDF reader sidebar', () => {
   });
 
   it('keeps trusted search editing local while a PDF.js editor is selected', async () => {
-    await openAnnotations('Documents/annotations-10000.pdf');
-    await browser.waitUntil(
-      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
-      { timeout: 15_000, timeoutMsg: 'Annotation panel did not load editable test data.' },
-    );
+    const workingPath = 'Documents/e2e-search-focus.pdf';
+    await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
+    await openAnnotations(workingPath);
+    await $('[data-annotation-tool="highlight"]').click();
+    await dragFixtureText();
+    const highlight = $('.highlightEditor');
+    await highlight.waitForExist({ timeout: 10_000 });
+    const annotationCard = $('.abyss-annotation-card');
+    await annotationCard.waitForExist({ timeout: 10_000 });
+    await annotationCard.click({ button: 'right' });
     const search = $('[data-annotation-search]');
-    await search.setValue('Annotation 00001');
-    await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
-    await $('.abyss-annotation-card').click();
     const popover = $('[data-annotation-editor-popover]');
     await expect(popover).toBeDisplayed();
     const before = await selectedPdfEditorSnapshot();
     const modifier = process.platform === 'darwin' ? Key.Command : Key.Control;
 
-    await search.click();
-    await browser.keys([modifier, 'a']);
-    await browser.keys('trusted typing');
-    const typed = await search.getValue();
-    expect(typed).toBe('trusted typing');
+    await browser.execute(() => {
+      const host = window as Window & {
+        __abyssSearchFocusTrace?: { events: string[]; stop(): void };
+      };
+      const events: string[] = [];
+      const listener = (event: FocusEvent): void => {
+        const target = event.target;
+        events.push(
+          target instanceof HTMLElement
+            ? `${performance.now().toFixed(1)}:${target.tagName}.${target.className}`
+            : `${performance.now().toFixed(1)}:unknown`,
+        );
+      };
+      document.addEventListener('focusin', listener, true);
+      host.__abyssSearchFocusTrace = {
+        events,
+        stop: () => {
+          document.removeEventListener('focusin', listener, true);
+        },
+      };
+    });
+    try {
+      await search.click();
+      await browser.pause(100);
+      const searchFocus = await browser.execute(() => {
+        const host = window as Window & {
+          __abyssSearchFocusTrace?: { events: string[]; stop(): void };
+        };
+        const input = document.querySelector<HTMLInputElement>('[data-annotation-search]');
+        const popover = document.querySelector<HTMLElement>(
+          '[data-annotation-editor-popover]:not([hidden])',
+        );
+        if (input === null) throw new Error('Annotation search input disappeared.');
+        const focusEvents = [...(host.__abyssSearchFocusTrace?.events ?? [])];
+        host.__abyssSearchFocusTrace?.stop();
+        delete host.__abyssSearchFocusTrace;
+        const bounds = input.getBoundingClientRect();
+        const hit = document.elementFromPoint(
+          Math.round(bounds.left + bounds.width / 2),
+          Math.round(bounds.top + bounds.height / 2),
+        );
+        const popoverBounds = popover?.getBoundingClientRect();
+        return {
+          activeElement:
+            document.activeElement instanceof HTMLElement
+              ? {
+                  className: document.activeElement.className,
+                  tagName: document.activeElement.tagName,
+                }
+              : null,
+          focused: document.activeElement === input,
+          focusEvents,
+          hit:
+            hit instanceof HTMLElement
+              ? {
+                  className: hit.className,
+                  insidePopover: popover?.contains(hit) ?? false,
+                  insideSearch: input.contains(hit) || hit === input,
+                  tagName: hit.tagName,
+                }
+              : null,
+          popoverBounds:
+            popoverBounds === undefined
+              ? null
+              : {
+                  bottom: popoverBounds.bottom,
+                  left: popoverBounds.left,
+                  right: popoverBounds.right,
+                  top: popoverBounds.top,
+                },
+          searchBounds: {
+            bottom: bounds.bottom,
+            left: bounds.left,
+            right: bounds.right,
+            top: bounds.top,
+          },
+        };
+      });
+      if (!searchFocus.focused || searchFocus.hit?.insideSearch !== true)
+        throw new Error(`Annotation search was not reachable: ${JSON.stringify(searchFocus)}`);
+      await browser.keys([modifier, 'a']);
+      await browser.keys('trusted typing');
+      const typed = await search.getValue();
+      if (typed !== 'trusted typing')
+        throw new Error(
+          `Trusted annotation search input was intercepted: ${JSON.stringify({
+            actual: typed,
+            expected: 'trusted typing',
+            searchFocus,
+          })}`,
+        );
 
-    await browser.keys(Key.Backspace);
-    expect(await search.getValue()).toBe(typed.slice(0, -1));
+      await browser.keys(Key.Backspace);
+      expect(await search.getValue()).toBe(typed.slice(0, -1));
 
-    await browser.keys([modifier, 'a']);
-    await browser.keys('replacement');
-    await expect(search).toHaveValue('replacement');
-    await browser.keys([modifier, 'z']);
-    await expect(search).toHaveValue(typed.slice(0, -1));
-    await browser.keys(
-      process.platform === 'darwin' ? [modifier, Key.Shift, 'z'] : [modifier, 'y'],
-    );
-    await expect(search).toHaveValue('replacement');
+      await browser.keys([modifier, 'a']);
+      await browser.keys('replacement');
+      await expect(search).toHaveValue('replacement');
+      await browser.keys([modifier, 'z']);
+      expect(await search.getValue()).toBe('replacemen');
+      expect(await selectedPdfEditorSnapshot()).toEqual(before);
+      await browser.keys(
+        process.platform === 'darwin' ? [modifier, Key.Shift, 'z'] : [modifier, 'y'],
+      );
+      await expect(search).toHaveValue('replacement');
+      expect(await selectedPdfEditorSnapshot()).toEqual(before);
 
-    await browser.keys([modifier, 'a']);
-    await browser.keys([modifier, 'c']);
-    await browser.keys([modifier, 'x']);
-    await expect(search).toHaveValue('');
-    await browser.keys([modifier, 'v']);
-    await expect(search).toHaveValue('replacement');
-    expect(await selectedPdfEditorSnapshot()).toEqual(before);
+      await browser.keys([modifier, 'a']);
+      await browser.keys([modifier, 'c']);
+      await browser.keys([modifier, 'x']);
+      await expect(search).toHaveValue('');
+      await browser.keys([modifier, 'v']);
+      await expect(search).toHaveValue('replacement');
+      expect(await selectedPdfEditorSnapshot()).toEqual(before);
+    } finally {
+      await browser.execute(() => {
+        const host = window as Window & {
+          __abyssSearchFocusTrace?: { stop(): void };
+        };
+        host.__abyssSearchFocusTrace?.stop();
+        delete host.__abyssSearchFocusTrace;
+      });
+    }
   });
 
   it('keeps annotation controls above an independent virtual scroll host', async () => {
@@ -950,6 +1145,17 @@ describe('PDF reader sidebar', () => {
     await $('[data-annotation-search]').setValue('Annotation 00001');
     await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
     await $('.abyss-annotation-card').click();
+    await expect($('.abyss-annotation-card')).toHaveAttribute('aria-current', 'true');
+    await expect($('[data-annotation-editor-popover]')).not.toBeDisplayed();
+    expect(
+      await browser.execute(() => ({
+        selectedEditors: document.querySelectorAll('.annotationEditorLayer .selectedEditor').length,
+        visiblePopovers: Array.from(
+          document.querySelectorAll<HTMLElement>('[data-annotation-editor-popover]'),
+        ).filter((popover) => !popover.hidden).length,
+      })),
+    ).toEqual({ selectedEditors: 0, visiblePopovers: 0 });
+    await $('.abyss-annotation-card').click({ button: 'right' });
     await expect($('[data-annotation-editor-popover]')).toBeDisplayed();
     await expect($('textarea[aria-label="Comment"]')).toHaveValue(
       expect.stringContaining('Annotation 00001'),
@@ -1021,14 +1227,39 @@ describe('PDF reader sidebar', () => {
     await browser.keys(Key.ArrowDown);
     await expect($('[data-annotation-editor-popover]')).not.toBeDisplayed();
 
-    const gestures = [
+    for (const key of ['Enter', ' '] as const) {
+      const navigation = await browser.execute((pressedKey) => {
+        const card = document.querySelector<HTMLButtonElement>(
+          '.abyss-annotation-card[tabindex="0"]',
+        );
+        if (card === null) throw new Error('Annotation navigation target is missing.');
+        const event = new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: pressedKey,
+        });
+        card.dispatchEvent(event);
+        return {
+          current: card.getAttribute('aria-current'),
+          prevented: event.defaultPrevented,
+          rowId: card.dataset['annotationRowId'] ?? null,
+        };
+      }, key);
+      expect(navigation).toEqual({ current: 'true', prevented: true, rowId: expect.any(String) });
+      await expect($('[data-annotation-editor-popover]')).not.toBeDisplayed();
+      expect(
+        await browser.execute(
+          () => document.querySelectorAll('.annotationEditorLayer .selectedEditor').length,
+        ),
+      ).toBe(0);
+    }
+
+    const contextualGestures = [
       { key: 'contextmenu', shiftKey: false },
-      { key: 'Enter', shiftKey: false },
-      { key: ' ', shiftKey: false },
       { key: 'ContextMenu', shiftKey: false },
       { key: 'F10', shiftKey: true },
     ] as const;
-    for (const gesture of gestures) {
+    for (const gesture of contextualGestures) {
       const activation = await browser.execute(({ key, shiftKey }) => {
         const current = document.querySelector<HTMLButtonElement>(
           '.abyss-annotation-card[tabindex="0"]',

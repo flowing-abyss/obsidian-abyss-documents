@@ -1056,7 +1056,16 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'annotationLayer' })
       .createDiv({ cls: 'highlightAnnotation' });
     annotation.dataset['annotationId'] = 'persisted-root';
+    let nativeClickRelays = 0;
+    let nativePointerRelays = 0;
+    annotation.addEventListener('click', () => {
+      nativeClickRelays += 1;
+    });
+    annotation.addEventListener('pointerdown', () => {
+      nativePointerRelays += 1;
+    });
 
+    annotation.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
     annotation.click();
     const contextmenu = new MouseEvent('contextmenu', {
       bubbles: true,
@@ -1070,7 +1079,71 @@ describe('PdfDocumentViewport', () => {
       kind: 'root-context',
     });
     expect(bridgeFocus).not.toHaveBeenCalled();
+    expect(nativeClickRelays).toBe(0);
+    expect(nativePointerRelays).toBe(1);
     expect(contextmenu.defaultPrevented).toBe(true);
+
+    annotation.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
+    expect(nativeClickRelays).toBe(1);
+  });
+
+  it('intercepts contextual activation before native target handlers can relay focus', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const annotation = root
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'freeTextAnnotation' });
+    annotation.dataset['annotationId'] = 'persisted-freetext';
+    let nativeContextRelays = 0;
+    let nativeMouseRelays = 0;
+    let nativePointerRelays = 0;
+    annotation.addEventListener('pointerdown', () => {
+      nativePointerRelays += 1;
+    });
+    annotation.addEventListener('contextmenu', () => {
+      nativeContextRelays += 1;
+    });
+    annotation.addEventListener('mousedown', () => {
+      nativeMouseRelays += 1;
+    });
+
+    annotation.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, button: 2, pointerId: 7 }),
+    );
+    annotation.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 2 }));
+    openAnnotationContext(annotation);
+
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('persisted-freetext', {
+      kind: 'root-context',
+    });
+    expect(nativeMouseRelays).toBe(0);
+    expect(nativePointerRelays).toBe(0);
+    expect(nativeContextRelays).toBe(0);
+  });
+
+  it('keeps native FreeText click handling available after contextual materialization', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(true);
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const native = root
+      .createDiv({ cls: 'annotationEditorLayer' })
+      .createDiv({ cls: 'freeTextEditor selectedEditor' });
+    native.id = 'native-freetext';
+    let nativeClicks = 0;
+    native.addEventListener('click', () => {
+      nativeClicks += 1;
+    });
+
+    native.click();
+
+    expect(nativeClicks).toBe(1);
   });
 
   it('does not steal modified primary annotation clicks from PDF.js multi-selection', async () => {

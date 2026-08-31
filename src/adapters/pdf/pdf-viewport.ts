@@ -160,6 +160,14 @@ function hasNativeSelectionModifier(event: MouseEvent | PointerEvent): boolean {
   return event.ctrlKey || event.metaKey || event.shiftKey;
 }
 
+function nativeAnnotationClickShouldPropagate(event: MouseEvent, target: Element): boolean {
+  return (
+    hasNativeSelectionModifier(event) ||
+    event.detail >= 2 ||
+    target.closest('.annotationEditorLayer .freeTextEditor') !== null
+  );
+}
+
 const ANNOTATION_NODE_TYPES: ReadonlyArray<
   readonly [selector: string, type: ViewportAnnotationSnapshot['type']]
 > = [
@@ -752,15 +760,17 @@ export class PdfDocumentViewport implements DocumentViewport {
   private registerRootListeners(root: HTMLElement): void {
     root.addEventListener('pointerdown', this.onRootPointerDown, { capture: true });
     root.addEventListener('pointercancel', this.onRootPointerCancel, { capture: true });
+    root.addEventListener('mousedown', this.onRootMouseDown, { capture: true });
     root.addEventListener('click', this.onRootClick, { capture: true });
-    root.addEventListener('contextmenu', this.onRootContextMenu);
+    root.addEventListener('contextmenu', this.onRootContextMenu, { capture: true });
   }
 
   private unregisterRootListeners(root: HTMLElement): void {
     root.removeEventListener('pointerdown', this.onRootPointerDown, { capture: true });
     root.removeEventListener('pointercancel', this.onRootPointerCancel, { capture: true });
+    root.removeEventListener('mousedown', this.onRootMouseDown, { capture: true });
     root.removeEventListener('click', this.onRootClick, { capture: true });
-    root.removeEventListener('contextmenu', this.onRootContextMenu);
+    root.removeEventListener('contextmenu', this.onRootContextMenu, { capture: true });
     this.clearPendingPointerActivation();
   }
 
@@ -770,6 +780,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   ): PdfAnnotationEditor | null {
     if (this.annotationCapabilities.readOnlyReason !== null) return null;
     return new PdfAnnotationEditor({
+      annotationRoot: this.requireMounted(this.root),
       annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
       annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
       commentBridge: this.requireMounted(this.commentBridge),
@@ -1408,6 +1419,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (!isElementTarget(target)) return;
     const annotationId = this.annotationActivationId(target);
     if (annotationId !== null) {
+      if (!nativeAnnotationClickShouldPropagate(event, target)) event.stopPropagation();
       this.handleRootAnnotationClick(event, target, annotationId);
       return;
     }
@@ -1435,10 +1447,14 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private readonly onRootPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0 || hasNativeSelectionModifier(event)) return;
+    if ((event.button !== 0 && event.button !== 2) || hasNativeSelectionModifier(event)) return;
     const target = event.target;
     if (!isElementTarget(target)) return;
     const annotationId = this.annotationActivationId(target);
+    if (event.button === 2) {
+      if (annotationId !== null) event.stopPropagation();
+      return;
+    }
     if (annotationId === null) {
       this.clearRootAnnotationSelection();
       return;
@@ -1455,6 +1471,13 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly onRootPointerCancel = (event: PointerEvent): void => {
     if (this.pendingPointerActivation?.pointerId === event.pointerId)
       this.pendingPointerActivation = null;
+  };
+
+  private readonly onRootMouseDown = (event: MouseEvent): void => {
+    if (event.button !== 2 || hasNativeSelectionModifier(event)) return;
+    const target = event.target;
+    if (!isElementTarget(target) || this.annotationActivationId(target) === null) return;
+    event.stopPropagation();
   };
 
   private selectRootAnnotation(id: string, target: Element): void {
@@ -1502,6 +1525,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     const annotationId = this.annotationActivationId(target);
     if (annotationId === null) return;
     event.preventDefault();
+    event.stopPropagation();
     this.activateRootAnnotation(annotationId, 'root-context');
   };
 

@@ -1001,7 +1001,9 @@ describe('AnnotationEditorPopover', () => {
 
     creation.resolve(editableAnnotation({ color: '#ffd400', comment: '' }));
     await popover.flushPendingChanges();
-    expect(onClose).toHaveBeenCalledExactlyOnceWith('click-away');
+    expect(onClose).toHaveBeenCalledExactlyOnceWith('click-away', {
+      focusTarget: unrelated,
+    });
 
     popover.destroy();
     unrelated.remove();
@@ -1460,7 +1462,7 @@ describe('AnnotationEditorPopover', () => {
         annotations: [created],
         comment: 'Durable pending draft',
       });
-      expect(onClose).toHaveBeenCalledExactlyOnceWith(reason);
+      expect(onClose).toHaveBeenCalledExactlyOnceWith(reason, { focusTarget: unrelated });
       popover.destroy();
       unrelated.remove();
       host.remove();
@@ -2305,7 +2307,7 @@ describe('AnnotationEditorPopover', () => {
       new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
     );
     expect(popover.element.hidden).toBe(true);
-    expect(onClose).toHaveBeenLastCalledWith('escape');
+    expect(onClose).toHaveBeenLastCalledWith('escape', { focusTarget: invoker });
     expect(host.ownerDocument.activeElement).toBe(invoker);
 
     openSelection();
@@ -2360,6 +2362,80 @@ describe('AnnotationEditorPopover', () => {
     expect(popover.isOpen).toBe(true);
     expect(onClose).not.toHaveBeenCalled();
     popover.destroy();
+    host.remove();
+  });
+
+  it('forwards the focusable pointer-dismissal target without restoring the prior invoker', () => {
+    const host = document.body.createDiv();
+    const invoker = host.createEl('button');
+    const search = host.createEl('input', { type: 'search' });
+    invoker.focus();
+    const onClose = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      onClose,
+    });
+
+    search.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+
+    expect(onClose.mock.calls).toEqual([['click-away', { focusTarget: search }]]);
+    expect(host.ownerDocument.activeElement).toBe(invoker);
+    popover.destroy();
+    host.remove();
+  });
+
+  it('forwards the restored invoker when Escape closes the popover', () => {
+    const host = document.body.createDiv();
+    const invoker = host.createDiv();
+    invoker.tabIndex = 0;
+    invoker.focus();
+    const onClose = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      onClose,
+    });
+    popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.focus();
+
+    popover.element.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+    );
+
+    expect(host.ownerDocument.activeElement).toBe(invoker);
+    expect(onClose).toHaveBeenCalledExactlyOnceWith('escape', { focusTarget: invoker });
+    popover.destroy();
+    host.remove();
+  });
+
+  it('forwards a keyboard focus-away custom control and excludes aria-disabled controls', async () => {
+    const host = document.body.createDiv();
+    const enabled = document.body.createDiv();
+    enabled.tabIndex = 0;
+    const disabled = document.body.createDiv();
+    disabled.tabIndex = 0;
+    disabled.setAttribute('aria-disabled', 'true');
+    const onClose = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      onClose,
+    });
+
+    disabled.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+    expect(onClose).toHaveBeenCalledExactlyOnceWith('click-away');
+
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      onClose,
+    });
+    enabled.focus();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(onClose).toHaveBeenLastCalledWith('focus-away', { focusTarget: enabled });
+    popover.destroy();
+    enabled.remove();
+    disabled.remove();
     host.remove();
   });
 
@@ -2476,7 +2552,9 @@ describe('AnnotationEditorPopover', () => {
 
     expect(popover.isOpen).toBe(false);
     expect(popover.element.hidden).toBe(true);
-    expect(onClose).toHaveBeenCalledExactlyOnceWith('focus-away');
+    expect(onClose).toHaveBeenCalledExactlyOnceWith('focus-away', {
+      focusTarget: unrelated,
+    });
     popover.destroy();
     unrelated.remove();
     host.remove();

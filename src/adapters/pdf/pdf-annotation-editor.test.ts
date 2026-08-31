@@ -185,6 +185,7 @@ function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
 }
 
 function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}) {
+  const annotationRoot = createDiv();
   const annotationStorage = storage();
   const saveDocument = vi.fn(async () => new Uint8Array([37, 80, 68, 70, 45]));
   const pdf = {
@@ -269,6 +270,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     updateAnnotations: vi.fn(() => true),
   };
   const editor = new PdfAnnotationEditor({
+    annotationRoot,
     annotationEditorParamsType: {
       FREETEXT_COLOR: 12,
       FREETEXT_OPACITY: 13,
@@ -288,6 +290,7 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
     viewer,
   });
   return {
+    annotationRoot,
     annotationStorage,
     changedModes,
     commentBridge,
@@ -4018,6 +4021,50 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(relayed).toEqual([null]);
   });
 
+  it('waits for native contextual close settlement before reopening FreeText', async () => {
+    const current = fixture();
+    const projected = createdAnnotation('', {
+      id: 'reopened-freetext',
+      type: 'free-text',
+    });
+    current.editor.setAnnotationProjection([
+      { annotation: projected, stableId: 'reopened-freetext' },
+    ]);
+    const uiManager = manager(selectedEditor('reopened-freetext', 3));
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    await expect(
+      current.editor.focusAnnotation('reopened-freetext', { kind: 'root-context' }),
+    ).resolves.toBe('editable');
+
+    let closingObserved = false;
+    let nativeCloseSettled = false;
+    const reopenSettlement: boolean[] = [];
+    current.eventBus.on('annotationeditormodechanged', (event: unknown) => {
+      const value = event as { readonly mode?: unknown; readonly source?: unknown };
+      if (value.source !== current.viewer) return;
+      if (value.mode === 0) {
+        closingObserved = true;
+        window.setTimeout(() => {
+          nativeCloseSettled = true;
+        }, 0);
+      } else if (value.mode === 3 && closingObserved) {
+        reopenSettlement.push(nativeCloseSettled);
+      }
+    });
+
+    const closing = current.editor.abortInteraction('The annotation editor was dismissed.');
+    const reopening = current.editor.focusAnnotation('reopened-freetext', {
+      kind: 'root-context',
+    });
+
+    await expect(closing).resolves.toBeUndefined();
+    await expect(reopening).resolves.toBe('editable');
+    expect(reopenSettlement).toEqual([true]);
+  });
+
   it('drops editable and null bridge events that are not owned by the current activation', async () => {
     const current = fixture();
     current.eventBus.dispatch('annotationeditoruimanager', {
@@ -5031,6 +5078,292 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
     expect(changedModes).toEqual([]);
     expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
+  });
+
+  it('forwards PDF.js native annotation edit requests to the embedded viewer', () => {
+    const { annotationRoot, commentBridge, editor, eventBus, modeRequests, viewer } = fixture();
+    document.body.append(annotationRoot);
+    const annotationLayer = annotationRoot.createDiv({ cls: 'annotationLayer' });
+    const activeManager = manager();
+    const source = {
+      annotationEditorType: 3,
+      container: annotationLayer.createDiv(),
+      data: { id: 'persisted-freetext' },
+      layer: annotationLayer,
+    };
+    editor.setAnnotationProjection([
+      {
+        annotation: createdAnnotation('', { id: 'persisted-freetext', type: 'free-text' }),
+        stableId: 'persisted-freetext',
+      },
+    ]);
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'persisted-freetext',
+      mode: 3,
+      mustEnterInEditMode: true,
+      source,
+    });
+    expect(modeRequests).toEqual([]);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: activeManager });
+
+    eventBus.dispatch('switchannotationeditormode', {
+      editComment: true,
+      editId: 'persisted-freetext',
+      isFromKeyboard: false,
+      mode: 3,
+      mustEnterInEditMode: true,
+      source,
+    });
+
+    expect(modeRequests).toEqual([
+      {
+        editComment: true,
+        editId: 'persisted-freetext',
+        isFromKeyboard: false,
+        mode: 3,
+        mustEnterInEditMode: true,
+      },
+    ]);
+
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'persisted-freetext',
+      mode: 3,
+      mustEnterInEditMode: true,
+      source,
+    });
+    editor.setAnnotationProjection([
+      {
+        annotation: createdAnnotation('', { id: 'persisted-ink', type: 'ink' }),
+        stableId: 'persisted-ink',
+      },
+    ]);
+    const inkSource = {
+      annotationEditorType: 15,
+      container: annotationLayer.createDiv(),
+      data: { id: 'persisted-ink' },
+      layer: annotationLayer,
+    };
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'persisted-ink',
+      mode: 15,
+      mustEnterInEditMode: true,
+      source: inkSource,
+    });
+    editor.setAnnotationProjection([
+      {
+        annotation: createdAnnotation('', { id: 'persisted-highlight', type: 'highlight' }),
+        stableId: 'persisted-highlight',
+      },
+    ]);
+    const highlightSource = {
+      annotationEditorType: 9,
+      container: annotationLayer.createDiv(),
+      data: { id: 'persisted-highlight' },
+      layer: annotationLayer,
+    };
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'persisted-highlight',
+      mode: 9,
+      mustEnterInEditMode: true,
+      source: highlightSource,
+    });
+    editor.setAnnotationProjection([]);
+    activeManager.getEditor.mockReturnValue(selectedEditor('native-ink', 15));
+    commentBridge.nativeEditorIds.mockReturnValue(new Set(['native-ink']));
+    const nativeInkSource = {
+      annotationEditorType: 15,
+      container: annotationLayer.createDiv(),
+      data: { id: 'native-ink' },
+      layer: annotationLayer,
+    };
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'native-ink',
+      mode: 15,
+      mustEnterInEditMode: true,
+      source: nativeInkSource,
+    });
+    activeManager.getEditor.mockReturnValue(selectedEditor('native-ink', 9));
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'native-ink',
+      mode: 15,
+      mustEnterInEditMode: true,
+      source: nativeInkSource,
+    });
+    expect(modeRequests.slice(1)).toEqual([
+      {
+        editComment: undefined,
+        editId: 'persisted-freetext',
+        isFromKeyboard: undefined,
+        mode: 3,
+        mustEnterInEditMode: true,
+      },
+      {
+        editComment: undefined,
+        editId: 'persisted-ink',
+        isFromKeyboard: undefined,
+        mode: 15,
+        mustEnterInEditMode: true,
+      },
+      {
+        editComment: undefined,
+        editId: 'persisted-highlight',
+        isFromKeyboard: undefined,
+        mode: 9,
+        mustEnterInEditMode: true,
+      },
+      {
+        editComment: undefined,
+        editId: 'native-ink',
+        isFromKeyboard: undefined,
+        mode: 15,
+        mustEnterInEditMode: true,
+      },
+    ]);
+    eventBus.dispatch('switchannotationeditormode', { mode: 9, source: {} });
+    expect(modeRequests).toHaveLength(5);
+    annotationRoot.remove();
+    editor.destroy();
+    expect(eventBus.listeners.get('switchannotationeditormode')?.size ?? 0).toBe(0);
+  });
+
+  it('rejects stale, arbitrary, unknown, mismatched, and NONE native edit relays', () => {
+    const { annotationRoot, editor, eventBus, modeRequests, viewer } = fixture();
+    document.body.append(annotationRoot);
+    const activeLayer = annotationRoot.createDiv({ cls: 'annotationLayer' });
+    const activeManager = manager();
+    const container = activeLayer.createDiv();
+    const source = {
+      annotationEditorType: 3,
+      container,
+      data: { id: 'known-freetext' },
+      layer: activeLayer,
+    };
+    editor.setAnnotationProjection([
+      {
+        annotation: createdAnnotation('', { id: 'known-freetext', type: 'free-text' }),
+        stableId: 'known-freetext',
+      },
+    ]);
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: activeManager });
+
+    const connectedBodySource = { ...source, container: document.body.createDiv() };
+    const foreignReader = document.body.createDiv();
+    const foreignLayer = foreignReader.createDiv({ cls: 'annotationLayer' });
+    const foreignSource = {
+      ...source,
+      container: foreignLayer.createDiv(),
+      layer: foreignLayer,
+    };
+    const retiredLayer = annotationRoot.createDiv({ cls: 'annotationLayer' });
+    const retiredContainer = retiredLayer.createDiv();
+    retiredLayer.remove();
+    const outsideActiveLayer = annotationRoot.createDiv();
+    const nestedLayer = activeLayer.createDiv({ cls: 'annotationLayer' });
+    const nestedContainer = nestedLayer.createDiv();
+
+    for (const event of [
+      null,
+      { editId: 'known-freetext', mode: '3', mustEnterInEditMode: true, source },
+      { editId: 3, mode: 3, mustEnterInEditMode: true, source },
+      { editId: '   ', mode: 3, mustEnterInEditMode: true, source },
+      { editId: 'known-freetext', mode: 3, mustEnterInEditMode: false, source },
+      { editId: 'known-freetext', mode: 13, mustEnterInEditMode: true, source },
+      { editId: 'known-freetext', mode: 0, mustEnterInEditMode: true, source },
+      { editId: 'known-freetext', mode: 3, mustEnterInEditMode: true, source: null },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, data: null },
+      },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, container: null },
+      },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, layer: null },
+      },
+      { editId: 'known-freetext', mode: 3, mustEnterInEditMode: true, source: {} },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, _uiManager: activeManager, layer: undefined },
+      },
+      { editId: 'known-freetext', mode: 3, mustEnterInEditMode: true, source: connectedBodySource },
+      { editId: 'known-freetext', mode: 3, mustEnterInEditMode: true, source: foreignSource },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, container: outsideActiveLayer },
+      },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, container: nestedContainer },
+      },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: {
+          ...source,
+          container: retiredContainer,
+          layer: retiredLayer,
+        },
+      },
+      {
+        editId: 'unknown-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, data: { id: 'unknown-freetext' } },
+      },
+      {
+        editId: 'known-freetext',
+        mode: 9,
+        mustEnterInEditMode: true,
+        source,
+      },
+      {
+        editId: 'known-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: { ...source, data: { id: 'different-freetext' } },
+      },
+    ])
+      eventBus.dispatch('switchannotationeditormode', event);
+
+    container.remove();
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'known-freetext',
+      mode: 3,
+      mustEnterInEditMode: true,
+      source,
+    });
+    editor.detachFromDocument();
+    const staleContainer = activeLayer.createDiv();
+    eventBus.dispatch('switchannotationeditormode', {
+      editId: 'known-freetext',
+      mode: 3,
+      mustEnterInEditMode: true,
+      source: { ...source, container: staleContainer },
+    });
+
+    expect(modeRequests).toEqual([]);
+    connectedBodySource.container.remove();
+    foreignReader.remove();
+    outsideActiveLayer.remove();
+    nestedLayer.remove();
+    annotationRoot.remove();
+    staleContainer.remove();
+    editor.destroy();
   });
 
   it('ignores unrelated mode events and rejects a superseded tool request', async () => {

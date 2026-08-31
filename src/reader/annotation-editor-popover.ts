@@ -8,7 +8,7 @@ import {
   type AnnotationSuggestion,
   type AnnotationSuggestionProvider,
 } from './link-suggestions.js';
-import { ownerWindow } from './owner-dom.js';
+import { focusableTarget, ownerWindow } from './owner-dom.js';
 import { isolateTextEditing } from './text-editing-guard.js';
 
 export type AnnotationEditorTarget =
@@ -31,6 +31,10 @@ export interface AnnotationEditorUpdate {
 
 export type AnnotationEditorCloseReason = 'escape' | 'click-away' | 'focus-away' | 'external';
 
+export interface AnnotationEditorCloseContext {
+  readonly focusTarget?: HTMLElement | undefined;
+}
+
 export interface AnnotationEditorPopoverRequest {
   readonly target: AnnotationEditorTarget;
   readonly palette: readonly AnnotationPaletteEntry[];
@@ -51,7 +55,10 @@ export interface AnnotationEditorPopoverRequest {
   readonly onUpdate: (update: AnnotationEditorUpdate) => boolean | void;
   readonly onSelectionPreview?: ((creation: AnnotationEditorCreation) => void) | undefined;
   readonly onDelete: (annotations: readonly DocumentAnnotation[]) => boolean | void;
-  readonly onClose: (reason: AnnotationEditorCloseReason) => void;
+  readonly onClose: (
+    reason: AnnotationEditorCloseReason,
+    context?: AnnotationEditorCloseContext,
+  ) => void;
 }
 
 const DEFAULT_COLOR = '#ffd400';
@@ -94,6 +101,7 @@ interface AnnotationCreationDraft {
 
 interface AnnotationCreationJob {
   cancelled: boolean;
+  deferredCloseContext: AnnotationEditorCloseContext | undefined;
   deferredCloseReason: AnnotationEditorCloseReason | null;
   readonly generation: number;
   readonly request: AnnotationEditorPopoverRequest;
@@ -257,7 +265,8 @@ export class AnnotationEditorPopover {
       const target = event.target;
       if (target instanceof ownerWindow(this.host).Element && this.element.contains(target)) return;
       if (this.isAnnotationInteractionTarget(target)) return;
-      this.close('click-away');
+      const focusTarget = pointerDismissalFocusTarget(target, ownerWindow(this.host));
+      this.close('click-away', false, focusTarget === null ? undefined : { focusTarget });
     });
     this.listenDocument('focusin', (event) => {
       if (this.active === null) return;
@@ -274,7 +283,8 @@ export class AnnotationEditorPopover {
           this.isAnnotationFocusTarget(focused)
         )
           return;
-        this.close('focus-away');
+        const focusTarget = focusableTarget(focused, ownerWindow(this.host));
+        this.close('focus-away', false, focusTarget === null ? undefined : { focusTarget });
       }, 0);
     });
   }
@@ -404,11 +414,15 @@ export class AnnotationEditorPopover {
     return true;
   }
 
-  close(reason: AnnotationEditorCloseReason = 'external', restoreFocus = false): boolean {
+  close(
+    reason: AnnotationEditorCloseReason = 'external',
+    restoreFocus = false,
+    context?: AnnotationEditorCloseContext,
+  ): boolean {
     const request = this.active;
     if (request === null) return true;
     if (!this.flushPendingMetadata()) return false;
-    if (this.deferPendingSelectionClose(request, reason, restoreFocus)) return true;
+    if (this.deferPendingSelectionClose(request, reason, restoreFocus, context)) return true;
     this.cancelPendingSelectionCreation(request);
     this.cancelFocusAwayTimer();
     this.openGeneration += 1;
@@ -417,11 +431,11 @@ export class AnnotationEditorPopover {
     this.selectionCreation = null;
     this.placement = null;
     this.element.hidden = true;
+    const restoredFocus = restoreFocus ? this.restoreFocus() : null;
     if (request.target.kind === 'selection' && this.selectionCreationState === 'draft')
       this.host.ownerDocument.getSelection()?.removeAllRanges();
-    if (restoreFocus) this.restoreFocus();
     this.previousFocus = null;
-    request.onClose(reason);
+    notifyAnnotationEditorClose(request, reason, closeContext(context, restoredFocus));
     return true;
   }
 
@@ -596,6 +610,7 @@ export class AnnotationEditorPopover {
   ): AnnotationCreationJob {
     return {
       cancelled: false,
+      deferredCloseContext: undefined,
       completed: false,
       deferredCloseReason: null,
       draft: this.captureCreationDraft(comment),
@@ -846,21 +861,23 @@ export class AnnotationEditorPopover {
   private capturePreviousFocus(): void {
     const active = this.host.ownerDocument.activeElement;
     const owner = ownerWindow(this.host);
-    if (active instanceof owner.HTMLElement && !this.element.contains(active))
-      this.previousFocus = active;
+    const focusTarget = focusableTarget(active, owner);
+    if (focusTarget !== null && !this.element.contains(focusTarget))
+      this.previousFocus = focusTarget;
   }
 
-  private restoreFocus(): void {
+  private restoreFocus(): HTMLElement | null {
     if (this.previousFocus?.isConnected === true) {
       this.previousFocus.focus();
-      return;
+      return this.previousFocus;
     }
     if (this.host.isConnected) {
       this.host.tabIndex = -1;
       this.host.focus();
-      return;
+      return null;
     }
     this.host.ownerDocument.body.focus();
+    return null;
   }
 
   private renderActions(target: AnnotationEditorTarget): void {
@@ -933,6 +950,7 @@ export class AnnotationEditorPopover {
     request: AnnotationEditorPopoverRequest,
     reason: AnnotationEditorCloseReason,
     restoreFocus: boolean,
+    context: AnnotationEditorCloseContext | undefined,
   ): boolean {
     if (reason !== 'click-away' && reason !== 'focus-away') return false;
     const job = this.selectionCreation;
@@ -942,6 +960,7 @@ export class AnnotationEditorPopover {
       job?.request !== request
     )
       return false;
+    job.deferredCloseContext = context;
     job.deferredCloseReason = reason;
     this.cancelFocusAwayTimer();
     this.openGeneration += 1;
@@ -959,9 +978,11 @@ export class AnnotationEditorPopover {
   private finishDeferredSelectionClose(job: AnnotationCreationJob): void {
     const reason = job.deferredCloseReason;
     if (reason === null) return;
+    const context = job.deferredCloseContext;
+    job.deferredCloseContext = undefined;
     job.deferredCloseReason = null;
     if (this.selectionCreation === job) this.selectionCreation = null;
-    job.request.onClose(reason);
+    notifyAnnotationEditorClose(job.request, reason, context);
   }
 
   private place(anchor: DOMRect, _target: AnnotationEditorTarget): void {
@@ -1063,6 +1084,13 @@ export class AnnotationEditorPopover {
   }
 }
 
+function closeContext(
+  context: AnnotationEditorCloseContext | undefined,
+  restoredFocus: HTMLElement | null,
+): AnnotationEditorCloseContext | undefined {
+  return restoredFocus === null ? context : { focusTarget: restoredFocus };
+}
+
 function fixedViewportBounds(
   owner: ReturnType<typeof ownerWindow>,
   element: HTMLElement,
@@ -1124,6 +1152,25 @@ function isEditablePointerTarget(
   return (
     target.closest('input, textarea, [contenteditable]:not([contenteditable="false"])') !== null
   );
+}
+
+function pointerDismissalFocusTarget(
+  target: EventTarget | null,
+  owner: ReturnType<typeof ownerWindow>,
+): HTMLElement | null {
+  const candidate = focusableTarget(target, owner);
+  if (candidate === null || candidate.matches('.pdfViewerContainer, [data-region="document"]'))
+    return null;
+  return candidate;
+}
+
+function notifyAnnotationEditorClose(
+  request: AnnotationEditorPopoverRequest,
+  reason: AnnotationEditorCloseReason,
+  context: AnnotationEditorCloseContext | undefined,
+): void {
+  if (context === undefined) request.onClose(reason);
+  else request.onClose(reason, context);
 }
 
 function createEditorElements(host: HTMLElement): AnnotationEditorElements {

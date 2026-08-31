@@ -10,11 +10,13 @@ import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import type {
+  AnnotationEditorCloseContext,
   AnnotationEditorCreation,
   AnnotationEditorPopoverRequest,
   AnnotationEditorTarget,
   AnnotationEditorUpdate,
 } from './annotation-editor-popover.js';
+import { focusableTarget, ownerWindow, type ReaderOwnerWindow } from './owner-dom.js';
 
 export interface QuickHighlightState {
   readonly armed: boolean;
@@ -59,6 +61,7 @@ interface QueuedStickySelection {
 }
 
 const DEFAULT_COLOR = '#ffd400';
+const NATIVE_FOCUS_GUARD_MS = 250;
 
 export class AnnotationInteractionController {
   private readonly cleanups: Array<() => void> = [];
@@ -70,6 +73,7 @@ export class AnnotationInteractionController {
   private ownedSelectionRevision: number | null = null;
   private destroyed = false;
   private nativeNeutralization: Promise<void> = Promise.resolve();
+  private nativeFocusGuard: NeutralizationFocusTracker | null = null;
   private mode: PdfAnnotationLogicalMode = 'neutral';
   private palette: readonly AnnotationPaletteEntry[];
   private quickRequestRevision = 0;
@@ -207,6 +211,7 @@ export class AnnotationInteractionController {
     if (!this.closeActiveSelection()) return false;
     this.discardQueuedStickySelection();
     this.destroyed = true;
+    this.stopNativeFocusGuard();
     this.quickRequestRevision += 1;
     this.abortCommit('The PDF annotation interaction was closed.');
     for (const cleanup of this.cleanups.splice(0)) cleanup();
@@ -298,14 +303,14 @@ export class AnnotationInteractionController {
     const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
       color: this.activeColor,
-      onClose: () => {
+      onClose: (_reason, context) => {
         if (revision !== this.activeSelectionRevision) return;
         const materialized = this.activeEditorKind === 'annotation';
         this.activeEditorKind = null;
         this.activeSelectionToken = null;
         this.ownedSelectionRevision = null;
         this.activeSelectionRevision += 1;
-        if (materialized) this.neutralizeNativeEditor();
+        if (materialized) this.neutralizeNativeEditor(context);
         else this.abortCommit('The PDF annotation selection editor was closed.');
       },
       onCreate: (creation) => this.createSelection(revision, creation),
@@ -349,15 +354,16 @@ export class AnnotationInteractionController {
     const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
       color: first.color ?? undefined,
-      onClose: () => {
+      onClose: (_reason, context) => {
         if (revision !== this.activeSelectionRevision) {
-          if (this.activeEditorKind === null && neutralizeOnClose) this.neutralizeNativeEditor();
+          if (this.activeEditorKind === null && neutralizeOnClose)
+            this.neutralizeNativeEditor(context);
           return;
         }
         this.activeEditorKind = null;
         this.ownedSelectionRevision = null;
         this.activeSelectionRevision += 1;
-        if (neutralizeOnClose) this.neutralizeNativeEditor();
+        if (neutralizeOnClose) this.neutralizeNativeEditor(context);
       },
       onCreate: () => 'dismissed' as const,
       onDelete: (annotations) => this.deleteAnnotations(annotations),
@@ -569,14 +575,36 @@ export class AnnotationInteractionController {
     this.queuedStickySelection = null;
   }
 
-  private neutralizeNativeEditor(): void {
+  private neutralizeNativeEditor(context?: AnnotationEditorCloseContext): void {
+    this.stopNativeFocusGuard();
+    const focus = trackNeutralizationFocus(context?.focusTarget);
+    this.nativeFocusGuard = focus;
     const neutralize = this.interaction.abortInteraction?.('The PDF annotation editor was closed.');
-    if (neutralize === undefined) return;
-    this.nativeNeutralization = neutralize.catch((cause: unknown) => {
-      console.error('[abyss-documents] Unexpected annotation interaction controller failure', {
-        cause,
+    if (neutralize === undefined) {
+      focus?.restore();
+      this.stopNativeFocusGuard(focus);
+      return;
+    }
+    this.nativeNeutralization = neutralize
+      .then(() => {
+        if (!this.destroyed && this.nativeFocusGuard === focus) focus?.restore();
+      })
+      .catch((cause: unknown) => {
+        console.error('[abyss-documents] Unexpected annotation interaction controller failure', {
+          cause,
+        });
+      })
+      .finally(() => {
+        if (!this.destroyed && this.nativeFocusGuard === focus) focus?.settle();
+        else focus?.stop();
       });
-    });
+  }
+
+  private stopNativeFocusGuard(expected?: NeutralizationFocusTracker | null): void {
+    const focus = this.nativeFocusGuard;
+    if (focus === null || (expected !== undefined && focus !== expected)) return;
+    this.nativeFocusGuard = null;
+    focus.stop();
   }
 
   private publishQuickHighlightState(): void {
@@ -599,6 +627,87 @@ export class AnnotationInteractionController {
       });
     });
   }
+}
+
+interface NeutralizationFocusTracker {
+  restore(): void;
+  settle(): void;
+  stop(): void;
+}
+
+function trackNeutralizationFocus(
+  initialTarget: HTMLElement | undefined,
+): NeutralizationFocusTracker | null {
+  if (initialTarget?.isConnected !== true) return null;
+  const document = initialTarget.ownerDocument;
+  const owner = ownerWindow(initialTarget);
+  const initialFocusTarget =
+    userFocusTarget(document.activeElement, owner) ?? userFocusTarget(initialTarget, owner);
+  if (initialFocusTarget === null) return null;
+  let target: HTMLElement = initialFocusTarget;
+  let restoreFrame: number | null = null;
+  let stopTimer: number | null = null;
+  let stopped = false;
+  const stop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    document.removeEventListener('focusin', onFocus, true);
+    if (restoreFrame !== null) owner.cancelAnimationFrame(restoreFrame);
+    if (stopTimer !== null) owner.clearTimeout(stopTimer);
+    restoreFrame = null;
+    stopTimer = null;
+  };
+  const restore = (): void => {
+    if (stopped || !target.isConnected || document.activeElement === target) return;
+    if (userFocusTarget(document.activeElement, owner) !== null) return;
+    target.focus({ preventScroll: true });
+  };
+  const scheduleRestore = (): void => {
+    if (stopped || restoreFrame !== null) return;
+    restoreFrame = owner.requestAnimationFrame(() => {
+      restoreFrame = null;
+      restore();
+    });
+  };
+  const onFocus = (event: FocusEvent): void => {
+    const candidate = userFocusTarget(event.target, owner);
+    if (candidate !== null) {
+      target = candidate;
+      return;
+    }
+    if (readerFocusSink(event.target, owner)) scheduleRestore();
+  };
+  document.addEventListener('focusin', onFocus, true);
+  return {
+    restore,
+    settle: () => {
+      restore();
+      if (stopped) return;
+      if (stopTimer !== null) owner.clearTimeout(stopTimer);
+      stopTimer = owner.setTimeout(stop, NATIVE_FOCUS_GUARD_MS);
+    },
+    stop,
+  };
+}
+
+function readerFocusSink(target: EventTarget | null, owner: ReaderOwnerWindow): boolean {
+  return (
+    target instanceof owner.HTMLElement &&
+    target.matches(
+      '.pdfViewerContainer, [data-region="document"], .annotationEditorLayer, .annotationEditorLayer .selectedEditor',
+    )
+  );
+}
+
+function userFocusTarget(target: EventTarget | null, owner: ReaderOwnerWindow): HTMLElement | null {
+  const candidate = focusableTarget(target, owner);
+  if (candidate === null) return null;
+  if (
+    readerFocusSink(candidate, owner) ||
+    candidate.closest('[data-annotation-editor-popover][hidden]') !== null
+  )
+    return null;
+  return candidate;
 }
 
 function isUsableClientPosition(

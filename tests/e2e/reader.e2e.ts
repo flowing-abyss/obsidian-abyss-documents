@@ -256,6 +256,55 @@ async function waitForNativeHighlightReadiness(): Promise<void> {
   );
 }
 
+async function dragFixtureText(): Promise<void> {
+  await waitForNativeHighlightReadiness();
+  const points = await browser.execute(async () => {
+    const text = document.querySelectorAll<HTMLElement>(
+      '[data-page-number="1"] .textLayer span',
+    )[1];
+    if (text === undefined) throw new Error('Expected selectable text on fixture page 1.');
+    const scrollHost = text.closest<HTMLElement>('.pdfViewerContainer');
+    if (scrollHost === null) throw new Error('Expected the PDF viewer scroll host.');
+    const before = text.getBoundingClientRect();
+    scrollHost.scrollTop += before.top - window.innerHeight / 2;
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+    const bounds = text.getBoundingClientRect();
+    return {
+      end: {
+        x: Math.round(bounds.left + bounds.width * 0.8),
+        y: Math.round(bounds.top + bounds.height / 2),
+      },
+      start: {
+        x: Math.round(bounds.left + bounds.width * 0.2),
+        y: Math.round(bounds.top + bounds.height / 2),
+      },
+    };
+  });
+  try {
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'reader-highlight-selection',
+        parameters: { pointerType: 'mouse' },
+        actions: [
+          { type: 'pointerMove', duration: 0, origin: 'viewport', ...points.start },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pointerMove', duration: 400, origin: 'viewport', ...points.end },
+          { type: 'pause', duration: 150 },
+        ],
+      },
+    ]);
+  } finally {
+    await browser.releaseActions();
+  }
+  const selectedText = await browser.execute(() => window.getSelection()?.toString().trim() ?? '');
+  if (selectedText.length === 0) throw new Error('Trusted PDF text drag selected nothing.');
+}
+
 async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<void> {
   await browser.executeObsidian(
     async ({ app }, input) => {
@@ -354,7 +403,7 @@ async function activatePersistedHighlightForComment(): Promise<void> {
     '.annotationLayer .highlightAnnotation[data-annotation-id]',
   );
   await $(persistedHighlight).waitForClickable({ timeout: 15_000 });
-  await $(persistedHighlight).click();
+  await $(persistedHighlight).click({ button: 'right' });
   try {
     await browser.waitUntil(
       async () =>
@@ -369,7 +418,7 @@ async function activatePersistedHighlightForComment(): Promise<void> {
       {
         timeout: 20_000,
         timeoutMsg:
-          'Neutral persisted Highlight activation did not expose an editable Comment field.',
+          'Persisted Highlight context activation did not expose an editable Comment field.',
       },
     );
   } catch (cause) {
@@ -389,7 +438,7 @@ async function activatePersistedHighlightForComment(): Promise<void> {
       };
     }, activeReaderLeafSelector);
     throw new Error(
-      `Persisted Highlight activation diagnostic=${JSON.stringify(diagnostics)}; ${String(cause)}`,
+      `Persisted Highlight context activation diagnostic=${JSON.stringify(diagnostics)}; ${String(cause)}`,
     );
   }
 }
@@ -474,23 +523,17 @@ async function inspectPassiveImportedAnnotation(selector: string): Promise<{
   readonly readOnlyMetadata: boolean;
   readonly selectedEditors: number;
 }> {
+  const annotation = $(selector);
+  await annotation.waitForDisplayed({ timeout: 5_000 });
+  await browser
+    .action('pointer')
+    .move({ origin: annotation })
+    .down({ button: 2 })
+    .up({ button: 2 })
+    .perform();
   return browser.execute(async (annotationSelector) => {
-    const annotation = document.querySelector<HTMLElement>(annotationSelector);
-    if (annotation === null)
+    if (document.querySelector<HTMLElement>(annotationSelector) === null)
       throw new Error(`Imported annotation unavailable: ${annotationSelector}`);
-    const bounds = annotation.getBoundingClientRect();
-    const init = {
-      bubbles: true,
-      button: 0,
-      clientX: bounds.left + bounds.width / 2,
-      clientY: bounds.top + bounds.height / 2,
-      isPrimary: true,
-      pointerId: 31,
-      pointerType: 'mouse',
-    };
-    annotation.dispatchEvent(new PointerEvent('pointerdown', init));
-    window.dispatchEvent(new PointerEvent('pointerup', init));
-    annotation.dispatchEvent(new MouseEvent('click', init));
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
         resolve();
@@ -539,8 +582,14 @@ async function assertCompactReadOnlyCard(comment: string): Promise<void> {
     ).find((candidate) => candidate.innerText.includes(expectedComment));
     if (card === undefined)
       throw new Error(`Read-only annotation card is missing: ${expectedComment}`);
-    card.click();
+    card.dataset['readOnlyContextTarget'] = '';
   }, comment);
+  await $('[data-read-only-context-target]').click({ button: 'right' });
+  await browser.execute(() => {
+    delete document.querySelector<HTMLElement>('[data-read-only-context-target]')?.dataset[
+      'readOnlyContextTarget'
+    ];
+  });
   const popover = $('[data-annotation-editor-popover]');
   await popover.waitForDisplayed({ timeout: 5_000 });
   const geometry = await browser.execute((expectedComment) => {
@@ -1081,24 +1130,7 @@ describe('PDF reader foundation', () => {
 
     await $('[data-annotation-tool="highlight"]').click();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
-    await waitForNativeHighlightReadiness();
-    await browser.execute(() => {
-      const text = document.querySelectorAll('[data-page-number="1"] .textLayer span')[1];
-      if (text === undefined) throw new Error('Expected selectable text on fixture page 1.');
-      const range = document.createRange();
-      range.selectNodeContents(text);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      text.dispatchEvent(
-        new PointerEvent('pointerup', {
-          bubbles: true,
-          clientX: 200,
-          clientY: 200,
-          pointerType: 'mouse',
-        }),
-      );
-    });
+    await dragFixtureText();
     await expect($('.highlightEditor')).toExist();
     await waitForAnnotationSave(saveBaseline);
 
@@ -1259,23 +1291,7 @@ describe('PDF reader foundation', () => {
 
     await $('[data-annotation-tool="highlight"]').click();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
-    await waitForNativeHighlightReadiness();
-    await browser.execute(() => {
-      const text = document.querySelectorAll('[data-page-number="1"] .textLayer span')[1];
-      if (text === undefined) throw new Error('Expected selectable comment fixture text.');
-      const range = document.createRange();
-      range.selectNodeContents(text);
-      getSelection()?.removeAllRanges();
-      getSelection()?.addRange(range);
-      text.dispatchEvent(
-        new PointerEvent('pointerup', {
-          bubbles: true,
-          clientX: 200,
-          clientY: 200,
-          pointerType: 'mouse',
-        }),
-      );
-    });
+    await dragFixtureText();
     await $('.highlightEditor').waitForExist({ timeout: 5_000 });
     await waitForAnnotationSave(saveBaseline);
     await closeReaderLeaves();
@@ -1373,23 +1389,7 @@ describe('PDF reader foundation', () => {
 
     await $('[data-annotation-tool="highlight"]').click();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
-    await waitForNativeHighlightReadiness();
-    await browser.execute(() => {
-      const text = document.querySelectorAll('[data-page-number="1"] .textLayer span')[1];
-      if (text === undefined) throw new Error('Expected qualification fixture text.');
-      const range = document.createRange();
-      range.selectNodeContents(text);
-      getSelection()?.removeAllRanges();
-      getSelection()?.addRange(range);
-      text.dispatchEvent(
-        new PointerEvent('pointerup', {
-          bubbles: true,
-          clientX: 200,
-          clientY: 200,
-          pointerType: 'mouse',
-        }),
-      );
-    });
+    await dragFixtureText();
     await $('.highlightEditor').waitForExist({
       timeout: 5_000,
       timeoutMsg: 'Supported Highlight was not created beside imported read-only annotations.',
@@ -1436,14 +1436,22 @@ describe('PDF reader foundation', () => {
       );
       expect(
         await browser.execute(() => {
-          const buttons = Array.from(
+          const select = document.querySelector<HTMLButtonElement>(
+            '[data-region="annotation-toolbar"] [data-annotation-tool="select"]',
+          );
+          const writingTools = Array.from(
             document.querySelectorAll<HTMLButtonElement>(
-              '[data-region="annotation-toolbar"] button',
+              '[data-region="annotation-toolbar"] [data-annotation-tool]:not([data-annotation-tool="select"]), ' +
+                '[data-region="annotation-toolbar"] .abyss-reader-split-menu',
             ),
           );
-          return buttons.length > 0 && buttons.every((button) => button.disabled);
+          return {
+            selectEnabled: select?.disabled === false,
+            writingToolsDisabled:
+              writingTools.length > 0 && writingTools.every((button) => button.disabled),
+          };
         }),
-      ).toBe(true);
+      ).toEqual({ selectEnabled: true, writingToolsDisabled: true });
       await $('[data-control="sidebar"]').click();
       await $('[data-tab="annotations"]').click();
       await expect($('[data-sidebar-panel="annotations"]')).toHaveText(

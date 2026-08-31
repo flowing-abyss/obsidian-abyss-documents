@@ -792,6 +792,8 @@ describe('ReaderController', () => {
     expect(
       shell.created.root.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.style.left,
     ).toBe('220px');
+    createdViewport.emit({ type: 'annotation-select', nativeId: null });
+    expect(shell.created.annotationEditorOpen).toBe(false);
     await controller.close();
   });
 

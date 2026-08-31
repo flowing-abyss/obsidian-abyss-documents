@@ -890,6 +890,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     visibility?: boolean,
     isEditable = true,
   ): void {
+    if (visibility === true && !isSelected) return;
     if (editor === null) {
       this.destroyPopup();
       return;

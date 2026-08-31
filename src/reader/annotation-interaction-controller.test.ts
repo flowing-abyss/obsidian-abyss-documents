@@ -1242,6 +1242,315 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it('restores the latest focusable click-away target after native neutralization steals focus', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const search = reader.createEl('input', { type: 'search' });
+    const replacement = reader.createEl('button');
+    const neutralization = deferred<void>();
+    const test = fixture();
+    test.abortInteraction.mockImplementation(async () => {
+      await neutralization.promise;
+      viewer.focus();
+    });
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Focus preservation')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    Reflect.apply(request.onClose, undefined, ['click-away', { focusTarget: search }]);
+    search.focus();
+    replacement.focus();
+    neutralization.resolve();
+    await neutralization.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(test.abortInteraction).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(replacement);
+
+    test.controller.destroy();
+    reader.remove();
+  });
+
+  it('restores the clicked search input when native neutralization leaves focus in the viewer', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const search = reader.createEl('input', { type: 'search' });
+    const neutralization = deferred<void>();
+    const test = fixture();
+    test.abortInteraction.mockImplementation(async () => {
+      await neutralization.promise;
+      viewer.focus();
+    });
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Search focus')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    Reflect.apply(request.onClose, undefined, ['click-away', { focusTarget: search }]);
+    search.focus();
+    neutralization.resolve();
+    await neutralization.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.activeElement).toBe(search);
+
+    test.controller.destroy();
+    reader.remove();
+  });
+
+  it('guards the clicked input from a viewer focus task queued after neutralization settles', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const search = reader.createEl('input', { type: 'search' });
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Late viewer focus')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    Reflect.apply(request.onClose, undefined, ['click-away', { focusTarget: search }]);
+    search.focus();
+    await vi.waitFor(() => {
+      expect(test.abortInteraction).toHaveBeenCalledOnce();
+    });
+    viewer.focus();
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+
+    expect(document.activeElement).toBe(search);
+    test.controller.destroy();
+    reader.remove();
+  });
+
+  it('guards the clicked input from a selected PDF.js editor focus task', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    const layer = viewer.createDiv({ cls: 'annotationEditorLayer' });
+    const nativeEditor = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    nativeEditor.tabIndex = 0;
+    const search = reader.createEl('input', { type: 'search' });
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Late editor focus')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    Reflect.apply(request.onClose, undefined, ['click-away', { focusTarget: search }]);
+    search.focus();
+    await vi.waitFor(() => {
+      expect(test.abortInteraction).toHaveBeenCalledOnce();
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    nativeEditor.focus();
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+
+    expect(document.activeElement).toBe(search);
+    test.controller.destroy();
+    reader.remove();
+  });
+
+  it('prefers the current custom tabindex focus over the close-context target', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const search = reader.createEl('input', { type: 'search' });
+    const customControl = reader.createDiv();
+    customControl.tabIndex = 0;
+    const neutralization = deferred<void>();
+    const test = fixture();
+    test.abortInteraction.mockImplementation(async () => {
+      await neutralization.promise;
+      viewer.focus();
+    });
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Current custom control')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    customControl.focus();
+    Reflect.apply(request.onClose, undefined, ['escape', { focusTarget: search }]);
+    neutralization.resolve();
+    await neutralization.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.activeElement).toBe(customControl);
+    test.controller.destroy();
+    reader.remove();
+  });
+
+  it('tracks a newer custom tabindex control while native neutralization is pending', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const search = reader.createEl('input', { type: 'search' });
+    const customControl = reader.createDiv();
+    customControl.tabIndex = 0;
+    const neutralization = deferred<void>();
+    const test = fixture();
+    test.abortInteraction.mockImplementation(async () => {
+      await neutralization.promise;
+      viewer.focus();
+    });
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('New custom control')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    Reflect.apply(request.onClose, undefined, ['click-away', { focusTarget: search }]);
+    search.focus();
+    customControl.focus();
+    neutralization.resolve();
+    await neutralization.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.activeElement).toBe(customControl);
+    test.controller.destroy();
+    reader.remove();
+  });
+
+  it('stops a pending focus guard when the controller is destroyed', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const search = reader.createEl('input', { type: 'search' });
+    const neutralization = deferred<void>();
+    const test = fixture();
+    test.abortInteraction.mockImplementation(async () => {
+      await neutralization.promise;
+      viewer.focus();
+    });
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Destroy pending focus')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    Reflect.apply(request.onClose, undefined, ['click-away', { focusTarget: search }]);
+    search.focus();
+    expect(test.controller.destroy()).toBe(true);
+    viewer.focus();
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+    expect(document.activeElement).toBe(viewer);
+
+    neutralization.resolve();
+    await neutralization.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(document.activeElement).toBe(viewer);
+    reader.remove();
+  });
+
+  it('does not install a user-focus guard for the viewer focus sink', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Viewer sink')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    viewer.focus();
+    Reflect.apply(request.onClose, undefined, ['click-away', { focusTarget: viewer }]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.activeElement).toBe(viewer);
+    test.controller.destroy();
+    reader.remove();
+  });
+
+  it('prevents a superseded neutralization from restoring its stale target', async () => {
+    const reader = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = reader.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = 0;
+    const staleTarget = reader.createEl('input', { type: 'search' });
+    const currentTarget = reader.createDiv();
+    currentTarget.tabIndex = 0;
+    const staleNeutralization = deferred<void>();
+    const test = fixture();
+    test.abortInteraction
+      .mockImplementationOnce(async () => {
+        await staleNeutralization.promise;
+      })
+      .mockResolvedValueOnce(undefined);
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Stale focus guard')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const staleRequest = test.opened[test.opened.length - 1];
+    if (staleRequest === undefined) throw new Error('Expected the first annotation request.');
+    Reflect.apply(staleRequest.onClose, undefined, ['click-away', { focusTarget: staleTarget }]);
+
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Current focus guard')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const currentRequest = test.opened[test.opened.length - 1];
+    if (currentRequest === undefined) throw new Error('Expected the second annotation request.');
+    Reflect.apply(currentRequest.onClose, undefined, [
+      'click-away',
+      { focusTarget: currentTarget },
+    ]);
+    currentTarget.focus();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    staleNeutralization.resolve();
+    await staleNeutralization.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.activeElement).toBe(currentTarget);
+    test.controller.destroy();
+    reader.remove();
+  });
+
   it('neutralizes a selection editor after its optimistic draft materializes', async () => {
     const test = fixture();
     test.emitSelection(textSelection('materialized-selection'));

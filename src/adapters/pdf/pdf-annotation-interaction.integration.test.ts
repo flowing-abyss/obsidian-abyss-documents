@@ -135,6 +135,7 @@ function oneShotFixture(options: { readonly deferNeutralMode?: boolean } = {}) {
   };
   const transactionOrder: string[] = [];
   const interaction = new PdfAnnotationEditor({
+    annotationRoot: createDiv(),
     annotationEditorParamsType: {
       FREETEXT_COLOR: 12,
       FREETEXT_OPACITY: 13,
@@ -436,6 +437,7 @@ describe('PDF annotation interaction integration', () => {
       },
     });
     const editor = new PdfAnnotationEditor({
+      annotationRoot: host,
       annotationEditorParamsType: {
         FREETEXT_COLOR: 12,
         FREETEXT_OPACITY: 13,
@@ -559,6 +561,7 @@ describe('PDF annotation interaction integration', () => {
       bridge.destroyPopup();
     });
     const editor = new PdfAnnotationEditor({
+      annotationRoot: host,
       annotationEditorParamsType: {
         FREETEXT_COLOR: 12,
         FREETEXT_OPACITY: 13,

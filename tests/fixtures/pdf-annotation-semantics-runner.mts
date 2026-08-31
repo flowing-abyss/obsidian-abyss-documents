@@ -267,6 +267,7 @@ async function nativeSession(bytes: Uint8Array, includeTextLayer = false): Promi
   });
   const runtimeViewer = createRuntimeViewer(uiManager, eventBus);
   annotationEditor = new PdfAnnotationEditor({
+    annotationRoot: container,
     annotationEditorParamsType: PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE,
     annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
     commentBridge: bridge,

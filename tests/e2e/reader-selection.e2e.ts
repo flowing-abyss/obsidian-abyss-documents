@@ -1606,78 +1606,73 @@ async function waitForPassivePersistedTarget(selector: string): Promise<string> 
 }
 
 async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
-  const editorSelector = activeReaderDescendant('.freeTextEditor.selectedEditor');
-  const controlSelector = `${editorSelector} .internal`;
   const inputSelector = activeReaderDescendant(
     '.freeTextEditor.selectedEditor [contenteditable="true"]',
   );
-  await browser.executeObsidian(
-    ({ app }, input) => {
-      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
-        controller?: {
-          viewport?: {
-            annotationEditorInstance?: {
-              focusAnnotation: (...args: [string, unknown]) => Promise<unknown>;
-              manager?: { firstSelectedEditor?: unknown } | null;
-              onAnnotationFocus(
-                listener: (focus: { editable?: boolean } | null) => void,
-              ): () => void;
+  await browser.keys(Key.Escape);
+  await expect($(nativeEditorSelector)).not.toBeDisplayed();
+  await browser.waitUntil(
+    async () =>
+      browser.executeObsidian(({ app }) => {
+        const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+          controller?: {
+            viewport?: {
+              annotationEditorInstance?: { contextualEditSession?: unknown };
+              viewer?: { annotationEditorMode?: number };
             };
-            commentBridge?: {
-              activeSelectedEditors?: unknown[];
-              activeSource?: unknown;
-              bindings?: Map<string, unknown>;
-            };
-            viewer?: { annotationEditorMode?: number };
           };
         };
-      };
-      const viewport = view.controller?.viewport;
-      const interaction = viewport?.annotationEditorInstance;
-      const bridge = viewport?.commentBridge;
-      const native = interaction?.manager?.firstSelectedEditor;
-      const editor = document.querySelector<HTMLElement>(input.editorSelector);
-      const control = document.querySelector<HTMLElement>(input.controlSelector);
-      if (
-        interaction === undefined ||
-        bridge === undefined ||
-        native === undefined ||
-        viewport?.viewer === undefined ||
-        editor === null ||
-        control === null
-      )
-        throw new Error('Persisted FreeText edit probe targets are incomplete.');
-      const original = interaction.focusAnnotation;
-      const focusEvents: Array<boolean | null> = [];
-      const stopFocus = interaction.onAnnotationFocus((focus) => {
-        focusEvents.push(focus?.editable ?? null);
-      });
-      const state = {
-        calls: 0,
-        bridge,
-        cleanup: () => {
-          interaction.focusAnnotation = original;
-          stopFocus();
-        },
-        control,
-        editor,
-        focusEvents,
-        interaction,
-        mode: viewport.viewer.annotationEditorMode ?? null,
-        native,
-        viewer: viewport.viewer,
-      };
-      interaction.focusAnnotation = function (...args: [string, unknown]): Promise<unknown> {
-        state.calls += 1;
-        return original.apply(this, args);
-      };
-      (window as Window & { __abyssTask3FreeTextProbe?: typeof state }).__abyssTask3FreeTextProbe =
-        state;
-    },
-    { controlSelector, editorSelector },
+        const viewport = view.controller?.viewport;
+        return (
+          viewport?.viewer?.annotationEditorMode === 0 &&
+          viewport.annotationEditorInstance?.contextualEditSession == null
+        );
+      }),
+    { timeout: 5_000, timeoutMsg: 'Unified FreeText context did not return to neutral mode.' },
   );
+  const nativeSurface = await waitForPassivePersistedTarget(
+    activeReaderDescendant('.annotationLayer .freeTextAnnotation[data-annotation-id]'),
+  );
+  await browser.executeObsidian(({ app }) => {
+    const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+      controller?: {
+        viewport?: {
+          annotationEditorInstance?: {
+            focusAnnotation: (...args: [string, unknown]) => Promise<unknown>;
+            onAnnotationFocus(listener: (focus: { editable?: boolean } | null) => void): () => void;
+          };
+          viewer?: { annotationEditorMode?: number };
+        };
+      };
+    };
+    const viewport = view.controller?.viewport;
+    const interaction = viewport?.annotationEditorInstance;
+    if (interaction === undefined || viewport?.viewer === undefined)
+      throw new Error('Neutral FreeText edit probe targets are incomplete.');
+    const original = interaction.focusAnnotation;
+    const focusEvents: Array<boolean | null> = [];
+    const stopFocus = interaction.onAnnotationFocus((focus) => {
+      focusEvents.push(focus?.editable ?? null);
+    });
+    const state = {
+      calls: 0,
+      cleanup: () => {
+        interaction.focusAnnotation = original;
+        stopFocus();
+      },
+      focusEvents,
+      mode: viewport.viewer.annotationEditorMode ?? null,
+      viewer: viewport.viewer,
+    };
+    interaction.focusAnnotation = function (...args: [string, unknown]): Promise<unknown> {
+      state.calls += 1;
+      return original.apply(this, args);
+    };
+    (window as Window & { __abyssTask3FreeTextProbe?: typeof state }).__abyssTask3FreeTextProbe =
+      state;
+  });
 
-  await $(editorSelector).doubleClick();
+  await $(nativeSurface).doubleClick();
   const editable = $(inputSelector);
   await editable.waitForExist({ timeout: 5_000 });
   await editable.click();
@@ -1688,33 +1683,24 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
     const host = window as Window & {
       __abyssTask3FreeTextProbe?: {
         calls: number;
-        bridge: {
-          activeSelectedEditors?: unknown[];
-          activeSource?: unknown;
-          bindings?: Map<string, unknown>;
-        };
         cleanup(): void;
-        control: HTMLElement;
-        editor: HTMLElement;
         focusEvents: Array<boolean | null>;
-        interaction: unknown;
         mode: number | null;
-        native: unknown;
         viewer: { annotationEditorMode?: number };
       };
     };
     const state = host.__abyssTask3FreeTextProbe;
     if (state === undefined) throw new Error('Persisted FreeText edit probe was not installed.');
-    const editable = state.editor.querySelector<HTMLElement>('[contenteditable="true"]');
+    const editor = document.querySelector<HTMLElement>(
+      '.workspace-leaf.mod-active .freeTextEditor.selectedEditor',
+    );
+    const editable = editor?.querySelector<HTMLElement>('[contenteditable="true"]') ?? null;
     if (editable === null) throw new Error('Persisted FreeText did not enter native edit mode.');
     const active = document.activeElement;
     const innerText = editable.innerText;
     const result = {
       calls: state.calls,
-      bridgeActiveSource: state.bridge.activeSource === state.native,
-      bridgeBindingCount: state.bridge.bindings?.size ?? -1,
-      bridgeSelected: state.bridge.activeSelectedEditors?.includes(state.native) ?? false,
-      editorConnected: state.editor.isConnected,
+      editorConnected: editor?.isConnected ?? false,
       focused: active === editable || (active !== null && editable.contains(active)),
       mode: state.viewer.annotationEditorMode ?? null,
       modeBefore: state.mode,
@@ -1723,10 +1709,7 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
         document.querySelector<HTMLElement>(
           '.workspace-leaf.mod-active [data-annotation-editor-popover]:not([hidden])',
         ) !== null,
-      sameEditor:
-        document.querySelector('.workspace-leaf.mod-active .freeTextEditor.selectedEditor') ===
-        state.editor,
-      selected: state.editor.classList.contains('selectedEditor'),
+      selected: editor?.classList.contains('selectedEditor') ?? false,
       text: innerText.length > 0 ? innerText : editable.textContent,
     };
     state.cleanup();
@@ -1735,18 +1718,14 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
   });
   expect(result).toMatchObject({
     calls: 0,
-    bridgeActiveSource: true,
-    bridgeBindingCount: 1,
-    bridgeSelected: true,
     editorConnected: true,
     focused: true,
     mode: 3,
-    modeBefore: 3,
-    focusEvents: [],
-    popoverVisible: true,
-    sameEditor: true,
+    modeBefore: 0,
+    popoverVisible: false,
     selected: true,
   });
+  expect(result.focusEvents).not.toContain(false);
   expect(result.text).toContain(' caret');
   await browser.keys(Key.Escape);
   await browser.waitUntil(async () => !(await editable.isExisting()), {
@@ -2585,7 +2564,7 @@ describe('reader selection-first annotations', () => {
     await installTask4AutocompleteNote();
     try {
       await installPersistedActivationTrace(fixture);
-      await $(activeReaderDescendant(fixture.persistedSelector)).click();
+      await $(activeReaderDescendant(fixture.persistedSelector)).click({ button: 'right' });
       await assertEditablePersistedActivation(fixture);
       const commentSelector = `${nativeEditorSelector} [aria-label="Comment"]`;
       const comment = $(commentSelector);
@@ -3102,7 +3081,7 @@ describe('reader selection-first annotations', () => {
   });
 
   for (const fixture of persistedWritableFixtures) {
-    it(`materializes, edits, verifies, and deletes a persisted ${fixture.kind} from a neutral click`, async () => {
+    it(`selects a persisted ${fixture.kind} with a neutral click and edits it from the context menu`, async () => {
       let hash = await vaultFileSha256(workingPath);
       await createPersistedWritableAnnotation(fixture);
       hash = await waitForPdfBytesToChange(workingPath, hash);
@@ -3115,6 +3094,10 @@ describe('reader selection-first annotations', () => {
           ? await waitForPassivePersistedTarget(activeReaderDescendant(fixture.persistedSelector))
           : activeReaderDescendant(fixture.persistedSelector);
       await $(persistedTarget).click();
+      await expect($(persistedTarget)).toHaveAttribute('data-abyss-annotation-selected', 'true');
+      await expect($(nativeEditorSelector)).not.toBeDisplayed();
+      await assertFreshNeutralReader(fixture);
+      await $(persistedTarget).click({ button: 'right' });
       await assertEditablePersistedActivation(fixture);
       const comment = `Persisted ${fixture.kind} activation`;
       await updateActivatedPersistedAnnotation(comment);
@@ -3125,7 +3108,7 @@ describe('reader selection-first annotations', () => {
         await installPersistedActivationTrace(fixture);
         await $(
           await waitForPassivePersistedTarget(activeReaderDescendant(fixture.persistedSelector)),
-        ).click();
+        ).click({ button: 'right' });
         await assertEditablePersistedActivation(fixture);
         await assertNativeFreeTextEditingUnaffected();
       }
@@ -3140,7 +3123,7 @@ describe('reader selection-first annotations', () => {
       await $('[data-tab="annotations"]').click();
       await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
       await installPersistedActivationTrace(fixture);
-      await $('.abyss-annotation-card').click();
+      await $('.abyss-annotation-card').click({ button: 'right' });
       await assertEditablePersistedActivation(fixture);
       await expect($(`${nativeEditorSelector} [aria-label="Comment"]`)).toHaveValue(comment);
       const deletedId = await $('.abyss-annotation-card').getAttribute('data-annotation-id');
@@ -3180,7 +3163,7 @@ describe('reader selection-first annotations', () => {
       );
     });
 
-    it(`materializes a persisted ${fixture.kind} through one sidebar-card activation`, async () => {
+    it(`keeps sidebar ${fixture.kind} navigation passive and opens its editor contextually`, async () => {
       const hash = await vaultFileSha256(workingPath);
       await createPersistedWritableAnnotation(fixture);
       await waitForPdfBytesToChange(workingPath, hash);
@@ -3192,7 +3175,16 @@ describe('reader selection-first annotations', () => {
       await $('.abyss-annotation-card').waitForExist({ timeout: 10_000 });
       await installPersistedActivationTrace(fixture);
       await $('.abyss-annotation-card').click();
-
+      await expect($('.abyss-annotation-card')).toHaveAttribute('aria-current', 'true');
+      await expect($(nativeEditorSelector)).not.toBeDisplayed();
+      await assertFreshNeutralReader(fixture);
+      await browser.keys(Key.Enter);
+      await expect($(nativeEditorSelector)).not.toBeDisplayed();
+      await assertFreshNeutralReader(fixture);
+      await browser.keys(' ');
+      await expect($(nativeEditorSelector)).not.toBeDisplayed();
+      await assertFreshNeutralReader(fixture);
+      await $('.abyss-annotation-card').click({ button: 'right' });
       await assertEditablePersistedActivation(fixture);
       await expect($(`${fixture.editorSelector}.selectedEditor`)).toExist();
     });
@@ -3218,7 +3210,7 @@ describe('reader selection-first annotations', () => {
       card.dataset['task9ExistingCard'] = '';
     });
     await expect($('.highlightEditor')).toExist();
-    await $('.abyss-annotation-card').click();
+    await $('.abyss-annotation-card').click({ button: 'right' });
     const popover = $(nativeEditorSelector);
     try {
       await popover.waitForDisplayed({ timeout: 5_000 });
@@ -3310,7 +3302,7 @@ describe('reader selection-first annotations', () => {
     await browser.keys(Key.Escape);
     await expect(popover).not.toBeDisplayed();
     hash = await waitForPdfBytesToChange(workingPath, hash);
-    await $('.abyss-annotation-card').click();
+    await $('.abyss-annotation-card').click({ button: 'right' });
     await expect(popover).toBeDisplayed();
     await expect(comment).toHaveValue('Contextual comment #tag [[Link]]');
     await expect($$('.abyss-annotation-card')).toBeElementsArrayOfSize(1);
@@ -3455,7 +3447,7 @@ describe('reader selection-first annotations', () => {
         throw new Error(`Missing exact overlap card: ${JSON.stringify({ cardTexts, comment })}`);
       }
       const card = $(`.abyss-annotation-card[data-annotation-id=${JSON.stringify(annotationId)}]`);
-      await card.click();
+      await card.click({ button: 'right' });
       try {
         await expect($(nativeEditorSelector)).toBeDisplayed();
       } catch (cause) {
@@ -3641,7 +3633,7 @@ describe('reader selection-first annotations', () => {
         ),
       ),
     ).toEqual(new Set(persistedIds));
-    await $$('.annotationLayer .highlightAnnotation')[0]?.click();
+    await $$('.annotationLayer .highlightAnnotation')[0]?.click({ button: 'right' });
     await browser.waitUntil(
       async () =>
         browser.execute(
@@ -3816,7 +3808,7 @@ describe('reader selection-first annotations', () => {
         ),
       ),
     ).toEqual(new Set(persistedIds));
-    await $$('.annotationLayer .highlightAnnotation')[0]?.click();
+    await $$('.annotationLayer .highlightAnnotation')[0]?.click({ button: 'right' });
     await browser.waitUntil(
       async () =>
         browser.execute(

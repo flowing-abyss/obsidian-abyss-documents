@@ -2250,6 +2250,52 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('ignores every passive hover popup while retaining explicit selected focus', () => {
+    const host = document.body.createDiv();
+    const bridge = new PdfCommentBridge(host);
+    const native = editor('Passive read-only');
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+
+    bridge.toggleCommentPopup(native, false, true, false);
+    bridge.toggleCommentPopup(native, false, true, true);
+    expect(focused).toEqual([]);
+
+    bridge.toggleCommentPopup(editor('Missing anchor', { anchor: null }));
+    expect(focused).toEqual([]);
+
+    const missingRgb = editor('Missing RGB', { color: undefined });
+    missingRgb.getNonHCMColor = () => [undefined, undefined, undefined] as unknown as number[];
+    bridge.toggleCommentPopup(missingRgb, true, true);
+    expect(focused[focused.length - 1]?.annotations[0]?.color).toBe('#000000');
+
+    const page = document.body.createDiv();
+    page.dataset['pageNumber'] = '0';
+    const pageAnchor = page.createDiv();
+    bridge.toggleCommentPopup(editor('Invalid page', { anchor: pageAnchor }), true, true);
+    expect(focused[focused.length - 1]?.annotations[0]?.anchor).toMatchObject({
+      kind: 'fixed-page',
+      pageIndex: 0,
+    });
+    page.dataset['pageNumber'] = '2';
+    bridge.toggleCommentPopup(editor('Valid page', { anchor: pageAnchor }), true, true);
+    expect(focused[focused.length - 1]?.annotations[0]?.anchor).toMatchObject({
+      kind: 'fixed-page',
+      pageIndex: 1,
+    });
+    page.remove();
+
+    bridge.toggleCommentPopup(native);
+    expect(focused).toHaveLength(4);
+
+    bridge.toggleCommentPopup(native, true, true, false);
+    bridge.toggleCommentPopup(native, true, true, true);
+    expect(focused).toHaveLength(6);
+
+    bridge.dispose();
+    host.remove();
+  });
+
   it('keeps the compatibility sidebar count and selected comment in sync with valid PDF.js data', () => {
     const host = document.body.createDiv();
     const bridge = new PdfCommentBridge(host);

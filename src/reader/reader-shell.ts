@@ -155,9 +155,10 @@ export class ReaderShell implements AnnotationInteractionHost {
     }
     return this.annotationEditor.open({
       ...request,
-      onClose: (reason) => {
+      onClose: (reason, context) => {
         try {
-          request.onClose(reason);
+          if (context === undefined) request.onClose(reason);
+          else request.onClose(reason, context);
         } finally {
           this.sidebarValue?.annotationsPanel.clearSelection();
           for (const listener of this.annotationEditorCloseListeners) listener();
