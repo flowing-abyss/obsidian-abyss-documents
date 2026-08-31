@@ -52,6 +52,12 @@ export interface AnnotationInteractionControllerOptions {
   readonly onSelectionCreateStart?: (creation: AnnotationEditorCreation) => void;
 }
 
+interface QueuedStickySelection {
+  readonly color: string;
+  readonly intentRevision: number;
+  readonly selection: PdfTextSelection;
+}
+
 const DEFAULT_COLOR = '#ffd400';
 
 export class AnnotationInteractionController {
@@ -67,8 +73,10 @@ export class AnnotationInteractionController {
   private mode: PdfAnnotationLogicalMode = 'neutral';
   private palette: readonly AnnotationPaletteEntry[];
   private quickRequestRevision = 0;
+  private queuedStickySelection: QueuedStickySelection | null = null;
   private stickyArmed = false;
   private stickyArming = false;
+  private stickyIntentRevision = 0;
   private activeSelectionToken: string | null = null;
   private lastStickySelectionToken: string | null = null;
 
@@ -112,6 +120,7 @@ export class AnnotationInteractionController {
   requestTool(tool: PdfAnnotationTool, color?: string): boolean {
     if (this.destroyed || (tool !== 'highlight' && tool !== 'select')) return false;
     if (!this.closeActiveSelection()) return false;
+    this.discardQueuedStickySelection();
     const enabled = tool === 'highlight';
     if (enabled && color !== undefined && color.trim().length > 0) this.setActiveColor(color);
     this.stickyArmed = false;
@@ -131,6 +140,7 @@ export class AnnotationInteractionController {
     source: PdfAnnotationActivationSource,
   ): Promise<PdfAnnotationActivationResult> {
     if (activationUnavailable(this.destroyed, source)) return 'cancelled';
+    this.discardQueuedStickySelection();
     if (this.activeEditorKind === 'annotation') {
       if (!(await this.host.flushAnnotationEditor())) return 'cancelled';
       if (activationUnavailable(this.destroyed, source)) return 'cancelled';
@@ -181,6 +191,7 @@ export class AnnotationInteractionController {
 
   invalidate(reason: AnnotationInteractionInvalidation): void {
     if (this.destroyed) return;
+    this.discardQueuedStickySelection();
     if (
       (reason === 'zoom' || reason === 'layout') &&
       this.activeEditorKind !== null &&
@@ -194,6 +205,7 @@ export class AnnotationInteractionController {
   destroy(): boolean {
     if (this.destroyed) return true;
     if (!this.closeActiveSelection()) return false;
+    this.discardQueuedStickySelection();
     this.destroyed = true;
     this.quickRequestRevision += 1;
     this.abortCommit('The PDF annotation interaction was closed.');
@@ -205,19 +217,22 @@ export class AnnotationInteractionController {
     if (this.destroyed) return;
     this.mode = mode;
     this.options.onModeChange?.(mode);
+    this.disarmStickyForTerminalMode(mode);
     if (this.activeAbort !== null) {
       this.publishQuickHighlightState();
       return;
     }
-    if (mode === 'ink' || mode === 'freetext' || mode === 'disabled') {
-      this.stickyArmed = false;
-      if (this.stickyArming) {
-        this.stickyArming = false;
-        this.quickRequestRevision += 1;
-      }
-    }
     if (mode !== 'neutral' && !this.closeActiveSelection()) return;
     this.publishQuickHighlightState();
+  }
+
+  private disarmStickyForTerminalMode(mode: PdfAnnotationLogicalMode): void {
+    if (mode !== 'ink' && mode !== 'freetext' && mode !== 'disabled') return;
+    this.discardQueuedStickySelection();
+    this.stickyArmed = false;
+    if (!this.stickyArming) return;
+    this.stickyArming = false;
+    this.quickRequestRevision += 1;
   }
 
   private handleColor(color: string): void {
@@ -235,16 +250,22 @@ export class AnnotationInteractionController {
   }
 
   private handleSelection(selection: PdfTextSelection | null): void {
-    if (this.activeAbort !== null) return;
+    if (this.activeAbort !== null) {
+      this.queueActiveStickySelection(selection);
+      return;
+    }
     if (selection === null) {
       this.handleClearedSelection();
+      return;
+    }
+    if (this.stickyArming) {
+      this.queueStickySelection(selection);
       return;
     }
     if (this.destroyed || this.mode !== 'neutral') {
       this.closeActiveSelection();
       return;
     }
-    if (this.stickyArming) return;
     if (this.stickyArmed) {
       this.commitStickySelection(selection);
       return;
@@ -260,13 +281,17 @@ export class AnnotationInteractionController {
     this.closeActiveSelection();
   }
 
-  private commitStickySelection(selection: PdfTextSelection): void {
+  private commitStickySelection(selection: PdfTextSelection, color = this.activeColor): void {
     if (selection.token === this.lastStickySelectionToken) return;
     this.lastStickySelectionToken = selection.token;
     const revision = this.activeSelectionRevision + 1;
     this.activeSelectionRevision = revision;
-    const creation = { color: this.activeColor, comment: '', selection };
-    void this.createSelection(revision, creation, false).catch(() => undefined);
+    const creation = { color, comment: '', selection };
+    void this.createSelection(revision, creation, false)
+      .catch(() => undefined)
+      .finally(() => {
+        this.replayQueuedStickySelection();
+      });
   }
 
   private openSelectionEditor(selection: PdfTextSelection): void {
@@ -478,8 +503,10 @@ export class AnnotationInteractionController {
       this.stickyArming = false;
       this.stickyArmed = enabled;
       this.publishQuickHighlightState();
+      this.replayQueuedStickySelection();
     } catch (cause) {
       if (this.destroyed || revision !== this.quickRequestRevision) return;
+      this.discardQueuedStickySelection();
       this.stickyArmed = false;
       this.stickyArming = false;
       this.publishQuickHighlightState();
@@ -506,6 +533,40 @@ export class AnnotationInteractionController {
     const abort = this.activeAbort;
     this.activeAbort = null;
     abort?.abort(new DOMException(message, 'AbortError'));
+  }
+
+  private queueStickySelection(selection: PdfTextSelection): void {
+    if (this.destroyed) return;
+    this.queuedStickySelection = {
+      color: this.activeColor,
+      intentRevision: this.stickyIntentRevision,
+      selection,
+    };
+  }
+
+  private queueActiveStickySelection(selection: PdfTextSelection | null): void {
+    if (selection !== null && (this.stickyArmed || this.stickyArming))
+      this.queueStickySelection(selection);
+  }
+
+  private replayQueuedStickySelection(): void {
+    if (
+      this.destroyed ||
+      this.activeAbort !== null ||
+      this.stickyArming ||
+      !this.stickyArmed ||
+      this.mode !== 'neutral'
+    )
+      return;
+    const queued = this.queuedStickySelection;
+    this.queuedStickySelection = null;
+    if (queued?.intentRevision !== this.stickyIntentRevision) return;
+    this.commitStickySelection(queued.selection, queued.color);
+  }
+
+  private discardQueuedStickySelection(): void {
+    this.stickyIntentRevision += 1;
+    this.queuedStickySelection = null;
   }
 
   private neutralizeNativeEditor(): void {

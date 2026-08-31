@@ -314,6 +314,42 @@ function requestPdfJsSelectionMode(
   });
 }
 
+function nonNormalizingSelectionHighlightFixture(
+  fixtureOptions: { readonly dispatchModeChanges?: boolean } = {},
+) {
+  const fixtureValue = fixture(fixtureOptions);
+  const uiManager = manager();
+  const existingEditor = selectedEditor('existing-runtime', 9);
+  const ownedEditor = selectedEditor('owned-runtime', 9);
+  let ownedEditorReady = false;
+  fixtureValue.commentBridge.nativeEditorIds.mockImplementation(
+    () => new Set(['existing-runtime', ...(ownedEditorReady ? ['owned-runtime'] : [])]),
+  );
+  fixtureValue.commentBridge.normalizeSelectionHighlight.mockReturnValue(null);
+  uiManager.getEditor.mockImplementation((id) => {
+    if (id === 'existing-runtime') return existingEditor;
+    if (id === 'owned-runtime') return ownedEditor;
+    return undefined;
+  });
+  let selectedForDelete: ReturnType<typeof selectedEditor> | null = null;
+  uiManager.setSelected.mockImplementation((editor: ReturnType<typeof selectedEditor>) => {
+    selectedForDelete = editor;
+  });
+  uiManager.delete.mockImplementation(() => {
+    if (selectedForDelete === ownedEditor) ownedEditorReady = false;
+  });
+  uiManager.highlightSelection.mockImplementation(() => {
+    ownedEditorReady = true;
+    uiManager.firstSelectedEditor = ownedEditor;
+    fixtureValue.annotationStorage.addEditor(9, 'owned-runtime');
+  });
+  fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+    source: fixtureValue.viewer,
+    uiManager,
+  });
+  return { existingEditor, fixtureValue, ownedEditor, uiManager };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -515,6 +551,167 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(firstEditorReady).toBe(true);
     expect(secondEditorReady).toBe(true);
   });
+
+  it.each(['timeout', 'abort'] as const)(
+    'settles a non-normalizing observed highlight after transaction %s and deletes only its exact editor',
+    async (ending) => {
+      vi.useFakeTimers();
+      try {
+        const { existingEditor, fixtureValue, ownedEditor, uiManager } =
+          nonNormalizingSelectionHighlightFixture();
+        const abort = new AbortController();
+        let outcome: unknown = 'pending';
+        void fixtureValue.editor
+          .commitSelection('current', { kind: 'highlight', color: '#ffd400' }, abort.signal)
+          .catch((cause: unknown) => {
+            outcome = cause;
+          });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+
+        if (ending === 'abort')
+          abort.abort(new DOMException('Navigation superseded the selection.', 'AbortError'));
+        else await vi.advanceTimersByTimeAsync(2_000);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(outcome).toMatchObject({ name: ending === 'abort' ? 'AbortError' : 'TimeoutError' });
+        expect(uiManager.setSelected).toHaveBeenCalledExactlyOnceWith(ownedEditor);
+        expect(uiManager.setSelected).not.toHaveBeenCalledWith(existingEditor);
+        expect(uiManager.delete).toHaveBeenCalledOnce();
+        expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
+        expect(
+          (Reflect.get(fixtureValue.editor, 'editorAddedListeners') as Set<unknown>).size,
+        ).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('recaptures one late-visible editor from an observed callback before rollback', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixtureValue = fixture();
+      const uiManager = manager();
+      const existingEditor = selectedEditor('existing-late-runtime', 9);
+      const ownedEditor = selectedEditor('owned-late-runtime', 9);
+      let ownedEditorReady = false;
+      fixtureValue.commentBridge.nativeEditorIds.mockImplementation(
+        () =>
+          new Set(['existing-late-runtime', ...(ownedEditorReady ? ['owned-late-runtime'] : [])]),
+      );
+      fixtureValue.commentBridge.normalizeSelectionHighlight.mockReturnValue(null);
+      uiManager.getEditor.mockImplementation((id) => {
+        if (id === 'existing-late-runtime') return existingEditor;
+        if (id === 'owned-late-runtime') return ownedEditor;
+        return undefined;
+      });
+      let selectedForDelete: ReturnType<typeof selectedEditor> | null = null;
+      uiManager.setSelected.mockImplementation((editor: ReturnType<typeof selectedEditor>) => {
+        selectedForDelete = editor;
+      });
+      uiManager.delete.mockImplementation(() => {
+        if (selectedForDelete === ownedEditor) ownedEditorReady = false;
+      });
+      uiManager.highlightSelection.mockImplementation(() => {
+        fixtureValue.annotationStorage.addEditor(9, 'owned-late-runtime');
+        ownedEditorReady = true;
+        uiManager.firstSelectedEditor = ownedEditor;
+      });
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      const abort = new AbortController();
+
+      const committing = fixtureValue.editor.commitSelection(
+        'current',
+        { kind: 'highlight', color: '#ffd400' },
+        abort.signal,
+      );
+      const rejected = expect(committing).rejects.toMatchObject({ name: 'AbortError' });
+      expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+      abort.abort(new DOMException('Navigation superseded the selection.', 'AbortError'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      await rejected;
+      expect(uiManager.setSelected).toHaveBeenCalledExactlyOnceWith(ownedEditor);
+      expect(uiManager.setSelected).not.toHaveBeenCalledWith(existingEditor);
+      expect(uiManager.delete).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['save', 'tool', 'suspend', 'destroy'] as const)(
+    'releases pending %s work after a non-normalizing observed highlight is aborted',
+    async (operation) => {
+      vi.useFakeTimers();
+      try {
+        const { fixtureValue, ownedEditor, uiManager } = nonNormalizingSelectionHighlightFixture();
+        let commitOutcome: unknown = 'pending';
+        void fixtureValue.editor
+          .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+          .catch((cause: unknown) => {
+            commitOutcome = cause;
+          });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+
+        let operationOutcome: unknown = 'pending';
+        if (operation === 'save') {
+          void fixtureValue.editor
+            .save(new AbortController().signal)
+            .then((bytes) => {
+              operationOutcome = bytes;
+            })
+            .catch((cause: unknown) => {
+              operationOutcome = cause;
+            });
+          await vi.advanceTimersByTimeAsync(2_000);
+        } else if (operation === 'tool') {
+          void fixtureValue.editor
+            .setTool('ink')
+            .then(() => {
+              operationOutcome = 'settled';
+            })
+            .catch((cause: unknown) => {
+              operationOutcome = cause;
+            });
+        } else if (operation === 'suspend') {
+          void fixtureValue.editor
+            .suspendInteractions()
+            .then(() => {
+              operationOutcome = 'settled';
+            })
+            .catch((cause: unknown) => {
+              operationOutcome = cause;
+            });
+        } else {
+          fixtureValue.editor.destroy();
+          operationOutcome = 'settled';
+        }
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(commitOutcome).toMatchObject({
+          name: operation === 'save' ? 'TimeoutError' : 'AbortError',
+        });
+        expect(operationOutcome).not.toBe('pending');
+        if (operation === 'save') expect(operationOutcome).toBeInstanceOf(Uint8Array);
+        else expect(operationOutcome).toBe('settled');
+        expect(uiManager.setSelected).toHaveBeenCalledExactlyOnceWith(ownedEditor);
+        expect(uiManager.delete).toHaveBeenCalledOnce();
+        expect(
+          (Reflect.get(fixtureValue.editor, 'editorAddedListeners') as Set<unknown>).size,
+        ).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('resolves highlight after dirty and NONE', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });

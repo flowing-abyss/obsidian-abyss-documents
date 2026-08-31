@@ -628,6 +628,28 @@ describe('AnnotationInteractionController', () => {
     expect(test.controller.color).toBe('#ff6666');
   });
 
+  it('replays a selection made while Sticky Highlight is still arming', async () => {
+    const arming = deferred<void>();
+    const test = fixture();
+    test.setQuickHighlight.mockImplementationOnce(() => arming.promise);
+
+    expect(test.controller.requestTool('highlight', '#5fb236')).toBe(true);
+    const selection = textSelection('sticky-immediate-drag');
+    test.emitSelection(selection);
+    expect(test.commitSelection).not.toHaveBeenCalled();
+
+    arming.resolve(undefined);
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledExactlyOnceWith(
+        'sticky-immediate-drag',
+        { color: '#5fb236', kind: 'highlight' },
+        expect.any(AbortSignal),
+      );
+    });
+    expect(test.openAnnotationEditor).not.toHaveBeenCalled();
+    test.controller.destroy();
+  });
+
   it.each(['ink', 'freetext'] as const)(
     'gates selection and publishes disarmed while Sticky Highlight leaves delayed %s mode',
     async (initialMode) => {
@@ -768,6 +790,123 @@ describe('AnnotationInteractionController', () => {
     expect(test.controller.quickHighlightArmed).toBe(true);
     test.controller.destroy();
   });
+
+  it('serializes Sticky Highlight commits and replays only the latest pending selection', async () => {
+    const first = deferred<DocumentAnnotation | 'dismissed'>();
+    const test = fixture();
+    test.commitSelection
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce(nativeAnnotation('', 'sticky-latest-native'));
+
+    test.controller.requestTool('highlight', '#ffd400');
+    await vi.waitFor(() => {
+      expect(test.controller.quickHighlightArmed).toBe(true);
+    });
+    test.emitSelection(textSelection('sticky-first-pending'));
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledOnce();
+    });
+
+    test.emitSelection(textSelection('sticky-superseded-pending'));
+    expect(test.controller.selectColor('#5fb236')).toBe(true);
+    test.emitSelection(textSelection('sticky-latest-pending'));
+    expect(test.commitSelection).toHaveBeenCalledOnce();
+
+    first.resolve(nativeAnnotation('', 'sticky-first-native'));
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledTimes(2);
+    });
+    expect(test.commitSelection.mock.calls.map(([token, action]) => ({ action, token }))).toEqual([
+      { action: { color: '#ffd400', kind: 'highlight' }, token: 'sticky-first-pending' },
+      { action: { color: '#5fb236', kind: 'highlight' }, token: 'sticky-latest-pending' },
+    ]);
+    expect(test.abortInteraction).not.toHaveBeenCalled();
+    test.controller.destroy();
+  });
+
+  it.each(['select', 'navigation', 'destroy'] as const)(
+    'discards the queued Sticky Highlight gesture after %s invalidation',
+    async (invalidation) => {
+      const first = deferred<DocumentAnnotation | 'dismissed'>();
+      const test = fixture();
+      test.commitSelection.mockImplementationOnce((_token, _action, signal) => {
+        signal?.addEventListener(
+          'abort',
+          () => {
+            first.reject(signal.reason);
+          },
+          { once: true },
+        );
+        return first.promise;
+      });
+
+      test.controller.requestTool('highlight');
+      await vi.waitFor(() => {
+        expect(test.controller.quickHighlightArmed).toBe(true);
+      });
+      test.emitSelection(textSelection('sticky-active-before-invalidation'));
+      await vi.waitFor(() => {
+        expect(test.commitSelection).toHaveBeenCalledOnce();
+      });
+      test.emitSelection(textSelection('sticky-queued-before-invalidation'));
+
+      if (invalidation === 'select') test.controller.requestTool('select');
+      else if (invalidation === 'navigation') test.controller.invalidate('navigation');
+      else test.controller.destroy();
+
+      await vi.waitFor(() => {
+        expect(test.commitSelection).toHaveBeenCalledOnce();
+      });
+      await Promise.resolve();
+      expect(test.commitSelection).toHaveBeenCalledOnce();
+      if (invalidation !== 'destroy') test.controller.destroy();
+    },
+  );
+
+  it.each(['ink', 'freetext', 'disabled'] as const)(
+    'discards a queued Sticky Highlight gesture when native %s mode wins during a commit',
+    async (terminalMode) => {
+      const first = deferred<DocumentAnnotation | 'dismissed'>();
+      const test = fixture();
+      test.commitSelection
+        .mockImplementationOnce(() => first.promise)
+        .mockResolvedValueOnce(nativeAnnotation('', `sticky-after-${terminalMode}`));
+
+      test.controller.requestTool('highlight');
+      await vi.waitFor(() => {
+        expect(test.controller.quickHighlightArmed).toBe(true);
+      });
+      test.emitSelection(textSelection(`sticky-active-before-${terminalMode}`));
+      await vi.waitFor(() => {
+        expect(test.commitSelection).toHaveBeenCalledOnce();
+      });
+      test.emitSelection(textSelection(`sticky-queued-before-${terminalMode}`));
+
+      test.emitMode(terminalMode);
+      expect(test.controller.quickHighlightArmed).toBe(false);
+      first.resolve(nativeAnnotation('', `sticky-active-before-${terminalMode}`));
+      await vi.waitFor(() => {
+        expect(test.commitSelection).toHaveBeenCalledOnce();
+      });
+
+      test.emitMode('neutral');
+      test.controller.requestTool('highlight');
+      await vi.waitFor(() => {
+        expect(test.controller.quickHighlightArmed).toBe(true);
+      });
+      test.emitSelection(textSelection(`sticky-after-${terminalMode}`));
+      await vi.waitFor(() => {
+        expect(test.commitSelection).toHaveBeenCalledTimes(2);
+      });
+      await Promise.resolve();
+
+      expect(test.commitSelection.mock.calls.map(([token]) => token)).toEqual([
+        `sticky-active-before-${terminalMode}`,
+        `sticky-after-${terminalMode}`,
+      ]);
+      test.controller.destroy();
+    },
+  );
 
   it('defers a Sticky Highlight palette change during a commit to the next gesture', async () => {
     const first = deferred<DocumentAnnotation | 'dismissed'>();
