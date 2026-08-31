@@ -144,6 +144,7 @@ interface PdfAnnotationUiManager {
     | undefined;
   highlightSelection(methodOfCreation?: string): void;
   redo(): void;
+  setSelected?(editor: PdfNativeEditorReference): void;
   undo(): void;
   updateParams(type: number, value: unknown): void;
 }
@@ -231,9 +232,12 @@ interface PendingAnnotationFocus {
 }
 
 interface SelectionHighlightReservation {
+  readonly candidateNativeIds: () => ReadonlySet<string>;
   readonly created: Promise<DocumentAnnotation>;
   readonly current: () => DocumentAnnotation | null;
+  readonly deleteOwnedNativeEditor: () => boolean;
   readonly observed: () => boolean;
+  readonly ownedNativeIds: () => ReadonlySet<string>;
   readonly refresh: () => void;
   readonly unsubscribe: () => void;
 }
@@ -355,6 +359,7 @@ export class PdfAnnotationEditor {
   private managerEventsEnabled = true;
   private pendingModeChange: PendingModeChange | null = null;
   private pendingSelectionTransaction: PendingSelectionTransaction | null = null;
+  private toolIntentRevision = 0;
   private queuedToolIntent: QueuedToolIntent | null = null;
   private readonly queuedMutations: QueuedMutation[] = [];
   private saveBarrier: ReturnType<typeof deferred<void>> | null = null;
@@ -388,7 +393,27 @@ export class PdfAnnotationEditor {
   }
 
   async setTool(tool: PdfAnnotationTool, options: PdfAnnotationToolOptions = {}): Promise<void> {
+    const intentRevision = ++this.toolIntentRevision;
+    await this.applyToolIntent(tool, options, intentRevision);
+  }
+
+  private async applyToolIntent(
+    tool: PdfAnnotationTool,
+    options: PdfAnnotationToolOptions,
+    intentRevision: number,
+  ): Promise<void> {
     if (this.interactionsSuspended) return;
+    const pendingSelection = this.pendingSelectionTransaction;
+    if (pendingSelection !== null) {
+      await this.abortAndWaitForTransaction(
+        pendingSelection,
+        new DOMException('The PDF annotation selection was superseded by a tool.', 'AbortError'),
+      );
+      if (intentRevision !== this.toolIntentRevision) {
+        throw new DOMException('The PDF annotation tool request was superseded.', 'AbortError');
+      }
+      if (this.toolIntentInterrupted()) return;
+    }
     this.cancelAnnotationActivation('The PDF annotation activation was superseded by a tool.');
     this.cancelContextualSaveRestore();
     this.requireManager();
@@ -400,6 +425,10 @@ export class PdfAnnotationEditor {
       return this.queueToolIntent(tool, modeOptions, this.requireManager(), this.lifecycleRevision);
     const mode = this.modeFor(tool);
     await this.changeMode(mode, modeOptions);
+  }
+
+  private toolIntentInterrupted(): boolean {
+    return this.destroyed || this.interactionsSuspended;
   }
 
   async editAnnotation(request: {
@@ -1352,10 +1381,19 @@ export class PdfAnnotationEditor {
         this.changeMode(this.dependencies.annotationEditorType.NONE),
         transaction.controller.signal,
       );
+      // Returning from NONE is the commit point. Before this line the exact
+      // PDF.js editor created for the gesture remains transaction-owned.
       return annotation;
     } catch (cause) {
       const failure = asError(cause);
+      const rollbackFailure = await this.rollbackSelectionHighlight(highlight);
       await this.abortSelectionTransaction(failure);
+      if (rollbackFailure !== null && rollbackFailure !== failure) {
+        throw new AggregateError(
+          [failure, rollbackFailure],
+          'The PDF selection annotation could not be rolled back.',
+        );
+      }
       throw failure;
     } finally {
       highlight.unsubscribe();
@@ -1418,6 +1456,12 @@ export class PdfAnnotationEditor {
     const created = deferred<DocumentAnnotation>();
     void created.promise.catch(() => undefined);
     const existingIds = this.dependencies.commentBridge.nativeEditorIds(manager);
+    const ownership = new SelectionHighlightOwnership(
+      manager,
+      this.dependencies.annotationEditorType.HIGHLIGHT,
+      () => this.dependencies.commentBridge.nativeEditorIds(manager),
+      existingIds,
+    );
     let current: DocumentAnnotation | null = null;
     let frame: number | null = null;
     let observed = false;
@@ -1428,6 +1472,7 @@ export class PdfAnnotationEditor {
         existingIds,
       );
       if (annotation === null) return false;
+      ownership.captureNormalizedIds();
       current ??= annotation;
       created.resolve(annotation);
       return true;
@@ -1457,17 +1502,79 @@ export class PdfAnnotationEditor {
       observed = true;
       queueMicrotask(refresh);
       refresh();
+      ownership.captureCallbackEditor();
     });
     return {
+      candidateNativeIds: () => ownership.candidateNativeIds(),
       created: created.promise,
       current: () => current,
+      deleteOwnedNativeEditor: () => ownership.deleteOwnedEditor(),
       observed: () => observed,
+      ownedNativeIds: () => ownership.ownedNativeIds(),
       refresh,
       unsubscribe: () => {
         stopRetries();
         unsubscribe();
       },
     };
+  }
+
+  private async rollbackSelectionHighlight(
+    reservation: SelectionHighlightReservation,
+  ): Promise<Error | null> {
+    let annotation: DocumentAnnotation | null = null;
+    try {
+      reservation.refresh();
+      annotation = reservation.current();
+      if (annotation === null && reservation.observed()) annotation = await reservation.created;
+    } catch {
+      // The exact runtime-id closure below remains available even when public
+      // annotation normalization fails.
+    }
+    try {
+      const nativeIds = reservation.ownedNativeIds();
+      const deleted =
+        annotation === null
+          ? reservation.deleteOwnedNativeEditor()
+          : this.dependencies.commentBridge.deleteAnnotations([annotation]);
+      if (!deleted) {
+        if (annotation === null && reservation.candidateNativeIds().size === 0) return null;
+        throw new DOMException(
+          'The PDF selection annotation could not be deleted during rollback.',
+          'InvalidStateError',
+        );
+      }
+      await this.waitForSelectionRollbackCleanup(reservation, nativeIds);
+      return null;
+    } catch (cause) {
+      return asError(cause);
+    }
+  }
+
+  private waitForSelectionRollbackCleanup(
+    reservation: SelectionHighlightReservation,
+    nativeIds: ReadonlySet<string>,
+  ): Promise<void> {
+    if (nativeIds.size === 0) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      let frame: number | null = null;
+      const timeout = window.setTimeout(() => {
+        if (frame !== null) window.cancelAnimationFrame(frame);
+        reject(
+          new DOMException('The PDF selection annotation rollback timed out.', 'TimeoutError'),
+        );
+      }, SELECTION_TRANSACTION_TIMEOUT_MS);
+      const check = (): void => {
+        const remaining = reservation.ownedNativeIds();
+        if (![...nativeIds].some((id) => remaining.has(id))) {
+          window.clearTimeout(timeout);
+          resolve();
+          return;
+        }
+        frame = window.requestAnimationFrame(check);
+      };
+      check();
+    });
   }
 
   private async createSelectionHighlight(
@@ -1516,12 +1623,14 @@ export class PdfAnnotationEditor {
     readonly color: string;
   }): Promise<void> {
     if (this.interactionsSuspended) return;
+    const intentRevision = ++this.toolIntentRevision;
     if (state.enabled) {
       await this.setParameter('highlight-color', state.color);
-      await this.setTool('highlight');
-      return;
     }
-    await this.setTool('select');
+    if (intentRevision !== this.toolIntentRevision) {
+      throw new DOMException('The PDF annotation tool request was superseded.', 'AbortError');
+    }
+    await this.applyToolIntent('select', {}, intentRevision);
   }
 
   async abortInteraction(message: string): Promise<void> {
@@ -2904,6 +3013,78 @@ export class PdfAnnotationEditor {
   }
 }
 
+class SelectionHighlightOwnership {
+  private ownedEditor: PdfNativeEditorReference | null = null;
+  private readonly ownedIdAliases = new Set<string>();
+
+  constructor(
+    private readonly manager: PdfAnnotationUiManager,
+    private readonly highlightMode: number,
+    private readonly readNativeIds: () => ReadonlySet<string>,
+    private readonly baselineIds: ReadonlySet<string>,
+  ) {}
+
+  candidateNativeIds(): ReadonlySet<string> {
+    const ids = new Set(this.readNativeIds());
+    for (const id of this.baselineIds) ids.delete(id);
+    return ids;
+  }
+
+  captureCallbackEditor(): void {
+    if (this.ownedEditor !== null) return;
+    const ids = this.candidateNativeIds();
+    const editor = this.uniqueCandidateEditor(ids);
+    if (editor === null) return;
+    this.ownedEditor = editor;
+    for (const id of ids) this.ownedIdAliases.add(id);
+    for (const id of nativeEditorIdentityIds(editor)) this.ownedIdAliases.add(id);
+  }
+
+  captureNormalizedIds(): void {
+    if (this.ownedEditor !== null) return;
+    const ids = this.candidateNativeIds();
+    if (ids.size !== 1) return;
+    const id = ids.values().next().value;
+    if (typeof id === 'string') this.ownedIdAliases.add(id);
+  }
+
+  ownedNativeIds(): ReadonlySet<string> {
+    const ids = new Set<string>();
+    for (const id of this.candidateNativeIds()) {
+      if (this.isOwnedId(id)) ids.add(id);
+    }
+    return ids;
+  }
+
+  deleteOwnedEditor(): boolean {
+    if (this.manager.setSelected === undefined || this.ownedEditor === null) return false;
+    this.manager.setSelected(this.ownedEditor);
+    this.manager.delete();
+    return true;
+  }
+
+  private isOwnedId(id: string): boolean {
+    if (this.ownedIdAliases.has(id)) return true;
+    return this.ownedEditor !== null && this.manager.getEditor(id) === this.ownedEditor;
+  }
+
+  private uniqueCandidateEditor(ids: ReadonlySet<string>): PdfNativeEditorReference | null {
+    if (ids.size === 0) return null;
+    const selected = this.manager.firstSelectedEditor;
+    const selectedAliases = new Set(
+      selected === undefined ? [] : nativeEditorIdentityIds(selected),
+    );
+    let candidate: PdfNativeEditorReference | null = null;
+    for (const id of ids) {
+      const editor = this.manager.getEditor(id) ?? (selectedAliases.has(id) ? selected : undefined);
+      if (editor?.mode !== this.highlightMode) return null;
+      if (candidate !== null && candidate !== editor) return null;
+      candidate = editor;
+    }
+    return candidate;
+  }
+}
+
 function nativeEditorAnnotationId(
   native: PdfNativeEditorReference | undefined,
 ): string | undefined {
@@ -2914,6 +3095,17 @@ function nativeEditorAnnotationId(
     persistedId = undefined;
   }
   return persistedId === undefined || persistedId.length === 0 ? native?.uid?.trim() : persistedId;
+}
+
+function nativeEditorIdentityIds(native: PdfNativeEditorReference): readonly string[] {
+  const ids = new Set<string>();
+  const annotationId = nativeEditorAnnotationId(native);
+  if (annotationId !== undefined && annotationId.length > 0) ids.add(annotationId);
+  const uid = nativeEditorUid(native);
+  if (uid !== null) ids.add(uid);
+  const elementId = native.elementBeforePopup?.id.trim();
+  if (elementId !== undefined && elementId.length > 0) ids.add(elementId);
+  return [...ids];
 }
 
 function reusableActivation(

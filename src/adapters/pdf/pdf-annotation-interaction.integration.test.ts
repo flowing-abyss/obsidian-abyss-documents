@@ -81,10 +81,11 @@ class IntegrationEventBus {
   }
 }
 
-function oneShotFixture() {
+function oneShotFixture(options: { readonly deferNeutralMode?: boolean } = {}) {
   const eventBus = new IntegrationEventBus();
   const selectionListeners = new Set<(selection: PdfTextSelection | null) => void>();
-  let materialized = false;
+  let materialized: DocumentAnnotation | null = null;
+  let materializedCount = 0;
   let selectionLive = true;
   let viewHidden = false;
   const annotationStorage = {
@@ -98,6 +99,7 @@ function oneShotFixture() {
     get: () => viewer.currentMode,
     set: (request: { readonly mode: number }) => {
       viewer.currentMode = request.mode;
+      if (options.deferNeutralMode === true && request.mode === 0) return;
       queueMicrotask(() => {
         eventBus.dispatch('annotationeditormodechanged', { mode: request.mode, source: viewer });
       });
@@ -118,7 +120,11 @@ function oneShotFixture() {
       viewer.annotationEditorMode = { mode: 9 } as never;
       queueMicrotask(() => {
         if (!capturedBeforeNavigation) return;
-        materialized = true;
+        materializedCount += 1;
+        materialized = nativeAnnotation(
+          '',
+          materializedCount === 1 ? 'created-native' : `created-native-${materializedCount}`,
+        );
         annotationStorage.onAnnotationEditor?.(9);
         annotationStorage.onSetModified?.();
       });
@@ -127,6 +133,7 @@ function oneShotFixture() {
     undo: vi.fn(),
     updateParams: vi.fn(),
   };
+  const transactionOrder: string[] = [];
   const interaction = new PdfAnnotationEditor({
     annotationEditorParamsType: {
       FREETEXT_COLOR: 12,
@@ -142,12 +149,20 @@ function oneShotFixture() {
     annotationEditorType: { DISABLE: -1, FREETEXT: 3, HIGHLIGHT: 9, INK: 15, NONE: 0 },
     commentBridge: {
       beginPersistence: () => undefined,
-      deleteAnnotations: () => true,
+      deleteAnnotations: () => {
+        if (materialized === null) return false;
+        transactionOrder.push('native-rollback');
+        materialized = null;
+        return true;
+      },
       endPersistence: () => undefined,
       focusAnnotation: async () => true,
-      nativeEditorIds: () => new Set<string>(),
+      nativeEditorIds: () =>
+        materialized?.identity.kind === 'stable'
+          ? new Set([`runtime-${String(materialized.identity.id)}`])
+          : new Set<string>(),
       normalizeCreatedAnnotation: () => nativeAnnotation(),
-      normalizeSelectionHighlight: () => (materialized ? nativeAnnotation() : null),
+      normalizeSelectionHighlight: () => materialized,
       onAnnotationFocus: () => () => undefined,
       reserveNextDialog: () => ({
         closed: Promise.resolve('external'),
@@ -170,6 +185,14 @@ function oneShotFixture() {
   eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
   const opened: AnnotationEditorPopoverRequest[] = [];
   const closeAnnotationEditor = vi.fn(() => true);
+  const committed: Array<{
+    readonly annotation: DocumentAnnotation;
+    readonly color: string;
+    readonly token: string;
+  }> = [];
+  const discarded: string[] = [];
+  const failed: unknown[] = [];
+  const started: string[] = [];
   const controller = new AnnotationInteractionController(
     interaction,
     {
@@ -182,20 +205,47 @@ function oneShotFixture() {
       setQuickHighlightState: vi.fn(),
     },
     palette,
+    {
+      onFailure: (_action, cause) => failed.push(cause),
+      onSelectionCreateCommit: (creation, annotation) =>
+        committed.push({
+          annotation,
+          color: creation.color,
+          token: creation.selection.token,
+        }),
+      onSelectionCreateDiscard: (creation) => {
+        transactionOrder.push('projection-discard');
+        discarded.push(creation.selection.token);
+      },
+      onSelectionCreateStart: (creation) => {
+        transactionOrder.push('projection-start');
+        started.push(creation.selection.token);
+      },
+    },
   );
   return {
     closeAnnotationEditor,
+    committed,
     controller,
+    discarded,
+    dispatchMode(mode: number) {
+      eventBus.dispatch('annotationeditormodechanged', { mode, source: viewer });
+    },
     emitSelection(selection: PdfTextSelection | null) {
       selectionLive = selection !== null;
+      if (selection !== null) materialized = null;
       for (const listener of selectionListeners) listener(selection);
     },
+    failed,
     hideViewAndInvalidateSelection() {
       viewHidden = true;
       selectionLive = false;
     },
     manager,
     opened,
+    interaction,
+    started,
+    transactionOrder,
   };
 }
 
@@ -231,6 +281,89 @@ describe('PDF annotation interaction integration', () => {
     });
     expect(capturedInCreationStack).toBe(true);
     expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+    test.controller.destroy();
+  });
+
+  it('runs two armed Sticky Highlight gestures as two complete PDF.js transactions', async () => {
+    const test = oneShotFixture();
+    const dirty: boolean[] = [];
+    test.interaction.onDirty((value) => dirty.push(value));
+
+    expect(test.controller.requestTool('highlight', '#ffd400')).toBe(true);
+    await vi.waitFor(() => {
+      expect(test.controller.quickHighlightArmed).toBe(true);
+    });
+    expect(test.opened).toEqual([]);
+
+    test.emitSelection(textSelection('sticky-first'));
+    await vi.waitFor(() => {
+      expect(test.committed).toHaveLength(1);
+    });
+    expect(test.controller.quickHighlightArmed).toBe(true);
+
+    expect(test.controller.selectColor('#5fb236')).toBe(true);
+    test.emitSelection(textSelection('sticky-second'));
+    await vi.waitFor(() => {
+      expect(test.committed).toHaveLength(2);
+    });
+
+    expect(test.manager.highlightSelection).toHaveBeenCalledTimes(2);
+    expect(dirty).toEqual([true, true]);
+    expect(test.started).toEqual(['sticky-first', 'sticky-second']);
+    expect(
+      test.committed.map(({ annotation, color, token }) => ({
+        color,
+        id: annotation.identity.kind === 'stable' ? String(annotation.identity.id) : 'legacy',
+        kind: annotation.identity.kind,
+        token,
+      })),
+    ).toEqual([
+      {
+        color: '#ffd400',
+        id: 'created-native',
+        kind: 'stable',
+        token: 'sticky-first',
+      },
+      {
+        color: '#5fb236',
+        id: 'created-native-2',
+        kind: 'stable',
+        token: 'sticky-second',
+      },
+    ]);
+    expect(test.discarded).toEqual([]);
+    expect(test.failed).toEqual([]);
+    expect(test.opened).toEqual([]);
+    expect(test.controller.quickHighlightArmed).toBe(true);
+    test.controller.destroy();
+  });
+
+  it('waits for native rollback before acknowledging a cancelled Sticky Highlight discard', async () => {
+    const test = oneShotFixture({ deferNeutralMode: true });
+    test.controller.requestTool('highlight');
+    await vi.waitFor(() => {
+      expect(test.controller.quickHighlightArmed).toBe(true);
+    });
+
+    test.emitSelection(textSelection('sticky-cancelled-after-materialization'));
+    await vi.waitFor(() => {
+      expect(test.manager.highlightSelection).toHaveBeenCalledOnce();
+      expect(test.started).toEqual(['sticky-cancelled-after-materialization']);
+    });
+
+    expect(test.controller.requestTool('select')).toBe(true);
+    test.dispatchMode(0);
+    await vi.waitFor(() => {
+      expect(test.discarded).toEqual(['sticky-cancelled-after-materialization']);
+    });
+
+    expect(test.transactionOrder).toEqual([
+      'projection-start',
+      'native-rollback',
+      'projection-discard',
+    ]);
+    expect(test.committed).toEqual([]);
+    expect(test.controller.quickHighlightArmed).toBe(false);
     test.controller.destroy();
   });
 

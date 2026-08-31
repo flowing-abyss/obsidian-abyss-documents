@@ -178,6 +178,7 @@ function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
     highlightSelection: vi.fn(),
     layers,
     redo: vi.fn(),
+    setSelected: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
   };
@@ -406,13 +407,40 @@ describe('PdfAnnotationEditor lifecycle', () => {
     const accessor = vi.fn(() => {
       throw failure;
     });
-    let editorReady = false;
+    const transactionEditor = selectedEditor('throwing-runtime', 9);
+    const unrelatedEditor = selectedEditor('unrelated-runtime', 9);
+    let transactionEditorReady = false;
+    let unrelatedEditorReady = false;
+    fixtureValue.commentBridge.nativeEditorIds.mockImplementation(
+      () =>
+        new Set([
+          ...(transactionEditorReady ? ['throwing-runtime'] : []),
+          ...(unrelatedEditorReady ? ['unrelated-runtime'] : []),
+        ]),
+    );
+    uiManager.getEditor.mockImplementation((id) => {
+      if (id === 'throwing-runtime') return transactionEditor;
+      if (id === 'unrelated-runtime') return unrelatedEditor;
+      return undefined;
+    });
+    let selectedForDelete: ReturnType<typeof selectedEditor> | null = null;
+    uiManager.setSelected.mockImplementation((editor: ReturnType<typeof selectedEditor>) => {
+      selectedForDelete = editor;
+    });
+    uiManager.delete.mockImplementation(() => {
+      if (selectedForDelete === transactionEditor) transactionEditorReady = false;
+      if (selectedForDelete === unrelatedEditor) unrelatedEditorReady = false;
+    });
     fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() => {
-      if (!editorReady) return null;
+      if (!transactionEditorReady) return null;
       return accessor();
     });
     uiManager.highlightSelection.mockImplementation(() => {
-      editorReady = true;
+      transactionEditorReady = true;
+      uiManager.firstSelectedEditor = transactionEditor;
+      fixtureValue.annotationStorage.addEditor(9);
+      unrelatedEditorReady = true;
+      uiManager.firstSelectedEditor = unrelatedEditor;
       fixtureValue.annotationStorage.addEditor(9);
     });
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
@@ -429,6 +457,61 @@ describe('PdfAnnotationEditor lifecycle', () => {
     await Promise.resolve();
 
     expect(accessor).toHaveBeenCalledOnce();
+    expect(uiManager.setSelected).toHaveBeenCalledExactlyOnceWith(transactionEditor);
+    expect(uiManager.delete).toHaveBeenCalledOnce();
+    expect(transactionEditorReady).toBe(false);
+    expect(unrelatedEditorReady).toBe(true);
+  });
+
+  it('fails closed when a rollback diff cannot prove one transaction-owned editor', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    const failure = new Error('PDF.js public highlight color failed');
+    const firstEditor = selectedEditor('ambiguous-first', 9);
+    const secondEditor = selectedEditor('ambiguous-second', 9);
+    let firstEditorReady = false;
+    let secondEditorReady = false;
+    fixtureValue.commentBridge.nativeEditorIds.mockImplementation(
+      () =>
+        new Set([
+          ...(firstEditorReady ? ['ambiguous-first'] : []),
+          ...(secondEditorReady ? ['ambiguous-second'] : []),
+        ]),
+    );
+    uiManager.getEditor.mockImplementation((id) => {
+      if (id === 'ambiguous-first') return firstEditor;
+      if (id === 'ambiguous-second') return secondEditor;
+      return undefined;
+    });
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() => {
+      if (!firstEditorReady) return null;
+      throw failure;
+    });
+    uiManager.highlightSelection.mockImplementation(() => {
+      firstEditorReady = true;
+      secondEditorReady = true;
+      uiManager.firstSelectedEditor = secondEditor;
+      fixtureValue.annotationStorage.addEditor(9);
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    const rejected = await fixtureValue.editor
+      .commitSelection('current', {
+        kind: 'highlight',
+        color: '#ffd400',
+      })
+      .catch((cause: unknown) => cause);
+
+    expect(rejected).toBeInstanceOf(AggregateError);
+    expect((rejected as AggregateError).errors as unknown[]).toContain(failure);
+
+    expect(uiManager.setSelected).not.toHaveBeenCalled();
+    expect(uiManager.delete).not.toHaveBeenCalled();
+    expect(firstEditorReady).toBe(true);
+    expect(secondEditorReady).toBe(true);
   });
 
   it('resolves highlight after dirty and NONE', async () => {
@@ -753,7 +836,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     inertCleanup();
   });
 
-  it('does not double-create while quick highlight is armed', async () => {
+  it('keeps native mode neutral while Sticky Highlight is armed and commits through PDF.js once', async () => {
     const fixtureValue = fixture();
     const uiManager = manager();
     fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
@@ -762,17 +845,282 @@ describe('PdfAnnotationEditor lifecycle', () => {
     });
 
     await fixtureValue.editor.setQuickHighlight({ enabled: true, color: '#5fb236' });
+    const committing = fixtureValue.editor.commitSelection('current', {
+      kind: 'highlight',
+      color: '#5fb236',
+    });
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockReturnValue(
+      createdAnnotation('', { id: 'sticky-native' }),
+    );
+    fixtureValue.annotationStorage.onAnnotationEditor?.(9);
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'sticky-native', kind: 'stable' },
+    });
+
+    expect(uiManager.updateParams).toHaveBeenNthCalledWith(1, 31, '#5fb236');
+    expect(uiManager.updateParams).toHaveBeenNthCalledWith(2, 31, '#5fb236');
+    expect(uiManager.highlightSelection).toHaveBeenCalledOnce();
+    expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
+  });
+
+  it('rolls back a materialized native highlight before an aborted selection transaction settles', async () => {
+    const fixtureValue = fixture({ dispatchModeChanges: false });
+    const uiManager = manager();
+    const abort = new AbortController();
+    const dirty: boolean[] = [];
+    let nativePresent = false;
+    fixtureValue.editor.onDirty((value) => dirty.push(value));
+    fixtureValue.commentBridge.nativeEditorIds.mockImplementation(() =>
+      nativePresent ? new Set(['sticky-runtime']) : new Set(),
+    );
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() =>
+      nativePresent ? createdAnnotation('', { id: 'sticky-native' }) : null,
+    );
+    fixtureValue.commentBridge.deleteAnnotations.mockImplementation(() => {
+      fixtureValue.annotationStorage.setValue('unrelated-native-edit', {
+        id: 'unrelated-native-edit',
+        mode: 15,
+      });
+      return true;
+    });
+    uiManager.highlightSelection.mockImplementation(() => {
+      fixtureValue.viewer.annotationEditorMode = { mode: 9 };
+      nativePresent = true;
+      fixtureValue.annotationStorage.addEditor(9, 'sticky-runtime');
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
+    let settled = false;
+    const committing = fixtureValue.editor
+      .commitSelection('current', { kind: 'highlight', color: '#ffd400' }, abort.signal)
+      .then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+        (cause: unknown) => {
+          settled = true;
+          return cause;
+        },
+      );
+    await vi.waitFor(() => {
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+    });
+
+    abort.abort(new DOMException('Select requested.', 'AbortError'));
+    fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+      source: fixtureValue.viewer,
+      mode: 0,
+    });
+
+    await vi.waitFor(() => {
+      expect(fixtureValue.commentBridge.deleteAnnotations).toHaveBeenCalledOnce();
+    });
+    expect(settled).toBe(false);
+    nativePresent = false;
+
+    await expect(committing).resolves.toMatchObject({ name: 'AbortError' });
+    expect(fixtureValue.commentBridge.deleteAnnotations).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ identity: { id: 'sticky-native', kind: 'stable' } }),
+    ]);
+    expect(nativePresent).toBe(false);
+    expect(fixtureValue.annotationStorage.isModified()).toBe(true);
+    expect(fixtureValue.annotationStorage.editorSnapshot('unrelated-native-edit')).toEqual({
+      id: 'unrelated-native-edit',
+      mode: 15,
+    });
+    expect(dirty).toEqual([true]);
+  });
+
+  it('rolls back a materialized native highlight when the commit cannot return to NONE', async () => {
+    const fixtureValue = fixture();
+    const uiManager = manager();
+    const failure = new Error('neutral mode transition failed');
+    let nativePresent = false;
+    fixtureValue.commentBridge.nativeEditorIds.mockImplementation(() =>
+      nativePresent ? new Set(['sticky-runtime']) : new Set(),
+    );
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() =>
+      nativePresent ? createdAnnotation('', { id: 'sticky-native' }) : null,
+    );
+    fixtureValue.commentBridge.deleteAnnotations.mockImplementation(() => {
+      nativePresent = false;
+      return true;
+    });
+    uiManager.highlightSelection.mockImplementation(() => {
+      fixtureValue.viewer.annotationEditorMode = { mode: 9 };
+      nativePresent = true;
+      fixtureValue.annotationStorage.addEditor(9, 'sticky-runtime');
+      Object.defineProperty(fixtureValue.viewer, 'annotationEditorMode', {
+        configurable: true,
+        get: () => 9,
+        set: () => {
+          throw failure;
+        },
+      });
+    });
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager,
+    });
+
     await expect(
       fixtureValue.editor.commitSelection('current', {
         kind: 'highlight',
-        color: '#5fb236',
+        color: '#ffd400',
       }),
-    ).resolves.toBe('dismissed');
+    ).rejects.toBe(failure);
 
-    expect(uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#5fb236');
-    expect(uiManager.highlightSelection).not.toHaveBeenCalled();
-    expect(fixtureValue.viewer.annotationEditorMode).toBe(9);
+    expect(fixtureValue.commentBridge.deleteAnnotations).toHaveBeenCalledOnce();
+    expect(nativePresent).toBe(false);
+    expect(fixtureValue.annotationStorage.isModified()).toBe(true);
   });
+
+  it('rolls back a materialized native highlight when its transaction times out', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixtureValue = fixture({ dispatchModeChanges: false });
+      const uiManager = manager();
+      let nativePresent = false;
+      fixtureValue.commentBridge.nativeEditorIds.mockImplementation(() =>
+        nativePresent ? new Set(['sticky-runtime']) : new Set(),
+      );
+      fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() =>
+        nativePresent ? createdAnnotation('', { id: 'sticky-native' }) : null,
+      );
+      fixtureValue.commentBridge.deleteAnnotations.mockImplementation(() => {
+        nativePresent = false;
+        return true;
+      });
+      uiManager.highlightSelection.mockImplementation(() => {
+        fixtureValue.viewer.annotationEditorMode = { mode: 9 };
+        nativePresent = true;
+        fixtureValue.annotationStorage.addEditor(9, 'sticky-runtime');
+      });
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+
+      const committing = fixtureValue.editor
+        .commitSelection('current', {
+          kind: 'highlight',
+          color: '#ffd400',
+        })
+        .catch((cause: unknown) => cause);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await expect(committing).resolves.toMatchObject({ name: 'TimeoutError' });
+      expect(fixtureValue.commentBridge.deleteAnnotations).toHaveBeenCalledOnce();
+      expect(nativePresent).toBe(false);
+      expect(fixtureValue.annotationStorage.isModified()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['ink', 15],
+    ['freetext', 3],
+  ] as const)(
+    'settles and rolls back a pending Sticky Highlight before the newer %s tool wins',
+    async (tool, mode) => {
+      const fixtureValue = fixture({ dispatchModeChanges: false });
+      const uiManager = manager();
+      let nativePresent = false;
+      fixtureValue.commentBridge.nativeEditorIds.mockImplementation(() =>
+        nativePresent ? new Set(['sticky-runtime']) : new Set(),
+      );
+      fixtureValue.commentBridge.normalizeSelectionHighlight.mockImplementation(() =>
+        nativePresent ? createdAnnotation('', { id: 'sticky-native' }) : null,
+      );
+      fixtureValue.commentBridge.deleteAnnotations.mockImplementation(() => {
+        nativePresent = false;
+        return true;
+      });
+      uiManager.highlightSelection.mockImplementation(() => {
+        fixtureValue.viewer.annotationEditorMode = { mode: 9 };
+        nativePresent = true;
+        fixtureValue.annotationStorage.addEditor(9, 'sticky-runtime');
+      });
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+
+      const committing = fixtureValue.editor
+        .commitSelection('current', { kind: 'highlight', color: '#ffd400' })
+        .catch((cause: unknown) => cause);
+      await vi.waitFor(() => {
+        expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }]);
+      });
+      const supersededTool = fixtureValue.editor
+        .setTool(tool === 'ink' ? 'freetext' : 'ink')
+        .catch((cause: unknown) => cause);
+      const changingTool = fixtureValue.editor.setTool(tool);
+      await vi.waitFor(() => {
+        expect(fixtureValue.modeRequests[fixtureValue.modeRequests.length - 1]).toEqual({
+          mode: 0,
+        });
+      });
+      fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+        source: fixtureValue.viewer,
+        mode: 0,
+      });
+      await vi.waitFor(() => {
+        expect(fixtureValue.modeRequests[fixtureValue.modeRequests.length - 1]).toEqual({ mode });
+      });
+      fixtureValue.eventBus.dispatch('annotationeditormodechanged', {
+        source: fixtureValue.viewer,
+        mode,
+      });
+
+      await expect(changingTool).resolves.toBeUndefined();
+      await expect(supersededTool).resolves.toMatchObject({ name: 'AbortError' });
+      await expect(committing).resolves.toMatchObject({ name: 'AbortError' });
+      expect(fixtureValue.modeRequests).toEqual([{ mode: 9 }, { mode: 0 }, { mode }]);
+      expect(fixtureValue.viewer.annotationEditorMode).toBe(mode);
+      expect(fixtureValue.commentBridge.deleteAnnotations).toHaveBeenCalledOnce();
+      expect(nativePresent).toBe(false);
+    },
+  );
+
+  it.each([
+    ['ink', 15],
+    ['freetext', 3],
+  ] as const)(
+    'does not let delayed Sticky Highlight arming restore NONE over newer %s',
+    async (tool, mode) => {
+      const fixtureValue = fixture();
+      const saveGate = deferred<Uint8Array<ArrayBuffer>>();
+      const uiManager = manager();
+      fixtureValue.saveDocument.mockImplementationOnce(() => saveGate.promise);
+      fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+        source: fixtureValue.viewer,
+        uiManager,
+      });
+      const saving = fixtureValue.editor.save(new AbortController().signal);
+      await vi.waitFor(() => {
+        expect(fixtureValue.saveDocument).toHaveBeenCalledOnce();
+      });
+
+      const delayedArming = fixtureValue.editor
+        .setQuickHighlight({ color: '#5fb236', enabled: true })
+        .catch((cause: unknown) => cause);
+      const newerTool = fixtureValue.editor.setTool(tool);
+      saveGate.resolve(new Uint8Array([37, 80, 68, 70, 45]));
+
+      await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
+      await expect(newerTool).resolves.toBeUndefined();
+      await expect(delayedArming).resolves.toMatchObject({ name: 'AbortError' });
+      expect(fixtureValue.modeRequests).toEqual([{ mode }]);
+      expect(fixtureValue.viewer.annotationEditorMode).toBe(mode);
+      expect(uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#5fb236');
+    },
+  );
 
   it('resolves comment after bridge open close and NONE', async () => {
     const fixtureValue = fixture();

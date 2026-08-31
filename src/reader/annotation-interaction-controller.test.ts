@@ -35,7 +35,7 @@ function textSelection(token = 'selection-1'): PdfTextSelection {
   };
 }
 
-function nativeAnnotation(comment = 'F'): DocumentAnnotation {
+function nativeAnnotation(comment = 'F', id = 'created-native'): DocumentAnnotation {
   const available = { available: true } as const;
   return {
     anchor: {
@@ -56,7 +56,7 @@ function nativeAnnotation(comment = 'F'): DocumentAnnotation {
     color: '#ffd400',
     comment,
     createdAt: null,
-    identity: { id: asAnnotationId('created-native'), kind: 'stable' },
+    identity: { id: asAnnotationId(id), kind: 'stable' },
     links: [],
     modifiedAt: null,
     selectedText: 'Selected text',
@@ -67,10 +67,12 @@ function nativeAnnotation(comment = 'F'): DocumentAnnotation {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function fixture(
@@ -90,8 +92,8 @@ function fixture(
     ): Promise<DocumentAnnotation | 'dismissed'> => nativeAnnotation(''),
   );
   const setQuickHighlight = vi.fn(
-    async (state: { readonly enabled: boolean; readonly color: string }): Promise<void> => {
-      mode = state.enabled ? 'quick-highlight' : 'neutral';
+    async (_state: { readonly enabled: boolean; readonly color: string }): Promise<void> => {
+      mode = 'neutral';
       for (const listener of modeListeners) listener(mode);
     },
   );
@@ -580,12 +582,7 @@ describe('AnnotationInteractionController', () => {
       });
     });
     expect(test.controller.selectColor('#5fb236')).toBe(true);
-    await vi.waitFor(() => {
-      expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
-        color: '#5fb236',
-        enabled: true,
-      });
-    });
+    expect(test.setQuickHighlight).toHaveBeenCalledOnce();
     expect(test.controller.requestTool('select')).toBe(true);
     await vi.waitFor(() => {
       expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
@@ -610,6 +607,292 @@ describe('AnnotationInteractionController', () => {
       });
     });
     expect(test.controller.color).toBe('#ff6666');
+  });
+
+  it.each(['ink', 'freetext'] as const)(
+    'gates selection and publishes disarmed while Sticky Highlight leaves delayed %s mode',
+    async (initialMode) => {
+      const nativeNeutral = deferred<void>();
+      const test = fixture(initialMode);
+      test.setQuickHighlight.mockImplementationOnce(async () => {
+        await nativeNeutral.promise;
+        test.emitMode('neutral');
+      });
+
+      expect(test.controller.requestTool('highlight', '#5fb236')).toBe(true);
+      expect(test.controller.quickHighlightArmed).toBe(false);
+      expect(test.states[test.states.length - 1]).toEqual({ armed: false, color: '#5fb236' });
+
+      test.emitSelection(textSelection(`arming-from-${initialMode}`));
+      expect(test.openAnnotationEditor).not.toHaveBeenCalled();
+      expect(test.commitSelection).not.toHaveBeenCalled();
+
+      nativeNeutral.resolve(undefined);
+      await vi.waitFor(() => {
+        expect(test.controller.quickHighlightArmed).toBe(true);
+      });
+      expect(test.states[test.states.length - 1]).toEqual({ armed: true, color: '#5fb236' });
+      test.controller.destroy();
+    },
+  );
+
+  it.each(['ink', 'freetext'] as const)(
+    'cancels delayed Sticky Highlight arming when a newer %s mode wins',
+    async (newerMode) => {
+      const delayedArm = deferred<void>();
+      const test = fixture();
+      test.setQuickHighlight.mockImplementationOnce(() => delayedArm.promise);
+
+      test.controller.requestTool('highlight');
+      expect(test.controller.quickHighlightArmed).toBe(false);
+      test.emitMode(newerMode);
+      delayedArm.resolve(undefined);
+      await delayedArm.promise;
+      await Promise.resolve();
+
+      expect(test.controller.quickHighlightArmed).toBe(false);
+      expect(test.states[test.states.length - 1]).toEqual({ armed: false, color: '#ffd400' });
+      test.emitSelection(textSelection(`after-${newerMode}`));
+      expect(test.commitSelection).not.toHaveBeenCalled();
+      expect(test.openAnnotationEditor).not.toHaveBeenCalled();
+      test.controller.destroy();
+    },
+  );
+
+  it('clears arming without reporting a failure when native neutralization is superseded', async () => {
+    const test = fixture();
+    test.setQuickHighlight.mockRejectedValueOnce(new DOMException('Newer tool won.', 'AbortError'));
+
+    test.controller.requestTool('highlight');
+
+    await vi.waitFor(() => {
+      expect(test.states[test.states.length - 1]).toEqual({ armed: false, color: '#ffd400' });
+    });
+    expect(test.controller.quickHighlightArmed).toBe(false);
+    expect(test.failures).toEqual([]);
+    test.controller.destroy();
+  });
+
+  it('commits an armed Sticky Highlight selection exactly once without opening the editor', async () => {
+    const started: AnnotationEditorCreation[] = [];
+    const committed: Array<{ annotation: DocumentAnnotation; creation: AnnotationEditorCreation }> =
+      [];
+    const test = fixture('neutral', {
+      onSelectionCreateCommit: (creation, annotation) => committed.push({ annotation, creation }),
+      onSelectionCreateStart: (creation) => started.push(creation),
+    });
+
+    expect(test.controller.requestTool('highlight', '#5fb236')).toBe(true);
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
+    test.emitMode('neutral');
+    const selection = textSelection('sticky-once');
+    test.emitSelection(selection);
+
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledOnce();
+    });
+    expect(test.commitSelection).toHaveBeenCalledExactlyOnceWith(
+      'sticky-once',
+      { color: '#5fb236', kind: 'highlight' },
+      expect.any(AbortSignal),
+    );
+    expect(test.openAnnotationEditor).not.toHaveBeenCalled();
+    expect(started).toEqual([{ color: '#5fb236', comment: '', selection }]);
+    expect(committed).toEqual([
+      {
+        annotation: nativeAnnotation(''),
+        creation: { color: '#5fb236', comment: '', selection },
+      },
+    ]);
+    expect(test.controller.quickHighlightArmed).toBe(true);
+    test.controller.destroy();
+  });
+
+  it('keeps Sticky Highlight armed across two independent selections and isolates their colors', async () => {
+    const committed: string[] = [];
+    const test = fixture('neutral', {
+      onSelectionCreateCommit: (_creation, annotation) =>
+        committed.push(
+          annotation.identity.kind === 'stable' ? String(annotation.identity.id) : 'legacy',
+        ),
+    });
+    test.commitSelection
+      .mockResolvedValueOnce(nativeAnnotation('', 'sticky-first-native'))
+      .mockResolvedValueOnce(nativeAnnotation('', 'sticky-second-native'));
+
+    test.controller.requestTool('highlight', '#ffd400');
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
+    test.emitMode('neutral');
+    test.emitSelection(textSelection('sticky-first'));
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledTimes(1);
+    });
+
+    expect(test.controller.selectColor('#5fb236')).toBe(true);
+    expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    test.emitMode('neutral');
+    test.emitSelection(textSelection('sticky-second'));
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledTimes(2);
+    });
+
+    expect(test.commitSelection.mock.calls.map(([token, action]) => ({ action, token }))).toEqual([
+      { action: { color: '#ffd400', kind: 'highlight' }, token: 'sticky-first' },
+      { action: { color: '#5fb236', kind: 'highlight' }, token: 'sticky-second' },
+    ]);
+    expect(committed).toEqual(['sticky-first-native', 'sticky-second-native']);
+    expect(test.openAnnotationEditor).not.toHaveBeenCalled();
+    expect(test.controller.quickHighlightArmed).toBe(true);
+    test.controller.destroy();
+  });
+
+  it('defers a Sticky Highlight palette change during a commit to the next gesture', async () => {
+    const first = deferred<DocumentAnnotation | 'dismissed'>();
+    const test = fixture();
+    test.commitSelection
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce(nativeAnnotation('', 'sticky-next-color'));
+
+    test.controller.requestTool('highlight', '#ffd400');
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
+    test.emitMode('neutral');
+    test.emitSelection(textSelection('sticky-current-color'));
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledOnce();
+    });
+
+    expect(test.controller.selectColor('#5fb236')).toBe(true);
+    expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    first.resolve(nativeAnnotation('', 'sticky-current-color'));
+    await vi.waitFor(() => {
+      expect(test.controller.quickHighlightArmed).toBe(true);
+    });
+
+    test.emitSelection(textSelection('sticky-next-color'));
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledTimes(2);
+    });
+    expect(test.commitSelection.mock.calls.map(([, action]) => action)).toEqual([
+      { color: '#ffd400', kind: 'highlight' },
+      { color: '#5fb236', kind: 'highlight' },
+    ]);
+    test.controller.destroy();
+  });
+
+  it('does not disarm Sticky Highlight or double-create from native mode callbacks', async () => {
+    const pending = deferred<DocumentAnnotation | 'dismissed'>();
+    const test = fixture();
+    test.commitSelection.mockImplementationOnce(() => pending.promise);
+
+    test.controller.requestTool('highlight');
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
+    test.emitMode('neutral');
+    test.emitSelection(textSelection('sticky-native-callback'));
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledOnce();
+    });
+
+    test.emitMode('quick-highlight');
+    test.emitMode('neutral');
+    test.emitSelection(textSelection('sticky-native-callback'));
+
+    expect(test.commitSelection).toHaveBeenCalledOnce();
+    expect(test.controller.quickHighlightArmed).toBe(true);
+    pending.resolve(nativeAnnotation(''));
+    await vi.waitFor(() => {
+      expect(test.controller.quickHighlightArmed).toBe(true);
+    });
+    test.controller.destroy();
+  });
+
+  it('disarms and discards a pending Sticky Highlight transaction when Select is requested', async () => {
+    const discarded: AnnotationEditorCreation[] = [];
+    const pending = deferred<DocumentAnnotation | 'dismissed'>();
+    let transactionSignal: AbortSignal | undefined;
+    const test = fixture('neutral', {
+      onSelectionCreateDiscard: (creation) => discarded.push(creation),
+    });
+    test.commitSelection.mockImplementationOnce((_token, _action, signal) => {
+      transactionSignal = signal;
+      signal?.addEventListener(
+        'abort',
+        () => {
+          pending.reject(signal.reason);
+        },
+        { once: true },
+      );
+      return pending.promise;
+    });
+
+    test.controller.requestTool('highlight');
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
+    test.emitMode('neutral');
+    const selection = textSelection('sticky-cancel');
+    test.emitSelection(selection);
+    await vi.waitFor(() => {
+      expect(test.commitSelection).toHaveBeenCalledOnce();
+    });
+
+    expect(test.controller.requestTool('select')).toBe(true);
+    await vi.waitFor(() => {
+      expect(transactionSignal?.aborted).toBe(true);
+    });
+
+    expect(discarded).toEqual([{ color: '#ffd400', comment: '', selection }]);
+    expect(test.controller.quickHighlightArmed).toBe(false);
+    expect(test.failures).toEqual([]);
+    test.controller.destroy();
+  });
+
+  it('reports one Sticky Highlight failure and discards its provisional projection once', async () => {
+    const cause = new Error('sticky native creation failed');
+    const discarded: AnnotationEditorCreation[] = [];
+    const started: AnnotationEditorCreation[] = [];
+    const test = fixture('neutral', {
+      onSelectionCreateDiscard: (creation) => discarded.push(creation),
+      onSelectionCreateStart: (creation) => started.push(creation),
+    });
+    test.commitSelection.mockRejectedValueOnce(cause);
+
+    test.controller.requestTool('highlight');
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
+    test.emitMode('neutral');
+    const selection = textSelection('sticky-failure');
+    test.emitSelection(selection);
+
+    await vi.waitFor(() => {
+      expect(test.failures).toEqual([{ action: 'create selection annotation', cause }]);
+    });
+    expect(started).toEqual([{ color: '#ffd400', comment: '', selection }]);
+    expect(discarded).toEqual([{ color: '#ffd400', comment: '', selection }]);
+    expect(test.openAnnotationEditor).not.toHaveBeenCalled();
+    expect(test.controller.quickHighlightArmed).toBe(true);
+    test.controller.destroy();
+  });
+
+  it('keeps ordinary neutral selection as one unified editor request', () => {
+    const test = fixture();
+    const selection = textSelection('ordinary-selection');
+
+    test.emitSelection(selection);
+    test.emitSelection(selection);
+
+    expect(test.openAnnotationEditor).toHaveBeenCalledOnce();
+    expect(test.opened[0]?.target).toEqual({ kind: 'selection', selection });
+    expect(test.commitSelection).not.toHaveBeenCalled();
+    test.controller.destroy();
   });
 
   it('keeps Ink FreeText and disabled modes owned by PDF.js', () => {
@@ -691,16 +974,14 @@ describe('AnnotationInteractionController', () => {
   });
 
   it('falls back when a palette refresh removes the active Sticky Highlight color', async () => {
-    const test = fixture('quick-highlight');
-    test.emitColor('#ff6666');
+    const test = fixture();
+    test.controller.requestTool('highlight', '#ff6666');
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
     test.controller.updatePalette([{ color: '#e56eee', meaning: 'Question', name: 'Magenta' }]);
 
-    await vi.waitFor(() => {
-      expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
-        color: '#e56eee',
-        enabled: true,
-      });
-    });
+    expect(test.setQuickHighlight).toHaveBeenCalledOnce();
     expect(test.controller.color).toBe('#e56eee');
     expect(test.observedColors).toEqual(['#ff6666', '#e56eee']);
     test.controller.destroy();
