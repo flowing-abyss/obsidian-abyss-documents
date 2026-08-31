@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DocumentAnnotation } from '../document-core/annotations.js';
 import { asAnnotationId } from '../document-core/annotations.js';
+import type { DocumentLocation } from '../document-core/document.js';
 import {
   beginPluginActivation,
   endPluginActivation,
@@ -755,7 +756,7 @@ describe('AnnotationsPanel', () => {
     beginPluginActivation();
     endPluginActivation();
     const root = createDiv();
-    const onNavigate = vi.fn();
+    const onNavigate = vi.fn<(location: DocumentLocation) => void>();
     const panel = new AnnotationsPanel(root, { onNavigate });
     panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
 
@@ -774,6 +775,31 @@ describe('AnnotationsPanel', () => {
         annotationSearchMs: [expect.any(Number)],
       },
     });
+  });
+
+  it('selects one of 10,000 rows without rebuilding the virtual card window or contextual activation', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onActivate = vi.fn();
+    const onNavigate = vi.fn();
+    const onSelect = vi.fn();
+    const panel = new AnnotationsPanel(root, { onActivate, onNavigate, onSelect });
+    panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
+    const before = Array.from(root.querySelectorAll<HTMLButtonElement>('.abyss-annotation-card'));
+    const target = before[20];
+    if (target === undefined) throw new Error('Expected a mounted annotation card.');
+
+    target.click();
+
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ nativeId: target.dataset['annotationId'] }),
+    );
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(Array.from(root.querySelectorAll('.abyss-annotation-card'))).toEqual(before);
+    expect(root.querySelectorAll('.abyss-annotation-card[aria-current="true"]')).toHaveLength(1);
+    panel.destroy();
+    root.remove();
   });
 
   it('does not retain detached card buttons beyond the mounted virtual window', () => {
@@ -1184,11 +1210,12 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
-  it('emits one identical explicit activation for click, contextmenu, and activation keys', () => {
+  it('navigates on primary activation and opens the editor only from explicit context commands', () => {
     const root = createDiv();
     root.doc.body.append(root);
     const onActivate = vi.fn<(activation: AnnotationPanelActivation) => void>();
-    const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn() });
+    const onNavigate = vi.fn<(location: DocumentLocation) => void>();
+    const panel = new AnnotationsPanel(root, { onActivate, onNavigate });
     const overlapping = [
       {
         key: 'overlap-first-row',
@@ -1239,7 +1266,7 @@ describe('AnnotationsPanel', () => {
       );
     }
 
-    const expected = {
+    const expectedContextActivation = {
       annotation: overlapping[1]?.annotation,
       clientPosition: { x: 64, y: 328 },
       location: {
@@ -1251,8 +1278,11 @@ describe('AnnotationsPanel', () => {
       nativeId: 'native-second',
       rowId: 'overlap-second-row',
     };
+    expect(onNavigate.mock.calls.map(([location]) => location)).toEqual(
+      Array.from({ length: 3 }, () => expectedContextActivation.location),
+    );
     expect(onActivate.mock.calls.map(([activation]) => activation)).toEqual(
-      Array.from({ length: 6 }, () => expected),
+      Array.from({ length: 3 }, () => expectedContextActivation),
     );
     const selected = root.querySelectorAll('.abyss-annotation-card[aria-current="true"]');
     expect(selected).toHaveLength(1);

@@ -139,6 +139,11 @@ export class AnnotationInteractionController {
     return this.interaction.focusAnnotation(stableId, source);
   }
 
+  selectAnnotation(stableId: string): boolean {
+    if (this.destroyed) return false;
+    return this.interaction.selectAnnotation?.(stableId) ?? false;
+  }
+
   selectColor(color: string): boolean {
     if (
       this.destroyed ||
@@ -174,8 +179,14 @@ export class AnnotationInteractionController {
     this.contain(this.applyQuickHighlight(true, revision));
   }
 
-  invalidate(_reason: AnnotationInteractionInvalidation): void {
+  invalidate(reason: AnnotationInteractionInvalidation): void {
     if (this.destroyed) return;
+    if (
+      (reason === 'zoom' || reason === 'layout') &&
+      this.activeEditorKind !== null &&
+      this.activeEditorKind !== 'selection'
+    )
+      return;
     if (!this.closeActiveSelection()) return;
     this.abortCommit('The PDF annotation selection was invalidated.');
   }
@@ -279,6 +290,17 @@ export class AnnotationInteractionController {
       onSelectionPreview: (creation) => this.options.onSelectionCreatePreview?.(creation),
       onUpdate: (update) => this.updateAnnotations(update),
       palette: this.palette,
+      resolveAnchor: (target) => {
+        if (target.kind === 'annotation')
+          return (
+            this.interaction.resolveAnnotationAnchor?.(annotationIdentity(target.annotation)) ??
+            null
+          );
+        if (target.kind !== 'selection') return null;
+        if (this.interaction.resolveSelectionAnchor === undefined)
+          return selectionAnchor(selection);
+        return this.interaction.resolveSelectionAnchor(selection.token);
+      },
       target: { kind: 'selection', selection },
     });
     if (opened) {
@@ -319,6 +341,10 @@ export class AnnotationInteractionController {
       onUpdate: (update) => this.updateAnnotations(update),
       palette: this.palette,
       position: focus.position,
+      resolveAnchor: (resolvedTarget) => {
+        const annotation = singleTargetAnnotation(resolvedTarget) ?? first;
+        return this.interaction.resolveAnnotationAnchor?.(annotationIdentity(annotation)) ?? null;
+      },
       target,
     });
     if (opened) {
@@ -546,4 +572,22 @@ function annotationToolForType(
   if (type === 'ink') return 'ink';
   if (type === 'free-text') return 'freetext';
   return null;
+}
+
+function annotationIdentity(annotation: DocumentAnnotation): string {
+  return annotation.identity.kind === 'stable'
+    ? annotation.identity.id
+    : annotation.identity.fingerprint;
+}
+
+function singleTargetAnnotation(target: AnnotationEditorTarget): DocumentAnnotation | null {
+  if (target.kind === 'annotation' || target.kind === 'readonly') return target.annotation;
+  if (target.kind === 'multiple' && target.annotations.length === 1)
+    return target.annotations[0] ?? null;
+  return null;
+}
+
+function selectionAnchor(selection: PdfTextSelection): DOMRect {
+  const rect = selection.clientRects[selection.clientRects.length - 1] ?? selection.clientRect;
+  return new DOMRect(rect.left, rect.top, rect.width, rect.height);
 }

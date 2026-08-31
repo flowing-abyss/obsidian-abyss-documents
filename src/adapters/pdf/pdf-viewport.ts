@@ -281,7 +281,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   private selectionObserverInstance: PdfDomSelectionObserver | null = null;
   private selectionSnapshotUnsubscribe: (() => void) | null = null;
   private annotationMutationUnsubscribe: (() => void) | null = null;
-  private pendingPointerActivation: { readonly id: string; readonly timeout: number } | null = null;
+  private pendingPointerActivation: { readonly id: string; readonly pointerId: number } | null =
+    null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
@@ -750,12 +751,14 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private registerRootListeners(root: HTMLElement): void {
     root.addEventListener('pointerdown', this.onRootPointerDown, { capture: true });
+    root.addEventListener('pointercancel', this.onRootPointerCancel, { capture: true });
     root.addEventListener('click', this.onRootClick, { capture: true });
     root.addEventListener('contextmenu', this.onRootContextMenu);
   }
 
   private unregisterRootListeners(root: HTMLElement): void {
     root.removeEventListener('pointerdown', this.onRootPointerDown, { capture: true });
+    root.removeEventListener('pointercancel', this.onRootPointerCancel, { capture: true });
     root.removeEventListener('click', this.onRootClick, { capture: true });
     root.removeEventListener('contextmenu', this.onRootContextMenu);
     this.clearPendingPointerActivation();
@@ -818,6 +821,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       const page = this.pageElement(pageNumber);
       if (page !== null) replacePdfAnnotationImageSources(page, annotationImageData);
       this.publishMountedAnnotationSnapshot();
+      this.events.emit({ type: 'annotation-layer-rendered', pageIndex: pageNumber - 1 });
     });
   }
 
@@ -1007,6 +1011,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.explicitScaleRequest = true;
     this.scaleRequestRevision += 1;
     this.events.emit({ type: 'scale-change', scale: eventScale });
+    this.events.emit({ type: 'geometry-change', reason: 'scale' });
   }
 
   private scaleFromEvent(data: Record<string, unknown>): ReaderScale | null {
@@ -1240,6 +1245,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     } finally {
       this.applyingLayout = false;
     }
+    this.events.emit({ type: 'geometry-change', reason: 'layout' });
   }
 
   private preservedScale(scale: ScaleRequest): PreservedScale {
@@ -1364,6 +1370,7 @@ export class PdfDocumentViewport implements DocumentViewport {
         this.requestedScale = fitScale;
         this.scaleRequestRevision += 1;
         this.applyScale(viewer, fitScale, this.scaleRequestRevision);
+        this.events.emit({ type: 'geometry-change', reason: 'refit' });
       }
     });
   };
@@ -1401,49 +1408,83 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (!isElementTarget(target)) return;
     const annotationId = this.annotationActivationId(target);
     if (annotationId !== null) {
-      const pending = this.pendingPointerActivation;
-      this.clearPendingPointerActivation();
-      if (pending?.id === annotationId) return;
-      const preserveNativeSelection = hasNativeSelectionModifier(event);
-      this.activateRootAnnotation(annotationId, preserveNativeSelection);
+      this.handleRootAnnotationClick(event, target, annotationId);
       return;
     }
     const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
-    if (retry === null) return;
+    if (retry === null) {
+      this.clearRootAnnotationSelection();
+      return;
+    }
     const page = target.closest<HTMLElement>('[data-page-number]');
     const pageNumber = positiveInteger(Number(page?.dataset['pageNumber']));
     if (page === null || pageNumber === null || this.viewer === null) return;
     this.retryPage(this.viewer, page, pageNumber, retry);
   };
 
+  private handleRootAnnotationClick(
+    event: MouseEvent,
+    target: Element,
+    annotationId: string,
+  ): void {
+    if (hasNativeSelectionModifier(event)) return;
+    const pending = this.pendingPointerActivation;
+    this.clearPendingPointerActivation();
+    if (pending?.id === annotationId) return;
+    this.selectRootAnnotation(annotationId, target);
+  }
+
   private readonly onRootPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || hasNativeSelectionModifier(event)) return;
     const target = event.target;
     if (!isElementTarget(target)) return;
     const annotationId = this.annotationActivationId(target);
-    if (annotationId === null) return;
+    if (annotationId === null) {
+      this.clearRootAnnotationSelection();
+      return;
+    }
     this.clearPendingPointerActivation();
-    const owner = target.ownerDocument.defaultView;
-    if (owner === null) return;
     const pending = {
       id: annotationId,
-      timeout: owner.setTimeout(() => {
-        if (this.pendingPointerActivation === pending) this.pendingPointerActivation = null;
-      }, 0),
+      pointerId: event.pointerId,
     };
     this.pendingPointerActivation = pending;
-    this.activateRootAnnotation(annotationId, hasNativeSelectionModifier(event));
+    this.selectRootAnnotation(annotationId, target);
   };
 
-  private activateRootAnnotation(
-    id: string,
-    preserveNativeSelection: boolean,
-    kind: 'root-click' | 'root-context' = 'root-click',
-  ): void {
+  private readonly onRootPointerCancel = (event: PointerEvent): void => {
+    if (this.pendingPointerActivation?.pointerId === event.pointerId)
+      this.pendingPointerActivation = null;
+  };
+
+  private selectRootAnnotation(id: string, target: Element): void {
+    if (this.annotationInteraction?.selectAnnotation?.(id) !== true) return;
+    this.markRootAnnotationSelected(target);
+    this.events.emit({ type: 'annotation-select', nativeId: id });
+  }
+
+  private markRootAnnotationSelected(target: Element): void {
+    this.root
+      ?.querySelectorAll<HTMLElement>('[data-abyss-annotation-selected]')
+      .forEach((node) => delete node.dataset['abyssAnnotationSelected']);
+    const node = target.closest<HTMLElement>(
+      '.annotationLayer [data-annotation-id], .annotationEditorLayer [id]',
+    );
+    if (node !== null) node.dataset['abyssAnnotationSelected'] = 'true';
+  }
+
+  private clearRootAnnotationSelection(): void {
+    this.clearPendingPointerActivation();
+    this.annotationInteraction?.clearAnnotationSelection?.();
+    const selected = this.root?.querySelectorAll<HTMLElement>('[data-abyss-annotation-selected]');
+    selected?.forEach((node) => delete node.dataset['abyssAnnotationSelected']);
+    this.events.emit({ type: 'annotation-select', nativeId: null });
+  }
+
+  private activateRootAnnotation(id: string, kind: 'root-context'): void {
     this.annotationInteraction
       ?.focusAnnotation(id, {
         kind,
-        ...(preserveNativeSelection ? { preserveNativeSelection: true } : {}),
       })
       .catch((cause: unknown) => {
         if (!isAbortFailure(cause))
@@ -1452,9 +1493,6 @@ export class PdfDocumentViewport implements DocumentViewport {
   }
 
   private clearPendingPointerActivation(): void {
-    const pending = this.pendingPointerActivation;
-    if (pending === null) return;
-    this.root?.ownerDocument.defaultView?.clearTimeout(pending.timeout);
     this.pendingPointerActivation = null;
   }
 
@@ -1464,7 +1502,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     const annotationId = this.annotationActivationId(target);
     if (annotationId === null) return;
     event.preventDefault();
-    this.activateRootAnnotation(annotationId, false, 'root-context');
+    this.activateRootAnnotation(annotationId, 'root-context');
   };
 
   private annotationActivationId(target: Element): string | null {

@@ -85,8 +85,11 @@ export interface SearchResultSet {
 export type ViewportEvent =
   | { readonly type: 'page-change'; readonly pageIndex: number }
   | { readonly type: 'scale-change'; readonly scale: ReaderScale }
+  | { readonly type: 'geometry-change'; readonly reason: 'layout' | 'refit' | 'scale' }
+  | { readonly type: 'annotation-layer-rendered'; readonly pageIndex: number }
   | { readonly type: 'search-results'; readonly results: SearchResultSet }
   | { readonly type: 'annotation-change'; readonly change: ViewportAnnotationChange }
+  | { readonly type: 'annotation-select'; readonly nativeId: string | null }
   | {
       readonly type: 'annotation-snapshot';
       readonly annotations: readonly ViewportAnnotationSnapshot[];

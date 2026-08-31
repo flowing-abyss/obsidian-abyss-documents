@@ -95,7 +95,7 @@ describe('ReaderSidebar', () => {
 
     sidebar.annotationsPanel.root
       .querySelector<HTMLButtonElement>('.abyss-annotation-card')
-      ?.click();
+      ?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
 
     expect(onAnnotationActivate).toHaveBeenCalledWith({
       annotation: item,

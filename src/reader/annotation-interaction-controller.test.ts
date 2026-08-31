@@ -571,6 +571,25 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it('keeps a materialized annotation editor open across geometry invalidation', () => {
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Live geometry')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+
+    test.closeAnnotationEditor.mockClear();
+    test.controller.invalidate('zoom');
+    test.controller.invalidate('layout');
+
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+
+    test.controller.invalidate('navigation');
+    expect(test.closeAnnotationEditor).toHaveBeenCalledOnce();
+    test.controller.destroy();
+  });
+
   it('arms, recolors, and disarms Quick Highlight through the native logical mode', async () => {
     const test = fixture();
 

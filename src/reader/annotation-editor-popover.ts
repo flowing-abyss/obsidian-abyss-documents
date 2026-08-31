@@ -36,6 +36,7 @@ export interface AnnotationEditorPopoverRequest {
   readonly palette: readonly AnnotationPaletteEntry[];
   readonly color?: string | undefined;
   readonly position?: { readonly x: number; readonly y: number } | undefined;
+  readonly resolveAnchor?: ((target: AnnotationEditorTarget) => DOMRect | null) | undefined;
   readonly onCreate: (
     creation: AnnotationEditorCreation,
   ) =>
@@ -105,9 +106,8 @@ interface AnnotationCreationJob {
 type SelectionCreationState = 'draft' | 'pending' | 'materialized';
 
 interface AnnotationPopoverPlacement {
+  readonly anchor: DOMRect;
   readonly target: AnnotationEditorTarget;
-  readonly x: number;
-  readonly y: number;
 }
 
 export class AnnotationEditorPopover {
@@ -137,6 +137,8 @@ export class AnnotationEditorPopover {
   private suggestionItems: readonly AnnotationSuggestion[] = [];
   private suggestionOrigin: { readonly open: number; readonly query: string } | null = null;
   private destroyed = false;
+  private anchorFrame: number | null = null;
+  private readonly anchorResizeObserver: ResizeObserver | null;
 
   constructor(
     private readonly host: HTMLElement,
@@ -152,6 +154,12 @@ export class AnnotationEditorPopover {
     this.readOnlyElement = elements.readOnly;
     this.statusElement = elements.status;
     this.actionsElement = elements.actions;
+    this.anchorResizeObserver =
+      typeof ResizeObserver === 'function'
+        ? new ResizeObserver(() => {
+            this.scheduleLivePlacement();
+          })
+        : null;
     host.append(this.element);
     this.registerElementListeners();
     this.registerDocumentListeners();
@@ -274,10 +282,7 @@ export class AnnotationEditorPopover {
   private registerViewportListeners(): void {
     const owner = ownerWindow(this.host);
     const place = (): void => {
-      if (this.active === null) return;
-      this.applyViewportConstraints();
-      this.resizeComment();
-      this.placeActive();
+      this.scheduleLivePlacement();
     };
     owner.addEventListener('resize', place);
     this.cleanups.push(() => {
@@ -287,6 +292,13 @@ export class AnnotationEditorPopover {
     visualViewport?.addEventListener('resize', place);
     this.cleanups.push(() => {
       visualViewport?.removeEventListener('resize', place);
+    });
+    const scroll = (): void => {
+      this.scheduleLivePlacement();
+    };
+    this.host.ownerDocument.addEventListener('scroll', scroll, true);
+    this.cleanups.push(() => {
+      this.host.ownerDocument.removeEventListener('scroll', scroll, true);
     });
   }
 
@@ -345,6 +357,10 @@ export class AnnotationEditorPopover {
     return this.pendingCreationUpdates.size === 0;
   }
 
+  invalidateGeometry(): void {
+    this.scheduleLivePlacement();
+  }
+
   private persistUpdate(
     request: AnnotationEditorPopoverRequest,
     update: AnnotationEditorUpdate,
@@ -379,11 +395,12 @@ export class AnnotationEditorPopover {
     this.selectionCreationState = request.target.kind === 'selection' ? 'draft' : 'materialized';
     this.render(request);
     this.element.hidden = false;
-    const position = request.position ?? targetPosition(request.target);
-    this.placement = { target: request.target, x: position.x, y: position.y };
+    const anchor = initialAnchor(request);
+    this.placement = { anchor, target: request.target };
     this.applyViewportConstraints();
     this.resizeComment();
-    this.place(position.x, position.y, request.target);
+    this.place(anchor, request.target);
+    this.observeLiveAnchor(request);
     return true;
   }
 
@@ -396,6 +413,7 @@ export class AnnotationEditorPopover {
     this.cancelFocusAwayTimer();
     this.openGeneration += 1;
     this.active = null;
+    this.stopLiveAnchor();
     this.selectionCreation = null;
     this.placement = null;
     this.element.hidden = true;
@@ -420,6 +438,7 @@ export class AnnotationEditorPopover {
     if (!this.flushPendingMetadata()) return false;
     const next = { ...request, target };
     this.active = next;
+    if (this.placement !== null) this.placement = { ...this.placement, target };
     this.selectionCreation = null;
     this.selectionCreationState = target.kind === 'selection' ? 'draft' : 'materialized';
     this.commentDirty = false;
@@ -438,6 +457,7 @@ export class AnnotationEditorPopover {
     this.cancelMetadataTimer();
     this.cancelFocusAwayTimer();
     this.active = null;
+    this.stopLiveAnchor();
     this.selectionCreation = null;
     this.placement = null;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
@@ -607,6 +627,7 @@ export class AnnotationEditorPopover {
     }
     const next = { ...request, target: { annotation, kind: 'annotation' as const } };
     this.active = next;
+    if (this.placement !== null) this.placement = { ...this.placement, target: next.target };
     this.selectionCreation = null;
     this.selectionCreationState = 'materialized';
     this.render(next);
@@ -925,6 +946,7 @@ export class AnnotationEditorPopover {
     this.cancelFocusAwayTimer();
     this.openGeneration += 1;
     this.active = null;
+    this.stopLiveAnchor();
     this.placement = null;
     this.commentDirty = false;
     this.element.hidden = true;
@@ -942,14 +964,15 @@ export class AnnotationEditorPopover {
     job.request.onClose(reason);
   }
 
-  private place(x: number, y: number, target: AnnotationEditorTarget): void {
+  private place(anchor: DOMRect, _target: AnnotationEditorTarget): void {
     const owner = ownerWindow(this.host);
-    const viewport = fixedViewportBounds(owner, this.element);
+    const viewport = documentViewportBounds(this.host, this.element, owner);
     this.applyViewportConstraints(viewport);
     const bounds = this.element.getBoundingClientRect();
-    const anchorTop = target.kind === 'selection' ? selectionAnchorRect(target.selection).top : y;
+    const x = anchor.left;
+    const y = anchor.bottom + POPOVER_ANCHOR_GAP;
     const placedY =
-      y + bounds.height > viewport.bottom ? anchorTop - POPOVER_ANCHOR_GAP - bounds.height : y;
+      y + bounds.height > viewport.bottom ? anchor.top - POPOVER_ANCHOR_GAP - bounds.height : y;
     this.element.dataset['overflow'] = 'scroll';
     this.element.style.left = `${clamp(x, viewport.left, viewport.right - bounds.width) - viewport.originLeft}px`;
     this.element.style.top = `${clamp(placedY, viewport.top, viewport.bottom - bounds.height) - viewport.originTop}px`;
@@ -958,11 +981,61 @@ export class AnnotationEditorPopover {
   private placeActive(): void {
     const placement = this.placement;
     if (placement === null || this.active === null) return;
-    this.place(placement.x, placement.y, placement.target);
+    this.place(placement.anchor, placement.target);
+  }
+
+  private observeLiveAnchor(request: AnnotationEditorPopoverRequest): void {
+    this.anchorResizeObserver?.disconnect();
+    if (request.resolveAnchor === undefined) return;
+    const viewport = this.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (viewport !== null) this.anchorResizeObserver?.observe(viewport);
+  }
+
+  private scheduleLivePlacement(): void {
+    if (this.active === null || this.anchorFrame !== null) return;
+    const owner = ownerWindow(this.host);
+    this.anchorFrame = owner.requestAnimationFrame(() => {
+      this.anchorFrame = null;
+      this.refreshLivePlacement();
+    });
+  }
+
+  private refreshLivePlacement(): void {
+    const request = this.active;
+    if (request === null) return;
+    const rect = request.resolveAnchor?.(request.target);
+    if (request.resolveAnchor !== undefined) {
+      if (
+        rect === null ||
+        rect === undefined ||
+        !anchorInViewport(
+          rect,
+          documentViewportBounds(this.host, this.element, ownerWindow(this.host)),
+        )
+      ) {
+        this.close('external');
+        return;
+      }
+      this.placement = { anchor: rect, target: request.target };
+    }
+    this.applyViewportConstraints();
+    this.resizeComment();
+    this.placeActive();
+  }
+
+  private cancelAnchorFrame(): void {
+    if (this.anchorFrame === null) return;
+    ownerWindow(this.host).cancelAnimationFrame(this.anchorFrame);
+    this.anchorFrame = null;
+  }
+
+  private stopLiveAnchor(): void {
+    this.cancelAnchorFrame();
+    this.anchorResizeObserver?.disconnect();
   }
 
   private applyViewportConstraints(
-    viewport = fixedViewportBounds(ownerWindow(this.host), this.element),
+    viewport = documentViewportBounds(this.host, this.element, ownerWindow(this.host)),
   ): void {
     this.element.style.maxWidth = `${Math.min(304, Math.max(0, viewport.right - viewport.left))}px`;
     this.element.style.maxHeight = `${Math.max(0, viewport.bottom - viewport.top)}px`;
@@ -1017,6 +1090,25 @@ function fixedViewportBounds(
     originTop: bounds.top,
     right: Math.min(right, bounds.right) - POPOVER_EDGE_INSET,
     top: Math.max(top, bounds.top) + POPOVER_EDGE_INSET,
+  };
+}
+
+function documentViewportBounds(
+  host: HTMLElement,
+  element: HTMLElement,
+  owner: ReturnType<typeof ownerWindow>,
+): FixedViewportBounds {
+  const bounds = fixedViewportBounds(owner, element);
+  const scroller = host.querySelector<HTMLElement>('.pdfViewerContainer');
+  if (scroller === null) return bounds;
+  const rect = scroller.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return bounds;
+  return {
+    ...bounds,
+    bottom: Math.min(bounds.bottom, rect.bottom - POPOVER_EDGE_INSET),
+    left: Math.max(bounds.left, rect.left + POPOVER_EDGE_INSET),
+    right: Math.min(bounds.right, rect.right - POPOVER_EDGE_INSET),
+    top: Math.max(bounds.top, rect.top + POPOVER_EDGE_INSET),
   };
 }
 
@@ -1128,6 +1220,28 @@ function targetPosition(target: AnnotationEditorTarget): {
   if (target.kind !== 'selection') return { x: 0, y: 0 };
   const rect = selectionAnchorRect(target.selection);
   return { x: rect.left, y: rect.bottom + POPOVER_ANCHOR_GAP };
+}
+
+function initialAnchor(request: AnnotationEditorPopoverRequest): DOMRect {
+  const resolved = request.resolveAnchor?.(request.target);
+  if (resolved !== null && resolved !== undefined) return resolved;
+  if (request.target.kind === 'selection') {
+    const rect = selectionAnchorRect(request.target.selection);
+    return new DOMRect(rect.left, rect.top, rect.width, rect.height);
+  }
+  const position = request.position ?? targetPosition(request.target);
+  return new DOMRect(position.x, position.y - POPOVER_ANCHOR_GAP, 0, 0);
+}
+
+function anchorInViewport(rect: DOMRect, viewport: FixedViewportBounds): boolean {
+  return (
+    Number.isFinite(rect.left) &&
+    Number.isFinite(rect.top) &&
+    rect.right > viewport.left &&
+    rect.left < viewport.right &&
+    rect.bottom > viewport.top &&
+    rect.top < viewport.bottom
+  );
 }
 
 function selectionAnchorRect(selection: PdfTextSelection): PdfTextSelection['clientRect'] {

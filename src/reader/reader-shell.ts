@@ -189,6 +189,10 @@ export class ReaderShell implements AnnotationInteractionHost {
     return this.annotationEditor.updateTarget(target);
   }
 
+  invalidateAnnotationEditorGeometry(): void {
+    this.annotationEditor.invalidateGeometry();
+  }
+
   retryAnnotationEditorUpdates(): boolean {
     return this.annotationEditor.retryPendingUpdates();
   }

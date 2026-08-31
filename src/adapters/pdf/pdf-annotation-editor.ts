@@ -67,6 +67,10 @@ export interface PdfAnnotationInteraction {
     stableId: string,
     source: PdfAnnotationActivationSource,
   ): Promise<PdfAnnotationActivationResult>;
+  selectAnnotation?(stableId: string): boolean;
+  clearAnnotationSelection?(): void;
+  resolveAnnotationAnchor?(stableId: string): DOMRect | null;
+  resolveSelectionAnchor?(token: string): DOMRect | null;
   setPalette?(palette: readonly AnnotationPaletteEntry[]): void;
   setQuickHighlight(state: { readonly enabled: boolean; readonly color: string }): Promise<void>;
   updateAnnotations(update: PdfAnnotationUpdate): boolean;
@@ -189,8 +193,10 @@ interface PdfAnnotationEditorDependencies {
         PdfCommentBridge,
         | 'nativeEditorUidForAnnotation'
         | 'refreshAnnotationFocus'
+        | 'resolveAnnotationAnchor'
         | 'selectAnnotation'
         | 'setSidebarUiManager'
+        | 'synchronizeAnnotationSelection'
       >
     >;
   readonly selectionObserver: PdfSelectionObserver;
@@ -519,6 +525,43 @@ export class PdfAnnotationEditor {
         return this.focusResolvedAnnotation(id, source, projected, activation);
       },
     );
+  }
+
+  selectAnnotation(stableId: string): boolean {
+    if (this.destroyed || this.interactionsSuspended) return false;
+    const requestedId = stableId.trim();
+    if (requestedId.length === 0) return false;
+    const target = this.projectedTargets.get(requestedId);
+    const id = target?.canonicalId ?? requestedId;
+    this.cancelAnnotationActivation('The PDF annotation activation was superseded by selection.');
+    return (
+      this.dependencies.commentBridge.synchronizeAnnotationSelection?.(
+        id,
+        target?.editorUid ?? this.editorUidOptions(id).editorUid,
+      ) ?? false
+    );
+  }
+
+  clearAnnotationSelection(): void {
+    if (this.destroyed) return;
+    this.cancelAnnotationActivation('The PDF annotation activation was cleared.');
+  }
+
+  resolveAnnotationAnchor(stableId: string): DOMRect | null {
+    const requestedId = stableId.trim();
+    if (this.destroyed || requestedId.length === 0) return null;
+    const target = this.projectedTargets.get(requestedId);
+    const id = target?.canonicalId ?? requestedId;
+    return (
+      this.dependencies.commentBridge.resolveAnnotationAnchor?.(
+        id,
+        target?.editorUid ?? this.editorUidOptions(id).editorUid,
+      ) ?? null
+    );
+  }
+
+  resolveSelectionAnchor(token: string): DOMRect | null {
+    return this.dependencies.selectionObserver.resolveAnchor?.(token) ?? null;
   }
 
   private focusResolvedAnnotation(

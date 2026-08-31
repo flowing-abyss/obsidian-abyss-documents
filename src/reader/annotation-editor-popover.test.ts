@@ -314,13 +314,14 @@ describe('AnnotationEditorPopover', () => {
       true,
     );
     expect(comment.style.getPropertyValue('--abyss-annotation-comment-height')).toBe('220px');
-    expect(popover.element.style.top).toBe('14px');
+    expect(popover.element.style.top).toBe('8px');
     Reflect.deleteProperty(host.win, 'visualViewport');
     popover.destroy();
     host.remove();
   });
 
   it('re-places a bottom-edge draft after textarea growth and viewport resize', () => {
+    vi.useFakeTimers();
     const host = document.body.createDiv();
     const popover = new AnnotationEditorPopover(host);
     const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
@@ -364,6 +365,7 @@ describe('AnnotationEditorPopover', () => {
 
     viewportHeight = 120;
     host.win.dispatchEvent(new Event('resize'));
+    vi.advanceTimersByTime(16);
     expect({ maxHeight: popover.element.style.maxHeight, top: popover.element.style.top }).toEqual({
       maxHeight: '104px',
       top: '8px',
@@ -371,6 +373,7 @@ describe('AnnotationEditorPopover', () => {
     Reflect.deleteProperty(host.win, 'visualViewport');
     popover.destroy();
     host.remove();
+    vi.useRealTimers();
   });
 
   it('uses semantic Obsidian tooltips for every palette swatch', () => {
@@ -669,7 +672,7 @@ describe('AnnotationEditorPopover', () => {
       maxHeight: '354px',
       maxWidth: '304px',
       overflow: 'scroll',
-      top: '264px',
+      top: '258px',
     });
 
     Object.defineProperty(popover.element, 'getBoundingClientRect', {
@@ -695,6 +698,316 @@ describe('AnnotationEditorPopover', () => {
     Reflect.deleteProperty(host.win, 'visualViewport');
     popover.destroy();
     host.remove();
+  });
+
+  it('coalesces document scrolling into one live-anchor resolution per frame', () => {
+    vi.useFakeTimers();
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    const popover = new AnnotationEditorPopover(host);
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 100, 80),
+    });
+    Object.defineProperty(host, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 800, 600),
+    });
+    Object.defineProperty(popover.element, 'offsetParent', {
+      configurable: true,
+      value: host,
+    });
+    let anchor = new DOMRect(100, 100, 20, 10);
+    const resolveAnchor = vi.fn(() => anchor);
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      resolveAnchor,
+    });
+    resolveAnchor.mockClear();
+    anchor = new DOMRect(120, 140, 20, 10);
+
+    viewport.dispatchEvent(new Event('scroll'));
+    viewport.dispatchEvent(new Event('scroll'));
+    viewport.dispatchEvent(new Event('scroll'));
+    vi.advanceTimersByTime(16);
+
+    expect(resolveAnchor).toHaveBeenCalledOnce();
+    expect({ left: popover.element.style.left, top: popover.element.style.top }).toEqual({
+      left: '120px',
+      top: '156px',
+    });
+    popover.destroy();
+    host.remove();
+    vi.useRealTimers();
+  });
+
+  it('coalesces zoom refit and sidebar geometry signals and clips against the PDF scroller', () => {
+    vi.useFakeTimers();
+    let resizeCallback: ResizeObserverCallback | null = null;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    class FakeResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe = observe;
+      disconnect = disconnect;
+      unobserve = vi.fn();
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    Object.defineProperty(host, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 900, 700),
+    });
+    Object.defineProperty(viewport, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(200, 80, 500, 500),
+    });
+    const popover = new AnnotationEditorPopover(host);
+    let anchor: DOMRect | null = new DOMRect(260, 160, 30, 12);
+    const resolveAnchor = vi.fn(() => anchor);
+    const request = {
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      resolveAnchor,
+    };
+    popover.open(request);
+    resolveAnchor.mockClear();
+    expect(observe).toHaveBeenCalledExactlyOnceWith(viewport);
+
+    const notifyGeometry = (): void => {
+      resizeCallback?.(
+        [
+          {
+            borderBoxSize: [],
+            contentBoxSize: [],
+            contentRect: DOMRectReadOnly.fromRect({ height: 500, width: 500, x: 200, y: 80 }),
+            devicePixelContentBoxSize: [],
+            target: viewport,
+          },
+        ],
+        {} as ResizeObserver,
+      );
+    };
+    notifyGeometry();
+    notifyGeometry();
+    notifyGeometry();
+    vi.advanceTimersByTime(16);
+
+    expect(resolveAnchor).toHaveBeenCalledOnce();
+    anchor = new DOMRect(120, 160, 30, 12);
+    notifyGeometry();
+    vi.advanceTimersByTime(16);
+    expect(popover.isOpen).toBe(false);
+    expect(request.onClose).toHaveBeenCalledWith('external');
+
+    popover.destroy();
+    expect(disconnect).toHaveBeenCalled();
+    host.remove();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('switches a materialized selection to its live native annotation anchor', async () => {
+    vi.useFakeTimers();
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    Object.defineProperty(viewport, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 800, 600),
+    });
+    const creation = deferred<DocumentAnnotation>();
+    const selected = selection();
+    const created = editableAnnotation({
+      identity: { id: asAnnotationId('created-live'), kind: 'stable' },
+    });
+    let selectionAnchor: DOMRect | null = new DOMRect(100, 100, 20, 10);
+    let annotationAnchor: DOMRect | null = new DOMRect(300, 220, 40, 12);
+    const resolveAnchor = vi.fn(
+      (target: Parameters<AnnotationEditorPopover['open']>[0]['target']) =>
+        target.kind === 'selection' ? selectionAnchor : annotationAnchor,
+    );
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selected }),
+      onCreate: () => creation.promise,
+      resolveAnchor,
+    });
+
+    popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#ffd400"]')?.click();
+    creation.resolve(created);
+    await Promise.resolve();
+    await Promise.resolve();
+    selectionAnchor = null;
+    viewport.dispatchEvent(new Event('scroll'));
+    vi.advanceTimersByTime(16);
+
+    expect(popover.isOpen).toBe(true);
+    expect(resolveAnchor).toHaveBeenLastCalledWith({ annotation: created, kind: 'annotation' });
+    expect({ left: popover.element.style.left, top: popover.element.style.top }).toEqual({
+      left: '300px',
+      top: '238px',
+    });
+
+    annotationAnchor = null;
+    popover.destroy();
+    host.remove();
+    vi.useRealTimers();
+  });
+
+  it('flips a live annotation above from the full anchor top edge', () => {
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    Object.defineProperty(viewport, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 500, 250),
+    });
+    const popover = new AnnotationEditorPopover(host);
+    Object.defineProperty(popover.element, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 120, 80),
+    });
+    Object.defineProperty(popover.element, 'offsetParent', {
+      configurable: true,
+      value: host,
+    });
+    Object.defineProperty(host, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 500, 250),
+    });
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      resolveAnchor: () => new DOMRect(100, 100, 20, 110),
+    });
+
+    expect(popover.element.style.top).toBe('14px');
+
+    popover.destroy();
+    host.remove();
+  });
+
+  it('closes instead of floating when its live annotation anchor is detached', () => {
+    vi.useFakeTimers();
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    const popover = new AnnotationEditorPopover(host);
+    const request = {
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      resolveAnchor: vi.fn<() => DOMRect | null>(() => new DOMRect(100, 100, 20, 10)),
+    };
+    popover.open(request);
+    request.resolveAnchor.mockReturnValue(null);
+
+    viewport.dispatchEvent(new Event('scroll'));
+    vi.advanceTimersByTime(16);
+
+    expect(popover.isOpen).toBe(false);
+    expect(request.onClose).toHaveBeenCalledWith('external');
+    popover.destroy();
+    host.remove();
+    vi.useRealTimers();
+  });
+
+  it('closes when scrolling moves its live anchor outside the document viewport', () => {
+    vi.useFakeTimers();
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    const popover = new AnnotationEditorPopover(host);
+    Object.defineProperty(host, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 800, 600),
+    });
+    let anchor = new DOMRect(100, 100, 20, 10);
+    const request = {
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      resolveAnchor: () => anchor,
+    };
+    popover.open(request);
+    anchor = new DOMRect(100, 900, 20, 10);
+
+    viewport.dispatchEvent(new Event('scroll'));
+    vi.advanceTimersByTime(16);
+
+    expect(popover.isOpen).toBe(false);
+    expect(request.onClose).toHaveBeenCalledWith('external');
+    popover.destroy();
+    host.remove();
+    vi.useRealTimers();
+  });
+
+  it('removes live-anchor scroll work when destroyed', () => {
+    vi.useFakeTimers();
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    const popover = new AnnotationEditorPopover(host);
+    const resolveAnchor = vi.fn(() => new DOMRect(100, 100, 20, 10));
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      resolveAnchor,
+    });
+    resolveAnchor.mockClear();
+
+    popover.destroy();
+    viewport.dispatchEvent(new Event('scroll'));
+    vi.advanceTimersByTime(16);
+
+    expect(resolveAnchor).not.toHaveBeenCalled();
+    host.remove();
+    vi.useRealTimers();
+  });
+
+  it('stops live-anchor work while a deferred click-away close finishes persistence', async () => {
+    vi.useFakeTimers();
+    let notifyResize = (): void => {
+      throw new Error('Expected a ResizeObserver callback.');
+    };
+    const disconnect = vi.fn();
+    class FakeResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        notifyResize = () => {
+          callback([], this);
+        };
+      }
+      observe = vi.fn();
+      disconnect = disconnect;
+      unobserve = vi.fn();
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    const host = document.body.createDiv();
+    const viewport = host.createDiv({ cls: 'pdfViewerContainer' });
+    const unrelated = document.body.createEl('button');
+    const creation = deferred<DocumentAnnotation>();
+    const onClose = vi.fn();
+    const resolveAnchor = vi.fn(() => new DOMRect(100, 100, 20, 10));
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ kind: 'selection', selection: selection() }),
+      onClose,
+      onCreate: () => creation.promise,
+      resolveAnchor,
+    });
+    editComment(popover, 'Durable draft');
+    disconnect.mockClear();
+    resolveAnchor.mockClear();
+    viewport.dispatchEvent(new Event('scroll'));
+    unrelated.dispatchEvent(new Event('pointerdown', { bubbles: true, cancelable: true }));
+    notifyResize();
+    vi.advanceTimersByTime(16);
+
+    expect(resolveAnchor).not.toHaveBeenCalled();
+    expect(disconnect).toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    creation.resolve(editableAnnotation({ color: '#ffd400', comment: '' }));
+    await popover.flushPendingChanges();
+    expect(onClose).toHaveBeenCalledExactlyOnceWith('click-away');
+
+    popover.destroy();
+    unrelated.remove();
+    host.remove();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('keeps an eight-pixel inset and flips a selection popover above the viewport edge', () => {

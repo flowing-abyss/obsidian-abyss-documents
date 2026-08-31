@@ -347,6 +347,43 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     return this.tryFocusAnnotation(id, { editableOnly: true, editorUid });
   }
 
+  resolveAnnotationAnchor(nativeId: string, editorUid?: string): DOMRect | null {
+    if (this.disposed) return null;
+    const id = nativeId.trim();
+    if (id.length === 0) return null;
+    const lookupId = annotationFocusLookupId(id, editorUid);
+    const native = this.findReadyNativeEditor(lookupId, false);
+    const node =
+      native?.node ??
+      Array.from(
+        this.host.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]'),
+      ).find((candidate) => candidate.dataset['annotationId'] === id) ??
+      null;
+    if (node?.isConnected !== true) return null;
+    const rect = node.getBoundingClientRect();
+    return rect.width === 0 && rect.height === 0 ? null : DOMRect.fromRect(rect);
+  }
+
+  synchronizeAnnotationSelection(nativeId: string, editorUid?: string): boolean {
+    if (this.disposed) return false;
+    const id = nativeId.trim();
+    if (id.length === 0) return false;
+    const lookupId = annotationFocusLookupId(id, editorUid);
+    const native = this.findReadyNativeEditor(lookupId, false);
+    const node =
+      native?.node ??
+      Array.from(
+        this.host.querySelectorAll<HTMLElement>('.annotationLayer [data-annotation-id]'),
+      ).find((candidate) => candidate.dataset['annotationId'] === id) ??
+      null;
+    if (node?.isConnected !== true) return false;
+    this.host
+      .querySelectorAll<HTMLElement>('[data-abyss-annotation-selected]')
+      .forEach((candidate) => delete candidate.dataset['abyssAnnotationSelected']);
+    node.dataset['abyssAnnotationSelected'] = 'true';
+    return true;
+  }
+
   private waitForAnnotationFocus(
     id: string,
     signal: AbortSignal | undefined,

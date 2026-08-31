@@ -210,7 +210,46 @@ interface AnnotationToolRequest {
   readonly viewport: DocumentViewport;
 }
 
+interface AnnotationSelectionRetryRequest {
+  readonly nativeId: string;
+}
+
+interface NavigationOptions {
+  readonly annotationSelectionRetry?: AnnotationSelectionRetryRequest;
+  readonly onArrive?: () => void;
+  readonly onFailure?: () => void;
+  readonly retainAnnotationActivation?: boolean;
+}
+
+interface NavigationFailureContext {
+  readonly cause: unknown;
+  readonly onFailure: (() => void) | undefined;
+  readonly revision: number;
+  readonly shell: ReaderShell;
+  readonly target: number;
+  readonly viewport: DocumentViewport;
+}
+
+interface PendingAnnotationSelectionRetry {
+  attempts: number;
+  readonly nativeId: string;
+  readonly pageIndex: number;
+  readonly shell: ReaderShell;
+  timeoutId: number;
+  readonly viewport: DocumentViewport;
+}
+
+type ContextViewportEvent = Extract<
+  ViewportEvent,
+  {
+    readonly type: 'annotation-layer-rendered' | 'annotation-select' | 'geometry-change';
+  }
+>;
+
 type WritableAnnotationTool = Exclude<PdfAnnotationTool, 'select'>;
+
+const ANNOTATION_SELECTION_RETRY_LIMIT = 3;
+const ANNOTATION_SELECTION_RETRY_TIMEOUT_MS = 2_000;
 
 interface CleanPeerReloadContext {
   readonly file: TFile;
@@ -315,6 +354,7 @@ export class ReaderController {
   private annotationToolRequestRevision = 0;
   private annotationInteractionController: AnnotationInteractionController | null = null;
   private annotationActivationAbort: AbortController | null = null;
+  private pendingAnnotationSelectionRetry: PendingAnnotationSelectionRetry | null = null;
   private currentAnnotationTool: PdfAnnotationTool = 'select';
   private annotationToolColors = annotationToolColorDefaults(
     DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400',
@@ -590,6 +630,7 @@ export class ReaderController {
     viewport: DocumentViewport,
     shell: ReaderShell,
   ): () => void {
+    this.cancelPendingAnnotationSelectionRetry();
     this.currentPageIndex = 0;
     this.navigationPageIndex = 0;
     this.pendingNavigationPageIndex = null;
@@ -1556,6 +1597,7 @@ export class ReaderController {
 
   private resetReaderState(): void {
     this.cancelAnnotationActivation(false);
+    this.cancelPendingAnnotationSelectionRetry();
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
     this.resetAnnotationProjectionState();
@@ -1969,6 +2011,14 @@ export class ReaderController {
       onAnnotationNavigate: (location) => {
         this.navigateToLocation(location);
       },
+      onAnnotationSelect: (activation) => {
+        const interactionController = this.annotationInteractionController;
+        const selected = interactionController?.selectAnnotation(activation.nativeId) ?? false;
+        this.navigateToLocation(
+          activation.location,
+          selected ? {} : { annotationSelectionRetry: { nativeId: activation.nativeId } },
+        );
+      },
       onAnnotationActivate: (activation) => {
         this.activateAnnotation(viewport, activation);
       },
@@ -2258,9 +2308,8 @@ export class ReaderController {
     this.cancelAnnotationActivation();
     const abort = new AbortController();
     this.annotationActivationAbort = abort;
-    this.navigateToLocation(
-      activation.location,
-      () => {
+    this.navigateToLocation(activation.location, {
+      onArrive: () => {
         const interactionController =
           this.viewport === viewport && this.shell === shell
             ? this.annotationInteractionController
@@ -2291,11 +2340,11 @@ export class ReaderController {
             this.finishAnnotationActivation(abort);
           });
       },
-      true,
-      () => {
+      onFailure: () => {
         this.finishAnnotationActivation(abort);
       },
-    );
+      retainAnnotationActivation: true,
+    });
   }
 
   private openReadOnlyAnnotationActivation(
@@ -2345,13 +2394,10 @@ export class ReaderController {
     this.resumeAutomaticSaveAfterInteraction();
   }
 
-  private navigateToLocation(
-    location: DocumentLocation,
-    onArrive?: () => void,
-    retainAnnotationActivation = false,
-    onFailure?: () => void,
-  ): void {
-    if (!retainAnnotationActivation) {
+  private navigateToLocation(location: DocumentLocation, options: NavigationOptions = {}): void {
+    const { annotationSelectionRetry, onArrive, onFailure } = options;
+    this.cancelPendingAnnotationSelectionRetry();
+    if (options.retainAnnotationActivation !== true) {
       this.cancelAnnotationActivation();
       this.annotationInteractionController?.invalidate('navigation');
     }
@@ -2366,39 +2412,114 @@ export class ReaderController {
     this.navigationPageIndex = target;
     this.pendingNavigationPageIndex = target;
     const revision = ++this.navigationRequestRevision;
+    if (annotationSelectionRetry !== undefined) {
+      this.startPendingAnnotationSelectionRetry(
+        viewport,
+        shell,
+        target,
+        annotationSelectionRetry.nativeId,
+      );
+    }
     void viewport
       .goTo(destination)
       .then(() => {
         if (this.viewport === viewport && revision === this.navigationRequestRevision) onArrive?.();
       })
       .catch((cause: unknown) => {
-        const isCurrentRequest =
-          this.viewport === viewport && revision === this.navigationRequestRevision;
-        if (!isCurrentRequest || isAbortFailure(cause)) {
-          if (isCurrentRequest && this.pendingNavigationPageIndex === target) {
-            this.navigationPageIndex = this.currentPageIndex;
-            this.pendingNavigationPageIndex = null;
-            shell.toolbar.setCurrentPage(this.currentPageIndex);
-          }
-          onFailure?.();
-          return;
-        }
-        if (
-          revision === this.navigationRequestRevision &&
-          this.pendingNavigationPageIndex === target
-        ) {
-          this.navigationPageIndex = this.currentPageIndex;
-          this.pendingNavigationPageIndex = null;
-        }
-        shell.toolbar.setCurrentPage(this.currentPageIndex);
-        const reason = this.reason(cause);
-        new Notice(`Could not go to page ${target + 1}: ${reason}`);
-        console.error('[abyss-documents] Failed to navigate PDF page', {
-          pageIndex: target,
+        this.handleNavigationFailure({
           cause,
+          onFailure,
+          revision,
+          shell,
+          target,
+          viewport,
         });
-        onFailure?.();
       });
+  }
+
+  private handleNavigationFailure(context: NavigationFailureContext): void {
+    const { cause, onFailure, revision, shell, target, viewport } = context;
+    const isCurrentRequest =
+      this.viewport === viewport && revision === this.navigationRequestRevision;
+    if (!isCurrentRequest || isAbortFailure(cause)) {
+      if (isCurrentRequest && this.pendingNavigationPageIndex === target) {
+        this.navigationPageIndex = this.currentPageIndex;
+        this.pendingNavigationPageIndex = null;
+        shell.toolbar.setCurrentPage(this.currentPageIndex);
+      }
+      if (isCurrentRequest) this.cancelPendingAnnotationSelectionRetry();
+      onFailure?.();
+      return;
+    }
+    if (this.pendingNavigationPageIndex === target) {
+      this.navigationPageIndex = this.currentPageIndex;
+      this.pendingNavigationPageIndex = null;
+    }
+    shell.toolbar.setCurrentPage(this.currentPageIndex);
+    const reason = this.reason(cause);
+    new Notice(`Could not go to page ${target + 1}: ${reason}`);
+    console.error('[abyss-documents] Failed to navigate PDF page', {
+      pageIndex: target,
+      cause,
+    });
+    this.cancelPendingAnnotationSelectionRetry();
+    onFailure?.();
+  }
+
+  private startPendingAnnotationSelectionRetry(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    pageIndex: number,
+    nativeId: string,
+  ): void {
+    const pending: PendingAnnotationSelectionRetry = {
+      attempts: 0,
+      nativeId,
+      pageIndex,
+      shell,
+      timeoutId: 0,
+      viewport,
+    };
+    pending.timeoutId = shell.root.win.setTimeout(() => {
+      if (this.pendingAnnotationSelectionRetry === pending)
+        this.pendingAnnotationSelectionRetry = null;
+    }, ANNOTATION_SELECTION_RETRY_TIMEOUT_MS);
+    this.pendingAnnotationSelectionRetry = pending;
+  }
+
+  private retryPendingAnnotationSelection(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    pageIndex: number,
+  ): void {
+    const pending = this.pendingAnnotationSelectionRetry;
+    if (!this.isCurrentAnnotationSelectionRetry(pending, viewport, shell, pageIndex)) return;
+    pending.attempts += 1;
+    const selected =
+      this.annotationInteractionController?.selectAnnotation(pending.nativeId) ?? false;
+    if (selected || pending.attempts >= ANNOTATION_SELECTION_RETRY_LIMIT)
+      this.cancelPendingAnnotationSelectionRetry();
+  }
+
+  private isCurrentAnnotationSelectionRetry(
+    pending: PendingAnnotationSelectionRetry | null,
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    pageIndex: number,
+  ): pending is PendingAnnotationSelectionRetry {
+    return (
+      pending?.viewport === viewport &&
+      pending.shell === shell &&
+      pending.pageIndex === pageIndex &&
+      this.viewport === viewport &&
+      this.shell === shell
+    );
+  }
+
+  private cancelPendingAnnotationSelectionRetry(): void {
+    const pending = this.pendingAnnotationSelectionRetry;
+    this.pendingAnnotationSelectionRetry = null;
+    if (pending !== null) pending.shell.root.win.clearTimeout(pending.timeoutId);
   }
 
   private setScale(scale: ReaderScale): void {
@@ -2495,6 +2616,10 @@ export class ReaderController {
     event: ViewportEvent,
   ): void {
     if (this.viewport !== viewport || this.shell !== shell) return;
+    if (isContextViewportEvent(event)) {
+      this.handleContextViewportEvent(viewport, shell, event);
+      return;
+    }
     if (isAnnotationProjectionEvent(event)) {
       this.queueAnnotationProjectionEvent(viewport, shell, event);
       return;
@@ -2517,6 +2642,29 @@ export class ReaderController {
       case 'render-error':
         return;
     }
+  }
+
+  private handleContextViewportEvent(
+    viewport: DocumentViewport,
+    shell: ReaderShell,
+    event: ContextViewportEvent,
+  ): void {
+    switch (event.type) {
+      case 'annotation-layer-rendered':
+        this.retryPendingAnnotationSelection(viewport, shell, event.pageIndex);
+        return;
+      case 'annotation-select':
+        this.handleAnnotationSelection(shell, event.nativeId);
+        return;
+      case 'geometry-change':
+        shell.invalidateAnnotationEditorGeometry();
+    }
+  }
+
+  private handleAnnotationSelection(shell: ReaderShell, nativeId: string | null): void {
+    shell.closeAnnotationEditor();
+    if (nativeId === null) shell.sidebar?.annotationsPanel.clearSelection();
+    else shell.sidebar?.annotationsPanel.selectAnnotation(nativeId, false);
   }
 
   private queueAnnotationProjectionEvent(
@@ -2831,6 +2979,14 @@ function isAnnotationProjectionEvent(
   event: ViewportEvent,
 ): event is Extract<ViewportEvent, { readonly type: 'annotation-change' | 'annotation-snapshot' }> {
   return event.type === 'annotation-change' || event.type === 'annotation-snapshot';
+}
+
+function isContextViewportEvent(event: ViewportEvent): event is ContextViewportEvent {
+  return (
+    event.type === 'annotation-layer-rendered' ||
+    event.type === 'annotation-select' ||
+    event.type === 'geometry-change'
+  );
 }
 
 function isReadingProfileId(value: unknown): value is ReadingProfileId {

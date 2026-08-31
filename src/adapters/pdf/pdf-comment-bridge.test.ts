@@ -1235,6 +1235,43 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('re-resolves a replaced native annotation anchor without selecting the PDF.js editor', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const first = layer.createDiv({ cls: 'highlightEditor' });
+    first.id = 'pdfjs_internal_editor_12';
+    vi.spyOn(first, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 20, width: 80, x: 100, y: 120 }),
+    );
+    const native = editor('Anchor', {
+      annotationElementId: '412R',
+      uid: '412R',
+    });
+    const manager = uiManager();
+    manager.getEditor.mockImplementation((id) => (id === first.id ? native : undefined));
+    const bridge = new PdfCommentBridge(host);
+    bridge.setSidebarUiManager(manager);
+
+    expect(bridge.resolveAnnotationAnchor('412R', first.id)).toEqual(
+      DOMRect.fromRect({ height: 20, width: 80, x: 100, y: 120 }),
+    );
+    first.remove();
+    const replacement = layer.createDiv({ cls: 'highlightEditor' });
+    replacement.id = 'pdfjs_internal_editor_12';
+    vi.spyOn(replacement, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 24, width: 96, x: 180, y: 240 }),
+    );
+
+    expect(bridge.resolveAnnotationAnchor('412R', replacement.id)).toEqual(
+      DOMRect.fromRect({ height: 24, width: 96, x: 180, y: 240 }),
+    );
+    expect(bridge.synchronizeAnnotationSelection('412R', replacement.id)).toBe(true);
+    expect(replacement.dataset['abyssAnnotationSelected']).toBe('true');
+    expect(manager.setSelected).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
   it('uses a fresh sidebar anchor when the writable native anchor is unavailable', async () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });

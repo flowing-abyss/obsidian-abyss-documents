@@ -20,6 +20,7 @@ export interface PdfSelectionObserver {
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void;
   validate(token: string): 'current' | 'stale';
   restore?(token: string): 'current' | 'stale';
+  resolveAnchor?(token: string): DOMRect | null;
   invalidate(): void;
 }
 
@@ -119,6 +120,32 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
       return 'stale';
     }
     return this.validate(token);
+  }
+
+  resolveAnchor(token: string): DOMRect | null {
+    const active = this.active;
+    if (!this.canResolveAnchor(token, active)) return null;
+    const identity = this.selectionIdentity();
+    const selection = this.ownerDocument.getSelection();
+    if (identity === null || !sameSelection(identity, active) || selection?.rangeCount !== 1)
+      return null;
+    const range = selection.getRangeAt(0);
+    const rects = Array.from(range.getClientRects());
+    const rect = rects[rects.length - 1] ?? range.getBoundingClientRect();
+    return rect.width === 0 && rect.height === 0 ? null : DOMRect.fromRect(rect);
+  }
+
+  private canResolveAnchor(
+    token: string,
+    active: ActiveSelection | null,
+  ): active is ActiveSelection {
+    return (
+      !this.destroyed &&
+      token === active?.token &&
+      active.anchorNode.isConnected &&
+      active.focusNode.isConnected &&
+      this.isCurrentTextLayer(active)
+    );
   }
 
   handleTextLayerRendered(pageIndex: number): void {

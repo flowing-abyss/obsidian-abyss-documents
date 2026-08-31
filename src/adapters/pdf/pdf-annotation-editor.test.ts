@@ -264,6 +264,8 @@ function fixture(fixtureOptions: { readonly dispatchModeChanges?: boolean } = {}
         opened: Promise.resolve(createdAnnotation()),
       }),
     ),
+    resolveAnnotationAnchor: vi.fn(() => null as DOMRect | null),
+    synchronizeAnnotationSelection: vi.fn(() => true),
     updateAnnotations: vi.fn(() => true),
   };
   const editor = new PdfAnnotationEditor({
@@ -1571,6 +1573,61 @@ describe('PdfAnnotationEditor lifecycle', () => {
       },
     );
   });
+
+  it('canonicalizes cheap selection without requesting a mode or materializing contextual focus', () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: '29R' });
+    current.editor.setAnnotationProjection([
+      {
+        aliases: ['selection-1'],
+        annotation,
+        editorUid: 'pdfjs_internal_editor_0',
+        stableId: '29R',
+      },
+    ]);
+
+    expect(current.editor.selectAnnotation('selection-1')).toBe(true);
+
+    expect(current.commentBridge.synchronizeAnnotationSelection).toHaveBeenCalledExactlyOnceWith(
+      '29R',
+      'pdfjs_internal_editor_0',
+    );
+    expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+    expect(current.modeRequests).toEqual([]);
+  });
+
+  it('returns the real cheap-selection bridge result for a not-yet-mounted far-page node', () => {
+    const current = fixture();
+    current.commentBridge.synchronizeAnnotationSelection.mockReturnValue(false);
+
+    expect(current.editor.selectAnnotation('far-page')).toBe(false);
+    expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+    expect(current.modeRequests).toEqual([]);
+  });
+
+  it.each(['select', 'clear'] as const)(
+    '%s cancels a deferred contextual resolver without changing native mode',
+    async (action) => {
+      const current = fixture();
+      const uiManager = manager();
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+      const resolution = deferred<DocumentAnnotation | null>();
+      current.editor.setAnnotationResolver(async () => resolution.promise);
+      const activation = current.editor.focusAnnotation('annotation-a', { kind: 'sidebar' });
+      await Promise.resolve();
+
+      if (action === 'select') current.editor.selectAnnotation('annotation-b');
+      else current.editor.clearAnnotationSelection();
+      resolution.resolve(createdAnnotation('', { id: 'annotation-a' }));
+
+      await expect(activation).resolves.toBe('cancelled');
+      expect(current.commentBridge.focusAnnotation).not.toHaveBeenCalled();
+      expect(current.modeRequests).toEqual([]);
+    },
+  );
 
   it('never lets a historical alias override another projected canonical id', async () => {
     const current = fixture();

@@ -130,6 +130,28 @@ describe('PdfDomSelectionObserver', () => {
     observer.destroy();
   });
 
+  it('resolves the live last selection rectangle and rejects a replaced text layer', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published selection.');
+
+    expect(observer.resolveAnchor(published.token)).toEqual(
+      DOMRect.fromRect({ height: 24, width: 26, x: 12, y: 36 }),
+    );
+    root.querySelector('.textLayer')?.remove();
+    expect(observer.resolveAnchor(published.token)).toBeNull();
+    observer.destroy();
+  });
+
   it('publishes pointerup before a same-turn render of the unchanged selected text layer', async () => {
     const root = selectionRoot();
     const text = root.querySelector('.textLayer')?.firstChild;

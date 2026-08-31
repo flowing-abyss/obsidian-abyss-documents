@@ -58,6 +58,7 @@ export interface AnnotationsPanelOptions {
   readonly colorNames?: Readonly<Record<string, string>>;
   readonly onActivate?: (activation: AnnotationPanelActivation) => void;
   readonly onNavigate: (location: DocumentLocation) => void;
+  readonly onSelect?: (activation: AnnotationPanelActivation) => void;
   readonly onTransfer?: (annotation: DocumentAnnotation, transfer: DataTransfer) => void;
   readonly onTransferFailure?: (annotation: DocumentAnnotation, cause: unknown) => void;
 }
@@ -309,7 +310,9 @@ export class AnnotationsPanel {
   }
 
   selectAnnotation(id: string, focus = true): boolean {
-    const annotation = this.filtered.find((candidate) => annotationId(candidate) === id);
+    const annotation = this.filtered.find(
+      (candidate) => annotationId(candidate) === id || (this.nativeIds.get(candidate) ?? '') === id,
+    );
     return annotation === undefined ? false : this.selectRow(this.rowId(annotation), focus);
   }
 
@@ -538,8 +541,8 @@ export class AnnotationsPanel {
     const button = ownerWindow(this.root).createEl('button');
     button.type = 'button';
     button.className = 'abyss-annotation-card';
-    button.addEventListener('click', (event) => {
-      this.onCardClick(button, event);
+    button.addEventListener('click', () => {
+      this.onCardClick(button);
     });
     button.addEventListener('keydown', (event) => {
       this.onCardKeyDown(button, event);
@@ -577,19 +580,19 @@ export class AnnotationsPanel {
     );
   }
 
-  private onCardClick(button: HTMLButtonElement, event: MouseEvent): void {
-    this.activateCard(button, clientPosition(event, button));
+  private onCardClick(button: HTMLButtonElement): void {
+    this.navigateCard(button);
   }
 
   private onCardKeyDown(button: HTMLButtonElement, event: KeyboardEvent): void {
     const current = this.cardAnnotations.get(button);
     if (current === undefined) return;
-    if (
-      event.key === 'Enter' ||
-      event.key === ' ' ||
-      event.key === 'ContextMenu' ||
-      (event.key === 'F10' && event.shiftKey)
-    ) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      this.navigate(current);
+      return;
+    }
+    if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
       event.preventDefault();
       this.activate(current, cardPosition(button));
       return;
@@ -749,10 +752,45 @@ export class AnnotationsPanel {
     if (annotation !== undefined) this.activate(annotation, position);
   }
 
+  private navigateCard(button: HTMLButtonElement): void {
+    const rowId = button.dataset['annotationRowId'];
+    if (rowId !== undefined) this.setRovingRow(rowId);
+    const annotation = this.cardAnnotations.get(button);
+    if (annotation !== undefined) this.navigate(annotation);
+  }
+
+  private navigate(annotation: DocumentAnnotation): void {
+    this.selectAnnotationState(annotation);
+    const target = this.activationFor(annotation);
+    if (this.options.onSelect !== undefined) this.options.onSelect(target);
+    else this.options.onNavigate(target.location);
+  }
+
   private activate(
     annotation: DocumentAnnotation,
     clientPosition?: { readonly x: number; readonly y: number },
   ): void {
+    this.selectAnnotationState(annotation);
+    const target = this.activationFor(annotation, clientPosition);
+    if (this.options.onActivate !== undefined) this.options.onActivate(target);
+    else this.options.onNavigate(target.location);
+  }
+
+  private activationFor(
+    annotation: DocumentAnnotation,
+    clientPosition?: { readonly x: number; readonly y: number },
+  ): AnnotationPanelActivation {
+    const rowId = this.rowId(annotation);
+    return {
+      annotation,
+      ...(clientPosition === undefined ? {} : { clientPosition }),
+      location: annotationLocation(annotation),
+      nativeId: this.nativeIds.get(annotation) ?? annotationId(annotation),
+      rowId,
+    };
+  }
+
+  private selectAnnotationState(annotation: DocumentAnnotation): string {
     const rowId = this.rowId(annotation);
     this.clearResolutionFeedback();
     this.selectedRowId = rowId;
@@ -762,15 +800,7 @@ export class AnnotationsPanel {
       if (card.dataset['annotationRowId'] === rowId) card.setAttribute('aria-current', 'true');
       else card.removeAttribute('aria-current');
     }
-    const target: AnnotationPanelActivation = {
-      annotation,
-      ...(clientPosition === undefined ? {} : { clientPosition }),
-      location: annotationLocation(annotation),
-      nativeId: this.nativeIds.get(annotation) ?? annotationId(annotation),
-      rowId,
-    };
-    if (this.options.onActivate !== undefined) this.options.onActivate(target);
-    else this.options.onNavigate(target.location);
+    return rowId;
   }
 
   private captureProjectionRoving(): ProjectionRovingSnapshot {

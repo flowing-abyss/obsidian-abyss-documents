@@ -107,6 +107,12 @@ function projectedAnnotationMatrix(controller: ReaderController) {
   }));
 }
 
+function openAnnotationContext(target: Element): void {
+  target.dispatchEvent(
+    new MouseEvent('contextmenu', { bubbles: true, button: 2, cancelable: true }),
+  );
+}
+
 function captureMenuChoices() {
   const choices: Array<{ checked: boolean | null; title: string }> = [];
   vi.spyOn(Menu.prototype, 'addItem').mockImplementation(function (
@@ -258,6 +264,7 @@ function interactiveViewport(pageCount = 3) {
   const focusAnnotation = vi.fn<PdfAnnotationInteraction['focusAnnotation']>(
     async () => 'editable',
   );
+  const selectAnnotation = vi.fn(() => true);
   const abortInteraction = vi.fn(async () => undefined);
   const resumeInteractions = vi.fn();
   const suspendInteractions = vi.fn(async () => undefined);
@@ -266,6 +273,7 @@ function interactiveViewport(pageCount = 3) {
     commitSelection,
     deleteAnnotations,
     focusAnnotation,
+    selectAnnotation,
     onAnnotationFocus(listener) {
       annotationFocusListeners.add(listener);
       return () => annotationFocusListeners.delete(listener);
@@ -302,6 +310,7 @@ function interactiveViewport(pageCount = 3) {
     deleteAnnotations,
     focusAnnotation,
     projectSelectionRects,
+    selectAnnotation,
     resumeInteractions,
     emitMode(next: PdfAnnotationLogicalMode) {
       mode = next;
@@ -587,7 +596,7 @@ describe('ReaderController', () => {
       );
     secondCard?.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     secondCard?.focus();
-    secondCard?.click();
+    if (secondCard !== null && secondCard !== undefined) openAnnotationContext(secondCard);
 
     await vi.waitFor(() => {
       const call = createdViewport.focusAnnotation.mock.lastCall;
@@ -626,6 +635,164 @@ describe('ReaderController', () => {
     ).toBe('overlap-second editor');
     expect(openEditor).toHaveBeenCalledOnce();
     extraction.resolve();
+  });
+
+  it('retries cheap sidebar selection after a far-page annotation has mounted', async () => {
+    const [pdf] = files('Books/Far-page-cheap-selection.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport(100);
+    const createdSession = session(pdf.path, createdViewport);
+    const extraction = deferred<void>();
+    Object.assign(createdSession.value, { listAnnotations: async () => extraction.promise });
+    const arrival = deferred<void>();
+    createdViewport.goTo.mockImplementationOnce(async () => {
+      await arrival.promise;
+      return undefined;
+    });
+    createdViewport.selectAnnotation.mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'far-cheap',
+          pageIndex: 70,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 40, height: 8 }],
+          selectedText: 'Far cheap selection',
+          color: '#ffd400',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+    await waitForAnimationFrame();
+    const card = shell.created.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-id="far-cheap"]',
+    );
+    if (card === null) throw new Error('Expected the far-page annotation card.');
+
+    card.click();
+    expect(createdViewport.selectAnnotation).toHaveBeenCalledExactlyOnceWith('far-cheap');
+    expect(createdViewport.goTo).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 70 }));
+
+    arrival.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(createdViewport.selectAnnotation).toHaveBeenCalledOnce();
+
+    createdViewport.emit({ type: 'annotation-layer-rendered', pageIndex: 70 });
+    await vi.waitFor(() => {
+      expect(createdViewport.selectAnnotation.mock.calls).toEqual([['far-cheap'], ['far-cheap']]);
+    });
+    expect(createdViewport.focusAnnotation).not.toHaveBeenCalled();
+    await controller.close();
+  });
+
+  it('cancels a pending far-page cheap selection retry when navigation is superseded', async () => {
+    const [pdf] = files('Books/Cancelled-far-page-cheap-selection.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport(100);
+    const createdSession = session(pdf.path, createdViewport);
+    const extraction = deferred<void>();
+    Object.assign(createdSession.value, { listAnnotations: async () => extraction.promise });
+    createdViewport.selectAnnotation.mockReturnValue(false);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'cancelled-far-cheap',
+          pageIndex: 70,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 40, height: 8 }],
+          selectedText: 'Cancelled far selection',
+          color: '#ffd400',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+    await waitForAnimationFrame();
+    const card = shell.created.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-id="cancelled-far-cheap"]',
+    );
+    if (card === null) throw new Error('Expected the far-page annotation card.');
+    card.click();
+    await vi.waitFor(() => {
+      expect(createdViewport.goTo).toHaveBeenCalledOnce();
+    });
+
+    shell.send({ type: 'go-to-page', pageIndex: 2 });
+    createdViewport.emit({ type: 'annotation-layer-rendered', pageIndex: 70 });
+    await Promise.resolve();
+
+    expect(createdViewport.selectAnnotation).toHaveBeenCalledExactlyOnceWith('cancelled-far-cheap');
+    await controller.close();
+  });
+
+  it('coalesces explicit viewport geometry invalidation while scroller bounds stay unchanged', async () => {
+    const [pdf] = files('Books/Live-anchor-geometry.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    const scroller = shell.created.documentHost.createDiv({ cls: 'pdfViewerContainer' });
+    Object.defineProperty(scroller, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => new DOMRect(0, 0, 800, 600),
+    });
+    let anchor = new DOMRect(100, 100, 30, 12);
+    const resolveAnchor = vi.fn(() => anchor);
+    shell.created.openAnnotationEditor({
+      target: {
+        annotation: annotationRecord('live-anchor', 0, { kind: 'point', point: { x: 0, y: 0 } }),
+        kind: 'annotation',
+      },
+      palette: [],
+      resolveAnchor,
+      onCreate: () => 'dismissed',
+      onUpdate: () => true,
+      onDelete: () => true,
+      onClose: () => undefined,
+    });
+    resolveAnchor.mockClear();
+    anchor = new DOMRect(220, 180, 30, 12);
+
+    createdViewport.emit({ type: 'geometry-change', reason: 'scale' });
+    createdViewport.emit({ type: 'geometry-change', reason: 'layout' });
+    createdViewport.emit({ type: 'geometry-change', reason: 'refit' });
+    await waitForAnimationFrame();
+
+    expect(resolveAnchor).toHaveBeenCalledOnce();
+    expect(shell.created.annotationEditorOpen).toBe(true);
+    expect(
+      shell.created.root.querySelector<HTMLElement>('[data-annotation-editor-popover]')?.style.left,
+    ).toBe('220px');
+    await controller.close();
   });
 
   it('uses the fresh post-navigation sidebar anchor for one writable annotation editor', async () => {
@@ -670,7 +837,7 @@ describe('ReaderController', () => {
     let rect = DOMRect.fromRect({ height: 40, width: 240, x: 10, y: 20 });
     vi.spyOn(card, 'getBoundingClientRect').mockImplementation(() => rect);
 
-    card.click();
+    openAnnotationContext(card);
     await vi.waitFor(() => {
       expect(createdViewport.goTo).toHaveBeenCalledOnce();
     });
@@ -688,7 +855,7 @@ describe('ReaderController', () => {
     const failure = new Error('Native focus failed');
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     createdViewport.focusAnnotation.mockRejectedValueOnce(failure);
-    card.click();
+    openAnnotationContext(card);
     await vi.waitFor(() => {
       expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to edit PDF annotation', {
         action: 'open PDF annotation',
@@ -699,7 +866,7 @@ describe('ReaderController', () => {
     });
     await Promise.resolve();
     createdViewport.focusAnnotation.mockRejectedValueOnce(failure);
-    card.click();
+    openAnnotationContext(card);
     await vi.waitFor(() => {
       expect(createdViewport.focusAnnotation).toHaveBeenCalledTimes(3);
     });
@@ -707,7 +874,7 @@ describe('ReaderController', () => {
     createdViewport.focusAnnotation.mockRejectedValueOnce(
       new DOMException('Native focus cancelled', 'AbortError'),
     );
-    card.click();
+    openAnnotationContext(card);
     await vi.waitFor(() => {
       expect(createdViewport.focusAnnotation).toHaveBeenCalledTimes(4);
     });
@@ -724,7 +891,7 @@ describe('ReaderController', () => {
           );
         }),
     );
-    card.click();
+    openAnnotationContext(card);
     await vi.waitFor(() => {
       expect(createdViewport.focusAnnotation).toHaveBeenCalledTimes(5);
     });
@@ -940,7 +1107,8 @@ describe('ReaderController', () => {
       return 'readonly';
     });
     const cards = shell.created.sidebar?.annotationsPanel.root;
-    cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-first"]')?.click();
+    const farFirst = cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-first"]');
+    if (farFirst !== null && farFirst !== undefined) openAnnotationContext(farFirst);
     firstNavigation.resolve();
     await vi.waitFor(() => {
       const call = createdViewport.focusAnnotation.mock.lastCall;
@@ -949,7 +1117,8 @@ describe('ReaderController', () => {
       expect(call?.[1].signal).toBeInstanceOf(AbortSignal);
     });
 
-    cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-second"]')?.click();
+    const farSecond = cards?.querySelector<HTMLButtonElement>('[data-annotation-id="far-second"]');
+    if (farSecond !== null && farSecond !== undefined) openAnnotationContext(farSecond);
     expect(firstSignal?.aborted).toBe(true);
     secondNavigation.resolve();
 
@@ -3035,7 +3204,7 @@ describe('ReaderController', () => {
       toJSON: () => ({}),
     });
     const openAnnotationEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
-    card.click();
+    openAnnotationContext(card);
 
     await vi.waitFor(() => {
       expect(createdViewport.goTo).toHaveBeenCalledWith(expect.objectContaining({ pageIndex: 0 }));
@@ -5610,9 +5779,11 @@ describe('ReaderController', () => {
       });
       await vi.advanceTimersByTimeAsync(20);
 
-      shell.created.sidebar?.annotationsPanel.root
-        .querySelector<HTMLButtonElement>('[data-annotation-id="activation-highlight"]')
-        ?.click();
+      const activationCard = shell.created.sidebar?.annotationsPanel.root.querySelector(
+        '[data-annotation-id="activation-highlight"]',
+      );
+      if (activationCard !== null && activationCard !== undefined)
+        openAnnotationContext(activationCard);
       await vi.waitFor(() => {
         expect(createdViewport.focusAnnotation).toHaveBeenCalledOnce();
       });

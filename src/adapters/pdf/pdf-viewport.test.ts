@@ -51,6 +51,16 @@ async function nextFrame(): Promise<void> {
   });
 }
 
+function openAnnotationContext(target: Element): MouseEvent {
+  const event = new MouseEvent('contextmenu', {
+    bubbles: true,
+    button: 2,
+    cancelable: true,
+  });
+  target.dispatchEvent(event);
+  return event;
+}
+
 function schedulePointerSelection(host: HTMLElement, pageNumber = 1): void {
   if (!host.isConnected) document.body.append(host);
   const root = host.querySelector<HTMLElement>('.pdfViewerContainer');
@@ -975,6 +985,7 @@ describe('PdfDocumentViewport', () => {
     const second = layer.createDiv({ cls: 'highlightEditor' });
     second.id = 'overlap-second';
     const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation');
     const dirty = vi.fn();
     editor.onDirty(dirty);
 
@@ -983,10 +994,8 @@ describe('PdfDocumentViewport', () => {
     second.addClass('selectedEditor');
     second.click();
 
-    expect(focusAnnotation.mock.calls).toEqual([
-      ['overlap-first', { kind: 'root-click' }],
-      ['overlap-second', { kind: 'root-click' }],
-    ]);
+    expect(selectAnnotation.mock.calls).toEqual([['overlap-first'], ['overlap-second']]);
+    expect(focusAnnotation).not.toHaveBeenCalled();
     expect(dirty).not.toHaveBeenCalled();
     expect(viewer.annotationEditorRequests).toEqual([]);
   });
@@ -1014,6 +1023,7 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'highlightEditor selectedEditor' });
     nativeNode.id = 'no-comment';
     const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation');
     const dirty = vi.fn();
     const focusFromPointer = vi.spyOn(commentManager, 'focusFromPointer');
     editor.onDirty(dirty);
@@ -1021,21 +1031,21 @@ describe('PdfDocumentViewport', () => {
     nativeNode.click();
 
     expect(setSidebarUiManager).toHaveBeenCalledWith(manager);
-    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('no-comment', {
-      kind: 'root-click',
-    });
+    expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('no-comment');
+    expect(focusAnnotation).not.toHaveBeenCalled();
     expect(focusFromPointer).not.toHaveBeenCalled();
     expect(dirty).not.toHaveBeenCalled();
     expect(viewer.annotationEditorRequests).toEqual([]);
   });
 
-  it('routes root left-click and context-click exactly once through the interaction boundary', async () => {
+  it('routes root left-click through cheap selection and context-click through contextual activation', async () => {
     const fixture = await mountedViewport(3);
     const interaction = fixture.viewport.annotationInteraction;
     const viewer = fixture.runtime.state.viewer;
     if (interaction === null || viewer === undefined)
       throw new Error('Expected mounted annotation interaction.');
     const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(true);
     const commentManager = viewer.options.commentManager as {
       focusFromPointer(target: EventTarget | null): void;
     };
@@ -1055,15 +1065,68 @@ describe('PdfDocumentViewport', () => {
     });
     annotation.dispatchEvent(contextmenu);
 
-    expect(focusAnnotation).toHaveBeenNthCalledWith(1, 'persisted-root', {
-      kind: 'root-click',
-    });
-    expect(focusAnnotation).toHaveBeenNthCalledWith(2, 'persisted-root', {
+    expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('persisted-root');
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('persisted-root', {
       kind: 'root-context',
     });
-    expect(focusAnnotation).toHaveBeenCalledTimes(2);
     expect(bridgeFocus).not.toHaveBeenCalled();
     expect(contextmenu.defaultPrevented).toBe(true);
+  });
+
+  it('does not steal modified primary annotation clicks from PDF.js multi-selection', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(true);
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const annotation = root
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'multi-native';
+
+    annotation.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true }));
+    annotation.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+
+    expect(selectAnnotation).not.toHaveBeenCalled();
+    expect(focusAnnotation).not.toHaveBeenCalled();
+  });
+
+  it('clears synchronized annotation selection from an empty document click', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(true);
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const layer = root.createDiv({ cls: 'annotationLayer' });
+    const annotation = layer.createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'clear-native';
+
+    annotation.click();
+    root.click();
+
+    expect(annotation.dataset['abyssAnnotationSelected']).toBeUndefined();
+    expect(events.filter((event) => event.type === 'annotation-select')).toEqual([
+      { type: 'annotation-select', nativeId: 'clear-native' },
+      { type: 'annotation-select', nativeId: null },
+    ]);
+  });
+
+  it('cancels pending contextual activation on an empty click even without a DOM selection marker', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    const clearAnnotationSelection = vi.spyOn(interaction, 'clearAnnotationSelection');
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+
+    root.click();
+
+    expect(clearAnnotationSelection).toHaveBeenCalledOnce();
   });
 
   it('does not emit a page failure when editable activation cleanup fails', async () => {
@@ -1121,7 +1184,7 @@ describe('PdfDocumentViewport', () => {
     });
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      nativeNode.click();
+      openAnnotationContext(nativeNode);
 
       expect(activation).not.toBeNull();
       await expect(activation).resolves.toBe('editable');
@@ -1167,7 +1230,7 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'highlightAnnotation' });
     annotation.dataset['annotationId'] = 'resolver-failure';
 
-    annotation.click();
+    openAnnotationContext(annotation);
 
     await vi.waitFor(() => {
       expect(events).toEqual([
@@ -1205,7 +1268,7 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'highlightAnnotation' });
     annotation.dataset['annotationId'] = id;
 
-    annotation.click();
+    openAnnotationContext(annotation);
 
     await vi.waitFor(() => {
       expect(events).toEqual([
@@ -1248,7 +1311,7 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'highlightAnnotation' });
     annotation.dataset['annotationId'] = id;
 
-    annotation.click();
+    openAnnotationContext(annotation);
     await vi.waitFor(() => {
       expect(eventBus.listeners.get('editorsrendered')).toHaveLength(1);
     });
@@ -1329,7 +1392,7 @@ describe('PdfDocumentViewport', () => {
         return activation;
       });
 
-      nativeNode.click();
+      openAnnotationContext(nativeNode);
 
       expect(activation).not.toBeNull();
       await expect(activation).rejects.toBe(cause);
@@ -1377,7 +1440,7 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'highlightAnnotation' });
     annotation.dataset['annotationId'] = id;
 
-    annotation.click();
+    openAnnotationContext(annotation);
     await vi.waitFor(() => {
       expect(eventBus.listeners.get('editingstateschanged')).toHaveLength(2);
       expect(eventBus.listeners.get('editorsrendered')).toHaveLength(1);
@@ -1438,10 +1501,10 @@ describe('PdfDocumentViewport', () => {
       const dirty = vi.fn();
       editor.onDirty(dirty);
 
-      imported.click();
+      openAnnotationContext(imported);
 
       expect(manager.getEditor).toHaveBeenCalledWith(id);
-      expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith(id, { kind: 'root-click' });
+      expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith(id, { kind: 'root-context' });
       expect(type).toMatch(/underline|text-note/);
       expect(dirty).not.toHaveBeenCalled();
       expect(viewer.annotationEditorRequests).toEqual([]);
@@ -1493,11 +1556,8 @@ describe('PdfDocumentViewport', () => {
       second.dispatchEvent(gesture);
 
       expect(gesture.defaultPrevented).toBe(false);
-      expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('multi-second', {
-        kind: 'root-click',
-        preserveNativeSelection: true,
-      });
-      expect(activationOrder).toEqual(['abyss-capture', 'pdfjs-target']);
+      expect(focusAnnotation).not.toHaveBeenCalled();
+      expect(activationOrder).toEqual(['pdfjs-target']);
       expect(dirty).not.toHaveBeenCalled();
       expect(viewer.annotationEditorRequests).toEqual([]);
     },
@@ -1567,10 +1627,10 @@ describe('PdfDocumentViewport', () => {
     control.setAttribute('contenteditable', 'false');
     const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
 
-    control.click();
+    openAnnotationContext(control);
 
     expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('neutral-freetext-editor', {
-      kind: 'root-click',
+      kind: 'root-context',
     });
   });
 
@@ -1588,10 +1648,10 @@ describe('PdfDocumentViewport', () => {
     content.setAttribute('contenteditable', 'true');
     const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
 
-    content.click();
+    openAnnotationContext(content);
 
     expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('imported-freetext', {
-      kind: 'root-click',
+      kind: 'root-context',
     });
   });
 
@@ -1606,12 +1666,10 @@ describe('PdfDocumentViewport', () => {
       .createDiv({ cls: 'freeTextAnnotation' });
     imported.dataset['annotationId'] = 'pointer-freetext';
     const order: string[] = [];
-    const focusAnnotation = vi
-      .spyOn(interaction, 'focusAnnotation')
-      .mockImplementation(async () => {
-        order.push('abyss-capture');
-        return 'editable';
-      });
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation').mockImplementation(() => {
+      order.push('abyss-capture');
+      return true;
+    });
     imported.addEventListener('pointerdown', () => {
       order.push('pdfjs-target');
     });
@@ -1622,16 +1680,14 @@ describe('PdfDocumentViewport', () => {
     imported.click();
 
     expect(order).toEqual(['abyss-capture', 'pdfjs-target']);
-    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('pointer-freetext', {
-      kind: 'root-click',
-    });
+    expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('pointer-freetext');
 
     imported.dispatchEvent(
       new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 8 }),
     );
     await new Promise((resolve) => imported.win.setTimeout(resolve, 0));
     imported.click();
-    expect(focusAnnotation).toHaveBeenCalledTimes(3);
+    expect(selectAnnotation).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -2117,8 +2173,14 @@ describe('PdfDocumentViewport', () => {
     const annotationImage = createEl('img');
     annotationImage.src = 'annotation-comment.svg';
     fixture.host.querySelector<HTMLElement>('.page[data-page-number="1"]')?.append(annotationImage);
+    const annotationLayerEvents: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => annotationLayerEvents.push(event));
     fixture.runtime.state.eventBus?.dispatch('annotationlayerrendered', { pageNumber: 1 });
     expect(annotationImage.src).toBe('data:image/svg+xml;base64,Y29tbWVudA==');
+    expect(annotationLayerEvents).toContainEqual({
+      type: 'annotation-layer-rendered',
+      pageIndex: 0,
+    });
     const marks = readerPerformanceSnapshot().marks.map(({ name }) => name);
     expect(marks).toEqual(expect.arrayContaining(['first-text-layer', 'first-usable-page']));
     expect(marks.filter((name) => name === 'text-layer')).toHaveLength(2);
@@ -2227,8 +2289,11 @@ describe('PdfDocumentViewport', () => {
     expect(events).toEqual([
       { type: 'page-change', pageIndex: 1 },
       { type: 'scale-change', scale: 1.5 },
+      { type: 'geometry-change', reason: 'scale' },
       { type: 'scale-change', scale: 'page-width' },
+      { type: 'geometry-change', reason: 'scale' },
       { type: 'scale-change', scale: 'page-height' },
+      { type: 'geometry-change', reason: 'scale' },
     ]);
   });
 
@@ -2532,6 +2597,8 @@ describe('PdfDocumentViewport', () => {
     const viewer = fixture.runtime.state.viewer;
     if (eventBus === undefined || viewer === undefined) throw new Error('Expected viewer state.');
     eventBus.dispatch('pagesinit', {});
+    const events: ViewportEvent[] = [];
+    fixture.viewport.onEvent((event) => events.push(event));
     viewer.currentPageNumber = 4;
 
     const cases = [
@@ -2546,6 +2613,9 @@ describe('PdfDocumentViewport', () => {
       expect(viewer.scrollMode).toBe(scrollMode);
       expect(viewer.currentPageNumber).toBe(4);
     }
+    expect(events.filter((event) => event.type === 'geometry-change')).toEqual(
+      cases.map(() => ({ type: 'geometry-change', reason: 'layout' })),
+    );
   });
 
   it('coalesces pre-pagesinit location, scale, and layout so the latest requests win', async () => {
@@ -2718,6 +2788,8 @@ describe('PdfDocumentViewport', () => {
       });
       eventBus.dispatch('pagesinit', {});
       assignScale.mockClear();
+      const events: ViewportEvent[] = [];
+      fixture.viewport.onEvent((event) => events.push(event));
 
       resize();
       resize();
@@ -2727,6 +2799,7 @@ describe('PdfDocumentViewport', () => {
       expect(assignScale).not.toHaveBeenCalled();
       scheduledFrame?.(0);
       expect(assignScale).toHaveBeenCalledWith('page-width');
+      expect(events).toContainEqual({ type: 'geometry-change', reason: 'refit' });
       currentScaleValue = 'page-fit';
       assignScale.mockClear();
       resize();
