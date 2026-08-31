@@ -564,6 +564,134 @@ describe('AnnotationProjection', () => {
     });
   });
 
+  it('indexes distinct newer pending keys once before strong reconciliation', () => {
+    const projection = new AnnotationProjection();
+    const count = 10_000;
+    const verified = Array.from({ length: count }, (_, index) => ({
+      ...verifiedAnnotation(`stable-${String(index)}`),
+      anchor: {
+        ...verifiedAnnotation(`stable-${String(index)}`).anchor,
+        pageIndex: index,
+      },
+    }));
+    projection.reconcile(verified, 1);
+    projection.applyViewportBatch(
+      verified.map((_, index) => ({
+        revision: 2,
+        event: {
+          type: 'annotation-change' as const,
+          change: {
+            operation: 'upsert' as const,
+            annotation: {
+              ...viewportAnnotation(`stable-${String(index)}`),
+              comment: `Pending ${String(index)}`,
+              pageIndex: index,
+            },
+          },
+        },
+      })),
+    );
+    const pendingOperations = (projection as unknown as { readonly pendingOperations: unknown[] })
+      .pendingOperations;
+    const pendingSome = vi.spyOn(pendingOperations, 'some');
+    const nativeFilter = Array.prototype.filter;
+    let traversedLargeArrayElements = 0;
+    const filter = vi.spyOn(Array.prototype, 'filter').mockImplementation(function (
+      this: unknown[],
+      ...args: Parameters<typeof Array.prototype.filter>
+    ) {
+      if (this.length >= 1_000) traversedLargeArrayElements += this.length;
+      return Reflect.apply(nativeFilter, this, args) as unknown[];
+    });
+    const startedAt = performance.now();
+
+    projection.reconcile(verified, 1);
+
+    const elapsed = performance.now() - startedAt;
+    filter.mockRestore();
+    expect({
+      elapsedUnderOneSecond: elapsed < 1_000,
+      pendingRows: projection
+        .snapshot()
+        .filter((row) => row.annotation.comment.startsWith('Pending ')).length,
+      pendingScans: pendingSome.mock.calls.length,
+      rows: projection.snapshot().length,
+      traversedUnderTenPasses: traversedLargeArrayElements < count * 10,
+    }).toEqual({
+      elapsedUnderOneSecond: true,
+      pendingRows: count,
+      pendingScans: 0,
+      rows: count,
+      traversedUnderTenPasses: true,
+    });
+  });
+
+  it('replays ten thousand pending removals with bounded reconcile traversal', () => {
+    const projection = new AnnotationProjection();
+    const count = 10_000;
+    const verified = Array.from({ length: count }, (_, index) =>
+      verifiedAnnotation(`stable-${String(index)}`),
+    );
+    projection.reconcile(verified, 1);
+    projection.applyViewportBatch(
+      verified.map((_, index) => ({
+        revision: 2,
+        event: {
+          type: 'annotation-change' as const,
+          change: { operation: 'remove' as const, nativeId: `stable-${String(index)}` },
+        },
+      })),
+    );
+    const nativeFilter = Array.prototype.filter;
+    let traversedLargeArrayElements = 0;
+    const filter = vi.spyOn(Array.prototype, 'filter').mockImplementation(function (
+      this: unknown[],
+      ...args: Parameters<typeof Array.prototype.filter>
+    ) {
+      if (this.length >= 1_000) traversedLargeArrayElements += this.length;
+      return Reflect.apply(nativeFilter, this, args) as unknown[];
+    });
+    const startedAt = performance.now();
+
+    projection.reconcile(verified, 1);
+
+    const elapsed = performance.now() - startedAt;
+    filter.mockRestore();
+    expect({
+      elapsedUnderOneSecond: elapsed < 1_000,
+      rows: projection.snapshot().length,
+      traversedUnderTenPasses: traversedLargeArrayElements < count * 10,
+    }).toEqual({ elapsedUnderOneSecond: true, rows: 0, traversedUnderTenPasses: true });
+  });
+
+  it('replays interleaved upsert bind remove and upsert operations in causal order', () => {
+    const projection = new AnnotationProjection();
+    projection.reconcile([], 1);
+    projection.upsert(viewportAnnotation('runtime-1', 'selection-1'), 2);
+    projection.bindCommittedSelection('selection-1', verifiedAnnotation('stable-1'), 2);
+    projection.remove('stable-1', 'selection-1', 2);
+    projection.upsert(
+      {
+        ...viewportAnnotation('stable-1', 'selection-1'),
+        comment: 'Final ordered value',
+      },
+      2,
+    );
+    const expectedKey = projection.snapshot()[0]?.key;
+
+    projection.reconcile([], 1);
+
+    expect(projection.snapshot()).toMatchObject([
+      {
+        key: expectedKey,
+        nativeId: 'stable-1',
+        provisionalId: 'selection-1',
+        runtimeId: 'stable-1',
+        annotation: { comment: 'Final ordered value' },
+      },
+    ]);
+  });
+
   it('keeps comment and color previews through same-revision extraction until commit or revert', () => {
     const projection = new AnnotationProjection();
     const verified = { ...verifiedAnnotation('stable-id'), comment: 'Original' };

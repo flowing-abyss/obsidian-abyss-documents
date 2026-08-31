@@ -21,6 +21,59 @@ function selectText(document: Document, node: Node, start = 2, end = 10): void {
   selection?.addRange(range);
 }
 
+function selectTextInReverse(document: Document, node: Node, start = 2, end = 10): void {
+  const selection = document.getSelection();
+  selection?.setBaseAndExtent(node, end, node, start);
+  const range = selection?.rangeCount === 1 ? selection.getRangeAt(0) : null;
+  if (range !== null) setSelectionRect(range);
+}
+
+function placeCaret(document: Document, node: Node, offset: number): void {
+  const range = document.createRange();
+  range.setStart(node, offset);
+  range.collapse(true);
+  const selection = document.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function mockDetachedSelectionGeometry(
+  document: Document,
+  expected: {
+    readonly end: number;
+    readonly endNode?: Node;
+    readonly start: number;
+    readonly startNode?: Node;
+  },
+): { setTop(top: number): void } {
+  const createRange = document.createRange.bind(document);
+  let top = 36;
+  vi.spyOn(document, 'createRange').mockImplementation(() => {
+    const range = createRange();
+    const rect = (): DOMRect => DOMRect.fromRect({ height: 24, width: 26, x: 12, y: top });
+    const isExpectedSelection = (): boolean =>
+      range.startOffset === expected.start &&
+      range.endOffset === expected.end &&
+      (expected.startNode === undefined || range.startContainer === expected.startNode) &&
+      (expected.endNode === undefined || range.endContainer === expected.endNode);
+    Object.defineProperty(range, 'getBoundingClientRect', {
+      configurable: true,
+      value: () =>
+        isExpectedSelection() ? rect() : DOMRect.fromRect({ height: 0, width: 0, x: 0, y: 0 }),
+    });
+    Object.defineProperty(range, 'getClientRects', {
+      configurable: true,
+      value: () => (isExpectedSelection() ? [rect()] : []),
+    });
+    return range;
+  });
+  return {
+    setTop(nextTop: number): void {
+      top = nextTop;
+    },
+  };
+}
+
 function dispatchSelection(document: Document): void {
   document.dispatchEvent(new Event('selectionchange'));
 }
@@ -144,12 +197,170 @@ describe('PdfDomSelectionObserver', () => {
     if (published === null || published === undefined)
       throw new Error('Expected a published selection.');
 
+    mockDetachedSelectionGeometry(document, { start: 2, end: 10 });
+
     expect(observer.resolveAnchor(published.token)).toEqual(
       DOMRect.fromRect({ height: 24, width: 26, x: 12, y: 36 }),
     );
     root.querySelector('.textLayer')?.remove();
     expect(observer.resolveAnchor(published.token)).toBeNull();
     observer.destroy();
+  });
+
+  it('remeasures the saved selection after focus moves to another caret', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published selection.');
+    const textarea = document.body.createEl('textarea', { text: 'Comment editor' });
+    const caret = textarea.firstChild ?? textarea.appendChild(document.createTextNode('Comment'));
+    placeCaret(document, caret, 2);
+    const geometry = mockDetachedSelectionGeometry(document, { start: 2, end: 10 });
+
+    expect(observer.resolveAnchor(published.token)).toEqual(
+      DOMRect.fromRect({ height: 24, width: 26, x: 12, y: 36 }),
+    );
+    geometry.setTop(96);
+    expect(observer.resolveAnchor(published.token)).toEqual(
+      DOMRect.fromRect({ height: 24, width: 26, x: 12, y: 96 }),
+    );
+    observer.destroy();
+  });
+
+  it('normalizes reverse saved endpoints without restoring the browser selection', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectTextInReverse(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published reverse selection.');
+    const otherText = document.body.appendChild(document.createTextNode('Other focus'));
+    placeCaret(document, otherText, 3);
+    mockDetachedSelectionGeometry(document, { start: 2, end: 10 });
+
+    expect(observer.resolveAnchor(published.token)).toEqual(
+      DOMRect.fromRect({ height: 24, width: 26, x: 12, y: 36 }),
+    );
+    expect(document.getSelection()?.anchorNode).toBe(otherText);
+    expect(document.getSelection()?.anchorOffset).toBe(3);
+    observer.destroy();
+  });
+
+  it('normalizes a reverse selection across text nodes by document order', async () => {
+    const root = selectionRoot();
+    const layer = root.querySelector<HTMLElement>('.textLayer');
+    if (layer === null) throw new Error('Expected a text layer.');
+    const first = document.createTextNode('Alpha ');
+    const second = document.createTextNode('Beta');
+    layer.replaceChildren(first, second);
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    const selection = document.getSelection();
+    selection?.setBaseAndExtent(second, 4, first, 1);
+    const selectedRange = selection?.rangeCount === 1 ? selection.getRangeAt(0) : null;
+    if (selectedRange !== null) setSelectionRect(selectedRange);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published cross-node selection.');
+    const otherText = document.body.appendChild(document.createTextNode('Other focus'));
+    placeCaret(document, otherText, 3);
+    mockDetachedSelectionGeometry(document, {
+      start: 1,
+      end: 4,
+      startNode: first,
+      endNode: second,
+    });
+
+    expect(observer.resolveAnchor(published.token)).toEqual(
+      DOMRect.fromRect({ height: 24, width: 26, x: 12, y: 36 }),
+    );
+    expect(document.getSelection()?.anchorNode).toBe(otherText);
+    observer.destroy();
+  });
+
+  it('rejects saved endpoints moved outside their active text layer', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published selection.');
+    root.createDiv({ cls: 'detached-copy' }).append(text);
+    mockDetachedSelectionGeometry(document, { start: 2, end: 10 });
+
+    expect(observer.resolveAnchor(published.token)).toBeNull();
+    observer.destroy();
+  });
+
+  it('rejects saved endpoints whose offsets no longer fit the text nodes', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (!(text instanceof Text)) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published selection.');
+    text.data = 'Tiny';
+
+    expect(observer.resolveAnchor(published.token)).toBeNull();
+    observer.destroy();
+  });
+
+  it('cannot resolve a saved anchor after invalidation or destruction', async () => {
+    const root = selectionRoot();
+    const text = root.querySelector('.textLayer')?.firstChild;
+    if (text?.nodeType !== Node.TEXT_NODE) throw new Error('Expected a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const invalidated = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (invalidated === null || invalidated === undefined)
+      throw new Error('Expected a published selection.');
+    observer.invalidate();
+
+    expect(observer.resolveAnchor(invalidated.token)).toBeNull();
+
+    listener.mockClear();
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const destroyed = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (destroyed === null || destroyed === undefined)
+      throw new Error('Expected a republished selection.');
+    observer.destroy();
+
+    expect(observer.resolveAnchor(destroyed.token)).toBeNull();
   });
 
   it('publishes pointerup before a same-turn render of the unchanged selected text layer', async () => {

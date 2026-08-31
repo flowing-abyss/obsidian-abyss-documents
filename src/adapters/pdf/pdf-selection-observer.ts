@@ -125,11 +125,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   resolveAnchor(token: string): DOMRect | null {
     const active = this.active;
     if (!this.canResolveAnchor(token, active)) return null;
-    const identity = this.selectionIdentity();
-    const selection = this.ownerDocument.getSelection();
-    if (identity === null || !sameSelection(identity, active) || selection?.rangeCount !== 1)
-      return null;
-    const range = selection.getRangeAt(0);
+    const range = rangeFromSelectionIdentity(this.ownerDocument, active);
+    if (range?.toString() !== active.text) return null;
     const rects = Array.from(range.getClientRects());
     const rect = rects[rects.length - 1] ?? range.getBoundingClientRect();
     return rect.width === 0 && rect.height === 0 ? null : DOMRect.fromRect(rect);
@@ -144,6 +141,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
       token === active?.token &&
       active.anchorNode.isConnected &&
       active.focusNode.isConnected &&
+      closestTextLayer(active.anchorNode, this.root) === active.textLayer &&
+      closestTextLayer(active.focusNode, this.root) === active.textLayer &&
       this.isCurrentTextLayer(active)
     );
   }
@@ -491,6 +490,33 @@ function sameSelection(left: SelectionIdentity, right: SelectionIdentity): boole
     left.text === right.text &&
     left.pageIndex === right.pageIndex
   );
+}
+
+function rangeFromSelectionIdentity(
+  ownerDocument: Document,
+  selection: SelectionIdentity,
+): Range | null {
+  const anchor = ownerDocument.createRange();
+  const focus = ownerDocument.createRange();
+  const range = ownerDocument.createRange();
+  try {
+    anchor.setStart(selection.anchorNode, selection.anchorOffset);
+    anchor.collapse(true);
+    focus.setStart(selection.focusNode, selection.focusOffset);
+    focus.collapse(true);
+    const anchorFirst = anchor.compareBoundaryPoints(Range.START_TO_START, focus) <= 0;
+    range.setStart(
+      anchorFirst ? selection.anchorNode : selection.focusNode,
+      anchorFirst ? selection.anchorOffset : selection.focusOffset,
+    );
+    range.setEnd(
+      anchorFirst ? selection.focusNode : selection.anchorNode,
+      anchorFirst ? selection.focusOffset : selection.anchorOffset,
+    );
+  } catch {
+    return null;
+  }
+  return range;
 }
 
 function selectionRect(range: Range | null): PdfSelectionRect {

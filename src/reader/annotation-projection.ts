@@ -195,42 +195,10 @@ export class AnnotationProjection {
     const current = this.rowForCommittedSelection(provisionalId);
     if (current === undefined) {
       if (replayKey === undefined || this.rows.some((row) => row.key === replayKey)) return false;
-      this.rows = [
-        ...this.rows,
-        Object.freeze({
-          key: replayKey,
-          annotation,
-          nativeId: annotationId(annotation),
-          provisionalId,
-          runtimeId: annotationId(annotation),
-          writable: annotationIsWritable(annotation),
-        }),
-      ];
+      this.rows = [...this.rows, committedSelectionRow(replayKey, provisionalId, annotation)];
       return true;
     }
-    const nativeId = annotationId(annotation);
-    const aliases = retainedAliases(current, nativeId, provisionalId, nativeId);
-    const bound = Object.freeze({
-      ...current,
-      annotation: Object.freeze({
-        ...current.annotation,
-        author: annotation.author,
-        capabilities: annotation.capabilities,
-        color: annotation.color ?? current.annotation.color,
-        comment: annotation.comment,
-        createdAt: annotation.createdAt,
-        identity: annotation.identity,
-        links: annotation.links,
-        modifiedAt: annotation.modifiedAt,
-        tags: annotation.tags,
-        type: annotation.type,
-      }),
-      nativeId,
-      provisionalId,
-      runtimeId: nativeId,
-      ...(aliases.length === 0 ? {} : { aliases }),
-      writable: annotationIsWritable(annotation),
-    });
+    const bound = committedSelectionRow(current.key, provisionalId, annotation, current);
     const overlay = this.editorOverlays.get(current);
     if (overlay !== undefined) this.editorOverlays.set(bound, overlay);
     this.rows = this.rows.map((row) => (row === current ? bound : row));
@@ -595,7 +563,8 @@ export class AnnotationProjection {
     confirmedRevision: number,
   ): AnnotationProjectionRow[] {
     const claimed = new Set<string>();
-    const reconciled = this.bindStrongRows(verified, claimed, confirmedRevision);
+    const newerPendingKeys = newerPendingNonRemoveKeys(this.pendingOperations, confirmedRevision);
+    const reconciled = this.bindStrongRows(verified, claimed, newerPendingKeys);
     this.bindExactRows(verified, reconciled, claimed);
     const fallback = fallbackIndex(this.rows, claimed);
     const counts = verifiedFallbackCounts(verified, reconciled);
@@ -617,26 +586,75 @@ export class AnnotationProjection {
       (operation) => operation.revision > this.confirmedRevision,
     );
     this.rebuildPendingOperationIndexes();
-    this.rows = next;
-    for (const operation of this.pendingOperations) this.replay(operation);
+    const replay = new AnnotationProjectionViewportIndex(next, this.editorOverlays);
+    for (const operation of this.pendingOperations) this.replayIndexed(replay, operation);
+    this.rows = replay.snapshot();
   }
 
-  private replay(operation: AnnotationProjectionOperation): void {
+  private replayIndexed(
+    index: AnnotationProjectionViewportIndex,
+    operation: AnnotationProjectionOperation,
+  ): void {
     if (operation.kind === 'upsert') {
-      this.upsertRows(operation.snapshot, operation.key);
+      this.replayIndexedUpsert(index, operation);
       return;
     }
     if (operation.kind === 'bind') {
-      this.bindCommittedSelectionRow(operation.provisionalId, operation.annotation, operation.key);
+      this.replayIndexedBind(index, operation);
       return;
     }
-    this.removeRows(operation.nativeId, operation.provisionalId);
+    index.removeByIdentity(operation.nativeId, operation.provisionalId);
+  }
+
+  private replayIndexedUpsert(
+    index: AnnotationProjectionViewportIndex,
+    operation: Extract<AnnotationProjectionOperation, { readonly kind: 'upsert' }>,
+  ): void {
+    const matches = index.rowsForSnapshot(operation.snapshot);
+    const current = matches[0];
+    if (current === undefined) {
+      const key =
+        operation.key !== undefined && !index.hasKey(operation.key)
+          ? operation.key
+          : `annotation-row-${String(this.nextKey++)}`;
+      index.append(this.rowFromSnapshot(key, operation.snapshot));
+      return;
+    }
+    const overlay = this.editorOverlays.get(current);
+    if (matches.length === 1 && rowMatchesSnapshot(current, operation.snapshot, overlay)) return;
+    for (const duplicate of matches.slice(1)) index.remove(duplicate);
+    const updated = this.rowFromSnapshot(current.key, operation.snapshot, overlay, current);
+    index.replace(current, updated);
+    if (overlay !== undefined) this.editorOverlays.set(updated, overlay);
+  }
+
+  private replayIndexedBind(
+    index: AnnotationProjectionViewportIndex,
+    operation: Extract<AnnotationProjectionOperation, { readonly kind: 'bind' }>,
+  ): void {
+    const current = index.rowForIdentity(operation.provisionalId);
+    if (current === undefined) {
+      if (index.hasKey(operation.key)) return;
+      index.append(
+        committedSelectionRow(operation.key, operation.provisionalId, operation.annotation),
+      );
+      return;
+    }
+    const bound = committedSelectionRow(
+      current.key,
+      operation.provisionalId,
+      operation.annotation,
+      current,
+    );
+    const overlay = this.editorOverlays.get(current);
+    index.replace(current, bound);
+    if (overlay !== undefined) this.editorOverlays.set(bound, overlay);
   }
 
   private bindStrongRows(
     verified: readonly DocumentAnnotation[],
     claimed: Set<string>,
-    confirmedRevision: number,
+    newerPendingKeys: ReadonlySet<string>,
   ): Array<AnnotationProjectionRow | undefined> {
     const reconciled: Array<AnnotationProjectionRow | undefined> = verified.map(() => undefined);
     const candidateBuckets = new Map<string, AnnotationProjectionRow[]>();
@@ -649,7 +667,7 @@ export class AnnotationProjection {
     for (const [bucket, indexes] of verifiedBuckets) {
       const rows = candidateBuckets.get(bucket) ?? [];
       if (indexes.length === 0 || indexes.length !== rows.length) continue;
-      if (this.strongRowsHavePendingState(rows, confirmedRevision)) continue;
+      if (this.strongRowsHavePendingState(rows, newerPendingKeys)) continue;
       const bindings = strongBucketBindings(rows, indexes, verified);
       if (bindings === null) continue;
       for (const { annotation, current, index } of bindings) {
@@ -662,18 +680,9 @@ export class AnnotationProjection {
 
   private strongRowsHavePendingState(
     rows: readonly AnnotationProjectionRow[],
-    confirmedRevision: number,
+    newerPendingKeys: ReadonlySet<string>,
   ): boolean {
-    return rows.some(
-      (row) =>
-        this.editorOverlays.has(row) ||
-        this.pendingOperations.some(
-          (operation) =>
-            operation.kind !== 'remove' &&
-            operation.key === row.key &&
-            operation.revision > confirmedRevision,
-        ),
-    );
+    return rows.some((row) => this.editorOverlays.has(row) || newerPendingKeys.has(row.key));
   }
 
   private bindExactRows(
@@ -830,16 +839,69 @@ function pendingCausalRows(
 ): Map<string, AnnotationProjectionRow[]> {
   const rows = new Map<string, AnnotationProjectionRow[]>();
   const included = new Set<string>();
+  const currentByKey = new Map(currentRows.map((row) => [row.key, row] as const));
   for (const operation of operations) {
     if (operation.kind === 'remove' || operation.revision > confirmedRevision) continue;
     const key = operation.key;
     if (key === undefined || claimed.has(key) || included.has(key)) continue;
-    const row = currentRows.find((candidate) => candidate.key === key);
+    const row = currentByKey.get(key);
     if (row?.writable !== true) continue;
     included.add(key);
     appendCandidate(rows, annotationBucket(row.annotation), row);
   }
   return rows;
+}
+
+function newerPendingNonRemoveKeys(
+  operations: readonly AnnotationProjectionOperation[],
+  confirmedRevision: number,
+): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const operation of operations) {
+    if (operation.kind === 'remove' || operation.revision <= confirmedRevision) continue;
+    if (operation.key !== undefined) keys.add(operation.key);
+  }
+  return keys;
+}
+
+function committedSelectionRow(
+  key: string,
+  provisionalId: string,
+  annotation: DocumentAnnotation,
+  current?: AnnotationProjectionRow,
+): AnnotationProjectionRow {
+  const nativeId = annotationId(annotation);
+  if (current === undefined)
+    return Object.freeze({
+      key,
+      annotation,
+      nativeId,
+      provisionalId,
+      runtimeId: nativeId,
+      writable: annotationIsWritable(annotation),
+    });
+  const aliases = retainedAliases(current, nativeId, provisionalId, nativeId);
+  return Object.freeze({
+    ...current,
+    annotation: Object.freeze({
+      ...current.annotation,
+      author: annotation.author,
+      capabilities: annotation.capabilities,
+      color: annotation.color ?? current.annotation.color,
+      comment: annotation.comment,
+      createdAt: annotation.createdAt,
+      identity: annotation.identity,
+      links: annotation.links,
+      modifiedAt: annotation.modifiedAt,
+      tags: annotation.tags,
+      type: annotation.type,
+    }),
+    nativeId,
+    provisionalId,
+    runtimeId: nativeId,
+    ...(aliases.length === 0 ? {} : { aliases }),
+    writable: annotationIsWritable(annotation),
+  });
 }
 
 function verifiedRowIsCurrent(
@@ -994,6 +1056,10 @@ class AnnotationProjectionViewportIndex {
     return [...resolved.values()];
   }
 
+  hasKey(key: string): boolean {
+    return this.slotByKey.has(key);
+  }
+
   removeByIdentity(nativeId: string, provisionalId?: string): boolean {
     const targets = new Map<string, AnnotationProjectionRow>();
     const native = this.rowForRemovalIdentity(nativeId);
@@ -1037,7 +1103,7 @@ class AnnotationProjectionViewportIndex {
     return this.rows.filter((row): row is AnnotationProjectionRow => row !== undefined);
   }
 
-  private rowForIdentity(identity: string): AnnotationProjectionRow | undefined {
+  rowForIdentity(identity: string): AnnotationProjectionRow | undefined {
     for (const tier of [
       this.native,
       this.runtime,
