@@ -782,6 +782,27 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it('still neutralizes a contextual editor after PDF.js clears focus first', async () => {
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Focus cleared first')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected an annotation editor request.');
+
+    test.emitAnnotationFocus(null);
+    request.onClose('click-away');
+
+    await vi.waitFor(() => {
+      expect(test.abortInteraction).toHaveBeenCalledExactlyOnceWith(
+        'The PDF annotation editor was closed.',
+      );
+    });
+    test.controller.destroy();
+  });
+
   it('neutralizes a selection editor after its optimistic draft materializes', async () => {
     const test = fixture();
     test.emitSelection(textSelection('materialized-selection'));

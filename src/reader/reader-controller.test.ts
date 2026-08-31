@@ -4824,6 +4824,63 @@ describe('ReaderController', () => {
     }
   });
 
+  it('keeps automatic saving queued while an annotation activation owns the interaction', async () => {
+    vi.useFakeTimers();
+    try {
+      const [pdf] = files('Books/Activation-save-barrier.pdf');
+      if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+      const createdViewport = viewport();
+      const createdSession = session(pdf.path, createdViewport);
+      const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+      const dirtyListeners: Array<(revision: number) => void> = [];
+      const source: NativeEditableSaveSession = {
+        baseToken,
+        pendingRevision: 1,
+        isDirty: true,
+        prepare: vi.fn(async () => ({ revision: 1, baseToken, bytes: new Uint8Array([1]) })),
+        commit: vi.fn(),
+        destroy: vi.fn(),
+      };
+      Object.assign(createdSession.value, {
+        createNativeEditableSession(onRevision: (revision: number) => void) {
+          dirtyListeners.push(onRevision);
+          return source;
+        },
+      });
+      const save = vi.fn(async () => ({
+        verified: true as const,
+        generation: 1,
+        sha256: 'b'.repeat(64),
+        byteSize: 5,
+        committedAt: '2026-08-31T00:00:00.000Z' as never,
+      }));
+      const shell = capturingShellFactory();
+      const controller = new ReaderController(
+        new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+        shell.createShell,
+        undefined,
+        { saveCoordinator: { save } },
+      );
+      await controller.open(pdf, createDiv());
+      const activationOwner = controller as unknown as {
+        annotationActivationAbort: AbortController | null;
+        cancelAnnotationActivation(): void;
+      };
+      activationOwner.annotationActivationAbort = new AbortController();
+
+      dirtyListeners[0]?.(1);
+      await vi.advanceTimersByTimeAsync(5_250);
+      expect(save).not.toHaveBeenCalled();
+
+      activationOwner.cancelAnnotationActivation();
+      await vi.waitFor(() => {
+        expect(save).toHaveBeenCalledOnce();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('promotes a deferred automatic save when Ctrl-S is pressed with the popover open', async () => {
     vi.useFakeTimers();
     try {

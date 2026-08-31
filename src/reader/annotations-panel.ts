@@ -313,6 +313,15 @@ export class AnnotationsPanel {
     return annotation === undefined ? false : this.selectRow(this.rowId(annotation), focus);
   }
 
+  clearSelection(): void {
+    if (this.selectedRowId === null) return;
+    this.selectedRowId = null;
+    for (const card of Array.from(
+      this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+    ))
+      card.removeAttribute('aria-current');
+  }
+
   resolveActivation(rowId: string): ResolvedAnnotationPanelActivation | null {
     const annotation = this.filtered.find((candidate) => this.rowId(candidate) === rowId);
     if (annotation === undefined || !this.selectRow(rowId, false)) return null;

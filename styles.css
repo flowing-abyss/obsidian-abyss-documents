@@ -6296,8 +6296,9 @@
 
 .abyss-documents .abyss-reader-toolbar {
   --abyss-reader-toolbar-control-size: 2rem;
-  --abyss-reader-split-disclosure-width: 14px;
-  --abyss-reader-split-main-width: 34px;
+  --abyss-reader-split-control-size: 2rem;
+  --abyss-reader-split-disclosure-height: 8px;
+  --abyss-reader-split-main-height: 24px;
 
   display: grid;
   min-width: 0;
@@ -6407,22 +6408,35 @@
 }
 
 .abyss-documents .abyss-reader-split-control {
-  display: inline-flex;
+  display: inline-grid;
+  width: var(--abyss-reader-split-control-size);
+  height: var(--abyss-reader-split-control-size);
   flex: 0 0 auto;
-  align-items: center;
+  grid-template-rows:
+    var(--abyss-reader-split-main-height)
+    var(--abyss-reader-split-disclosure-height);
 }
 
 .abyss-documents .abyss-reader-split-control .abyss-reader-split-main {
-  width: var(--abyss-reader-split-main-width);
-  min-width: var(--abyss-reader-split-main-width);
-  border-radius: var(--radius-s) 0 0 var(--radius-s);
+  width: var(--abyss-reader-split-control-size);
+  min-width: var(--abyss-reader-split-control-size);
+  min-height: var(--abyss-reader-split-main-height);
+  height: var(--abyss-reader-split-main-height);
+  border-radius: var(--radius-s) var(--radius-s) 0 0;
 }
 
 .abyss-documents .abyss-reader-split-control .abyss-reader-split-menu {
-  width: var(--abyss-reader-split-disclosure-width);
-  min-width: var(--abyss-reader-split-disclosure-width);
+  width: var(--abyss-reader-split-control-size);
+  min-width: var(--abyss-reader-split-control-size);
+  min-height: var(--abyss-reader-split-disclosure-height);
+  height: var(--abyss-reader-split-disclosure-height);
   padding-inline: 0;
-  border-radius: 0 var(--radius-s) var(--radius-s) 0;
+  border-radius: 0 0 var(--radius-s) var(--radius-s);
+}
+
+.abyss-documents .abyss-reader-split-menu :where(.svg-icon) {
+  width: 10px;
+  height: 10px;
 }
 
 .abyss-documents .abyss-annotation-tool[aria-pressed='true'] {
@@ -6437,7 +6451,7 @@
 .abyss-documents .abyss-reader-tool-color {
   position: absolute;
   inset-inline-end: 0.25rem;
-  inset-block-end: 0.2rem;
+  inset-block-start: 0.15rem;
   width: 0.4rem;
   height: 0.4rem;
   border: var(--border-width) solid var(--background-primary);
@@ -6550,8 +6564,8 @@
 
 .abyss-documents .abyss-annotation-editor-swatch[aria-pressed='true']::before {
   box-shadow:
-    0 0 0 2px var(--background-primary),
-    0 0 0 4px var(--text-normal);
+    inset 0 0 0 2px var(--background-primary),
+    inset 0 0 0 3px var(--text-normal);
 }
 
 .abyss-documents .abyss-annotation-editor-swatch:focus-visible {
@@ -6629,10 +6643,7 @@
 }
 
 .abyss-documents .abyss-reader-sidebar {
-  position: absolute;
-  z-index: var(--layer-modal);
-  inset-block: 0;
-  inset-inline-start: 0;
+  position: relative;
   box-sizing: border-box;
   display: flex;
   width: var(--abyss-reader-sidebar-width);
@@ -6643,10 +6654,13 @@
   flex-direction: column;
   border-inline-end: var(--border-width) solid var(--background-modifier-border);
   background: var(--background-primary);
-  box-shadow: var(--shadow-l);
 }
 
 .abyss-documents .abyss-reader-sidebar.is-mobile {
+  position: absolute;
+  z-index: var(--layer-modal);
+  inset-block: 0;
+  inset-inline-start: 0;
   width: min(var(--abyss-reader-sidebar-width), 90%);
   max-width: 90%;
   padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
@@ -7308,6 +7322,10 @@
 
 @container abyss-reader (inline-size <= 600px) {
   .abyss-documents .abyss-reader-sidebar {
+    position: absolute;
+    z-index: var(--layer-modal);
+    inset-block: 0;
+    inset-inline-start: 0;
     width: min(var(--abyss-reader-sidebar-width), 90%);
     max-width: 90%;
     padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
@@ -7333,8 +7351,9 @@
 
 @media (pointer: coarse) {
   .abyss-documents .abyss-reader-toolbar {
-    --abyss-reader-split-disclosure-width: 24px;
-    --abyss-reader-split-main-width: 44px;
+    --abyss-reader-split-control-size: 44px;
+    --abyss-reader-split-disclosure-height: 10px;
+    --abyss-reader-split-main-height: 34px;
   }
 
   .abyss-documents .abyss-annotation-editor-popover {
@@ -7407,9 +7426,9 @@
   }
 
   .abyss-documents .abyss-reader-split-control .abyss-reader-split-menu {
-    width: var(--abyss-reader-split-disclosure-width);
-    min-width: var(--abyss-reader-split-disclosure-width);
-    min-height: 2.75rem;
+    width: var(--abyss-reader-split-control-size);
+    min-width: var(--abyss-reader-split-control-size);
+    min-height: var(--abyss-reader-split-disclosure-height);
   }
 
   .abyss-documents

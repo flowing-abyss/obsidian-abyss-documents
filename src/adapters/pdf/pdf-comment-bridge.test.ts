@@ -711,7 +711,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       if (next !== null) focused.push(next);
     });
 
-    bridge.focusFromPointer(secondNode);
+    bridge.focusFromPointer(secondNode, true);
 
     const focus = focused[0];
     expect(focus).toMatchObject({
@@ -731,7 +731,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
-  it('normalizes a selected native batch without replacing its PDF.js selection', async () => {
+  it('keeps an ordinary selected-editor focus isolated from stale PDF.js peers', async () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });
     const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
@@ -761,10 +761,46 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     ).resolves.toBe(true);
 
     expect(focused[0]?.annotations.map((annotation) => annotation.identity)).toEqual([
-      { id: 'preserved-first', kind: 'stable' },
       { id: 'preserved-second', kind: 'stable' },
     ]);
     expect(manager.setSelected).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('publishes selected peers only for an explicit modified multi-selection', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'explicit-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    secondNode.id = 'explicit-second';
+    const first = editor('First', { anchor: firstNode, uid: 'explicit-first' });
+    const second = editor('Second', { anchor: secondNode, uid: 'explicit-second' });
+    const manager = uiManager(first);
+    manager.getEditor.mockImplementation((id) => {
+      if (id === 'explicit-first') return first;
+      return id === 'explicit-second' ? second : undefined;
+    });
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    await expect(
+      bridge.focusAnnotation('explicit-second', undefined, undefined, {
+        editableOnly: true,
+        includeSelectedPeers: true,
+        preserveSelection: true,
+      }),
+    ).resolves.toBe(true);
+
+    expect(focused[0]?.annotations.map((annotation) => annotation.identity)).toEqual([
+      { id: 'explicit-first', kind: 'stable' },
+      { id: 'explicit-second', kind: 'stable' },
+    ]);
     bridge.dispose();
     host.remove();
   });
@@ -798,6 +834,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     await expect(
       bridge.focusAnnotation('persisted-second', undefined, undefined, {
         editableOnly: true,
+        includeSelectedPeers: true,
         preserveSelection: true,
       }),
     ).resolves.toBe(true);
@@ -848,6 +885,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     await expect(
       bridge.focusAnnotation('incomplete-second', undefined, undefined, {
         editableOnly: true,
+        includeSelectedPeers: true,
         preserveSelection: true,
       }),
     ).resolves.toBe(true);
@@ -886,7 +924,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     bridge.onAnnotationFocus((next) => {
       if (next !== null) focused.push(next);
     });
-    bridge.toggleCommentPopup(first, true, true, true);
+    bridge.focusFromPointer(firstNode, true);
 
     secondNode.addClass('selectedEditor');
     await vi.waitFor(() => {
@@ -1077,7 +1115,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       if (next !== null) focused.push(next);
     });
 
-    bridge.focusFromPointer(secondNode);
+    bridge.focusFromPointer(secondNode, true);
 
     const focus = focused[0];
     if (focus === undefined) throw new Error('Expected a normalized multi focus.');
@@ -1121,7 +1159,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       if (next !== null) focused.push(next);
     });
 
-    bridge.focusFromPointer(secondNode);
+    bridge.focusFromPointer(secondNode, true);
 
     const focus = focused[0];
     if (focus === undefined) throw new Error('Expected a normalized multi focus.');
@@ -1170,6 +1208,30 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     missing.abort();
     await expect(missingFocus).resolves.toBe(false);
     bridge.dispose();
+    host.remove();
+  });
+
+  it('selects a mounted native editor synchronously for contextual activation retries', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor' });
+    node.id = 'pdfjs_internal_editor_12';
+    const native = editor('Retry target', {
+      anchor: node,
+      annotationElementId: '412R',
+      uid: '412R',
+    });
+    const manager = uiManager();
+    manager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
+    const bridge = new PdfCommentBridge(host);
+    bridge.setSidebarUiManager(manager);
+
+    expect(bridge.selectAnnotation('')).toBe(false);
+    expect(bridge.selectAnnotation('412R')).toBe(true);
+    expect(manager.setSelected).toHaveBeenCalledExactlyOnceWith(native);
+
+    bridge.dispose();
+    expect(bridge.selectAnnotation('412R')).toBe(false);
     host.remove();
   });
 
@@ -1473,6 +1535,50 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     expect(oldManager.setSelected).not.toHaveBeenCalled();
     expect(oldManager.updateParams).not.toHaveBeenCalled();
     expect(oldManager.delete).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('rebinds a stable annotation to its mounted replacement editor after PDF.js rerenders', async () => {
+    const host = document.body.createDiv();
+    const editorLayer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const oldNode = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    oldNode.id = 'pdfjs_internal_editor_1';
+    const oldEditor = editor('Old editor', {
+      anchor: oldNode,
+      annotationElementId: '370R',
+      uid: oldNode.id,
+    });
+    const oldManager = uiManager(oldEditor);
+    oldManager.getEditor.mockImplementation((id) => (id === oldNode.id ? oldEditor : undefined));
+    const bridge = new PdfCommentBridge(host);
+    bridge.setSidebarUiManager(oldManager);
+    await expect(bridge.focusAnnotation('370R')).resolves.toBe(true);
+    expect(bridge.nativeEditorUidForAnnotation('370R')).toBe(oldNode.id);
+
+    oldNode.remove();
+    const newNode = editorLayer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    newNode.id = 'pdfjs_internal_editor_4';
+    const newEditor = editor('New editor', {
+      anchor: newNode,
+      annotationElementId: '370R',
+      uid: newNode.id,
+    });
+    const newManager = uiManager(newEditor);
+    newManager.getEditor.mockImplementation((id) => (id === newNode.id ? newEditor : undefined));
+    bridge.setSidebarUiManager(newManager);
+
+    expect(bridge.nativeEditorUidForAnnotation('370R')).toBe(newNode.id);
+    expect(bridge.updateAnnotations({ annotations: [annotation('370R')], color: '#5fb236' })).toBe(
+      true,
+    );
+    expect(newManager.setSelected).toHaveBeenCalledExactlyOnceWith(newEditor);
+    expect(newManager.updateParams).toHaveBeenCalledExactlyOnceWith(
+      PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE.HIGHLIGHT_COLOR,
+      '#5fb236',
+    );
+    expect(oldManager.updateParams).not.toHaveBeenCalled();
+
     bridge.dispose();
     host.remove();
   });
@@ -1947,7 +2053,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       if (next !== null) focused.push(next);
     });
 
-    bridge.focusFromPointer(writableNode);
+    bridge.focusFromPointer(writableNode, true);
 
     const focus = focused[0];
     expect(focus).toMatchObject({ editable: false });

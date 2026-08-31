@@ -1,4 +1,5 @@
 import type { DocumentAnnotation } from '../document-core/annotations.js';
+import type { ReaderLayout } from '../document-core/reading.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { FocusReturn, PoliteAnnouncer } from './a11y.js';
 import {
@@ -47,6 +48,7 @@ export class ReaderShell implements AnnotationInteractionHost {
   private readonly focusReturn = new FocusReturn();
   private readonly intentHandler: (intent: ReaderShellIntent) => void;
   private quickHighlightState: QuickHighlightState = { armed: false, color: '#ffd400' };
+  private currentLayout: ReaderLayout = { pages: 'single', scrolling: 'continuous' };
   private sidebarValue: ReaderSidebar | null = null;
   private destroyed = false;
 
@@ -112,6 +114,11 @@ export class ReaderShell implements AnnotationInteractionHost {
     return this.annotationEditor.hasPendingChanges;
   }
 
+  setLayout(layout: ReaderLayout): void {
+    this.currentLayout = { ...layout };
+    this.toolbar.setLayout(layout);
+  }
+
   configureAnnotationToolbar(
     palette: readonly AnnotationPaletteEntry[],
     readOnlyReason: string | null,
@@ -152,6 +159,7 @@ export class ReaderShell implements AnnotationInteractionHost {
         try {
           request.onClose(reason);
         } finally {
+          this.sidebarValue?.annotationsPanel.clearSelection();
           for (const listener of this.annotationEditorCloseListeners) listener();
         }
       },
@@ -286,6 +294,7 @@ export class ReaderShell implements AnnotationInteractionHost {
   }
 
   private handleReaderShortcut(event: KeyboardEvent): void {
+    if (this.handlePagedNavigationShortcut(event)) return;
     if ((!event.ctrlKey && !event.metaKey) || event.altKey) return;
     const key = event.key.toLocaleLowerCase();
     if (key === 'f') {
@@ -298,6 +307,38 @@ export class ReaderShell implements AnnotationInteractionHost {
     event.preventDefault();
     event.stopPropagation();
     this.intentHandler({ type: event.shiftKey ? 'redo-annotation' : 'undo-annotation' });
+  }
+
+  private handlePagedNavigationShortcut(event: KeyboardEvent): boolean {
+    const intent = this.pagedNavigationIntent(event);
+    if (intent === null) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    this.intentHandler(intent);
+    return true;
+  }
+
+  private pagedNavigationIntent(event: KeyboardEvent): ReaderShellIntent | null {
+    if (!this.pagedNavigationEnabled(event)) return null;
+    const target = event.target;
+    const owner = this.root.ownerDocument.defaultView;
+    if (owner === null || !(target instanceof owner.Element)) return null;
+    if (target.closest('[data-region="sidebar"], [data-region="toolbar"]') !== null) return null;
+    if (event.key === 'ArrowLeft') return { type: 'previous-page' };
+    return event.key === 'ArrowRight' ? { type: 'next-page' } : null;
+  }
+
+  private pagedNavigationEnabled(event: KeyboardEvent): boolean {
+    return (
+      this.currentLayout.scrolling === 'page-by-page' &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      !event.shiftKey &&
+      !this.annotationEditor.isOpen &&
+      !hasOpenReaderMenu(this.root) &&
+      !isTextEditingTarget(event.target, this.root)
+    );
   }
 
   private captureSidebarInvoker(): void {

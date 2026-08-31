@@ -16,6 +16,30 @@ function selection(): PdfTextSelection {
 }
 
 describe('ReaderShell', () => {
+  it('uses horizontal arrow keys for page navigation only in paged reading mode', () => {
+    const host = document.body.createDiv();
+    const intents: unknown[] = [];
+    const shell = new ReaderShell(host, (intent) => intents.push(intent));
+    shell.setLayout({ pages: 'single', scrolling: 'page-by-page' });
+
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowRight' }),
+    );
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowLeft' }),
+    );
+
+    expect(intents).toEqual([{ type: 'next-page' }, { type: 'previous-page' }]);
+    intents.length = 0;
+    shell.setLayout({ pages: 'single', scrolling: 'continuous' });
+    shell.documentHost.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowRight' }),
+    );
+    expect(intents).toEqual([]);
+    shell.destroy();
+    host.remove();
+  });
+
   it('injects comment suggestions with the current PDF source path', () => {
     const host = document.body.createDiv();
     const suggest = vi.fn(() => [
@@ -95,6 +119,10 @@ describe('ReaderShell', () => {
     expect(
       sidebar.annotationsPanel.root.querySelectorAll('.abyss-annotation-card[aria-current="true"]'),
     ).toHaveLength(1);
+    shell.closeAnnotationEditor();
+    expect(
+      sidebar.annotationsPanel.root.querySelectorAll('.abyss-annotation-card[aria-current="true"]'),
+    ).toHaveLength(0);
     shell.destroy();
     host.remove();
   });

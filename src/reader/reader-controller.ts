@@ -400,7 +400,7 @@ export class ReaderController {
         : { ...this.currentLayout };
       viewport.setLayout(layout);
       this.currentLayout = layout;
-      shell.toolbar.setLayout(layout);
+      shell.setLayout(layout);
       shell.toolbar.setProfile(this.currentProfile);
       this.refreshAnnotationToolbar(session, viewport, shell);
     } catch (cause) {
@@ -595,7 +595,7 @@ export class ReaderController {
     shell.toolbar.setPageCount(viewport.pageCount);
     shell.toolbar.setCurrentPage(this.currentPageIndex);
     shell.toolbar.setProfile(this.currentProfile);
-    shell.toolbar.setLayout(this.currentLayout);
+    shell.setLayout(this.currentLayout);
     this.configureAnnotationToolbar(session, viewport, shell);
     shell.root.dataset['readingProfile'] = this.currentProfile;
     const unsubscribeViewport = viewport.onEvent((event) => {
@@ -655,7 +655,7 @@ export class ReaderController {
           if (cause instanceof SaveDiscardedError) return;
           this.reportSaveFailure(session.descriptor.path, cause, reason);
         },
-        shouldDeferAutomaticSave: () => this.shell?.annotationEditorOpen === true,
+        shouldDeferAutomaticSave: () => this.automaticSaveBlocked(),
       },
     );
     this.nativeSaveSession = native;
@@ -914,8 +914,12 @@ export class ReaderController {
   }
 
   private requireAutomaticSaveWindow(): void {
-    if (this.manualSaveOverrideDepth > 0 || this.shell?.annotationEditorOpen !== true) return;
+    if (this.manualSaveOverrideDepth > 0 || !this.automaticSaveBlocked()) return;
     throw new AutomaticSaveDeferredError();
+  }
+
+  private automaticSaveBlocked(): boolean {
+    return this.shell?.annotationEditorOpen === true || this.annotationActivationAbort !== null;
   }
 
   private async awaitAutomaticSaveWindow(signal: AbortSignal): Promise<void> {
@@ -924,7 +928,7 @@ export class ReaderController {
     while (
       this.manualSaveOverrideDepth === 0 &&
       this.shell === shell &&
-      shell.annotationEditorOpen
+      this.automaticSaveBlocked()
     ) {
       await this.waitForAutomaticSaveWake(shell, signal);
     }
@@ -936,6 +940,13 @@ export class ReaderController {
 
   private wakeDeferredAutomaticSave(): void {
     for (const listener of [...this.automaticSaveWakeListeners]) listener();
+  }
+
+  private resumeAutomaticSaveAfterInteraction(): void {
+    this.wakeDeferredAutomaticSave();
+    const scheduler = this.autosave;
+    if (scheduler === null) return;
+    void scheduler.resumeAutomaticSave().catch(() => undefined);
   }
 
   private async resolveNativeSaveConflict(
@@ -1524,7 +1535,7 @@ export class ReaderController {
   }
 
   private resetReaderState(): void {
-    this.cancelAnnotationActivation();
+    this.cancelAnnotationActivation(false);
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
     this.resetAnnotationProjectionState();
@@ -2302,13 +2313,16 @@ export class ReaderController {
     this.finishAnnotationActivation(abort);
   }
 
-  private cancelAnnotationActivation(): void {
+  private cancelAnnotationActivation(resumeAutomaticSave = true): void {
     this.annotationActivationAbort?.abort();
     this.annotationActivationAbort = null;
+    if (resumeAutomaticSave) this.resumeAutomaticSaveAfterInteraction();
   }
 
   private finishAnnotationActivation(abort: AbortController): void {
-    if (this.annotationActivationAbort === abort) this.annotationActivationAbort = null;
+    if (this.annotationActivationAbort !== abort) return;
+    this.annotationActivationAbort = null;
+    this.resumeAutomaticSaveAfterInteraction();
   }
 
   private navigateToLocation(
@@ -2402,7 +2416,7 @@ export class ReaderController {
     try {
       viewport.setLayout(layout);
       this.currentLayout = { ...layout };
-      shell.toolbar.setLayout(layout);
+      shell.setLayout(layout);
     } catch (cause) {
       new Notice(`Could not change page layout: ${this.reason(cause)}`);
       console.error('[abyss-documents] Failed to change PDF layout', { layout, cause });

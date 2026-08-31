@@ -244,15 +244,19 @@ export class AnnotationInteractionController {
     }
     if (!isUsableClientPosition(focus.position)) return;
     const target = this.annotationFocusTarget(focus, first);
+    const neutralizeOnClose = target.kind !== 'readonly' || focus.editable;
     const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
       color: first.color ?? undefined,
       onClose: () => {
-        if (revision !== this.activeSelectionRevision) return;
+        if (revision !== this.activeSelectionRevision) {
+          if (this.activeEditorKind === null && neutralizeOnClose) this.neutralizeNativeEditor();
+          return;
+        }
         this.activeEditorKind = null;
         this.ownedSelectionRevision = null;
         this.activeSelectionRevision += 1;
-        this.neutralizeNativeEditor();
+        if (neutralizeOnClose) this.neutralizeNativeEditor();
       },
       onCreate: () => 'dismissed' as const,
       onDelete: (annotations) => this.deleteAnnotations(annotations),

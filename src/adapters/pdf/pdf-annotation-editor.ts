@@ -186,7 +186,10 @@ interface PdfAnnotationEditorDependencies {
     Partial<
       Pick<
         PdfCommentBridge,
-        'nativeEditorUidForAnnotation' | 'refreshAnnotationFocus' | 'setSidebarUiManager'
+        | 'nativeEditorUidForAnnotation'
+        | 'refreshAnnotationFocus'
+        | 'selectAnnotation'
+        | 'setSidebarUiManager'
       >
     >;
   readonly selectionObserver: PdfSelectionObserver;
@@ -536,6 +539,7 @@ export class PdfAnnotationEditor {
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
         ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
+        includeSelectedPeers: true,
         ...this.editorUidOptions(id),
         preserveSelection: true,
       }),
@@ -1118,7 +1122,7 @@ export class PdfAnnotationEditor {
     const owner = activation.contextualFailureOwner;
     const signal = this.contextualActivationSignal(session, activation);
     try {
-      if (this.isRequestedEditorSelected(session)) return Promise.resolve(true);
+      if (this.trySelectRequestedEditor(session)) return Promise.resolve(true);
     } catch (cause) {
       return Promise.reject(
         this.recordContextualActivationFailure(session, cause) ?? asError(cause),
@@ -1148,7 +1152,7 @@ export class PdfAnnotationEditor {
         if (settled) return;
         try {
           if (signal.aborted || this.contextualEditSession !== session) finish(false);
-          else if (this.isRequestedEditorSelected(session)) finish(true);
+          else if (this.trySelectRequestedEditor(session)) finish(true);
         } catch (cause) {
           const failure = this.recordContextualActivationFailure(session, cause);
           if (failure === null) fail(asError(cause));
@@ -1163,6 +1167,15 @@ export class PdfAnnotationEditor {
       signal.addEventListener('abort', onAbort, { once: true });
       check();
     });
+  }
+
+  private trySelectRequestedEditor(session: ContextualEditSession): boolean {
+    if (this.isRequestedEditorSelected(session)) return true;
+    this.dependencies.commentBridge.selectAnnotation?.(
+      session.id,
+      this.editorUidOptions(session.id).editorUid,
+    );
+    return this.isRequestedEditorSelected(session);
   }
 
   private contextualActivationSignal(
@@ -1908,10 +1921,7 @@ export class PdfAnnotationEditor {
     const pendingSelection = this.pendingSelectionTransaction;
     if (pendingSelection !== null) pending.push(pendingSelection.settled.promise);
     const activation = this.activeActivation;
-    if (activation !== null) {
-      this.cancelAnnotationActivation('The PDF annotation activation yielded to saving.');
-      pending.push(activation.promise.catch(() => 'cancelled'));
-    }
+    if (activation !== null) pending.push(activation.promise.catch(() => 'cancelled'));
     if (pending.length === 0) return null;
     return waitWithSignal(
       Promise.all(pending).then(() => undefined),
@@ -2118,9 +2128,7 @@ export class PdfAnnotationEditor {
 
   private nativeEditorUid(annotationId: string): string {
     return (
-      this.projectedTargets.get(annotationId)?.editorUid ??
-      this.dependencies.commentBridge.nativeEditorUidForAnnotation?.(annotationId) ??
-      annotationId
+      this.dependencies.commentBridge.nativeEditorUidForAnnotation?.(annotationId) ?? annotationId
     );
   }
 

@@ -404,15 +404,16 @@ describe('PDF.js style build', () => {
         '.abyss-documents .abyss-reader-split-control .abyss-reader-split-menu',
       ),
     ).toMatchObject({
-      width: 'var(--abyss-reader-split-disclosure-width)',
-      'min-width': 'var(--abyss-reader-split-disclosure-width)',
-      'min-height': '2.75rem',
+      width: 'var(--abyss-reader-split-control-size)',
+      'min-width': 'var(--abyss-reader-split-control-size)',
+      'min-height': 'var(--abyss-reader-split-disclosure-height)',
     });
     expect(
       mobileDeclarations(coarsePointer, '.abyss-documents .abyss-reader-toolbar'),
     ).toMatchObject({
-      '--abyss-reader-split-disclosure-width': '24px',
-      '--abyss-reader-split-main-width': '44px',
+      '--abyss-reader-split-control-size': '44px',
+      '--abyss-reader-split-disclosure-height': '10px',
+      '--abyss-reader-split-main-height': '34px',
     });
     expect(
       mobileDeclarations(coarsePointer, '.abyss-documents .abyss-annotation-colors'),
@@ -432,7 +433,7 @@ describe('PDF.js style build', () => {
     ).toEqual({});
   });
 
-  it('keys the left sidebar overlay to reader width and gives direct zoom controls 44px targets', async () => {
+  it('docks the desktop sidebar, overlays it only when narrow, and gives touch controls 44px targets', async () => {
     const root = postcss.parse(await readFile('styles.css', 'utf8'));
     const narrowReader = root.nodes.find(
       (node) =>
@@ -449,12 +450,13 @@ describe('PDF.js style build', () => {
         node.type === 'atrule' && node.name === 'media' && node.params.includes('pointer: coarse'),
     );
     expect(topLevelDeclarations(root, '.abyss-documents .abyss-reader-sidebar')).toMatchObject({
-      position: 'absolute',
-      'inset-inline-start': '0',
+      position: 'relative',
     });
     expect(
       mobileDeclarations(narrowReader, '.abyss-documents .abyss-reader-sidebar'),
     ).toMatchObject({
+      position: 'absolute',
+      'inset-inline-start': '0',
       width: 'min(var(--abyss-reader-sidebar-width), 90%)',
     });
     expect(mobileDeclarations(viewportMobile, '.abyss-documents .abyss-reader-sidebar')).toEqual(
