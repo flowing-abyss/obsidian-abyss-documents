@@ -6464,6 +6464,52 @@ describe('ReaderController', () => {
     expect(unregister).not.toHaveBeenCalled();
   });
 
+  it('accepts its own verified auto-restore without treating pending edits as a peer conflict', async () => {
+    const [pdf] = files('Books/First.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdSession = session(pdf.path);
+    const baseToken: BaseToken = { sha256: 'a'.repeat(64), byteSize: 4, mtime: 10 };
+    const acceptVerifiedReload = vi.fn();
+    const source = {
+      baseToken,
+      pendingRevision: 1,
+      isDirty: true,
+      prepare: vi.fn(),
+      commit: vi.fn(),
+      destroy: vi.fn(),
+      acceptVerifiedReload,
+    } satisfies NativeEditableSaveSession;
+    Object.assign(createdSession.value, { createNativeEditableSession: () => source });
+    let broadcast: VerifiedReloadListener | undefined;
+    const createdAdapter = adapterFor(pdf.path, createdSession);
+    const notice = vi.spyOn(Notice.prototype, 'constructor__');
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([createdAdapter.value]),
+      undefined,
+      undefined,
+      {
+        saveCoordinator: {
+          save: vi.fn(),
+          register: vi.fn((_path: string, listener: VerifiedReloadListener) => {
+            broadcast = listener;
+            return vi.fn();
+          }),
+        },
+      },
+    );
+    await controller.open(pdf, createDiv());
+    if (broadcast === undefined) throw new Error('Expected a verified-save listener.');
+    const restoredToken: BaseToken = { ...baseToken, mtime: 20 };
+    const recoverySource = Object.freeze({ kind: 'recovery', origin: source });
+
+    await broadcast(restoredToken, 1, recoverySource);
+
+    expect(acceptVerifiedReload).toHaveBeenCalledWith(restoredToken);
+    expect(createdAdapter.open).toHaveBeenCalledOnce();
+    expect(source.destroy).not.toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
   it('invalidates and cancellably replaces stale annotations with ids from a verified reopened PDF', async () => {
     const [pdf] = files('Books/Committed.pdf');
     if (pdf === undefined) throw new Error('Expected PDF.');

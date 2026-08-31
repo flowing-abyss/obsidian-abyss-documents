@@ -70,6 +70,7 @@ export class PdfEditableSession implements NativeEditableSaveSession, NativeSave
 
   acceptVerifiedReload(token: BaseToken): void {
     this.base = Object.freeze({ ...token });
+    this.retained = null;
   }
 
   destroy(): void {

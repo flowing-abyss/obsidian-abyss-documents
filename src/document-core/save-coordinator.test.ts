@@ -123,7 +123,7 @@ describe('DocumentSaveCoordinator', () => {
     expect(listenerB).toHaveBeenCalledOnce();
     expect(listenerA.mock.calls[0]?.[0]).toBe(tokenB);
     expect(listenerA.mock.calls[0]?.[1]).toBe(0);
-    expect(listenerA.mock.calls[0]?.[2]).toEqual({ kind: 'recovery' });
+    expect(listenerA.mock.calls[0]?.[2]).toEqual({ kind: 'recovery', origin: null });
   });
 
   it('serializes two views per normalized path and broadcasts only verified bytes', async () => {

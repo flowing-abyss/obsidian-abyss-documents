@@ -39,6 +39,7 @@ export interface NativeSaveRecoveryFailure extends Error {
   readonly preimage: Uint8Array | null;
   readonly preparedBytes: Uint8Array;
   readonly restored: boolean;
+  readonly restoredToken?: BaseToken | null;
 }
 
 export function isNativeSaveRecoveryFailure(cause: unknown): cause is NativeSaveRecoveryFailure {
@@ -75,15 +76,26 @@ export interface PreparedNativeSave {
 export interface NativeSaveSource {
   prepare(revision: number, signal: AbortSignal): Promise<PreparedNativeSave>;
   commit(prepared: PreparedNativeSave, token: BaseToken): void | Promise<void>;
+  acceptVerifiedReload?(token: BaseToken): void;
 }
 
 export interface NativeRecoverySource {
   readonly kind: 'recovery';
+  readonly origin: NativeSaveSource | null;
 }
 
-export const NATIVE_RECOVERY_SOURCE: NativeRecoverySource = Object.freeze({ kind: 'recovery' });
+export const NATIVE_RECOVERY_SOURCE: NativeRecoverySource = Object.freeze({
+  kind: 'recovery',
+  origin: null,
+});
 
 export type VerifiedReloadSource = NativeSaveSource | NativeRecoverySource;
+
+export function isNativeRecoverySource(
+  source: VerifiedReloadSource,
+): source is NativeRecoverySource {
+  return 'origin' in source;
+}
 
 export interface NativeEditableSaveSession extends NativeSaveSource {
   readonly baseToken: BaseToken;
@@ -199,7 +211,13 @@ export class DocumentSaveCoordinator {
       verifyPdf: this.verifyPdf,
       signal,
     };
-    const verified = await this.boundary.write(writeRequest);
+    let verified: VerifiedPdfWrite;
+    try {
+      verified = await this.boundary.write(writeRequest);
+    } catch (cause) {
+      await this.acceptVerifiedRestore(key, request.revision, request.source, cause);
+      throw cause;
+    }
     await request.source.commit(prepared, verified.token);
     this.retained.delete(request.source);
     await this.broadcast(key, verified, request.revision, request.source);
@@ -210,6 +228,25 @@ export class DocumentSaveCoordinator {
       byteSize: verified.token.byteSize,
       committedAt: asUtcTimestamp(new Date().toISOString()),
     });
+  }
+
+  private async acceptVerifiedRestore(
+    key: string,
+    revision: number,
+    source: NativeSaveSource,
+    cause: unknown,
+  ): Promise<void> {
+    if (!isNativeSaveRecoveryFailure(cause) || !cause.restored || cause.restoredToken == null)
+      return;
+    const token = cause.restoredToken;
+    this.retained.delete(source);
+    source.acceptVerifiedReload?.(token);
+    await this.broadcast(
+      key,
+      { token },
+      revision,
+      Object.freeze({ kind: 'recovery', origin: source }),
+    );
   }
 
   private async prepareOnce(

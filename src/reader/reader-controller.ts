@@ -32,6 +32,7 @@ import {
 } from '../document-core/reading.js';
 import {
   SaveConflictError,
+  isNativeRecoverySource,
   isNativeSaveRecoveryFailure,
   type BaseToken,
   type DocumentSaveCoordinator,
@@ -258,6 +259,14 @@ interface CleanPeerReloadContext {
   readonly native: NativeEditableSaveSession;
   readonly scheduler: AutosaveScheduler;
   readonly session: DocumentSession;
+}
+
+interface OwnVerifiedReloadContext {
+  readonly native: NativeEditableSaveSession;
+  readonly revision: number;
+  readonly session: DocumentSession;
+  readonly source: VerifiedReloadSource;
+  readonly token: BaseToken;
 }
 
 interface VerifiedAnnotationMarker {
@@ -1050,27 +1059,11 @@ export class ReaderController {
         this.autosave !== scheduler
       )
         return;
-      if (source !== native) {
-        if (native.isDirty || this.shell?.annotationEditorPendingChanges === true) {
-          scheduler.pauseForFailure(
-            new SaveConflictError(session.descriptor.path, native.baseToken, token),
-            native.pendingRevision,
-          );
-        } else {
-          const lifecycleGeneration = this.lifecycleRequestGeneration;
-          await this.reloadCleanPeerAfterVerifiedSave(
-            session,
-            native,
-            scheduler,
-            lifecycleGeneration,
-          );
-        }
-      } else if (this.nativeSaveSession === native && 'acceptVerifiedReload' in native) {
-        (
-          native as NativeEditableSaveSession & { acceptVerifiedReload(token: unknown): void }
-        ).acceptVerifiedReload(token);
-        this.markVerifiedAnnotationsStale(session, token, revision, source);
+      if (this.isOwnVerifiedReloadSource(source, native)) {
+        this.acceptOwnVerifiedReload({ native, revision, session, source, token });
+        return;
       }
+      await this.acceptPeerVerifiedReload(session, native, scheduler, token);
     };
     try {
       this.unregisterSaveBroadcast = coordinator.register(session.descriptor.path, listener);
@@ -1085,6 +1078,42 @@ export class ReaderController {
       }
       throw cause;
     }
+  }
+
+  private isOwnVerifiedReloadSource(
+    source: VerifiedReloadSource,
+    native: NativeEditableSaveSession,
+  ): boolean {
+    return source === native || (isNativeRecoverySource(source) && source.origin === native);
+  }
+
+  private acceptOwnVerifiedReload(context: OwnVerifiedReloadContext): void {
+    const { native, revision, session, source, token } = context;
+    if (this.nativeSaveSession !== native || native.acceptVerifiedReload === undefined) return;
+    native.acceptVerifiedReload(token);
+    if (!isNativeRecoverySource(source))
+      this.markVerifiedAnnotationsStale(session, token, revision, source);
+  }
+
+  private async acceptPeerVerifiedReload(
+    session: DocumentSession,
+    native: NativeEditableSaveSession,
+    scheduler: AutosaveScheduler,
+    token: BaseToken,
+  ): Promise<void> {
+    if (native.isDirty || this.shell?.annotationEditorPendingChanges === true) {
+      scheduler.pauseForFailure(
+        new SaveConflictError(session.descriptor.path, native.baseToken, token),
+        native.pendingRevision,
+      );
+      return;
+    }
+    await this.reloadCleanPeerAfterVerifiedSave(
+      session,
+      native,
+      scheduler,
+      this.lifecycleRequestGeneration,
+    );
   }
 
   private markVerifiedAnnotationsStale(

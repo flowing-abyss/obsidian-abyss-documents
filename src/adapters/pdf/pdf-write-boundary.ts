@@ -27,6 +27,7 @@ const recoveryResult = new WeakMap<SaveVerificationError, SaveRecoveryResult>();
 interface SaveRecoveryResult {
   restored: boolean;
   restoreCause: unknown;
+  restoredToken: BaseToken | null;
 }
 
 export class SaveVerificationError extends Error {
@@ -42,6 +43,7 @@ export class SaveVerificationError extends Error {
     readonly cause?: unknown;
     readonly restored?: boolean;
     readonly restoreCause?: unknown;
+    readonly restoredToken?: BaseToken | null;
   }) {
     super(`Could not verify the PDF annotation save during ${details.stage}: ${details.path}`);
     this.name = new.target.name;
@@ -55,6 +57,8 @@ export class SaveVerificationError extends Error {
     recoveryResult.set(this, {
       restored: details.restored ?? false,
       restoreCause: details.restoreCause,
+      restoredToken:
+        details.restoredToken == null ? null : Object.freeze({ ...details.restoredToken }),
     });
   }
 
@@ -73,6 +77,11 @@ export class SaveVerificationError extends Error {
 
   get restoreCause(): unknown {
     return resultFor(this).restoreCause;
+  }
+
+  get restoredToken(): BaseToken | null {
+    const token = resultFor(this).restoredToken;
+    return token === null ? null : Object.freeze({ ...token });
   }
 }
 
@@ -311,6 +320,7 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
   ): Promise<never> {
     const recoverySignal = new AbortController().signal;
     const authority = authorityFor(failure);
+    let restoredToken: BaseToken | null = null;
     try {
       if (authority.preimage === null)
         throw new Error('No PDF preimage is available for recovery.');
@@ -319,7 +329,7 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
       const preimageToken = await baseTokenFor(authority.preimage, file.stat.mtime);
       if (contentTokensEqual(currentToken, preimageToken)) {
         await request.verifyPdf(current, recoverySignal);
-        throw new RestoredPreimage();
+        throw new RestoredPreimage(currentToken);
       }
       const attemptedToken = await baseTokenFor(request.bytes, file.stat.mtime);
       if (!contentTokensEqual(currentToken, attemptedToken)) {
@@ -333,13 +343,14 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
         throw new Error('The restored PDF preimage did not match readback.');
       }
       await request.verifyPdf(readback, recoverySignal);
+      restoredToken = actual;
     } catch (restoreCause) {
       if (restoreCause instanceof RestoredPreimage) {
-        throw reconciled(failure, true);
+        throw reconciled(failure, true, undefined, restoreCause.token);
       }
       throw reconciled(failure, false, restoreCause);
     }
-    throw reconciled(failure, true);
+    throw reconciled(failure, true, undefined, restoredToken);
   }
 
   private requireFile(path: string): TFile {
@@ -349,7 +360,11 @@ export class PdfWriteBoundary implements NativePdfWriteBoundary {
   }
 }
 
-class RestoredPreimage extends Error {}
+class RestoredPreimage extends Error {
+  constructor(readonly token: BaseToken) {
+    super();
+  }
+}
 
 function authorityFor(failure: SaveVerificationError): SaveRecoveryAuthority {
   const authority = recoveryAuthority.get(failure);
@@ -367,10 +382,12 @@ function reconciled(
   failure: SaveVerificationError,
   restored: boolean,
   restoreCause?: unknown,
+  restoredToken: BaseToken | null = null,
 ): SaveVerificationError {
   const result = resultFor(failure);
   result.restored = restored;
   result.restoreCause = restoreCause;
+  result.restoredToken = restoredToken;
   return failure;
 }
 
