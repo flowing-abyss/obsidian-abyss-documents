@@ -3210,7 +3210,8 @@ describe('reader selection-first annotations', () => {
       card.dataset['task9ExistingCard'] = '';
     });
     await expect($('.highlightEditor')).toExist();
-    await $('.abyss-annotation-card').click({ button: 'right' });
+    const sidebarInvoker = $('[data-task9-existing-card]');
+    await sidebarInvoker.click({ button: 'right' });
     const popover = $(nativeEditorSelector);
     try {
       await popover.waitForDisplayed({ timeout: 5_000 });
@@ -3301,6 +3302,7 @@ describe('reader selection-first annotations', () => {
     expect(retainedFocus).toBe(true);
     await browser.keys(Key.Escape);
     await expect(popover).not.toBeDisplayed();
+    await expect(sidebarInvoker).toBeFocused();
     hash = await waitForPdfBytesToChange(workingPath, hash);
     await $('.abyss-annotation-card').click({ button: 'right' });
     await expect(popover).toBeDisplayed();

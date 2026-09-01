@@ -167,12 +167,16 @@ export class ReaderShell implements AnnotationInteractionHost {
       options.sidebarInvokerRowId,
       generation,
     );
-    const opened = this.annotationEditor.open({
-      ...request,
-      onClose: (reason, context) => {
-        this.handleAnnotationEditorClose(request, lifecycle, reason, context);
+    const focusReturnTargetOwned = this.ownsSidebarFocusTransfer(lifecycle.sidebarInvoker);
+    const opened = this.annotationEditor.open(
+      {
+        ...request,
+        onClose: (reason, context) => {
+          this.handleAnnotationEditorClose(request, lifecycle, reason, context);
+        },
       },
-    });
+      { focusReturnTarget: lifecycle.sidebarInvoker, focusReturnTargetOwned },
+    );
     if (opened) this.annotationEditorGeneration = generation;
     return opened;
   }
@@ -205,6 +209,16 @@ export class ReaderShell implements AnnotationInteractionHost {
         ? selectedRow
         : undefined;
     return { generation, selectedRowId, sidebarInvoker };
+  }
+
+  private ownsSidebarFocusTransfer(sidebarInvoker: HTMLButtonElement | undefined): boolean {
+    if (sidebarInvoker === undefined) return false;
+    const active = this.root.doc.activeElement;
+    return (
+      active === sidebarInvoker ||
+      (active !== null &&
+        (this.documentHost.contains(active) || this.annotationEditor.element.contains(active)))
+    );
   }
 
   private handleAnnotationEditorClose(

@@ -61,6 +61,11 @@ export interface AnnotationEditorPopoverRequest {
   ) => void;
 }
 
+export interface AnnotationEditorPopoverOpenOptions {
+  readonly focusReturnTarget?: HTMLElement | undefined;
+  readonly focusReturnTargetOwned?: boolean | undefined;
+}
+
 const DEFAULT_COLOR = '#ffd400';
 const METADATA_DEBOUNCE_MS = 300;
 const POPOVER_EDGE_INSET = 8;
@@ -136,6 +141,7 @@ export class AnnotationEditorPopover {
   private metadataTimer: number | null = null;
   private focusAwayTimer: number | null = null;
   private openGeneration = 0;
+  private activeFocusReturnTarget: HTMLElement | null = null;
   private placement: AnnotationPopoverPlacement | null = null;
   private readonly pendingCreationUpdates = new Set<AnnotationCreationJob>();
   private previousFocus: HTMLElement | null = null;
@@ -389,16 +395,23 @@ export class AnnotationEditorPopover {
     }
   }
 
-  open(request: AnnotationEditorPopoverRequest): boolean {
+  open(
+    request: AnnotationEditorPopoverRequest,
+    options: AnnotationEditorPopoverOpenOptions = {},
+  ): boolean {
     if (this.destroyed)
       throw new DOMException('Annotation editor popover destroyed.', 'InvalidStateError');
     const deferredCloseReason = this.selectionCreation?.deferredCloseReason;
     if (deferredCloseReason !== null && deferredCloseReason !== undefined) return false;
     if (!this.flushPendingMetadata()) return false;
-    if (this.active === null) this.capturePreviousFocus();
+    const focusReturnTarget = this.focusReturnTargetForOpen(
+      options.focusReturnTarget,
+      options.focusReturnTargetOwned === true,
+    );
     this.openGeneration += 1;
     this.cancelFocusAwayTimer();
     this.active = request;
+    this.activeFocusReturnTarget = focusReturnTarget;
     this.cancelMetadataTimer();
     this.commentDirty = false;
     this.selectionCreation = null;
@@ -434,6 +447,7 @@ export class AnnotationEditorPopover {
     const restoredFocus = restoreFocus ? this.restoreFocus() : null;
     if (request.target.kind === 'selection' && this.selectionCreationState === 'draft')
       this.host.ownerDocument.getSelection()?.removeAllRanges();
+    this.activeFocusReturnTarget = null;
     this.previousFocus = null;
     notifyAnnotationEditorClose(request, reason, closeContext(context, restoredFocus));
     return true;
@@ -471,6 +485,7 @@ export class AnnotationEditorPopover {
     this.cancelMetadataTimer();
     this.cancelFocusAwayTimer();
     this.active = null;
+    this.activeFocusReturnTarget = null;
     this.stopLiveAnchor();
     this.selectionCreation = null;
     this.placement = null;
@@ -866,7 +881,26 @@ export class AnnotationEditorPopover {
       this.previousFocus = focusTarget;
   }
 
+  private focusReturnTargetForOpen(
+    requested: HTMLElement | undefined,
+    targetOwned: boolean,
+  ): HTMLElement | null {
+    const target =
+      requested !== undefined && (this.activeFocusReturnTarget === requested || targetOwned)
+        ? requested
+        : null;
+    if (this.active === null) {
+      this.previousFocus = null;
+      if (target === null) this.capturePreviousFocus();
+    } else if (requested !== undefined && target === null) this.capturePreviousFocus();
+    return target;
+  }
+
   private restoreFocus(): HTMLElement | null {
+    if (this.activeFocusReturnTarget?.isConnected === true) {
+      this.activeFocusReturnTarget.focus();
+      return this.activeFocusReturnTarget;
+    }
     if (this.previousFocus?.isConnected === true) {
       this.previousFocus.focus();
       return this.previousFocus;
@@ -971,6 +1005,7 @@ export class AnnotationEditorPopover {
     this.element.hidden = true;
     this.host.ownerDocument.getSelection()?.removeAllRanges();
     if (restoreFocus) this.restoreFocus();
+    this.activeFocusReturnTarget = null;
     this.previousFocus = null;
     return true;
   }

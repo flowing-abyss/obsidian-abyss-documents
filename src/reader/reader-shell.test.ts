@@ -365,6 +365,103 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
+  it('lets a sidebar generation replace transient PDF native focus for the same annotation', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const focused = annotation('pdf-then-sidebar-focus');
+    const sidebar = openAnnotationSidebar(shell, [focused]);
+    const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="row-1"]',
+    );
+    if (card === null) throw new Error('Expected the sidebar invoker.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    card.focus();
+    const nativeFocus = shell.documentHost.createDiv({ cls: 'highlightEditor selectedEditor' });
+    nativeFocus.tabIndex = -1;
+    nativeFocus.focus();
+    openFromSidebar(shell, annotationEditorRequest(focused), 'row-1');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(document.activeElement).toBe(card);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('does not retain sidebar A as the focus return for a newer PDF B generation', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const first = annotation('sidebar-before-pdf-a');
+    const second = annotation('sidebar-before-pdf-b');
+    const sidebar = openAnnotationSidebar(shell, [first, second]);
+    const firstCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="row-1"]',
+    );
+    if (firstCard === null) throw new Error('Expected the first sidebar invoker.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    firstCard.focus();
+    openFromSidebar(shell, annotationEditorRequest(first), 'row-1');
+    shell.openAnnotationEditor(annotationEditorRequest(second));
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(document.activeElement).not.toBe(firstCard);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('keeps a click-away target after sidebar ownership replaces an earlier PDF generation', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const external = shell.root.createEl('button');
+    const focused = annotation('pdf-sidebar-click-away');
+    const sidebar = openAnnotationSidebar(shell, [focused]);
+    const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="row-1"]',
+    );
+    if (card === null) throw new Error('Expected the sidebar invoker.');
+    shell.documentHost.focus();
+    shell.openAnnotationEditor(annotationEditorRequest(focused));
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    card.focus();
+    openFromSidebar(shell, annotationEditorRequest(focused), 'row-1');
+    external.focus();
+
+    external.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+
+    expect(document.activeElement).toBe(external);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('lets a newer sidebar generation replace the older owned focus return', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const first = annotation('sidebar-return-a');
+    const second = annotation('sidebar-return-b');
+    const sidebar = openAnnotationSidebar(shell, [first, second]);
+    const firstCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="row-1"]',
+    );
+    const secondCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="row-2"]',
+    );
+    if (firstCard === null || secondCard === null)
+      throw new Error('Expected both sidebar invokers.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    firstCard.focus();
+    openFromSidebar(shell, annotationEditorRequest(first), 'row-1');
+    sidebar.annotationsPanel.selectAnnotation('native-2', false);
+    secondCard.focus();
+    openFromSidebar(shell, annotationEditorRequest(second), 'row-2');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(document.activeElement).toBe(secondCard);
+    shell.destroy();
+    host.remove();
+  });
+
   it('does not replace a newer Escape focus target with the sidebar invoker', () => {
     const host = document.body.createDiv();
     const newerFocus = document.body.createEl('button');
