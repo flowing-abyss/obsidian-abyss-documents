@@ -20,6 +20,7 @@ type Listener = (event: unknown) => void;
 interface FakePageView {
   readonly div: HTMLElement;
   draw: ReturnType<typeof vi.fn<() => Promise<void>>>;
+  hasEditableAnnotations(): boolean;
   renderingState: 'FINISHED' | 'INITIAL' | 'RUNNING';
   reset: ReturnType<typeof vi.fn<() => void>>;
   readonly viewport: {
@@ -456,6 +457,7 @@ function viewerRuntime(findOptions: ViewerRuntimeOptions = {}) {
           draw: vi.fn(async () => {
             pageView.renderingState = 'RUNNING';
           }),
+          hasEditableAnnotations: () => true,
           renderingState: 'FINISHED',
           reset: vi.fn(() => {
             pageView.renderingState = 'INITIAL';
@@ -960,6 +962,62 @@ describe('PdfDocumentViewport', () => {
       ),
       snapshotCount: snapshots.size,
     }).toEqual({ removed: [], snapshotCount: 1 });
+  });
+
+  it('publishes one stable mounted snapshot after a multi-page annotation mode exit', async () => {
+    const { host, runtime, viewport } = await mountedViewport(3);
+    const eventBus = runtime.state.eventBus;
+    const viewer = runtime.state.viewer;
+    if (eventBus === undefined || viewer === undefined)
+      throw new Error('Expected mounted PDF state.');
+    eventBus.dispatch('annotationeditoruimanager', {
+      source: viewer,
+      uiManager: annotationManager(),
+    });
+    const mountPageAnnotations = (pageNumber: number, ids: readonly string[]): void => {
+      const page = host.querySelector<HTMLElement>(`[data-page-number="${String(pageNumber)}"]`);
+      if (page === null) throw new Error(`Expected page ${String(pageNumber)}.`);
+      page.querySelector('.annotationLayer')?.remove();
+      const layer = page.createDiv({ cls: 'annotationLayer' });
+      for (const id of ids) {
+        const annotation = layer.createDiv({ cls: 'highlightAnnotation' });
+        annotation.dataset['annotationId'] = id;
+        vi.spyOn(annotation, 'getBoundingClientRect').mockReturnValue(
+          new DOMRect(pageNumber * 10, 20, 30, 8),
+        );
+      }
+    };
+    mountPageAnnotations(1, ['delete-target', 'page-1-retained']);
+    mountPageAnnotations(2, ['page-2-retained']);
+    mountPageAnnotations(3, ['page-3-retained']);
+    for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1)
+      eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber });
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
+    mountPageAnnotations(1, ['page-1-retained']);
+    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 1 });
+    await nextFrame();
+    mountPageAnnotations(2, ['page-2-retained']);
+    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 2 });
+    await nextFrame();
+    mountPageAnnotations(3, ['page-3-retained']);
+    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 3 });
+    await nextFrame();
+
+    expect(events.filter(({ type }) => type === 'annotation-snapshot')).toHaveLength(1);
+    expect(
+      events.filter(
+        (event) => event.type === 'annotation-change' && event.change.operation === 'remove',
+      ),
+    ).toEqual([
+      {
+        type: 'annotation-change',
+        change: { operation: 'remove', nativeId: 'delete-target' },
+      },
+    ]);
   });
 
   it('normalizes exact-overlap native editor clicks as independently addressable annotations', async () => {

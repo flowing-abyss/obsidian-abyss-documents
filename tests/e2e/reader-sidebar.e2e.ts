@@ -2,6 +2,15 @@ import { $, $$, browser, expect } from '@wdio/globals';
 import { afterEach, beforeEach, describe, it } from 'mocha';
 import { Key } from 'webdriverio';
 
+import {
+  installTenThousandDeleteTrace,
+  measureNextAnnotationCardNavigation,
+  readTenThousandDeleteTrace,
+  waitForAnimationFrames,
+  waitForAnnotationProjectionToSettle,
+  type TenThousandDeleteTrace,
+} from './annotation-performance-oracle';
+
 async function closeReaderLeaves(): Promise<void> {
   await browser.executeObsidian(async ({ app }) => {
     const host = window as Window & {
@@ -128,6 +137,7 @@ async function dragFixtureText(): Promise<void> {
           { type: 'pointerDown', button: 0 },
           { type: 'pointerMove', duration: 400, origin: 'viewport', ...points.end },
           { type: 'pause', duration: 150 },
+          { type: 'pointerUp', button: 0 },
         ],
       },
     ]);
@@ -441,7 +451,10 @@ async function installSidebarContinuityMonitor(): Promise<void> {
     });
     (
       window as Window & {
-        __abyssTask6SidebarMonitor?: { cleanup(): Record<string, number> };
+        __abyssTask6SidebarMonitor?: {
+          cleanup(): Record<string, number>;
+          snapshot(): Record<string, number>;
+        };
       }
     ).__abyssTask6SidebarMonitor = {
       cleanup() {
@@ -449,12 +462,48 @@ async function installSidebarContinuityMonitor(): Promise<void> {
         observer.disconnect();
         return { ...state };
       },
+      snapshot() {
+        processRecords(observer.takeRecords());
+        return { ...state };
+      },
     };
   });
 }
 
 async function assertSidebarContinuityMonitor(): Promise<void> {
-  await browser.pause(50);
+  let lastMetrics: Record<string, number> = {};
+  let previousMutationRecords = -1;
+  let stableFrames = 0;
+  try {
+    await browser.waitUntil(
+      async () => {
+        await waitForAnimationFrames(2);
+        lastMetrics = await browser.execute(() => {
+          const monitor = (
+            window as Window & {
+              __abyssTask6SidebarMonitor?: { snapshot(): Record<string, number> };
+            }
+          ).__abyssTask6SidebarMonitor;
+          if (monitor === undefined) throw new Error('Sidebar continuity monitor is unavailable.');
+          return monitor.snapshot();
+        });
+        const mutationRecords = lastMetrics['mutationRecords'] ?? 0;
+        stableFrames =
+          mutationRecords > 0 && mutationRecords === previousMutationRecords ? stableFrames + 1 : 0;
+        previousMutationRecords = mutationRecords;
+        return stableFrames >= 1;
+      },
+      {
+        interval: 0,
+        timeout: 5_000,
+        timeoutMsg: 'Sidebar continuity mutations did not settle across animation frames.',
+      },
+    );
+  } catch (cause) {
+    throw new Error(
+      `Sidebar continuity mutations did not settle: ${JSON.stringify(lastMetrics)}; ${String(cause)}`,
+    );
+  }
   const metrics = await browser.execute(() => {
     const host = window as Window & {
       __abyssTask6SidebarMonitor?: { cleanup(): Record<string, number> };
@@ -783,7 +832,47 @@ describe('PDF reader sidebar', () => {
     });
     try {
       await search.click();
-      await browser.pause(100);
+      let lastFocusState: {
+        readonly focused: boolean;
+        readonly hitInsideSearch: boolean;
+        readonly popoverVisible: boolean;
+      } | null = null;
+      try {
+        await browser.waitUntil(
+          async () => {
+            lastFocusState = await browser.execute(() => {
+              const input = document.querySelector<HTMLInputElement>('[data-annotation-search]');
+              const popover = document.querySelector<HTMLElement>(
+                '[data-annotation-editor-popover]:not([hidden])',
+              );
+              if (input === null) throw new Error('Annotation search input disappeared.');
+              const bounds = input.getBoundingClientRect();
+              const hit = document.elementFromPoint(
+                Math.round(bounds.left + bounds.width / 2),
+                Math.round(bounds.top + bounds.height / 2),
+              );
+              return {
+                focused: document.activeElement === input,
+                hitInsideSearch: hit === input || input.contains(hit),
+                popoverVisible: popover !== null,
+              };
+            });
+            return (
+              lastFocusState.focused &&
+              lastFocusState.hitInsideSearch &&
+              !lastFocusState.popoverVisible
+            );
+          },
+          {
+            timeout: 2_000,
+            timeoutMsg: 'Annotation search did not acquire stable trusted focus.',
+          },
+        );
+      } catch (cause) {
+        throw new Error(
+          `Annotation search did not acquire stable trusted focus: ${JSON.stringify(lastFocusState)}; ${String(cause)}`,
+        );
+      }
       const searchFocus = await browser.execute(() => {
         const host = window as Window & {
           __abyssSearchFocusTrace?: { events: string[]; stop(): void };
@@ -1449,8 +1538,27 @@ describe('PDF reader sidebar', () => {
 
     const firstColor = $('[data-sidebar-panel="annotations"] [data-annotation-color]');
     await firstColor.moveTo();
-    await browser.pause(350);
-    await expect($('.tooltip')).toBeDisplayed();
+    try {
+      await $('.tooltip').waitForDisplayed({
+        timeout: 2_000,
+        timeoutMsg: 'Color meaning tooltip did not become visible while its chip was hovered.',
+      });
+    } catch (cause) {
+      const diagnostic = await browser.execute(() => ({
+        hovered: document
+          .querySelector('[data-sidebar-panel="annotations"] [data-annotation-color]')
+          ?.matches(':hover'),
+        tooltips: Array.from(document.querySelectorAll<HTMLElement>('.tooltip')).map((tooltip) => ({
+          display: getComputedStyle(tooltip).display,
+          hidden: tooltip.hidden,
+          text: tooltip.textContent,
+          visibility: getComputedStyle(tooltip).visibility,
+        })),
+      }));
+      throw new Error(
+        `Color meaning tooltip did not become visible: ${JSON.stringify(diagnostic)}; ${String(cause)}`,
+      );
+    }
     await movePointerTo(1, 1);
     await browser.waitUntil(async () => !(await $('.tooltip').isDisplayed()), {
       timeout: 2_000,
@@ -1699,5 +1807,128 @@ describe('PDF reader sidebar', () => {
         delete host.__abyssTask9Continuity;
       });
     }
+  });
+
+  it('deletes one annotation from ten thousand without replacing unrelated mounted content', async () => {
+    const workingPath = 'Documents/e2e-annotations-10000-delete.pdf';
+    await resetWorkingPdf('Documents/annotations-10000.pdf', workingPath);
+    await openAnnotations(workingPath);
+    await browser.waitUntil(
+      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
+      { timeout: 15_000, timeoutMsg: 'Annotation delete fixture did not load ten thousand items.' },
+    );
+    await waitForAnnotationWindowToSettle();
+    await waitForAnimationFrames(5);
+
+    expect(await measureNextAnnotationCardNavigation()).toBeLessThan(250);
+    await browser.keys(Key.ArrowUp);
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.activeElement
+              ?.closest('.abyss-annotation-card-row')
+              ?.getAttribute('aria-posinset') === '1',
+        ),
+      { timeout: 2_000, timeoutMsg: 'Delete target card did not regain keyboard focus.' },
+    );
+
+    const target = await browser.execute(() => {
+      const card = document.querySelector<HTMLButtonElement>(
+        '.abyss-annotation-card[tabindex="0"]',
+      );
+      const rowId = card?.dataset['annotationRowId'];
+      const annotationId = card?.dataset['annotationId'];
+      if (card === null || rowId === undefined || annotationId === undefined)
+        throw new Error('Delete target identity is incomplete.');
+      return { annotationId, rowId };
+    });
+    await $('.abyss-annotation-card[tabindex="0"]').click({ button: 'right' });
+    await expect($('[data-annotation-editor-popover]')).toBeDisplayed();
+    await expect($('[data-action="delete-annotation"]')).toBeEnabled();
+    await waitForAnnotationProjectionToSettle();
+    await waitForAnimationFrames(5);
+    await installTenThousandDeleteTrace(target);
+
+    let trace: TenThousandDeleteTrace | null = null;
+    try {
+      await $('[data-action="delete-annotation"]').click();
+      const firstFrame = await browser.execute(
+        (rowId) =>
+          new Promise<{ readonly cards: number; readonly targetPresent: boolean }>((resolve) => {
+            requestAnimationFrame(() => {
+              const panel = document.querySelector<HTMLElement>(
+                '[data-sidebar-panel="annotations"]',
+              );
+              resolve({
+                cards: panel?.querySelectorAll('.abyss-annotation-card').length ?? 0,
+                targetPresent:
+                  panel?.querySelector(
+                    `.abyss-annotation-card[data-annotation-row-id="${CSS.escape(rowId)}"]`,
+                  ) !== null,
+              });
+            });
+          }),
+        target.rowId,
+      );
+      expect(firstFrame.targetPresent).toBe(false);
+      expect(firstFrame.cards).toBeGreaterThan(0);
+
+      let lastTrace: TenThousandDeleteTrace | null = null;
+      try {
+        await browser.waitUntil(
+          async () => {
+            lastTrace = await readTenThousandDeleteTrace();
+            return (
+              !lastTrace.targetPresent &&
+              lastTrace.indexedBatches >= 1 &&
+              lastTrace.settledFrames >= 5 &&
+              (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '9999'
+            );
+          },
+          {
+            interval: 0,
+            timeout: 10_000,
+            timeoutMsg: 'Ten-thousand delete projection did not converge.',
+          },
+        );
+      } catch (cause) {
+        throw new Error(
+          `Ten-thousand delete projection did not converge: ${JSON.stringify(lastTrace)}; ${String(cause)}`,
+        );
+      }
+      trace = await readTenThousandDeleteTrace(true);
+    } finally {
+      if (trace === null) {
+        const traceExists = await browser.execute(
+          () =>
+            (
+              window as Window & {
+                __abyssTask7DeleteTrace?: unknown;
+              }
+            ).__abyssTask7DeleteTrace !== undefined,
+        );
+        if (traceExists) trace = await readTenThousandDeleteTrace(true);
+      }
+    }
+
+    expect(trace).toMatchObject({
+      indexedBatches: 1,
+      indexedRenderCalls: 1,
+      mountedBursts: 1,
+      targetPresent: false,
+      targetSemanticNativePresent: false,
+      unrelatedCardIdentityBreaks: 0,
+      zeroCardFrames: 0,
+      zeroCardMutationSamples: 0,
+      zeroNativeFrames: 0,
+      zeroNativeMutationSamples: 0,
+    });
+    expect(trace.renderCalls).toBeGreaterThanOrEqual(2);
+    expect(trace.renderCalls).toBeLessThanOrEqual(3);
+    expect(trace.maxRafGapMs).toBeLessThan(100);
+    expect(trace.mutationSamples).toBeGreaterThan(0);
+    expect(trace.settledFrames).toBeGreaterThanOrEqual(5);
+    expect(trace.semanticNativeMismatches).toEqual([]);
   });
 });

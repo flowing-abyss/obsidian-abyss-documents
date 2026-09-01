@@ -108,6 +108,10 @@ interface PdfPageViewGeometry {
   };
 }
 
+interface PdfPageViewAnnotationState {
+  hasEditableAnnotations?(): boolean;
+}
+
 interface MountedAnnotationContext {
   readonly internalId: string;
   readonly pageIndex: number;
@@ -298,6 +302,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private selectionAbort: AbortController | null = null;
   private currentSelection: PdfTextSelection | null = null;
   private annotationSnapshotFrame: number | null = null;
+  private annotationModeExitPages: Set<number> | null = null;
   private mountedAnnotationSnapshots = new Map<string, ViewportAnnotationSnapshot>();
   private lastQuery = '';
   private readonly failedPages = new Set<number>();
@@ -737,6 +742,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.clearPendingInteractions();
     this.currentSelection = null;
     this.mountedAnnotationSnapshots.clear();
+    this.annotationModeExitPages = null;
     this.cancelAnnotationSnapshotFrame();
   }
 
@@ -831,20 +837,55 @@ export class PdfDocumentViewport implements DocumentViewport {
       if (pageNumber === null) return;
       const page = this.pageElement(pageNumber);
       if (page !== null) replacePdfAnnotationImageSources(page, annotationImageData);
-      this.publishMountedAnnotationSnapshot();
+      this.publishAnnotationLayerSnapshot(pageNumber - 1);
       this.events.emit({ type: 'annotation-layer-rendered', pageIndex: pageNumber - 1 });
+    });
+    this.bind('annotationeditormodechanged', (event) => {
+      this.beginAnnotationModeExitSnapshot(event);
     });
   }
 
   private scheduleAnnotationSnapshot(): void {
     const root = this.root;
-    if (root === null) return;
+    if (root === null || this.annotationModeExitPages !== null) return;
     const ownerWindow = root.ownerDocument.defaultView;
     if (ownerWindow === null || this.annotationSnapshotFrame !== null) return;
     this.annotationSnapshotFrame = ownerWindow.requestAnimationFrame(() => {
       this.annotationSnapshotFrame = null;
+      if (this.annotationModeExitPages !== null) return;
       this.publishMountedAnnotationSnapshot(true);
     });
+  }
+
+  private beginAnnotationModeExitSnapshot(event: unknown): void {
+    if (record(event)?.['mode'] !== PDFJS_ANNOTATION_EDITOR_TYPE.NONE) return;
+    this.cancelAnnotationSnapshotFrame();
+    const pages = this.loadedEditableAnnotationPages();
+    this.annotationModeExitPages = pages.size === 0 ? null : pages;
+    if (this.annotationModeExitPages === null) this.scheduleAnnotationSnapshot();
+  }
+
+  private loadedEditableAnnotationPages(): Set<number> {
+    const viewer = this.viewer;
+    if (viewer === null) return new Set();
+    return new Set(
+      [...this.loadedAnnotationPages()].filter((pageIndex) => {
+        const pageView = viewer.getPageView(pageIndex) as PdfPageViewAnnotationState | undefined;
+        return pageView?.hasEditableAnnotations?.() !== false;
+      }),
+    );
+  }
+
+  private publishAnnotationLayerSnapshot(pageIndex: number): void {
+    const pending = this.annotationModeExitPages;
+    if (pending === null) {
+      this.publishMountedAnnotationSnapshot();
+      return;
+    }
+    pending.delete(pageIndex);
+    if (pending.size > 0) return;
+    this.annotationModeExitPages = null;
+    this.scheduleAnnotationSnapshot();
   }
 
   private cancelAnnotationSnapshotFrame(): void {
