@@ -1336,10 +1336,10 @@ export class PdfAnnotationEditor {
 
   private trySelectRequestedEditor(session: ContextualEditSession): boolean {
     if (this.isRequestedEditorSelected(session)) return true;
-    this.dependencies.commentBridge.selectAnnotation?.(
-      session.id,
-      this.editorUidOptions(session.id).editorUid,
-    );
+    const editorUid = this.editorUidOptions(session.id).editorUid;
+    this.dependencies.commentBridge.selectAnnotation?.(session.id, editorUid);
+    if (!this.isRequestedEditorSelected(session) && editorUid !== undefined)
+      this.dependencies.commentBridge.selectAnnotation?.(session.id);
     return this.isRequestedEditorSelected(session);
   }
 

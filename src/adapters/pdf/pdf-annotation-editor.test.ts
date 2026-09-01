@@ -1718,6 +1718,47 @@ describe('PdfAnnotationEditor lifecycle', () => {
     );
   });
 
+  it('falls back from a stale projected editor uid to the mounted canonical editor', async () => {
+    vi.useFakeTimers();
+    try {
+      const current = fixture();
+      const annotation = createdAnnotation('', { id: '29R' });
+      current.editor.setAnnotationProjection([
+        { annotation, editorUid: 'retired-runtime', stableId: '29R' },
+      ]);
+      const canonical = selectedEditor('29R', 9);
+      const uiManager = manager();
+      Object.assign(current.commentBridge, {
+        selectAnnotation: vi.fn((_id: string, editorUid?: string) => {
+          if (editorUid !== undefined) return false;
+          uiManager.firstSelectedEditor = canonical;
+          return true;
+        }),
+      });
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager,
+      });
+
+      const activation = current.editor.focusAnnotation('29R', { kind: 'sidebar' });
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await expect(activation).resolves.toBe('editable');
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
+        '29R',
+        expect.any(AbortSignal),
+        annotation,
+        {
+          editableOnly: true,
+          editorUid: 'retired-runtime',
+          preserveSelection: true,
+        },
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('prefers the currently mounted PDF editor identity over a stale projected runtime id', async () => {
     const current = fixture();
     const annotation = createdAnnotation('', { id: '369R' });

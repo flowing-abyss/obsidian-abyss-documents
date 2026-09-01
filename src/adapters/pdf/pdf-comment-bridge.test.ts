@@ -73,6 +73,19 @@ function uiManager(selected: PdfCommentEditor | null = null) {
   };
 }
 
+function mountEditor(
+  host: HTMLElement,
+  manager: ReturnType<typeof uiManager>,
+  native: PdfCommentEditor,
+  className = 'highlightEditor',
+): void {
+  const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+  const node = layer.createDiv({ cls: className });
+  node.id = native.uid ?? 'mounted-editor';
+  Reflect.set(native, 'elementBeforePopup', node);
+  manager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
+}
+
 function annotation(id: string, writable = true): DocumentAnnotation {
   const unavailable = {
     available: false as const,
@@ -226,6 +239,71 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       host.remove();
     },
   );
+
+  it('releases a retired editable source when the unified focus lease closes', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    node.id = 'retired-runtime';
+    const native = editor('Retire me', {
+      anchor: node,
+      annotationElementId: '29R',
+      mode: 9,
+      uid: node.id,
+    });
+    const manager = uiManager(native);
+    manager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) focused.push(focus);
+    });
+
+    bridge.toggleCommentPopup(native, true, true, true);
+    bridge.destroyPopup();
+
+    const lease = (
+      focused[0] as PdfAnnotationFocus & { readonly lease?: { readonly release: () => void } }
+    ).lease;
+    expect(lease).toBeDefined();
+    lease?.release();
+    node.remove();
+
+    expect(bridge.nativeEditorUidForAnnotation('29R')).toBeNull();
+    lease?.release();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('releases unified focus when its native editor detaches', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    node.id = 'detached-runtime';
+    const native = editor('Detach me', {
+      anchor: node,
+      annotationElementId: '30R',
+      mode: 9,
+      uid: node.id,
+    });
+    const manager = uiManager(native);
+    manager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+
+    bridge.toggleCommentPopup(native, true, true, true);
+    node.remove();
+
+    await vi.waitFor(() => {
+      expect(focused[focused.length - 1]).toBeNull();
+    });
+    expect(bridge.nativeEditorUidForAnnotation('30R')).toBeNull();
+    bridge.dispose();
+    host.remove();
+  });
 
   it('ignores a persisted highlight mounted during repeated selection before adopting the new one', () => {
     const host = document.body.createDiv();
@@ -674,6 +752,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
       const host = document.body.createDiv();
       const native = editor('Recolor me', { mode, uid: `color-${String(mode)}` });
       const manager = uiManager(native);
+      mountEditor(host, manager, native, mode === 3 ? 'freeTextEditor' : `${_type}Editor`);
       const bridge = new PdfCommentBridge(host);
       const focused: PdfAnnotationFocus[] = [];
       bridge.setSidebarUiManager(manager);
@@ -696,6 +775,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     const host = document.body.createDiv();
     const native = editor('Delete only this', { uid: 'single-delete' });
     const manager = uiManager(native);
+    mountEditor(host, manager, native);
     const mutations = vi.fn();
     const bridge = new PdfCommentBridge(host, { onNativeMutation: mutations });
     const focused: PdfAnnotationFocus[] = [];
@@ -2210,6 +2290,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     const host = document.body.createDiv();
     const native = editor('Before', { uid: 'retry' });
     const manager = uiManager(native);
+    mountEditor(host, manager, native);
     const failures: PdfCommentMutationFailure[] = [];
     const bridge = new PdfCommentBridge(host, { onFailure: (failure) => failures.push(failure) });
     const focused: PdfAnnotationFocus[] = [];
@@ -2241,6 +2322,7 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     const host = document.body.createDiv();
     const native = editor('Before native mutation', { uid: 'mutation-guard' });
     const manager = uiManager(native);
+    mountEditor(host, manager, native);
     const bridge = new PdfCommentBridge(host, {
       onNativeMutation: () => {
         bridge.destroyPopup();

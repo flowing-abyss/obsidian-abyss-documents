@@ -1204,9 +1204,11 @@ describe('AnnotationInteractionController', () => {
 
   it('neutralizes the native contextual editor when its unified popover closes', async () => {
     const test = fixture();
+    const release = vi.fn();
     test.emitAnnotationFocus({
       annotations: [nativeAnnotation('Closing annotation')],
       editable: true,
+      lease: { release },
       position: { x: 10, y: 20 },
     });
     const request = test.opened[test.opened.length - 1];
@@ -1214,6 +1216,7 @@ describe('AnnotationInteractionController', () => {
 
     request.onClose('escape');
     await vi.waitFor(() => {
+      expect(release).toHaveBeenCalledOnce();
       expect(test.abortInteraction).toHaveBeenCalledExactlyOnceWith(
         'The PDF annotation editor was closed.',
       );

@@ -348,13 +348,17 @@ export class AnnotationInteractionController {
       this.closeActiveSelection();
       return;
     }
-    if (!isUsableClientPosition(focus.position)) return;
+    if (!isUsableClientPosition(focus.position)) {
+      this.releaseAnnotationFocusLease(focus);
+      return;
+    }
     const target = this.annotationFocusTarget(focus, first);
     const neutralizeOnClose = target.kind !== 'readonly' || focus.editable;
     const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
       color: first.color ?? undefined,
       onClose: (_reason, context) => {
+        this.releaseAnnotationFocusLease(focus);
         if (revision !== this.activeSelectionRevision) {
           if (this.activeEditorKind === null && neutralizeOnClose)
             this.neutralizeNativeEditor(context);
@@ -378,11 +382,26 @@ export class AnnotationInteractionController {
       },
       target,
     });
-    if (opened) {
-      this.activeEditorKind = target.kind;
-      this.activeSelectionRevision = revision;
-      this.ownedSelectionRevision = revision;
+    this.finishAnnotationFocusOpen(opened, target, revision, focus);
+  }
+
+  private finishAnnotationFocusOpen(
+    opened: boolean,
+    target: AnnotationEditorTarget,
+    revision: number,
+    focus: PdfAnnotationFocus,
+  ): void {
+    if (!opened) {
+      this.releaseAnnotationFocusLease(focus);
+      return;
     }
+    this.activeEditorKind = target.kind;
+    this.activeSelectionRevision = revision;
+    this.ownedSelectionRevision = revision;
+  }
+
+  private releaseAnnotationFocusLease(focus: PdfAnnotationFocus): void {
+    focus.lease?.release();
   }
 
   private annotationFocusTarget(
