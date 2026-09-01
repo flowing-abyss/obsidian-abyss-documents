@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { decodeAnnotationComment } from '../../annotation-tokens.js';
-import type { DocumentAnnotation } from '../../document-core/annotations.js';
+import type { AnnotationGeometry, DocumentAnnotation } from '../../document-core/annotations.js';
 import { beginReaderTimedOperation } from '../../reader-performance.js';
 import type { AnnotationPaletteEntry } from '../../settings.js';
 import type {
@@ -42,6 +42,11 @@ interface PdfProjectedTarget {
   readonly editorUid?: string;
 }
 
+export interface PdfProjectedHitTarget {
+  readonly editorUid?: string;
+  readonly stableId: string;
+}
+
 export type PdfAnnotationResolver = (
   stableId: string,
   signal: AbortSignal,
@@ -71,6 +76,8 @@ export interface PdfAnnotationInteraction {
   ): Promise<PdfAnnotationActivationResult>;
   selectAnnotation?(stableId: string): boolean;
   clearAnnotationSelection?(): void;
+  retainSelection?(token: string): boolean;
+  releaseSelection?(token: string): boolean;
   resolveAnnotationAnchor?(stableId: string): DOMRect | null;
   resolveSelectionAnchor?(token: string): DOMRect | null;
   setPalette?(palette: readonly AnnotationPaletteEntry[]): void;
@@ -180,6 +187,7 @@ interface PdfAnnotationEditorDependencies {
   readonly annotationEditorParamsType: AnnotationEditorParameterConstants;
   readonly annotationEditorType: AnnotationEditorTypeConstants;
   readonly eventBus: PdfAnnotationEventBus;
+  readonly onAnnotationSelectionClear?: () => void;
   readonly pdf: PDFDocumentProxy;
   readonly commentBridge: Pick<
     PdfCommentBridge,
@@ -472,6 +480,7 @@ export class PdfAnnotationEditor {
   private activeActivation: AnnotationActivation | null = null;
   private annotationResolver: PdfAnnotationResolver | null = null;
   private readonly projectedTargets = new Map<string, PdfProjectedTarget>();
+  private projectedHitGrid: PdfProjectedHitGrid = new Map();
   private readonly removeBridgeFocusListener: () => void;
   private pendingAnnotationFocus: PendingAnnotationFocus | null = null;
 
@@ -573,6 +582,14 @@ export class PdfAnnotationEditor {
     return this.dependencies.selectionObserver.onSelection(listener);
   }
 
+  releaseSelection(token: string): boolean {
+    return this.dependencies.selectionObserver.release?.(token) ?? false;
+  }
+
+  retainSelection(token: string): boolean {
+    return this.dependencies.selectionObserver.retain?.(token) ?? false;
+  }
+
   onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void {
     if (this.destroyed) return () => undefined;
     this.annotationFocusListeners.add(listener);
@@ -585,6 +602,33 @@ export class PdfAnnotationEditor {
     this.projectedTargets.clear();
     for (const [identity, target] of pdfProjectedTargetIndex(annotations))
       this.projectedTargets.set(identity, target);
+    this.projectedHitGrid = pdfProjectedHitGrid(annotations);
+  }
+
+  hitTestProjectedAnnotation(
+    pageIndex: number,
+    point: { readonly x: number; readonly y: number },
+  ): PdfProjectedHitTarget | null {
+    return this.hitTestProjectedAnnotations(pageIndex, point)[0] ?? null;
+  }
+
+  hitTestProjectedAnnotations(
+    pageIndex: number,
+    point: { readonly x: number; readonly y: number },
+  ): readonly PdfProjectedHitTarget[] {
+    const cell = this.projectedHitGrid.get(pageIndex)?.get(pdfProjectedHitCellKey(point));
+    if (cell === undefined) return [];
+    const hits: PdfProjectedHitTarget[] = [];
+    const seen = new Set<string>();
+    for (let index = cell.length - 1; index >= 0; index -= 1) {
+      const region = cell[index];
+      if (region === undefined || !pdfProjectedHitRegionContains(region, point)) continue;
+      const key = `${region.target.stableId}\u0000${region.target.editorUid ?? ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push(region.target);
+    }
+    return hits;
   }
 
   setAnnotationResolver(resolver: PdfAnnotationResolver | null): void {
@@ -645,6 +689,7 @@ export class PdfAnnotationEditor {
   clearAnnotationSelection(): void {
     if (this.destroyed) return;
     this.cancelAnnotationActivation('The PDF annotation activation was cleared.');
+    this.dependencies.onAnnotationSelectionClear?.();
   }
 
   resolveAnnotationAnchor(stableId: string): DOMRect | null {
@@ -2477,6 +2522,7 @@ export class PdfAnnotationEditor {
     this.modeListeners.clear();
     this.colorListeners.clear();
     this.projectedTargets.clear();
+    this.projectedHitGrid.clear();
     this.annotationResolver = null;
     this.releaseContextualEditSession();
     this.clearPendingAnnotationFocus();
@@ -3474,6 +3520,233 @@ function pdfProjectedAliases(
 interface PdfProjectedEntry {
   readonly aliases: ReadonlySet<string>;
   readonly target: PdfProjectedTarget;
+}
+
+interface PdfProjectedHitRegion {
+  readonly bottom: number;
+  readonly left: number;
+  readonly right: number;
+  readonly shape: PdfProjectedHitShape;
+  readonly target: PdfProjectedHitTarget;
+  readonly top: number;
+}
+
+interface PdfProjectedHitPoint {
+  readonly x: number;
+  readonly y: number;
+}
+
+type PdfProjectedHitShape =
+  | { readonly kind: 'rectangle' }
+  | { readonly center: PdfProjectedHitPoint; readonly kind: 'circle'; readonly radius: number }
+  | { readonly kind: 'polygon'; readonly points: readonly PdfProjectedHitPoint[] }
+  | {
+      readonly end: PdfProjectedHitPoint;
+      readonly kind: 'segment';
+      readonly radius: number;
+      readonly start: PdfProjectedHitPoint;
+    };
+
+type PdfProjectedHitGrid = Map<number, Map<string, PdfProjectedHitRegion[]>>;
+
+const PDF_PROJECTED_HIT_CELL_SIZE = 64;
+const PDF_PROJECTED_POINT_HIT_RADIUS = 8;
+
+function pdfProjectedHitGrid(annotations: readonly PdfProjectedAnnotation[]): PdfProjectedHitGrid {
+  const grid: PdfProjectedHitGrid = new Map();
+  for (const projected of annotations) {
+    const target = pdfProjectedTarget(projected);
+    const anchor = projected.annotation.anchor;
+    if (anchor.kind !== 'fixed-page') continue;
+    for (const rect of pdfAnnotationHitRegions(anchor.geometry)) {
+      const region: PdfProjectedHitRegion = {
+        ...rect,
+        target: {
+          stableId: target.canonicalId,
+          ...(target.editorUid === undefined ? {} : { editorUid: target.editorUid }),
+        },
+      };
+      pdfProjectedHitGridInsert(grid, anchor.pageIndex, region);
+    }
+  }
+  return grid;
+}
+
+function pdfProjectedHitGridInsert(
+  grid: PdfProjectedHitGrid,
+  pageIndex: number,
+  region: PdfProjectedHitRegion,
+): void {
+  let page = grid.get(pageIndex);
+  if (page === undefined) {
+    page = new Map();
+    grid.set(pageIndex, page);
+  }
+  const firstColumn = Math.floor(region.left / PDF_PROJECTED_HIT_CELL_SIZE);
+  const lastColumn = Math.floor(region.right / PDF_PROJECTED_HIT_CELL_SIZE);
+  const firstRow = Math.floor(region.top / PDF_PROJECTED_HIT_CELL_SIZE);
+  const lastRow = Math.floor(region.bottom / PDF_PROJECTED_HIT_CELL_SIZE);
+  for (let column = firstColumn; column <= lastColumn; column += 1) {
+    for (let row = firstRow; row <= lastRow; row += 1) {
+      const key = `${String(column)}:${String(row)}`;
+      const cell = page.get(key);
+      if (cell === undefined) page.set(key, [region]);
+      else cell.push(region);
+    }
+  }
+}
+
+function pdfProjectedHitCellKey(point: { readonly x: number; readonly y: number }): string {
+  return `${String(Math.floor(point.x / PDF_PROJECTED_HIT_CELL_SIZE))}:${String(
+    Math.floor(point.y / PDF_PROJECTED_HIT_CELL_SIZE),
+  )}`;
+}
+
+function pdfProjectedHitRegionContains(
+  region: PdfProjectedHitRegion,
+  point: PdfProjectedHitPoint,
+): boolean {
+  if (
+    point.x < region.left ||
+    point.x > region.right ||
+    point.y < region.top ||
+    point.y > region.bottom
+  )
+    return false;
+  switch (region.shape.kind) {
+    case 'rectangle':
+      return true;
+    case 'circle':
+      return pdfProjectedSquaredDistance(point, region.shape.center) <= region.shape.radius ** 2;
+    case 'polygon':
+      return pdfProjectedPointInPolygon(point, region.shape.points);
+    case 'segment':
+      return (
+        pdfProjectedSquaredDistanceToSegment(point, region.shape.start, region.shape.end) <=
+        region.shape.radius ** 2
+      );
+  }
+}
+
+function pdfProjectedSquaredDistance(
+  first: PdfProjectedHitPoint,
+  second: PdfProjectedHitPoint,
+): number {
+  return (first.x - second.x) ** 2 + (first.y - second.y) ** 2;
+}
+
+function pdfProjectedSquaredDistanceToSegment(
+  point: PdfProjectedHitPoint,
+  start: PdfProjectedHitPoint,
+  end: PdfProjectedHitPoint,
+): number {
+  const lengthSquared = pdfProjectedSquaredDistance(start, end);
+  if (lengthSquared === 0) return pdfProjectedSquaredDistance(point, start);
+  const projection = Math.max(
+    0,
+    Math.min(
+      1,
+      ((point.x - start.x) * (end.x - start.x) + (point.y - start.y) * (end.y - start.y)) /
+        lengthSquared,
+    ),
+  );
+  return pdfProjectedSquaredDistance(point, {
+    x: start.x + projection * (end.x - start.x),
+    y: start.y + projection * (end.y - start.y),
+  });
+}
+
+function pdfProjectedPointInPolygon(
+  point: PdfProjectedHitPoint,
+  polygon: readonly PdfProjectedHitPoint[],
+): boolean {
+  let inside = false;
+  for (
+    let current = 0, previous = polygon.length - 1;
+    current < polygon.length;
+    previous = current, current += 1
+  ) {
+    const currentPoint = polygon[current];
+    const previousPoint = polygon[previous];
+    if (currentPoint === undefined || previousPoint === undefined) continue;
+    const crosses =
+      currentPoint.y > point.y !== previousPoint.y > point.y &&
+      point.x <
+        ((previousPoint.x - currentPoint.x) * (point.y - currentPoint.y)) /
+          (previousPoint.y - currentPoint.y) +
+          currentPoint.x;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+function pdfAnnotationHitRegions(
+  geometry: AnnotationGeometry,
+): ReadonlyArray<Omit<PdfProjectedHitRegion, 'target'>> {
+  switch (geometry.kind) {
+    case 'point':
+      return [pdfProjectedCircleHitRegion(geometry.point, PDF_PROJECTED_POINT_HIT_RADIUS)];
+    case 'rectangle': {
+      const { height, width, x, y } = geometry.rectangle;
+      return [
+        pdfProjectedHitRegion(
+          [
+            { x, y },
+            { x: x + width, y: y + height },
+          ],
+          { kind: 'rectangle' },
+        ),
+      ];
+    }
+    case 'quadrilaterals':
+      return geometry.quadrilaterals.map((quadrilateral) => {
+        const points = [
+          quadrilateral.topLeft,
+          quadrilateral.topRight,
+          quadrilateral.bottomRight,
+          quadrilateral.bottomLeft,
+        ];
+        return pdfProjectedHitRegion(points, { kind: 'polygon', points });
+      });
+    case 'ink':
+      return geometry.paths.flatMap(pdfProjectedInkHitRegions);
+  }
+}
+
+function pdfProjectedInkHitRegions(
+  path: readonly PdfProjectedHitPoint[],
+): ReadonlyArray<Omit<PdfProjectedHitRegion, 'target'>> {
+  const radius = PDF_PROJECTED_POINT_HIT_RADIUS / 2;
+  const first = path[0];
+  if (first === undefined) return [];
+  if (path.length === 1) return [pdfProjectedCircleHitRegion(first, radius)];
+  return path.slice(1).map((end, index) => {
+    const start = path[index] ?? end;
+    return pdfProjectedHitRegion([start, end], { end, kind: 'segment', radius, start }, radius);
+  });
+}
+
+function pdfProjectedCircleHitRegion(
+  center: PdfProjectedHitPoint,
+  radius: number,
+): Omit<PdfProjectedHitRegion, 'target'> {
+  return pdfProjectedHitRegion([center], { center, kind: 'circle', radius }, radius);
+}
+
+function pdfProjectedHitRegion(
+  points: readonly PdfProjectedHitPoint[],
+  shape: PdfProjectedHitShape,
+  padding = 0,
+): Omit<PdfProjectedHitRegion, 'target'> {
+  const xs = points.map(({ x }) => x);
+  const ys = points.map(({ y }) => y);
+  return {
+    bottom: Math.max(...ys) + padding,
+    left: Math.min(...xs) - padding,
+    right: Math.max(...xs) + padding,
+    shape,
+    top: Math.min(...ys) - padding,
+  };
 }
 
 function pdfProjectedTargetIndex(

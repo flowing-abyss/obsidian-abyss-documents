@@ -364,6 +364,7 @@ export class ReaderController {
   private annotationInteractionController: AnnotationInteractionController | null = null;
   private annotationActivationAbort: AbortController | null = null;
   private pendingAnnotationSelectionRetry: PendingAnnotationSelectionRetry | null = null;
+  private selectedAnnotationNativeId: string | null = null;
   private currentAnnotationTool: PdfAnnotationTool = 'select';
   private annotationToolColors = annotationToolColorDefaults(
     DEFAULT_SETTINGS.annotations.palette[0]?.color ?? '#ffd400',
@@ -520,6 +521,7 @@ export class ReaderController {
       resolution.annotation.identity.kind === 'stable'
         ? resolution.annotation.identity.id
         : resolution.annotation.identity.fingerprint;
+    this.selectedAnnotationNativeId = id;
     shell.sidebar?.annotationsPanel.selectAnnotation(id);
     this.navigateToLocation(annotationLocation(resolution.annotation));
     return true;
@@ -640,6 +642,7 @@ export class ReaderController {
     shell: ReaderShell,
   ): () => void {
     this.cancelPendingAnnotationSelectionRetry();
+    this.selectedAnnotationNativeId = null;
     this.currentPageIndex = 0;
     this.navigationPageIndex = 0;
     this.pendingNavigationPageIndex = null;
@@ -1627,6 +1630,7 @@ export class ReaderController {
   private resetReaderState(): void {
     this.cancelAnnotationActivation(false);
     this.cancelPendingAnnotationSelectionRetry();
+    this.selectedAnnotationNativeId = null;
     this.outlineLoadedFor = null;
     this.outlineLoadingFor = null;
     this.resetAnnotationProjectionState();
@@ -2041,6 +2045,7 @@ export class ReaderController {
         this.navigateToLocation(location);
       },
       onAnnotationSelect: (activation) => {
+        this.selectedAnnotationNativeId = activation.nativeId;
         const interactionController = this.annotationInteractionController;
         const selected = interactionController?.selectAnnotation(activation.nativeId) ?? false;
         this.navigateToLocation(
@@ -2073,7 +2078,10 @@ export class ReaderController {
     const sidebar = shell.openSidebar(tab, callbacks);
     sidebar.outlinePanel.setCurrentPage(this.currentPageIndex);
     if (tab === 'outline') this.loadOutline(session, shell);
-    if (tab === 'annotations') this.loadAnnotations(session, shell);
+    if (tab === 'annotations') {
+      this.loadAnnotations(session, shell);
+      this.applyAnnotationSelection(shell);
+    }
   }
 
   private loadAnnotations(session: DocumentSession, shell: ReaderShell): void {
@@ -2165,6 +2173,7 @@ export class ReaderController {
     if (!Object.is(this.annotationsLoadedFor, session)) return false;
     shell.sidebar?.annotationsPanel.setProjectedAnnotations(this.annotationProjection.snapshot());
     shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
+    this.applyAnnotationSelection(shell);
     return true;
   }
 
@@ -2692,9 +2701,17 @@ export class ReaderController {
   }
 
   private handleAnnotationSelection(shell: ReaderShell, nativeId: string | null): void {
+    this.selectedAnnotationNativeId = nativeId;
     shell.closeAnnotationEditor();
-    if (nativeId === null) shell.sidebar?.annotationsPanel.clearSelection();
-    else shell.sidebar?.annotationsPanel.selectAnnotation(nativeId, false);
+    this.applyAnnotationSelection(shell);
+  }
+
+  private applyAnnotationSelection(shell: ReaderShell): void {
+    const panel = shell.sidebar?.annotationsPanel;
+    if (panel === undefined) return;
+    const nativeId = this.selectedAnnotationNativeId;
+    if (nativeId === null) panel.clearSelection();
+    else panel.selectAnnotation(nativeId, false);
   }
 
   private queueAnnotationProjectionEvent(
@@ -2782,6 +2799,7 @@ export class ReaderController {
     );
     shell.sidebar?.annotationsPanel.setProjectedAnnotations(this.annotationProjection.snapshot());
     shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
+    this.applyAnnotationSelection(shell);
   }
 
   private projectedAnnotationForStableId(stableId: string): DocumentAnnotation | null {

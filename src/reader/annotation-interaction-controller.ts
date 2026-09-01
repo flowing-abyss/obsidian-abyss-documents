@@ -310,12 +310,14 @@ export class AnnotationInteractionController {
   }
 
   private openSelectionEditor(selection: PdfTextSelection): void {
+    this.interaction.clearAnnotationSelection?.();
     const revision = this.activeSelectionRevision + 1;
     const opened = this.host.openAnnotationEditor({
       color: this.activeColor,
       onClose: (_reason, context) => {
         if (revision !== this.activeSelectionRevision) return;
         const materialized = this.activeEditorKind === 'annotation';
+        this.interaction.releaseSelection?.(selection.token);
         this.activeEditorKind = null;
         this.activeSelectionToken = null;
         this.ownedSelectionRevision = null;
@@ -344,11 +346,12 @@ export class AnnotationInteractionController {
       target: { kind: 'selection', selection },
     });
     if (opened) {
+      this.interaction.retainSelection?.(selection.token);
       this.activeEditorKind = 'selection';
       this.activeSelectionToken = selection.token;
       this.activeSelectionRevision = revision;
       this.ownedSelectionRevision = revision;
-    }
+    } else this.interaction.releaseSelection?.(selection.token);
   }
 
   private handleAnnotationFocus(focus: PdfAnnotationFocus | null): void {
@@ -464,7 +467,7 @@ export class AnnotationInteractionController {
       this.finishSelectionCreation({ abort, creation, materializeEditor, result, revision });
       return result;
     } catch (cause) {
-      this.failSelectionCreation(creation, abort, cause);
+      this.failSelectionCreation(creation, abort, cause, materializeEditor);
       throw cause;
     }
   }
@@ -490,24 +493,42 @@ export class AnnotationInteractionController {
       this.applyPendingQuickColor();
     }
     if (result === 'dismissed') {
+      if (!materializeEditor) this.interaction.releaseSelection?.(creation.selection.token);
       this.options.onSelectionCreateDiscard?.(creation);
       return;
     }
     if (!ownsTransaction || revision !== this.activeSelectionRevision) {
-      this.options.onSelectionCreateDiscard?.(creation);
+      this.releaseDiscardedSelection(creation);
       return;
     }
+    this.commitSelectionCreation(creation, result, revision, materializeEditor);
+  }
+
+  private releaseDiscardedSelection(creation: AnnotationEditorCreation): void {
+    this.interaction.releaseSelection?.(creation.selection.token);
+    this.options.onSelectionCreateDiscard?.(creation);
+  }
+
+  private commitSelectionCreation(
+    creation: AnnotationEditorCreation,
+    result: DocumentAnnotation,
+    revision: number,
+    materializeEditor: boolean,
+  ): void {
     if (materializeEditor) this.activeEditorKind = 'annotation';
     this.options.onSelectionCreateCommit?.(creation, result);
     if (materializeEditor) this.ownedSelectionRevision = revision;
+    this.interaction.releaseSelection?.(creation.selection.token);
   }
 
   private failSelectionCreation(
     creation: AnnotationEditorCreation,
     abort: AbortController,
     cause: unknown,
+    materializeEditor: boolean,
   ): void {
     this.options.onSelectionCreateDiscard?.(creation);
+    if (!materializeEditor) this.interaction.releaseSelection?.(creation.selection.token);
     if (this.activeAbort !== abort) return;
     this.activeAbort = null;
     this.applyPendingQuickColor();

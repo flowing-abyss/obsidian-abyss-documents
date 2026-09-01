@@ -54,6 +54,8 @@ const ANNOTATION_MODE_EXIT_FALLBACK_FRAMES = 5;
 const PDF_TO_CSS_UNITS = 96 / 72;
 const ANNOTATION_HIGHLIGHT_COLORS =
   'yellow=#ffd400,red=#ff6666,green=#5fb236,blue=#2ea8e5,purple=#a28ae5,magenta=#e56eee,orange=#f19837,gray=#aaaaaa';
+const ANNOTATION_ACTIVATION_SELECTOR =
+  '.annotationLayer :is(.underlineAnnotation, .textAnnotation, .highlightAnnotation, .inkAnnotation, .freeTextAnnotation)[data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]';
 
 type PdfEventBus = InstanceType<PdfRuntime['pdfjsViewer']['EventBus']>;
 type PdfLinkService = InstanceType<PdfRuntime['pdfjsViewer']['PDFLinkService']>;
@@ -124,6 +126,11 @@ interface AnnotationModeExitBarrier {
 interface MountedAnnotationContext {
   readonly internalId: string;
   readonly pageIndex: number;
+}
+
+interface AnnotationActivationTarget {
+  readonly id: string;
+  readonly node: HTMLElement;
 }
 
 interface FindRequest {
@@ -302,8 +309,6 @@ export class PdfDocumentViewport implements DocumentViewport {
   private selectionObserverInstance: PdfDomSelectionObserver | null = null;
   private selectionSnapshotUnsubscribe: (() => void) | null = null;
   private annotationMutationUnsubscribe: (() => void) | null = null;
-  private pendingPointerActivation: { readonly id: string; readonly pointerId: number } | null =
-    null;
   private root: HTMLDivElement | null = null;
   private viewerElement: HTMLDivElement | null = null;
   private destroyPromise: Promise<void> | null = null;
@@ -776,7 +781,6 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private registerRootListeners(root: HTMLElement): void {
     root.addEventListener('pointerdown', this.onRootPointerDown, { capture: true });
-    root.addEventListener('pointercancel', this.onRootPointerCancel, { capture: true });
     root.addEventListener('mousedown', this.onRootMouseDown, { capture: true });
     root.addEventListener('click', this.onRootClick, { capture: true });
     root.addEventListener('contextmenu', this.onRootContextMenu, { capture: true });
@@ -784,11 +788,9 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private unregisterRootListeners(root: HTMLElement): void {
     root.removeEventListener('pointerdown', this.onRootPointerDown, { capture: true });
-    root.removeEventListener('pointercancel', this.onRootPointerCancel, { capture: true });
     root.removeEventListener('mousedown', this.onRootMouseDown, { capture: true });
     root.removeEventListener('click', this.onRootClick, { capture: true });
     root.removeEventListener('contextmenu', this.onRootContextMenu, { capture: true });
-    this.clearPendingPointerActivation();
   }
 
   private createAnnotationEditor(
@@ -802,6 +804,9 @@ export class PdfDocumentViewport implements DocumentViewport {
       annotationEditorType: PDFJS_ANNOTATION_EDITOR_TYPE,
       commentBridge: this.requireMounted(this.commentBridge),
       eventBus,
+      onAnnotationSelectionClear: () => {
+        this.publishRootAnnotationSelectionCleared();
+      },
       pdf: this.pdf,
       selectionObserver: this.requireMounted(this.selectionObserverInstance),
       viewer,
@@ -1552,10 +1557,10 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly onRootClick = (event: MouseEvent): void => {
     const target = event.target;
     if (!isElementTarget(target)) return;
-    const annotationId = this.annotationActivationId(target);
-    if (annotationId !== null) {
+    const annotation = this.annotationActivationTarget(target, event.clientX, event.clientY);
+    if (annotation !== null) {
       if (!nativeAnnotationClickShouldPropagate(event, target)) event.stopPropagation();
-      this.handleRootAnnotationClick(event, target, annotationId);
+      this.handleRootAnnotationClick(event, annotation.node, annotation.id);
       return;
     }
     const retry = target.closest<HTMLButtonElement>('[data-action="retry-page"]');
@@ -1575,10 +1580,8 @@ export class PdfDocumentViewport implements DocumentViewport {
     annotationId: string,
   ): void {
     if (hasNativeSelectionModifier(event)) return;
-    const pending = this.pendingPointerActivation;
-    this.clearPendingPointerActivation();
     if (event.detail >= 2) return;
-    if (pending?.id !== annotationId) this.selectRootAnnotation(annotationId, target);
+    if (!this.rootAnnotationIsSelected(target)) this.selectRootAnnotation(annotationId, target);
     this.activateRootAnnotation(annotationId, 'root-click', {
       x: event.clientX,
       y: event.clientY,
@@ -1589,38 +1592,28 @@ export class PdfDocumentViewport implements DocumentViewport {
     if ((event.button !== 0 && event.button !== 2) || hasNativeSelectionModifier(event)) return;
     const target = event.target;
     if (!isElementTarget(target)) return;
-    const annotationId = this.annotationActivationId(target);
-    if (event.button === 2) {
-      if (annotationId !== null) event.stopPropagation();
+    if (event.button === 0) {
+      const annotation = this.directAnnotationActivationTarget(target);
+      if (annotation !== null) this.selectRootAnnotation(annotation.id, annotation.node);
       return;
     }
-    if (annotationId === null) {
-      this.clearRootAnnotationSelection();
-      return;
-    }
-    this.clearPendingPointerActivation();
-    const pending = {
-      id: annotationId,
-      pointerId: event.pointerId,
-    };
-    this.pendingPointerActivation = pending;
-    this.selectRootAnnotation(annotationId, target);
-  };
-
-  private readonly onRootPointerCancel = (event: PointerEvent): void => {
-    if (this.pendingPointerActivation?.pointerId === event.pointerId)
-      this.pendingPointerActivation = null;
+    const annotation = this.annotationActivationTarget(target, event.clientX, event.clientY);
+    if (annotation !== null) event.stopPropagation();
   };
 
   private readonly onRootMouseDown = (event: MouseEvent): void => {
     if (event.button !== 2 || hasNativeSelectionModifier(event)) return;
     const target = event.target;
-    if (!isElementTarget(target) || this.annotationActivationId(target) === null) return;
+    if (
+      !isElementTarget(target) ||
+      this.annotationActivationTarget(target, event.clientX, event.clientY) === null
+    )
+      return;
     event.stopPropagation();
   };
 
   private selectRootAnnotation(id: string, target: Element): void {
-    if (this.annotationInteraction?.selectAnnotation?.(id) !== true) return;
+    this.annotationInteraction?.selectAnnotation?.(id);
     this.markRootAnnotationSelected(target);
     this.events.emit({ type: 'annotation-select', nativeId: id });
   }
@@ -1635,9 +1628,23 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (node !== null) node.dataset['abyssAnnotationSelected'] = 'true';
   }
 
+  private rootAnnotationIsSelected(target: Element): boolean {
+    return (
+      target.closest<HTMLElement>(ANNOTATION_ACTIVATION_SELECTOR)?.dataset[
+        'abyssAnnotationSelected'
+      ] === 'true'
+    );
+  }
+
   private clearRootAnnotationSelection(): void {
-    this.clearPendingPointerActivation();
-    this.annotationInteraction?.clearAnnotationSelection?.();
+    if (this.annotationInteraction?.clearAnnotationSelection !== undefined) {
+      this.annotationInteraction.clearAnnotationSelection();
+      return;
+    }
+    this.publishRootAnnotationSelectionCleared();
+  }
+
+  private publishRootAnnotationSelectionCleared(): void {
     const selected = this.root?.querySelectorAll<HTMLElement>('[data-abyss-annotation-selected]');
     selected?.forEach((node) => delete node.dataset['abyssAnnotationSelected']);
     this.events.emit({ type: 'annotation-select', nativeId: null });
@@ -1659,26 +1666,112 @@ export class PdfDocumentViewport implements DocumentViewport {
       });
   }
 
-  private clearPendingPointerActivation(): void {
-    this.pendingPointerActivation = null;
-  }
-
   private readonly onRootContextMenu = (event: MouseEvent): void => {
     const target = event.target;
     if (!isElementTarget(target)) return;
-    const annotationId = this.annotationActivationId(target);
-    if (annotationId === null) return;
+    const annotation = this.annotationActivationTarget(target, event.clientX, event.clientY);
+    if (annotation === null) return;
     event.preventDefault();
     event.stopPropagation();
-    this.activateRootAnnotation(annotationId, 'root-context');
+    this.activateRootAnnotation(annotation.id, 'root-context');
   };
+
+  private annotationActivationTarget(
+    target: Element,
+    clientX: number,
+    clientY: number,
+  ): AnnotationActivationTarget | null {
+    const direct = this.directAnnotationActivationTarget(target);
+    if (direct !== null) return direct;
+    if (!this.canHitTestAnnotation(target, clientX, clientY)) return null;
+    const page = target.closest<HTMLElement>('[data-page-number]');
+    return page === null ? null : this.hitTestAnnotation(page, clientX, clientY);
+  }
+
+  private directAnnotationActivationTarget(target: Element): AnnotationActivationTarget | null {
+    const id = this.annotationActivationId(target);
+    if (id === null) return null;
+    const node = this.annotationActivationNode(target);
+    return node === null ? null : { id, node };
+  }
+
+  private canHitTestAnnotation(target: Element, clientX: number, clientY: number): boolean {
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+    if (target.closest('a, button, input, select, textarea') !== null) return false;
+    if (isNativeFreeTextEditingTarget(target)) return false;
+    return (
+      target.closest('.textLayer, .canvasWrapper, .annotationLayer, .annotationEditorLayer') !==
+      null
+    );
+  }
+
+  private hitTestAnnotation(
+    page: HTMLElement,
+    clientX: number,
+    clientY: number,
+  ): AnnotationActivationTarget | null {
+    const hitTestingDocument = page.ownerDocument as unknown as {
+      readonly elementsFromPoint?: (x: number, y: number) => Element[];
+    };
+    const elementsFromPoint = hitTestingDocument.elementsFromPoint;
+    if (elementsFromPoint === undefined)
+      return this.projectedAnnotationActivationTarget(page, clientX, clientY);
+    for (const element of elementsFromPoint.call(page.ownerDocument, clientX, clientY)) {
+      if (!page.contains(element)) continue;
+      const annotation = this.directAnnotationActivationTarget(element);
+      if (annotation !== null && this.annotationActivationNodeIsVisible(annotation.node))
+        return annotation;
+    }
+    return this.projectedAnnotationActivationTarget(page, clientX, clientY);
+  }
+
+  private projectedAnnotationActivationTarget(
+    page: HTMLElement,
+    clientX: number,
+    clientY: number,
+  ): AnnotationActivationTarget | null {
+    const pageNumber = positiveInteger(Number(page.dataset['pageNumber']));
+    if (pageNumber === null) return null;
+    const point = this.projectClientRects(pageNumber - 1, [
+      { bottom: clientY, left: clientX, right: clientX, top: clientY },
+    ])[0];
+    if (point === undefined) return null;
+    const hits = this.annotationEditorInstance?.hitTestProjectedAnnotations(pageNumber - 1, point);
+    if (hits === undefined) return null;
+    for (const hit of hits) {
+      const node = this.projectedAnnotationNode(page, hit.stableId, hit.editorUid);
+      if (node !== null && this.annotationActivationNodeIsVisible(node))
+        return { id: hit.stableId, node };
+    }
+    return null;
+  }
+
+  private projectedAnnotationNode(
+    page: HTMLElement,
+    stableId: string,
+    editorUid: string | undefined,
+  ): HTMLElement | null {
+    if (editorUid !== undefined) {
+      const editor = page.ownerDocument.getElementById(editorUid);
+      if (editor instanceof HTMLElement && page.contains(editor)) return editor;
+    }
+    return page.querySelector<HTMLElement>(
+      `.annotationLayer [data-annotation-id="${CSS.escape(stableId)}"]`,
+    );
+  }
+
+  private annotationActivationNode(target: Element): HTMLElement | null {
+    return target.closest<HTMLElement>(ANNOTATION_ACTIVATION_SELECTOR);
+  }
+
+  private annotationActivationNodeIsVisible(node: HTMLElement): boolean {
+    return node.closest('.hidden, [hidden]') === null;
+  }
 
   private annotationActivationId(target: Element): string | null {
     if (target.closest('a, button, input, select, textarea') !== null) return null;
     if (isNativeFreeTextEditingTarget(target)) return null;
-    const node = target.closest<HTMLElement>(
-      '.annotationLayer :is(.underlineAnnotation, .textAnnotation, .highlightAnnotation, .inkAnnotation, .freeTextAnnotation)[data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]',
-    );
+    const node = this.annotationActivationNode(target);
     if (node === null) return null;
     const internalId = annotationNodeInternalId(node);
     if (internalId.length === 0) return null;

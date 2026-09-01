@@ -20,6 +20,8 @@ export interface PdfSelectionObserver {
   onSelection(listener: (selection: PdfTextSelection | null) => void): () => void;
   validate(token: string): 'current' | 'stale';
   restore?(token: string): 'current' | 'stale';
+  retain?(token: string): boolean;
+  release?(token: string): boolean;
   resolveAnchor?(token: string): DOMRect | null;
   invalidate(): void;
 }
@@ -69,6 +71,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   } | null = null;
   private touchGesture = false;
   private suppressPointerSelection = false;
+  private selectionPreview: HTMLElement | null = null;
+  private retainedToken: string | null = null;
   private destroyed = false;
 
   constructor(private readonly root: HTMLElement) {
@@ -122,6 +126,18 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     return this.validate(token);
   }
 
+  release(token: string): boolean {
+    if (token !== this.active?.token) return false;
+    this.dismissPublishedSelection();
+    return true;
+  }
+
+  retain(token: string): boolean {
+    if (this.destroyed || token !== this.active?.token) return false;
+    this.retainedToken = token;
+    return true;
+  }
+
   resolveAnchor(token: string): DOMRect | null {
     const active = this.active;
     if (!this.canResolveAnchor(token, active)) return null;
@@ -172,6 +188,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     if (this.destroyed) return;
     this.revision += 1;
     this.active = null;
+    this.retainedToken = null;
+    this.clearSelectionPreview();
     this.pendingPublication = null;
     this.pointerGesture = null;
     this.touchGesture = false;
@@ -184,6 +202,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     if (this.destroyed) return;
     this.destroyed = true;
     this.active = null;
+    this.retainedToken = null;
+    this.clearSelectionPreview();
     this.pendingPublication = null;
     this.cancelFrame();
     this.ownerDocument.removeEventListener('selectionchange', this.onSelectionChange);
@@ -199,18 +219,26 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   }
 
   private readonly onSelectionChange = (): void => {
-    if (
+    if (this.selectionChangeIsSuppressed()) return;
+    if (this.pendingPublication !== null && this.input !== 'keyboard') return;
+    const publication = this.capturePendingPublication();
+    if (this.shouldKeepPublishedSelection(publication)) return;
+    this.schedulePublication(publication);
+  };
+
+  private selectionChangeIsSuppressed(): boolean {
+    return (
       this.destroyed ||
       this.pointerGesture !== null ||
       this.touchGesture ||
       this.suppressPointerSelection
-    )
-      return;
-    if (this.pendingPublication !== null && this.input !== 'keyboard') return;
-    const publication = this.capturePendingPublication();
-    if (publication.selection === null && this.active !== null && this.input !== 'keyboard') return;
-    this.schedulePublication(publication);
-  };
+    );
+  }
+
+  private shouldKeepPublishedSelection(publication: PendingSelectionPublication): boolean {
+    if (publication.selection !== null || this.active === null) return false;
+    return this.input !== 'keyboard' || this.retainedToken === this.active.token;
+  }
 
   private schedulePublication(publication: PendingSelectionPublication): void {
     if (this.destroyed) return;
@@ -313,6 +341,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     if (selection === null) {
       this.revision += 1;
       this.active = null;
+      this.retainedToken = null;
+      this.clearSelectionPreview();
       this.emit(null);
       return;
     }
@@ -320,6 +350,8 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     this.revision += 1;
     const token = `${this.session}.${this.revision}.${++nextSelectionIdentity}`;
     this.active = { ...selection, token };
+    this.retainedToken = null;
+    this.renderSelectionPreview(selection);
     this.emit({
       token,
       text: selection.text,
@@ -392,10 +424,48 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
   private dismissPublishedSelection(): void {
     this.cancelFrame();
     this.pendingPublication = null;
+    this.retainedToken = null;
     if (this.active === null) return;
     this.revision += 1;
     this.active = null;
+    this.clearSelectionPreview();
     this.emit(null);
+  }
+
+  private renderSelectionPreview(selection: CapturedSelection): void {
+    this.clearSelectionPreview();
+    const textLayer = selection.textLayer as HTMLElement;
+    const layerBounds = textLayer.getBoundingClientRect();
+    const scaleX =
+      layerBounds.width > 0 && textLayer.clientWidth > 0
+        ? textLayer.clientWidth / layerBounds.width
+        : 1;
+    const scaleY =
+      layerBounds.height > 0 && textLayer.clientHeight > 0
+        ? textLayer.clientHeight / layerBounds.height
+        : 1;
+    const preview = textLayer.createDiv({ cls: 'abyss-pdf-selection-preview' });
+    preview.dataset['abyssSelectionPreview'] = '';
+    preview.setAttribute('aria-hidden', 'true');
+    for (const rect of selection.clientRects) {
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      const box = preview.createSpan();
+      box.dataset['abyssSelectionPreviewRect'] = '';
+      box.style.left = `${String((rect.left - layerBounds.left) * scaleX)}px`;
+      box.style.top = `${String((rect.top - layerBounds.top) * scaleY)}px`;
+      box.style.width = `${String(rect.width * scaleX)}px`;
+      box.style.height = `${String(rect.height * scaleY)}px`;
+    }
+    if (preview.childElementCount === 0) {
+      preview.remove();
+      return;
+    }
+    this.selectionPreview = preview;
+  }
+
+  private clearSelectionPreview(): void {
+    this.selectionPreview?.remove();
+    this.selectionPreview = null;
   }
 
   private cancelFrame(): void {

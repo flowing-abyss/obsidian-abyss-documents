@@ -183,6 +183,78 @@ describe('PdfDomSelectionObserver', () => {
     observer.destroy();
   });
 
+  it('keeps a visible preview after PDF.js clears the native pointer selection', async () => {
+    const root = selectionRoot();
+    const textLayer = root.querySelector<HTMLElement>('.textLayer');
+    const text = textLayer?.firstChild;
+    if (textLayer === null || text?.nodeType !== Node.TEXT_NODE)
+      throw new Error('Expected a text layer with a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+
+    primaryPointer(root, 'pointerdown');
+    selectText(document, text, 2, 10);
+    primaryPointer(text, 'pointerup');
+    dispatchSelection(document);
+    await nextFrame();
+
+    document.getSelection()?.removeAllRanges();
+    dispatchSelection(document);
+    await nextFrame();
+
+    const preview = textLayer.querySelector<HTMLElement>('[data-abyss-selection-preview]');
+    expect(preview?.getAttribute('aria-hidden')).toBe('true');
+    expect(preview?.querySelectorAll('[data-abyss-selection-preview-rect]')).toHaveLength(2);
+
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published selection.');
+    expect(
+      (
+        observer as unknown as {
+          release(token: string): boolean;
+        }
+      ).release(published.token),
+    ).toBe(true);
+    expect(textLayer.querySelector('[data-abyss-selection-preview]')).toBeNull();
+    observer.destroy();
+  });
+
+  it('retains a keyboard selection while its annotation editor owns the token', async () => {
+    const root = selectionRoot();
+    const textLayer = root.querySelector<HTMLElement>('.textLayer');
+    const text = textLayer?.firstChild;
+    if (textLayer === null || text?.nodeType !== Node.TEXT_NODE)
+      throw new Error('Expected a text layer with a text node.');
+    const observer = new PdfDomSelectionObserver(root);
+    const listener = vi.fn<(selection: PdfTextSelection | null) => void>();
+    observer.onSelection(listener);
+    selectText(document, text, 2, 10);
+    emitSelection(root, 'keyboard');
+    await nextFrame();
+    const published = listener.mock.calls.find(([value]) => value !== null)?.[0];
+    if (published === null || published === undefined)
+      throw new Error('Expected a published keyboard selection.');
+
+    expect(
+      (
+        observer as unknown as {
+          retain(token: string): boolean;
+        }
+      ).retain(published.token),
+    ).toBe(true);
+    document.getSelection()?.removeAllRanges();
+    dispatchSelection(document);
+    await nextFrame();
+
+    expect(listener).toHaveBeenCalledExactlyOnceWith(published);
+    expect(textLayer.querySelector('[data-abyss-selection-preview]')).not.toBeNull();
+    expect(observer.release(published.token)).toBe(true);
+    expect(textLayer.querySelector('[data-abyss-selection-preview]')).toBeNull();
+    observer.destroy();
+  });
+
   it('resolves the live last selection rectangle and rejects a replaced text layer', async () => {
     const root = selectionRoot();
     const text = root.querySelector('.textLayer')?.firstChild;

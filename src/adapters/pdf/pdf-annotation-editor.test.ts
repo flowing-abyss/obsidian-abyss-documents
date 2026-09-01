@@ -2603,6 +2603,133 @@ describe('PdfAnnotationEditor lifecycle', () => {
     }
   });
 
+  it('hit-tests overlapping projected annotations from a page-local spatial grid', () => {
+    const current = fixture();
+    const lower = {
+      ...createdAnnotation('', { id: 'lower-highlight' }),
+      anchor: {
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: {
+          kind: 'rectangle' as const,
+          rectangle: { height: 20, width: 120, x: 40, y: 80 },
+        },
+        kind: 'fixed-page' as const,
+        pageIndex: 0,
+      },
+    };
+    const upper = {
+      ...createdAnnotation('', { id: 'upper-highlight' }),
+      anchor: {
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: {
+          kind: 'rectangle' as const,
+          rectangle: { height: 12, width: 80, x: 60, y: 84 },
+        },
+        kind: 'fixed-page' as const,
+        pageIndex: 0,
+      },
+    };
+    current.editor.setAnnotationProjection([
+      { annotation: lower, editorUid: 'lower-editor', stableId: 'lower-highlight' },
+      { annotation: upper, editorUid: 'upper-editor', stableId: 'upper-highlight' },
+    ]);
+
+    expect(current.editor.hitTestProjectedAnnotation(0, { x: 72, y: 90 })).toEqual({
+      editorUid: 'upper-editor',
+      stableId: 'upper-highlight',
+    });
+    expect(current.editor.hitTestProjectedAnnotations(0, { x: 72, y: 90 })).toEqual([
+      { editorUid: 'upper-editor', stableId: 'upper-highlight' },
+      { editorUid: 'lower-editor', stableId: 'lower-highlight' },
+    ]);
+    expect(current.editor.hitTestProjectedAnnotation(0, { x: 10, y: 10 })).toBeNull();
+    expect(current.editor.hitTestProjectedAnnotation(1, { x: 72, y: 90 })).toBeNull();
+  });
+
+  it('rejects empty bounding-box space around angled quadrilaterals and ink segments', () => {
+    const current = fixture();
+    const quadrilateral = {
+      ...createdAnnotation('', { id: 'angled-highlight' }),
+      anchor: {
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: {
+          kind: 'quadrilaterals' as const,
+          quadrilaterals: [
+            {
+              bottomLeft: { x: 0, y: 50 },
+              bottomRight: { x: 50, y: 100 },
+              topLeft: { x: 50, y: 0 },
+              topRight: { x: 100, y: 50 },
+            },
+          ],
+        },
+        kind: 'fixed-page' as const,
+        pageIndex: 0,
+      },
+    };
+    const ink = {
+      ...createdAnnotation('', { id: 'diagonal-ink', type: 'ink' }),
+      anchor: {
+        coordinateSpace: 'page-points-top-left' as const,
+        geometry: {
+          kind: 'ink' as const,
+          paths: [
+            [
+              { x: 0, y: 0 },
+              { x: 100, y: 100 },
+            ],
+          ],
+        },
+        kind: 'fixed-page' as const,
+        pageIndex: 1,
+      },
+    };
+    current.editor.setAnnotationProjection([
+      { annotation: quadrilateral, stableId: 'angled-highlight' },
+      { annotation: ink, stableId: 'diagonal-ink' },
+    ]);
+
+    expect(current.editor.hitTestProjectedAnnotation(0, { x: 50, y: 50 })).toMatchObject({
+      stableId: 'angled-highlight',
+    });
+    expect(current.editor.hitTestProjectedAnnotation(0, { x: 10, y: 10 })).toBeNull();
+    expect(current.editor.hitTestProjectedAnnotation(1, { x: 50, y: 52 })).toMatchObject({
+      stableId: 'diagonal-ink',
+    });
+    expect(current.editor.hitTestProjectedAnnotation(1, { x: 50, y: 10 })).toBeNull();
+  });
+
+  it('hit-tests one target without degrading a 10,000-annotation projection', () => {
+    const current = fixture();
+    const annotations = Array.from({ length: 10_000 }, (_, index) => {
+      const id = `large-projection-${String(index)}`;
+      const x = (index % 100) * 10;
+      const y = Math.floor(index / 100) * 10;
+      return {
+        annotation: {
+          ...createdAnnotation('', { id }),
+          anchor: {
+            coordinateSpace: 'page-points-top-left' as const,
+            geometry: {
+              kind: 'rectangle' as const,
+              rectangle: { height: 4, width: 4, x, y },
+            },
+            kind: 'fixed-page' as const,
+            pageIndex: 0,
+          },
+        },
+        editorUid: `editor-${String(index)}`,
+        stableId: id,
+      };
+    });
+    current.editor.setAnnotationProjection(annotations);
+
+    expect(current.editor.hitTestProjectedAnnotation(0, { x: 992, y: 992 })).toEqual({
+      editorUid: 'editor-9999',
+      stableId: 'large-projection-9999',
+    });
+  });
+
   it('suppresses the duplicate PDF.js toolbar while unified controls are active and restores it on teardown', async () => {
     const current = fixture();
     const annotation = createdAnnotation('', { id: 'toolbar-highlight' });

@@ -1063,6 +1063,29 @@
 .abyss-documents .textLayer .editToolbar {
   display: none !important;
 }
+
+.abyss-documents .textLayer .abyss-pdf-selection-preview {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+}
+
+.abyss-documents .textLayer [data-abyss-selection-preview-rect] {
+  position: absolute;
+  border-radius: 1px;
+  background: color-mix(in srgb, AccentColor, transparent 50%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, AccentColor, transparent 66%);
+}
+
+.abyss-documents
+  :is(
+    .annotationLayer [data-abyss-annotation-selected],
+    .annotationEditorLayer [data-abyss-annotation-selected]
+  ) {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
 /* stylelint-enable selector-class-pattern */
 
 @container abyss-reader (inline-size <= 760px) {

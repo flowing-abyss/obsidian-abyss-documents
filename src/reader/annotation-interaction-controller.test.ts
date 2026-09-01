@@ -101,8 +101,12 @@ function fixture(
   const deleteAnnotations = vi.fn(() => true);
   const focusAnnotation = vi.fn(async () => 'editable' as const);
   const abortInteraction = vi.fn(async () => undefined);
+  const clearAnnotationSelection = vi.fn();
+  const retainSelection = vi.fn(() => true);
+  const releaseSelection = vi.fn(() => true);
   const interaction: PdfAnnotationInteraction = {
     abortInteraction,
+    clearAnnotationSelection,
     commitSelection,
     deleteAnnotations,
     focusAnnotation,
@@ -123,6 +127,8 @@ function fixture(
       selectionListeners.add(listener);
       return () => selectionListeners.delete(listener);
     },
+    retainSelection,
+    releaseSelection,
     setQuickHighlight,
     updateAnnotations,
   };
@@ -151,6 +157,7 @@ function fixture(
   });
   return {
     abortInteraction,
+    clearAnnotationSelection,
     closeAnnotationEditor,
     commitSelection,
     controller,
@@ -176,6 +183,8 @@ function fixture(
     observedModes,
     openAnnotationEditor,
     opened,
+    retainSelection,
+    releaseSelection,
     selectionListenerCount: () => selectionListeners.size,
     setQuickHighlight,
     states,
@@ -324,6 +333,7 @@ describe('AnnotationInteractionController', () => {
     await expect(committing).resolves.toMatchObject({
       identity: { id: 'created-native', kind: 'stable' },
     });
+    expect(test.releaseSelection).toHaveBeenCalledExactlyOnceWith(selection.token);
   });
 
   it('retains the owned selection draft when focusing metadata clears native text selection', async () => {
@@ -472,6 +482,24 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it('releases a terminal Sticky Highlight dismissal without opening an editor', async () => {
+    const test = fixture();
+    test.commitSelection.mockResolvedValueOnce('dismissed');
+    test.controller.requestTool('highlight');
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    });
+    test.emitMode('neutral');
+    const selection = textSelection('sticky-dismissed');
+
+    test.emitSelection(selection);
+
+    await vi.waitFor(() => {
+      expect(test.releaseSelection).toHaveBeenCalledExactlyOnceWith(selection.token);
+    });
+    expect(test.openAnnotationEditor).not.toHaveBeenCalled();
+  });
+
   it('passes the complete unified metadata draft to native comment creation', async () => {
     const test = fixture();
     const selection = textSelection('comment-selection');
@@ -567,6 +595,14 @@ describe('AnnotationInteractionController', () => {
     }
 
     expect(test.opened).toHaveLength(5);
+    expect(test.clearAnnotationSelection).toHaveBeenCalledTimes(5);
+    expect(test.retainSelection.mock.calls).toEqual([
+      ['neutral'],
+      ['zoom'],
+      ['layout'],
+      ['navigation'],
+      ['session'],
+    ]);
     expect(test.closeAnnotationEditor).toHaveBeenCalled();
     test.controller.destroy();
   });
@@ -1090,6 +1126,7 @@ describe('AnnotationInteractionController', () => {
     });
     expect(started).toEqual([{ color: '#ffd400', comment: '', selection }]);
     expect(discarded).toEqual([{ color: '#ffd400', comment: '', selection }]);
+    expect(test.releaseSelection).toHaveBeenCalledExactlyOnceWith(selection.token);
     expect(test.openAnnotationEditor).not.toHaveBeenCalled();
     expect(test.controller.quickHighlightArmed).toBe(true);
     test.controller.destroy();
@@ -1741,6 +1778,7 @@ describe('AnnotationInteractionController', () => {
       annotation: readonly,
       kind: 'readonly',
     });
+    expect(test.releaseSelection).toHaveBeenCalledExactlyOnceWith('rejected-selection');
     test.controller.destroy();
   });
 

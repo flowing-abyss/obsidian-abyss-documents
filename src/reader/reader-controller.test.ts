@@ -637,6 +637,50 @@ describe('ReaderController', () => {
     extraction.resolve();
   });
 
+  it('replays a PDF annotation selection when the annotations panel opens later', async () => {
+    const [pdf] = files('Books/Deferred-sidebar-selection.pdf');
+    if (pdf === undefined) throw new Error('Expected a PDF fixture.');
+    const createdViewport = interactiveViewport();
+    const createdSession = session(pdf.path, createdViewport);
+    const extraction = deferred<void>();
+    Object.assign(createdSession.value, { listAnnotations: async () => extraction.promise });
+    const shell = capturingShellFactory();
+    const controller = new ReaderController(
+      new DocumentAdapterRegistry([adapterFor(pdf.path, createdSession).value]),
+      shell.createShell,
+    );
+    await controller.open(pdf, createDiv());
+    createdViewport.emit({
+      type: 'annotation-change',
+      change: {
+        operation: 'upsert',
+        annotation: {
+          nativeId: 'selected-before-sidebar',
+          pageIndex: 0,
+          type: 'highlight',
+          rects: [{ x: 10, y: 20, width: 100, height: 12 }],
+          selectedText: 'Selected before sidebar',
+          color: '#ffd400',
+          comment: '',
+          tags: [],
+          links: [],
+          writable: true,
+        },
+      },
+    });
+    await waitForAnimationFrame();
+
+    createdViewport.emit({ type: 'annotation-select', nativeId: 'selected-before-sidebar' });
+    shell.send({ type: 'open-sidebar', tab: 'annotations' });
+
+    expect(
+      shell.created.sidebar?.annotationsPanel.root.querySelector(
+        '[data-annotation-id="selected-before-sidebar"][aria-current="true"]',
+      ),
+    ).not.toBeNull();
+    extraction.resolve();
+  });
+
   it('retries cheap sidebar selection after a far-page annotation has mounted', async () => {
     const [pdf] = files('Books/Far-page-cheap-selection.pdf');
     if (pdf === undefined) throw new Error('Expected a PDF fixture.');

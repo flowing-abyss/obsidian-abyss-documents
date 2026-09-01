@@ -12,6 +12,18 @@ const activeReaderSelector = '.workspace-leaf.mod-active [data-abyss-document]';
 const selectionEditorSelector =
   '.workspace-leaf.mod-active .abyss-documents > [data-annotation-editor-popover]:not([hidden])';
 const nativeEditorSelector = selectionEditorSelector;
+
+async function computedOutline(
+  selector: string,
+): Promise<{ readonly style: string; readonly width: string }> {
+  return browser.execute((targetSelector) => {
+    const target = document.querySelector(targetSelector);
+    if (!(target instanceof HTMLElement))
+      throw new Error(`Selected annotation is unavailable: ${targetSelector}`);
+    const style = getComputedStyle(target);
+    return { style: style.outlineStyle, width: style.outlineWidth };
+  }, selector);
+}
 const task4AutocompletePath = 'Task 4 autocomplete.md';
 
 function activeReaderDescendant(selector: string): string {
@@ -435,7 +447,7 @@ async function dragFixtureTextWhileInspectingPalette(
 async function clickNativeHighlight(
   index: number,
   modifierKeys: readonly string[] = [],
-): Promise<void> {
+): Promise<{ readonly hitTextLayer: boolean; readonly target: string }> {
   const point = await browser.execute((editorIndex) => {
     const editor = document.querySelectorAll<HTMLElement>('.highlightEditor')[editorIndex];
     if (editor === undefined) throw new Error(`Native highlight ${editorIndex} is missing.`);
@@ -455,6 +467,14 @@ async function clickNativeHighlight(
       y: Math.round(bounds.top + bounds.height / 2),
     };
   }, index);
+  const hit = await browser.execute(({ x, y }) => {
+    const target = document.elementFromPoint(x, y);
+    if (!(target instanceof Element)) throw new Error('Native highlight has no hit-test target.');
+    return {
+      hitTextLayer: target.closest('.textLayer') !== null,
+      target: `${target.tagName}.${target.className}`,
+    };
+  }, point);
   try {
     await browser.execute(() => {
       const events: Array<{
@@ -542,6 +562,84 @@ async function clickNativeHighlight(
   } finally {
     await browser.releaseActions();
   }
+  return hit;
+}
+
+async function clickHighlightThroughTextLayer(index: number): Promise<{
+  readonly forcedStackContainsActivationTarget: boolean;
+  readonly hitTextLayer: boolean;
+  readonly stack: readonly string[];
+  readonly target: string;
+}> {
+  const result = await browser.execute((editorIndex) => {
+    const editor = document.querySelectorAll<HTMLElement>('.highlightEditor')[editorIndex];
+    if (editor === undefined) throw new Error(`Native highlight ${editorIndex} is missing.`);
+    const bounds = editor.getBoundingClientRect();
+    if (!editor.isConnected || bounds.width <= 2 || bounds.height <= 2)
+      throw new Error(`Native highlight ${editorIndex} has no visible bounds.`);
+    const point = {
+      x: Math.round(bounds.left + bounds.width / 2),
+      y: Math.round(bounds.top + bounds.height / 2),
+    };
+    const target = document.elementFromPoint(point.x, point.y);
+    if (!(target instanceof Element)) throw new Error('Native highlight has no hit-test target.');
+    const stack = document.elementsFromPoint(point.x, point.y);
+    const activationSelector = '.annotationLayer [data-annotation-id], .annotationEditorLayer [id]';
+    const forcedStack = stack.filter((element) => element.closest(activationSelector) === null);
+    const host = window as Window & {
+      __abyssOriginalElementsFromPoint?: (x: number, y: number) => Element[];
+    };
+    host.__abyssOriginalElementsFromPoint = document.elementsFromPoint.bind(document);
+    Object.defineProperty(document, 'elementsFromPoint', {
+      configurable: true,
+      value: () => forcedStack,
+    });
+    return {
+      hit: {
+        forcedStackContainsActivationTarget: forcedStack.some(
+          (element) => element.closest(activationSelector) !== null,
+        ),
+        hitTextLayer: target.closest('.textLayer') !== null,
+        stack: stack.map(
+          (element) =>
+            `${element.tagName}.${element.className}#${element.id}[annotation=${
+              (element as HTMLElement).dataset['annotationId'] ?? ''
+            }]`,
+        ),
+        target: `${target.tagName}.${target.className}`,
+      },
+      point,
+    };
+  }, index);
+  try {
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'annotation-text-layer-pointer',
+        parameters: { pointerType: 'mouse' },
+        actions: [
+          { type: 'pointerMove', duration: 0, origin: 'viewport', ...result.point },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pointerUp', button: 0 },
+        ],
+      },
+    ]);
+  } finally {
+    await browser.releaseActions();
+    await browser.execute(() => {
+      const host = window as Window & {
+        __abyssOriginalElementsFromPoint?: (x: number, y: number) => Element[];
+      };
+      const original = host.__abyssOriginalElementsFromPoint;
+      if (original !== undefined)
+        Object.defineProperty(document, 'elementsFromPoint', {
+          configurable: true,
+          value: original,
+        });
+      delete host.__abyssOriginalElementsFromPoint;
+    });
+  }
+  return result.hit;
 }
 
 async function installOverlapContinuityTrace(expectedIds: readonly string[]): Promise<void> {
@@ -2263,7 +2361,44 @@ describe('reader selection-first annotations', () => {
     await selectFixtureText();
 
     await $(selectionEditorSelector).waitForDisplayed({ timeout: 5_000 });
+    expect(
+      await browser.execute(() => {
+        window.getSelection()?.removeAllRanges();
+        document.dispatchEvent(new Event('selectionchange'));
+        return window.getSelection()?.toString() ?? '';
+      }),
+    ).toBe('');
+    await expect($('[data-abyss-selection-preview]')).toBeDisplayed();
+    await expect($('[data-abyss-selection-preview-rect]')).toBeDisplayed();
     await expect($(`${selectionEditorSelector} [aria-label="Comment"]`)).toExist();
+  });
+
+  it('visibly selects a just-created highlight on the page and in the annotation list', async () => {
+    await selectFixtureText();
+    await $(selectionEditorSelector).waitForDisplayed({ timeout: 5_000 });
+
+    await $(`${selectionEditorSelector} [data-editor-color="#ffd400"]`).click();
+    await $('.highlightEditor').waitForDisplayed({ timeout: 10_000 });
+    await expect($('[data-abyss-selection-preview]')).not.toExist();
+    await browser.keys(Key.Escape);
+
+    const hit = await clickHighlightThroughTextLayer(0);
+    expect(hit.hitTextLayer).toBe(true);
+    expect(hit.forcedStackContainsActivationTarget).toBe(false);
+    const created = $('[data-abyss-annotation-selected]');
+    await expect(created).toHaveAttribute('data-abyss-annotation-selected', 'true');
+    expect(await computedOutline('[data-abyss-annotation-selected]')).toEqual({
+      style: 'solid',
+      width: '2px',
+    });
+    await $('[data-control="sidebar"]').click();
+    await $('[data-tab="annotations"]').click();
+    await expect($('.abyss-annotation-card[aria-current="true"]')).toExist();
+
+    await selectFixtureText(2);
+    await $(selectionEditorSelector).waitForDisplayed({ timeout: 5_000 });
+    await expect($('[data-abyss-annotation-selected]')).not.toExist();
+    await expect($('.abyss-annotation-card[aria-current="true"]')).not.toExist();
   });
 
   it('waits for a genuine primary text drag to end before showing selection actions', async () => {
@@ -3095,6 +3230,7 @@ describe('reader selection-first annotations', () => {
           : activeReaderDescendant(fixture.persistedSelector);
       await $(persistedTarget).click();
       await expect($(persistedTarget)).toHaveAttribute('data-abyss-annotation-selected', 'true');
+      expect(await computedOutline(persistedTarget)).toEqual({ style: 'solid', width: '2px' });
       await expect($(nativeEditorSelector)).not.toBeDisplayed();
       await assertFreshNeutralReader(fixture);
       await $(persistedTarget).click({ button: 'right' });

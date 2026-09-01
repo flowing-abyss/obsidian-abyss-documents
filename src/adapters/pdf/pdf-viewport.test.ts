@@ -1345,12 +1345,125 @@ describe('PdfDocumentViewport', () => {
     expect(focusAnnotation).toHaveBeenCalledTimes(2);
   });
 
+  it('hit-tests a disabled highlight beneath the text layer before selecting it', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    const observedSelections: Array<string | null> = [];
+    const stopObserving = fixture.viewport.onEvent((event) => {
+      if (event.type === 'annotation-select') observedSelections.push(event.nativeId);
+    });
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(true);
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const page = root.createDiv();
+    page.dataset['pageNumber'] = '1';
+    const editorLayer = page.createDiv({ cls: 'annotationEditorLayer' });
+    const hiddenEditor = editorLayer.createDiv({ cls: 'highlightEditor hidden' });
+    hiddenEditor.id = 'hidden-point-highlight';
+    const editor = editorLayer.createDiv({ cls: 'highlightEditor disabled' });
+    editor.id = 'point-highlight';
+    vi.spyOn(editor, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 24, width: 120, x: 40, y: 80 }),
+    );
+    const text = page.createDiv({ cls: 'textLayer' }).createSpan({ text: 'Highlighted' });
+    const elementsFromPoint = vi.fn(() => [text, hiddenEditor, editor, page]);
+    Object.defineProperty(document, 'elementsFromPoint', {
+      configurable: true,
+      value: elementsFromPoint,
+    });
+
+    text.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        clientX: 64,
+        clientY: 92,
+        isPrimary: true,
+        pointerId: 11,
+      }),
+    );
+    expect(selectAnnotation).not.toHaveBeenCalled();
+    expect(elementsFromPoint).not.toHaveBeenCalled();
+    text.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, button: 0, clientX: 64, clientY: 92 }),
+    );
+
+    expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('point-highlight');
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('point-highlight', {
+      clientPosition: { x: 64, y: 92 },
+      kind: 'root-click',
+    });
+    expect(editor.dataset['abyssAnnotationSelected']).toBe('true');
+    expect(elementsFromPoint).toHaveBeenCalledExactlyOnceWith(64, 92);
+    interaction.clearAnnotationSelection?.();
+    expect(editor.dataset['abyssAnnotationSelected']).toBeUndefined();
+    expect(observedSelections).toEqual(['point-highlight', null]);
+    stopObserving();
+    Reflect.deleteProperty(document, 'elementsFromPoint');
+  });
+
+  it('selects a projected static highlight when browser stack hit-testing is unavailable', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    const editor = fixture.viewport.annotationEditor;
+    if (interaction === null || editor === null)
+      throw new Error('Expected mounted annotation editing.');
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(true);
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('readonly');
+    const page = fixture.host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (page === null) throw new Error('Expected PDF page.');
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'projected-static-highlight';
+    const hiddenEditor = page
+      .createDiv({ cls: 'annotationEditorLayer' })
+      .createDiv({ cls: 'highlightEditor' });
+    hiddenEditor.id = 'projected-hidden-highlight';
+    hiddenEditor.classList.add('hidden');
+    const text = page.createDiv({ cls: 'textLayer' }).createSpan({ text: 'Highlighted' });
+    editor.setAnnotationProjection([
+      {
+        annotation: writableHighlight('projected-static-highlight'),
+        stableId: 'projected-static-highlight',
+      },
+      {
+        annotation: writableHighlight('projected-hidden-highlight'),
+        editorUid: 'projected-hidden-highlight',
+        stableId: 'projected-hidden-highlight',
+      },
+      {
+        annotation: writableHighlight('projected-missing-highlight'),
+        editorUid: 'projected-missing-highlight',
+        stableId: 'projected-missing-highlight',
+      },
+    ]);
+    Reflect.deleteProperty(document, 'elementsFromPoint');
+
+    text.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, button: 0, clientX: 20, clientY: 40 }),
+    );
+
+    expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('projected-static-highlight');
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('projected-static-highlight', {
+      clientPosition: { x: 20, y: 40 },
+      kind: 'root-click',
+    });
+    expect(annotation.dataset['abyssAnnotationSelected']).toBe('true');
+  });
+
   it('activates an ordinary annotation click even when cheap selection cannot resolve it', async () => {
     const fixture = await mountedViewport(3);
     const interaction = fixture.viewport.annotationInteraction;
     if (interaction === null) throw new Error('Expected mounted annotation interaction.');
     const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
     const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(false);
+    const observedSelections: Array<string | null> = [];
+    fixture.viewport.onEvent((event) => {
+      if (event.type === 'annotation-select') observedSelections.push(event.nativeId);
+    });
     const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
     if (root === null) throw new Error('Expected PDF root.');
     const annotation = root
@@ -1365,6 +1478,8 @@ describe('PdfDocumentViewport', () => {
       clientPosition: { x: 96, y: 312 },
       kind: 'root-click',
     });
+    expect(annotation.dataset['abyssAnnotationSelected']).toBe('true');
+    expect(observedSelections).toEqual(['recoverable-root']);
   });
 
   it('intercepts contextual activation before native target handlers can relay focus', async () => {
