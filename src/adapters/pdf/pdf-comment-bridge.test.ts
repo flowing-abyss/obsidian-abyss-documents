@@ -1725,6 +1725,80 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('clears an active readonly source when the PDF.js manager is replaced', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    node.id = 'readonly-old-manager';
+    const native = editor('Locked', { anchor: node, uid: node.id });
+    const popupState = vi.fn();
+    native.setCommentButtonStates = popupState;
+    const oldManager = uiManager(native);
+    oldManager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
+    const replacement = editor('Replacement', { uid: 'readonly-new-manager' });
+    const replacementPopupState = vi.fn();
+    replacement.setCommentButtonStates = replacementPopupState;
+    const newManager = uiManager(replacement);
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(oldManager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    await expect(
+      bridge.focusAnnotation(node.id, undefined, annotation(node.id, false), {
+        forceReadonly: true,
+      }),
+    ).resolves.toBe(true);
+    popupState.mockClear();
+
+    bridge.setSidebarUiManager(newManager);
+    bridge.setSidebarUiManager(newManager);
+
+    expect(focused.filter((focus) => focus === null)).toHaveLength(1);
+    expect(popupState).toHaveBeenCalledExactlyOnceWith({
+      hasPopup: false,
+      selected: false,
+    });
+    expect(replacementPopupState).not.toHaveBeenCalled();
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('clears an active readonly source when its native DOM node detaches', async () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const node = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    node.id = 'readonly-detached';
+    const native = editor('Locked', { anchor: node, uid: node.id });
+    const popupState = vi.fn();
+    native.setCommentButtonStates = popupState;
+    const manager = uiManager(native);
+    manager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    await expect(
+      bridge.focusAnnotation(node.id, undefined, annotation(node.id, false), {
+        forceReadonly: true,
+      }),
+    ).resolves.toBe(true);
+    popupState.mockClear();
+
+    node.remove();
+
+    await vi.waitFor(() => {
+      expect(focused.filter((focus) => focus === null)).toHaveLength(1);
+    });
+    bridge.refreshAnnotationFocus();
+    expect(focused.filter((focus) => focus === null)).toHaveLength(1);
+    expect(popupState).toHaveBeenCalledExactlyOnceWith({
+      hasPopup: false,
+      selected: false,
+    });
+    bridge.dispose();
+    host.remove();
+  });
+
   it.each([
     ['Underline', 'underlineAnnotation', 'underline', 'Underline annotations are read-only.'],
     ['Text Note', 'textAnnotation', 'text-note', 'Text Note annotations are read-only.'],

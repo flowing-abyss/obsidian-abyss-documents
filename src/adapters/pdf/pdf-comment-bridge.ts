@@ -269,13 +269,15 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   private releaseDetachedActiveFocus(): boolean {
-    const lease = this.activeFocusLease;
     if (this.activeSourceIsMounted()) return false;
-    if (lease === null) {
-      this.activeFocusActivation = undefined;
-      return false;
-    }
-    lease.release();
+    return this.releaseActiveFocus();
+  }
+
+  private releaseActiveFocus(): boolean {
+    if (this.activeSource === null) return false;
+    const lease = this.activeFocusLease;
+    if (lease === null) this.releasePopupState();
+    else lease.release();
     this.emitFocus(null);
     return true;
   }
@@ -1124,9 +1126,17 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     const source = this.activeSource;
     const manager = this.sidebarUiManager;
     if (source === null || manager === null) return false;
+    if (!this.activeSourceEditable) return this.readonlySourceIsMounted(source);
     const runtimeId = source.uid?.trim();
     if (runtimeId === undefined || runtimeId.length === 0) return false;
     return this.findReadyNativeEditor(runtimeId, false)?.editor === source;
+  }
+
+  private readonlySourceIsMounted(source: PdfCommentEditor): boolean {
+    const runtimeId = source.uid?.trim();
+    if (runtimeId === undefined || runtimeId.length === 0) return true;
+    const anchor = source.elementBeforePopup;
+    return anchor instanceof Element && this.host.contains(anchor);
   }
 
   private retainActiveBinding(
@@ -1163,12 +1173,8 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
 
   setSidebarUiManager(uiManager: unknown): void {
     const manager = isPdfCommentUiManager(uiManager) ? uiManager : null;
-    const lease = manager === this.sidebarUiManager ? null : this.activeFocusLease;
-    if (lease !== null) {
-      lease.release();
-      this.emitFocus(null);
-    }
-    if (manager !== this.sidebarUiManager) this.activeFocusActivation = undefined;
+    if (this.sidebarUiManager !== null && manager !== this.sidebarUiManager)
+      this.releaseActiveFocus();
     this.sidebarUiManager = manager;
     for (const check of [...this.focusReadinessChecks]) check();
   }
