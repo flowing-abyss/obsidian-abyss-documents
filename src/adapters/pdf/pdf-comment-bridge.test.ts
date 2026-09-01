@@ -624,11 +624,45 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     expect(manager.updateParams).toHaveBeenCalled();
     node.removeClass('selectedEditor');
     bridge.destroyPopup();
-    expect(focused).toHaveLength(2);
-    expect(focused[1]).toBeNull();
+    await Promise.resolve();
+    expect(focused).toHaveLength(1);
     bridge.dispose();
     host.remove();
   });
+
+  it.each([
+    ['Highlight', 9, 'highlightEditor'],
+    ['Ink', 15, 'inkEditor'],
+  ] as const)(
+    'retains a selected %s binding across PDF.js popup hides',
+    async (_label, mode, className) => {
+      const host = document.body.createDiv();
+      const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+      const node = layer.createDiv({ cls: `${className} selectedEditor` });
+      node.id = `selected-${String(mode)}`;
+      const native = editor('Edit me', { anchor: node, mode, uid: node.id });
+      const manager = uiManager(native);
+      manager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
+      const bridge = new PdfCommentBridge(host);
+      const focused: Array<PdfAnnotationFocus | null> = [];
+      bridge.setSidebarUiManager(manager);
+      bridge.onAnnotationFocus((focus) => focused.push(focus));
+
+      bridge.toggleCommentPopup(native, true, true, true);
+      node.removeClass('selectedEditor');
+      bridge.toggleCommentPopup(native, false, false, true);
+      node.addClass('selectedEditor');
+      await Promise.resolve();
+
+      expect(focused).toHaveLength(1);
+      node.removeClass('selectedEditor');
+      bridge.destroyPopup();
+      await Promise.resolve();
+      expect(focused).toEqual([expect.any(Object)]);
+      bridge.dispose();
+      host.remove();
+    },
+  );
 
   it.each([
     ['Highlight', 9, 'highlight', PDFJS_ANNOTATION_EDITOR_PARAMS_TYPE.HIGHLIGHT_COLOR],
@@ -800,6 +834,38 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     expect(focused[0]?.annotations.map((annotation) => annotation.identity)).toEqual([
       { id: 'explicit-first', kind: 'stable' },
       { id: 'explicit-second', kind: 'stable' },
+    ]);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('publishes every selected peer when PDF.js opens its popup for a modified selection', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const firstNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    firstNode.id = 'popup-first';
+    const secondNode = layer.createDiv({ cls: 'highlightEditor selectedEditor' });
+    secondNode.id = 'popup-second';
+    const first = editor('First', { anchor: firstNode, uid: firstNode.id });
+    const second = editor('Second', { anchor: secondNode, uid: secondNode.id });
+    const manager = uiManager(second);
+    const editors = new Map([
+      [firstNode.id, first],
+      [secondNode.id, second],
+    ]);
+    manager.getEditor.mockImplementation((id) => editors.get(id));
+    const bridge = new PdfCommentBridge(host);
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((next) => {
+      if (next !== null) focused.push(next);
+    });
+
+    bridge.toggleCommentPopup(second, true, true, true);
+
+    expect(focused[0]?.annotations.map((annotation) => annotation.identity)).toEqual([
+      { id: firstNode.id, kind: 'stable' },
+      { id: secondNode.id, kind: 'stable' },
     ]);
     bridge.dispose();
     host.remove();
@@ -1224,11 +1290,14 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     const manager = uiManager();
     manager.getEditor.mockImplementation((id) => (id === node.id ? native : undefined));
     const bridge = new PdfCommentBridge(host);
+    const focused = vi.fn();
     bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus(focused);
 
     expect(bridge.selectAnnotation('')).toBe(false);
     expect(bridge.selectAnnotation('412R')).toBe(true);
     expect(manager.setSelected).toHaveBeenCalledExactlyOnceWith(native);
+    expect(focused).not.toHaveBeenCalled();
 
     bridge.dispose();
     expect(bridge.selectAnnotation('412R')).toBe(false);

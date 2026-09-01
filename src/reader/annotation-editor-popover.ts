@@ -326,10 +326,10 @@ export class AnnotationEditorPopover {
   private isAnnotationFocusTarget(target: EventTarget | null): boolean {
     if (this.isAnnotationInteractionTarget(target)) return true;
     return (
-      this.active?.target.kind === 'annotation' &&
+      this.active?.target.kind !== 'selection' &&
       target instanceof ownerWindow(this.host).Element &&
       this.host.contains(target) &&
-      target.matches('.annotationEditorLayer.disabled.nonEditing')
+      target.matches('.pdfViewerContainer, .annotationEditorLayer.disabled.nonEditing')
     );
   }
 

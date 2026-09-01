@@ -2536,6 +2536,28 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
+  it('keeps an annotation editor open across the current PDF viewer focus handoff', async () => {
+    const host = document.body.createDiv({ cls: 'abyss-documents' });
+    const viewer = host.createDiv({ cls: 'pdfViewerContainer' });
+    viewer.tabIndex = -1;
+    const onClose = vi.fn();
+    const popover = new AnnotationEditorPopover(host);
+    popover.open({
+      ...editorRequest({ annotation: editableAnnotation(), kind: 'annotation' }),
+      onClose,
+    });
+    popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.focus();
+
+    viewer.focus();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    expect(popover.isOpen).toBe(true);
+    expect(popover.element.hidden).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+    popover.destroy();
+    host.remove();
+  });
+
   it('closes with focus-away when focus moves to an unrelated control', async () => {
     const host = document.body.createDiv();
     const unrelated = document.body.createEl('button');

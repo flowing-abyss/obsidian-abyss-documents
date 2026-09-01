@@ -1689,7 +1689,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
         ...({ editorUid: 'pdfjs_internal_editor_0' } as Record<string, string>),
       },
     ]);
-    const uiManager = manager(selectedEditor('persisted-highlight', 9));
+    const uiManager = manager(selectedEditor('pdfjs_internal_editor_0', 9));
     current.eventBus.dispatch('annotationeditoruimanager', {
       source: current.viewer,
       uiManager,
@@ -1700,7 +1700,11 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ).resolves.toBe('editable');
 
     expect(current.modeRequests).toEqual([
-      { editComment: false, editId: 'persisted-highlight', mode: 9 },
+      {
+        editComment: false,
+        editId: 'pdfjs_internal_editor_0',
+        mode: 9,
+      },
     ]);
     expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
       'persisted-highlight',
@@ -1708,6 +1712,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       annotation,
       {
         editableOnly: true,
+        editorUid: 'pdfjs_internal_editor_0',
         preserveSelection: true,
       },
     );
@@ -1755,20 +1760,23 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ]);
     current.eventBus.dispatch('annotationeditoruimanager', {
       source: current.viewer,
-      uiManager: manager(selectedEditor('29R', 9)),
+      uiManager: manager(selectedEditor('pdfjs_internal_editor_0', 9)),
     });
 
     await expect(
       current.editor.focusAnnotation('pdfjs_internal_editor_0', { kind: 'root-click' }),
     ).resolves.toBe('editable');
 
-    expect(current.modeRequests).toEqual([{ editComment: false, editId: '29R', mode: 9 }]);
+    expect(current.modeRequests).toEqual([
+      { editComment: false, editId: 'pdfjs_internal_editor_0', mode: 9 },
+    ]);
     expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
       '29R',
       expect.any(AbortSignal),
       annotation,
       {
         editableOnly: true,
+        editorUid: 'pdfjs_internal_editor_0',
         preserveSelection: true,
       },
     );
@@ -1849,20 +1857,23 @@ describe('PdfAnnotationEditor lifecycle', () => {
     ]);
     current.eventBus.dispatch('annotationeditoruimanager', {
       source: current.viewer,
-      uiManager: manager(selectedEditor('30R', 9)),
+      uiManager: manager(selectedEditor('pdfjs_internal_editor_0', 9)),
     });
 
     await expect(current.editor.focusAnnotation('30R', { kind: 'sidebar' })).resolves.toBe(
       'editable',
     );
 
-    expect(current.modeRequests).toEqual([{ editComment: false, editId: '30R', mode: 9 }]);
+    expect(current.modeRequests).toEqual([
+      { editComment: false, editId: 'pdfjs_internal_editor_0', mode: 9 },
+    ]);
     expect(current.commentBridge.focusAnnotation).toHaveBeenCalledWith(
       '30R',
       expect.any(AbortSignal),
       first,
       {
         editableOnly: true,
+        editorUid: 'pdfjs_internal_editor_0',
         preserveSelection: true,
       },
     );
@@ -4554,6 +4565,10 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(uiManager.layers[1]?.disableClick).toHaveBeenCalledOnce();
     expect(uiManager.layers[1]?.disableTextSelection).toHaveBeenCalledOnce();
 
+    Object.defineProperty(uiManager, 'firstSelectedEditor', {
+      configurable: true,
+      value: undefined,
+    });
     eventBus.dispatch('editingstateschanged', {
       source: uiManager,
       details: { hasSelectedEditor: false },
@@ -4646,6 +4661,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       source: uiManager,
       details: { hasSelectedEditor: true },
     });
+    uiManager.firstSelectedEditor = undefined;
     eventBus.dispatch('editingstateschanged', {
       source: uiManager,
       details: { hasSelectedEditor: false },
@@ -4656,6 +4672,26 @@ describe('PdfAnnotationEditor lifecycle', () => {
         { mode: 0 },
       ]);
     });
+  });
+
+  it('ignores a transient native deselection event while the requested editor remains selected', async () => {
+    const { editor, eventBus, modeRequests, viewer } = fixture();
+    const uiManager = manager(selectedEditor('highlight-1', 9));
+    eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+    await editor.editAnnotation({ editComment: false, id: 'highlight-1', kind: 'highlight' });
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: true },
+    });
+
+    eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: false },
+    });
+    await Promise.resolve();
+
+    expect(editor.hasContextualEdit).toBe(true);
+    expect(modeRequests).toEqual([{ editComment: false, editId: 'highlight-1', mode: 9 }]);
   });
 
   it('re-arms the same contextual annotation target after autosave', async () => {

@@ -344,7 +344,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     if (this.disposed) return false;
     const id = nativeId.trim();
     if (id.length === 0) return false;
-    return this.tryFocusAnnotation(id, { editableOnly: true, editorUid });
+    const native = this.findReadyNativeEditor(annotationFocusLookupId(id, editorUid), false);
+    if (native === null || !isSupportedNativeEditor(native.editor)) return false;
+    native.manager.setSelected(native.editor);
+    return true;
   }
 
   resolveAnnotationAnchor(nativeId: string, editorUid?: string): DOMRect | null {
@@ -901,7 +904,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     }
     this.publishFocus(editor, {
       anchor: popupAnchor(editor)?.getBoundingClientRect(),
-      includeSelectedPeers: false,
+      includeSelectedPeers: isSelected,
       isEditable,
       isSelected,
     });
@@ -1007,21 +1010,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     }
     const source = this.activeSource;
     const manager = this.sidebarUiManager;
-    if (
-      source !== null &&
-      source.mode === 3 &&
-      source.editorType === 'freetext' &&
-      manager !== null &&
-      this.selectedEditorsFromDom(manager).includes(source)
-    ) {
-      const revision = ++this.popupDestroyRevision;
-      queueMicrotask(() => {
-        if (revision !== this.popupDestroyRevision || this.disposed || this.activeSource !== source)
-          return;
-        if (this.selectedEditorsFromDom(manager).includes(source)) return;
-        this.releasePopupState();
-        this.emitFocus(null);
-      });
+    if (source !== null && this.activeSourceEditable && manager !== null) {
       return;
     }
     this.releasePopupState();

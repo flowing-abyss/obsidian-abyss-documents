@@ -2409,7 +2409,9 @@ export class PdfAnnotationEditor {
 
   private nativeEditorUid(annotationId: string): string {
     return (
-      this.dependencies.commentBridge.nativeEditorUidForAnnotation?.(annotationId) ?? annotationId
+      this.dependencies.commentBridge.nativeEditorUidForAnnotation?.(annotationId) ??
+      this.projectedTargets.get(annotationId)?.editorUid ??
+      annotationId
     );
   }
 
@@ -2683,6 +2685,7 @@ export class PdfAnnotationEditor {
       return;
     }
     if (hasSelectedEditor !== false || session.phase !== 'selected') return;
+    if (this.isRequestedEditorSelected(session)) return;
     void this.closeContextualEditSession(session).catch((cause: unknown) => {
       console.error('[abyss-documents] Failed to close the PDF annotation editor', { cause });
     });
