@@ -50,6 +50,7 @@ const MIN_SCALE = 0.1;
 const MAX_SCALE = 25;
 const SCALE_DELTA = 1.1;
 const VERTICAL_PADDING = 5;
+const ANNOTATION_MODE_EXIT_FALLBACK_FRAMES = 5;
 const PDF_TO_CSS_UNITS = 96 / 72;
 const ANNOTATION_HIGHLIGHT_COLORS =
   'yellow=#ffd400,red=#ff6666,green=#5fb236,blue=#2ea8e5,purple=#a28ae5,magenta=#e56eee,orange=#f19837,gray=#aaaaaa';
@@ -110,6 +111,14 @@ interface PdfPageViewGeometry {
 
 interface PdfPageViewAnnotationState {
   hasEditableAnnotations?(): boolean;
+}
+
+interface AnnotationModeExitBarrier {
+  frame: number | null;
+  readonly generation: number;
+  readonly ownerWindow: Window;
+  readonly pages: Map<number, PdfPageViewAnnotationState>;
+  quietFrames: number;
 }
 
 interface MountedAnnotationContext {
@@ -302,7 +311,8 @@ export class PdfDocumentViewport implements DocumentViewport {
   private selectionAbort: AbortController | null = null;
   private currentSelection: PdfTextSelection | null = null;
   private annotationSnapshotFrame: number | null = null;
-  private annotationModeExitPages: Set<number> | null = null;
+  private annotationModeExitBarrier: AnnotationModeExitBarrier | null = null;
+  private annotationModeExitGeneration = 0;
   private mountedAnnotationSnapshots = new Map<string, ViewportAnnotationSnapshot>();
   private lastQuery = '';
   private readonly failedPages = new Set<number>();
@@ -478,6 +488,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   setLayout(layout: ReaderLayout): void {
     const viewer = this.requireMounted(this.viewer);
+    this.flushAnnotationModeExitBarrier();
     this.selectionObserverInstance?.invalidate();
     this.requestedLayout = { ...layout };
     if (!this.pagesInitialized || this.colorRebindActive) {
@@ -742,7 +753,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.clearPendingInteractions();
     this.currentSelection = null;
     this.mountedAnnotationSnapshots.clear();
-    this.annotationModeExitPages = null;
+    this.cancelAnnotationModeExitBarrier();
     this.cancelAnnotationSnapshotFrame();
   }
 
@@ -837,7 +848,7 @@ export class PdfDocumentViewport implements DocumentViewport {
       if (pageNumber === null) return;
       const page = this.pageElement(pageNumber);
       if (page !== null) replacePdfAnnotationImageSources(page, annotationImageData);
-      this.publishAnnotationLayerSnapshot(pageNumber - 1);
+      this.publishAnnotationLayerSnapshot(event, pageNumber - 1);
       this.events.emit({ type: 'annotation-layer-rendered', pageIndex: pageNumber - 1 });
     });
     this.bind('annotationeditormodechanged', (event) => {
@@ -847,45 +858,127 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private scheduleAnnotationSnapshot(): void {
     const root = this.root;
-    if (root === null || this.annotationModeExitPages !== null) return;
+    if (root === null || this.annotationModeExitBarrier !== null) return;
     const ownerWindow = root.ownerDocument.defaultView;
     if (ownerWindow === null || this.annotationSnapshotFrame !== null) return;
     this.annotationSnapshotFrame = ownerWindow.requestAnimationFrame(() => {
       this.annotationSnapshotFrame = null;
-      if (this.annotationModeExitPages !== null) return;
+      if (this.annotationModeExitBarrier !== null) return;
       this.publishMountedAnnotationSnapshot(true);
     });
   }
 
   private beginAnnotationModeExitSnapshot(event: unknown): void {
-    if (record(event)?.['mode'] !== PDFJS_ANNOTATION_EDITOR_TYPE.NONE) return;
+    if (record(event)?.['mode'] !== PDFJS_ANNOTATION_EDITOR_TYPE.NONE) {
+      this.flushAnnotationModeExitBarrier();
+      return;
+    }
+    this.cancelAnnotationModeExitBarrier();
     this.cancelAnnotationSnapshotFrame();
     const pages = this.loadedEditableAnnotationPages();
-    this.annotationModeExitPages = pages.size === 0 ? null : pages;
-    if (this.annotationModeExitPages === null) this.scheduleAnnotationSnapshot();
+    const ownerWindow = this.root?.ownerDocument.defaultView ?? null;
+    if (pages.size === 0 || ownerWindow === null) {
+      this.scheduleAnnotationSnapshot();
+      return;
+    }
+    const barrier: AnnotationModeExitBarrier = {
+      frame: null,
+      generation: ++this.annotationModeExitGeneration,
+      ownerWindow,
+      pages,
+      quietFrames: 0,
+    };
+    this.annotationModeExitBarrier = barrier;
+    this.scheduleAnnotationModeExitSettlement(barrier);
   }
 
-  private loadedEditableAnnotationPages(): Set<number> {
+  private loadedEditableAnnotationPages(): Map<number, PdfPageViewAnnotationState> {
     const viewer = this.viewer;
-    if (viewer === null) return new Set();
-    return new Set(
-      [...this.loadedAnnotationPages()].filter((pageIndex) => {
+    if (viewer === null) return new Map();
+    return new Map(
+      [...this.loadedAnnotationPages()].flatMap((pageIndex) => {
         const pageView = viewer.getPageView(pageIndex) as PdfPageViewAnnotationState | undefined;
-        return pageView?.hasEditableAnnotations?.() !== false;
+        return pageView !== undefined && pageView.hasEditableAnnotations?.() !== false
+          ? [[pageIndex, pageView] as const]
+          : [];
       }),
     );
   }
 
-  private publishAnnotationLayerSnapshot(pageIndex: number): void {
-    const pending = this.annotationModeExitPages;
-    if (pending === null) {
+  private publishAnnotationLayerSnapshot(event: unknown, pageIndex: number): void {
+    if (!this.annotationLayerEventIsCurrent(event, pageIndex)) return;
+    const barrier = this.annotationModeExitBarrier;
+    if (barrier === null) {
       this.publishMountedAnnotationSnapshot();
       return;
     }
-    pending.delete(pageIndex);
-    if (pending.size > 0) return;
-    this.annotationModeExitPages = null;
+    const source = record(event)?.['source'];
+    const expected = barrier.pages.get(pageIndex);
+    if (expected !== undefined && (source === undefined || source === expected)) {
+      barrier.pages.delete(pageIndex);
+      barrier.quietFrames = 0;
+    }
+    if (barrier.pages.size > 0) return;
+    this.completeAnnotationModeExitBarrier(barrier);
+  }
+
+  private annotationLayerEventIsCurrent(event: unknown, pageIndex: number): boolean {
+    const source = record(event)?.['source'];
+    if (source === undefined) return true;
+    const current = this.viewer?.getPageView(pageIndex) as PdfPageViewAnnotationState | undefined;
+    return Object.is(source, current);
+  }
+
+  private scheduleAnnotationModeExitSettlement(barrier: AnnotationModeExitBarrier): void {
+    barrier.frame = barrier.ownerWindow.requestAnimationFrame(() => {
+      barrier.frame = null;
+      if (
+        this.annotationModeExitBarrier !== barrier ||
+        barrier.generation !== this.annotationModeExitGeneration
+      )
+        return;
+      this.pruneAnnotationModeExitPages(barrier);
+      barrier.quietFrames += 1;
+      if (barrier.pages.size === 0 || barrier.quietFrames >= ANNOTATION_MODE_EXIT_FALLBACK_FRAMES) {
+        this.completeAnnotationModeExitBarrier(barrier);
+        return;
+      }
+      this.scheduleAnnotationModeExitSettlement(barrier);
+    });
+  }
+
+  private pruneAnnotationModeExitPages(barrier: AnnotationModeExitBarrier): void {
+    const viewer = this.viewer;
+    for (const [pageIndex, pageView] of barrier.pages) {
+      const current = viewer?.getPageView(pageIndex) as PdfPageViewAnnotationState | undefined;
+      if (
+        current !== pageView ||
+        this.pageElement(pageIndex + 1) === null ||
+        pageView.hasEditableAnnotations?.() === false
+      )
+        barrier.pages.delete(pageIndex);
+    }
+  }
+
+  private completeAnnotationModeExitBarrier(barrier: AnnotationModeExitBarrier): void {
+    if (this.annotationModeExitBarrier !== barrier) return;
+    this.cancelAnnotationModeExitBarrier();
     this.scheduleAnnotationSnapshot();
+  }
+
+  private flushAnnotationModeExitBarrier(): void {
+    if (this.annotationModeExitBarrier === null && this.annotationSnapshotFrame === null) return;
+    this.cancelAnnotationSnapshotFrame();
+    this.cancelAnnotationModeExitBarrier();
+    this.publishMountedAnnotationSnapshot(true);
+  }
+
+  private cancelAnnotationModeExitBarrier(): void {
+    const barrier = this.annotationModeExitBarrier;
+    this.annotationModeExitBarrier = null;
+    this.annotationModeExitGeneration += 1;
+    if (barrier !== null && barrier.frame !== null)
+      barrier.ownerWindow.cancelAnimationFrame(barrier.frame);
   }
 
   private cancelAnnotationSnapshotFrame(): void {
@@ -1139,6 +1232,7 @@ export class PdfDocumentViewport implements DocumentViewport {
 
   private startColorRebind(): void {
     const viewer = this.requireMounted(this.viewer);
+    this.flushAnnotationModeExitBarrier();
     this.navigationLifecycleRevision += 1;
     this.selectionObserverInstance?.invalidate();
     const pageColors = this.requestedPageColors;

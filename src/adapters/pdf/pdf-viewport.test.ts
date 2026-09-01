@@ -519,6 +519,61 @@ async function mountedViewport(pageCount = 700, options: ViewerRuntimeOptions = 
   return { documentProxy, host, runtime, search, viewport };
 }
 
+function mountAnnotationIds(host: HTMLElement, pageNumber: number, ids: readonly string[]): void {
+  const page = host.querySelector<HTMLElement>(`[data-page-number="${String(pageNumber)}"]`);
+  if (page === null) throw new Error(`Expected page ${String(pageNumber)}.`);
+  page.querySelector('.annotationLayer')?.remove();
+  const layer = page.createDiv({ cls: 'annotationLayer' });
+  for (const id of ids) {
+    const annotation = layer.createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = id;
+    vi.spyOn(annotation, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(pageNumber * 10, 20, 30, 8),
+    );
+  }
+}
+
+function dispatchAnnotationLayer(
+  runtime: ReturnType<typeof viewerRuntime>,
+  pageNumber: number,
+  source?: unknown,
+): void {
+  const eventBus = runtime.state.eventBus;
+  const viewer = runtime.state.viewer;
+  if (eventBus === undefined || viewer === undefined)
+    throw new Error('Expected mounted PDF state.');
+  eventBus.dispatch('annotationlayerrendered', {
+    source: source ?? viewer.getPageView(pageNumber - 1),
+    pageNumber,
+  });
+}
+
+async function annotationBarrierFixture(pageIds: ReadonlyArray<readonly string[]>): Promise<{
+  readonly eventBus: NonNullable<ReturnType<typeof viewerRuntime>['state']['eventBus']>;
+  readonly events: ViewportEvent[];
+  readonly host: HTMLElement;
+  readonly runtime: ReturnType<typeof viewerRuntime>;
+  readonly viewer: NonNullable<ReturnType<typeof viewerRuntime>['state']['viewer']>;
+  readonly viewport: PdfDocumentViewport;
+}> {
+  const { host, runtime, viewport } = await mountedViewport(pageIds.length);
+  const eventBus = runtime.state.eventBus;
+  const viewer = runtime.state.viewer;
+  if (eventBus === undefined || viewer === undefined)
+    throw new Error('Expected mounted PDF state.');
+  eventBus.dispatch('annotationeditoruimanager', {
+    source: viewer,
+    uiManager: annotationManager(),
+  });
+  pageIds.forEach((ids, pageIndex) => {
+    mountAnnotationIds(host, pageIndex + 1, ids);
+    dispatchAnnotationLayer(runtime, pageIndex + 1);
+  });
+  const events: ViewportEvent[] = [];
+  viewport.onEvent((event) => events.push(event));
+  return { eventBus, events, host, runtime, viewer, viewport };
+}
+
 describe('PdfDocumentViewport', () => {
   it('converts every selection client rectangle through its rendered page viewport', async () => {
     const { host, viewport } = await mountedViewport(3);
@@ -944,7 +999,7 @@ describe('PdfDocumentViewport', () => {
       const layer = page.createDiv({ cls: 'annotationLayer' });
       const annotation = layer.createDiv({ cls: 'highlightAnnotation' });
       annotation.dataset['annotationId'] = `visited-${String(pageNumber)}`;
-      eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber });
+      dispatchAnnotationLayer(runtime, pageNumber);
     }
     events.length = 0;
 
@@ -965,46 +1020,22 @@ describe('PdfDocumentViewport', () => {
   });
 
   it('publishes one stable mounted snapshot after a multi-page annotation mode exit', async () => {
-    const { host, runtime, viewport } = await mountedViewport(3);
-    const eventBus = runtime.state.eventBus;
-    const viewer = runtime.state.viewer;
-    if (eventBus === undefined || viewer === undefined)
-      throw new Error('Expected mounted PDF state.');
-    eventBus.dispatch('annotationeditoruimanager', {
-      source: viewer,
-      uiManager: annotationManager(),
-    });
-    const mountPageAnnotations = (pageNumber: number, ids: readonly string[]): void => {
-      const page = host.querySelector<HTMLElement>(`[data-page-number="${String(pageNumber)}"]`);
-      if (page === null) throw new Error(`Expected page ${String(pageNumber)}.`);
-      page.querySelector('.annotationLayer')?.remove();
-      const layer = page.createDiv({ cls: 'annotationLayer' });
-      for (const id of ids) {
-        const annotation = layer.createDiv({ cls: 'highlightAnnotation' });
-        annotation.dataset['annotationId'] = id;
-        vi.spyOn(annotation, 'getBoundingClientRect').mockReturnValue(
-          new DOMRect(pageNumber * 10, 20, 30, 8),
-        );
-      }
-    };
-    mountPageAnnotations(1, ['delete-target', 'page-1-retained']);
-    mountPageAnnotations(2, ['page-2-retained']);
-    mountPageAnnotations(3, ['page-3-retained']);
-    for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1)
-      eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber });
-    const events: ViewportEvent[] = [];
-    viewport.onEvent((event) => events.push(event));
+    const { eventBus, events, host, runtime, viewer, viewport } = await annotationBarrierFixture([
+      ['delete-target', 'page-1-retained'],
+      ['page-2-retained'],
+      ['page-3-retained'],
+    ]);
 
     viewport.annotationEditor?.notifyNativeMutation();
     eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
-    mountPageAnnotations(1, ['page-1-retained']);
-    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 1 });
+    mountAnnotationIds(host, 1, ['page-1-retained']);
+    dispatchAnnotationLayer(runtime, 1);
     await nextFrame();
-    mountPageAnnotations(2, ['page-2-retained']);
-    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 2 });
+    mountAnnotationIds(host, 2, ['page-2-retained']);
+    dispatchAnnotationLayer(runtime, 2);
     await nextFrame();
-    mountPageAnnotations(3, ['page-3-retained']);
-    eventBus.dispatch('annotationlayerrendered', { source: viewer, pageNumber: 3 });
+    mountAnnotationIds(host, 3, ['page-3-retained']);
+    dispatchAnnotationLayer(runtime, 3);
     await nextFrame();
 
     expect(events.filter(({ type }) => type === 'annotation-snapshot')).toHaveLength(1);
@@ -1018,6 +1049,165 @@ describe('PdfDocumentViewport', () => {
         change: { operation: 'remove', nativeId: 'delete-target' },
       },
     ]);
+  });
+
+  it('bounds a mode-exit barrier when one loaded page never renders', async () => {
+    const { eventBus, events, host, runtime, viewer, viewport } = await annotationBarrierFixture([
+      ['delete-target', 'page-1-retained'],
+      ['page-2-retained'],
+      ['page-3-retained'],
+    ]);
+    const retainedBefore = host.querySelector<HTMLElement>(
+      '[data-page-number="1"] [data-annotation-id="page-1-retained"]',
+    );
+    if (retainedBefore === null) throw new Error('Expected retained annotation fixture.');
+    retainedBefore.textContent = 'Before';
+    dispatchAnnotationLayer(runtime, 1);
+    events.length = 0;
+
+    viewport.annotationEditor?.notifyNativeMutation();
+    eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
+    mountAnnotationIds(host, 1, ['page-1-retained', 'late-add']);
+    const retainedAfter = host.querySelector<HTMLElement>(
+      '[data-page-number="1"] [data-annotation-id="page-1-retained"]',
+    );
+    if (retainedAfter === null) throw new Error('Expected updated annotation fixture.');
+    retainedAfter.textContent = 'After';
+    dispatchAnnotationLayer(runtime, 1);
+    await nextFrame();
+    await nextFrame();
+    await nextFrame();
+    await nextFrame();
+    await nextFrame();
+    await nextFrame();
+
+    expect(events.filter(({ type }) => type === 'annotation-snapshot')).toHaveLength(1);
+    expect(events).toContainEqual({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'delete-target' },
+    });
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'annotation-change' &&
+          event.change.operation === 'upsert' &&
+          event.change.annotation.nativeId === 'late-add',
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'annotation-change' &&
+          event.change.operation === 'upsert' &&
+          event.change.annotation.nativeId === 'page-1-retained' &&
+          event.change.annotation.selectedText === 'After',
+      ),
+    ).toBe(true);
+  });
+
+  it('releases a mode-exit barrier when an offscreen loaded page is unmounted', async () => {
+    const { eventBus, events, host, runtime, viewer } = await annotationBarrierFixture([
+      ['delete-target', 'page-1-retained'],
+      ['page-2-retained'],
+      ['page-3-retained'],
+    ]);
+
+    eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
+    host.querySelector('[data-page-number="3"]')?.remove();
+    mountAnnotationIds(host, 1, ['page-1-retained']);
+    dispatchAnnotationLayer(runtime, 1);
+    dispatchAnnotationLayer(runtime, 2);
+    await nextFrame();
+    await nextFrame();
+
+    expect(events.filter(({ type }) => type === 'annotation-snapshot')).toHaveLength(1);
+    expect(events).toContainEqual({
+      type: 'annotation-change',
+      change: { operation: 'remove', nativeId: 'delete-target' },
+    });
+  });
+
+  it('flushes before document rebind and rejects stale page-view render events', async () => {
+    const { eventBus, events, runtime, viewer, viewport } = await annotationBarrierFixture([
+      ['old-document-retained'],
+      [],
+      [],
+    ]);
+    eventBus.dispatch('pagesinit', {});
+    const oldPageViews = [0, 1, 2].map((pageIndex) => viewer.getPageView(pageIndex));
+
+    eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
+    viewport.setReadingColors({
+      background: '#f4ecd8',
+      foreground: '#2d281f',
+      brightness: 0.95,
+      contrast: 1.05,
+      imageDim: 0.1,
+    });
+    for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1)
+      dispatchAnnotationLayer(runtime, pageNumber, oldPageViews[pageNumber - 1]);
+    await nextFrame();
+
+    expect(events.filter((event) => event.type === 'annotation-snapshot')).toEqual([
+      {
+        type: 'annotation-snapshot',
+        annotations: [expect.objectContaining({ nativeId: 'old-document-retained' })],
+      },
+    ]);
+  });
+
+  it('flushes a settled mode-exit snapshot before layout supersedes its page set', async () => {
+    const { eventBus, events, runtime, viewer, viewport } = await annotationBarrierFixture([
+      ['layout-retained'],
+      [],
+      [],
+    ]);
+    eventBus.dispatch('pagesinit', {});
+
+    eventBus.dispatch('annotationeditormodechanged', { source: viewer, mode: 0 });
+    for (let pageNumber = 1; pageNumber <= 3; pageNumber += 1)
+      dispatchAnnotationLayer(runtime, pageNumber);
+    viewport.setLayout({ pages: 'facing', scrolling: 'page-by-page' });
+    await nextFrame();
+
+    expect(events.filter(({ type }) => type === 'annotation-snapshot')).toEqual([
+      {
+        type: 'annotation-snapshot',
+        annotations: [expect.objectContaining({ nativeId: 'layout-retained' })],
+      },
+    ]);
+  });
+
+  it('cancels mode-exit fallback work on destroy and flushes on a newer mode', async () => {
+    const first = await annotationBarrierFixture([['destroy-retained'], [], []]);
+    first.eventBus.dispatch('annotationeditormodechanged', { source: first.viewer, mode: 0 });
+    await first.viewport.destroy();
+    expect(
+      (first.viewport as unknown as { annotationModeExitBarrier?: unknown })
+        .annotationModeExitBarrier,
+    ).toBeNull();
+
+    const second = await annotationBarrierFixture([['superseded-retained'], [], []]);
+    second.eventBus.dispatch('annotationeditormodechanged', { source: second.viewer, mode: 0 });
+    second.eventBus.dispatch('annotationeditormodechanged', { source: second.viewer, mode: 1 });
+
+    expect(second.events.filter(({ type }) => type === 'annotation-snapshot')).toEqual([
+      {
+        type: 'annotation-snapshot',
+        annotations: [expect.objectContaining({ nativeId: 'superseded-retained' })],
+      },
+    ]);
+    await second.viewport.destroy();
+  });
+
+  it('publishes an ordinary annotation-layer snapshot immediately outside a barrier', async () => {
+    const { runtime, viewport } = await mountedViewport(3);
+    const events: ViewportEvent[] = [];
+    viewport.onEvent((event) => events.push(event));
+
+    dispatchAnnotationLayer(runtime, 1);
+
+    expect(events.filter(({ type }) => type === 'annotation-snapshot')).toHaveLength(1);
   });
 
   it('normalizes exact-overlap native editor clicks as independently addressable annotations', async () => {

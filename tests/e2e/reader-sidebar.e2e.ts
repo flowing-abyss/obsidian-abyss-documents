@@ -1916,8 +1916,8 @@ describe('PDF reader sidebar', () => {
       indexedBatches: 1,
       indexedRenderCalls: 1,
       mountedBursts: 1,
+      targetNativeSemanticPresent: false,
       targetPresent: false,
-      targetSemanticNativePresent: false,
       unrelatedCardIdentityBreaks: 0,
       zeroCardFrames: 0,
       zeroCardMutationSamples: 0,
@@ -1929,6 +1929,9 @@ describe('PDF reader sidebar', () => {
     expect(trace.maxRafGapMs).toBeLessThan(100);
     expect(trace.mutationSamples).toBeGreaterThan(0);
     expect(trace.settledFrames).toBeGreaterThanOrEqual(5);
-    expect(trace.semanticNativeMismatches).toEqual([]);
+    expect(trace.baselineNativeSemanticCount).toBeGreaterThan(1);
+    expect(trace.finalNativeSemanticMismatches).toEqual([]);
+    expect(trace.missingRetainedNativeSemanticIds).toEqual([]);
+    expect(trace.replacedRetainedNativeSemanticIds.length).toBeGreaterThan(0);
   });
 });

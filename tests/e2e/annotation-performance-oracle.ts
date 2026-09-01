@@ -97,16 +97,19 @@ export interface TenThousandDeleteTarget {
 }
 
 export interface TenThousandDeleteTrace {
+  readonly baselineNativeSemanticCount: number;
+  readonly finalNativeSemanticMismatches: readonly string[];
   readonly indexedBatches: number;
   readonly indexedRenderCalls: number;
   readonly maxRafGapMs: number;
+  readonly missingRetainedNativeSemanticIds: readonly string[];
   readonly mountedBursts: number;
   readonly mutationSamples: number;
+  readonly replacedRetainedNativeSemanticIds: readonly string[];
   readonly renderCalls: number;
-  readonly semanticNativeMismatches: readonly string[];
   readonly settledFrames: number;
+  readonly targetNativeSemanticPresent: boolean;
   readonly targetPresent: boolean;
-  readonly targetSemanticNativePresent: boolean;
   readonly unrelatedCardIdentityBreaks: number;
   readonly zeroCardFrames: number;
   readonly zeroCardMutationSamples: number;
@@ -146,7 +149,11 @@ export async function installTenThousandDeleteTrace(
     interface ControllerTrace {
       annotationProjection: ProjectionTrace;
       renderAnnotationProjection: (...args: readonly unknown[]) => void;
-      viewport?: { mountedAnnotationSnapshots?: ReadonlyMap<string, unknown> };
+      viewport?: {
+        annotationEditor?: {
+          resolveNativeEditor(internalId: string): { readonly id: string } | null;
+        } | null;
+      };
     }
     const view = app.workspace.getLeavesOfType('abyss-document-view')[0]?.view as unknown as
       | {
@@ -171,17 +178,44 @@ export async function installTenThousandDeleteTrace(
       throw new Error('Unrelated mounted card identities are incomplete.');
     const nativeSelector =
       '.annotationLayer [data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]';
-    const visibleNative = (): HTMLElement[] =>
-      Array.from(document.querySelectorAll<HTMLElement>(nativeSelector)).filter((node) => {
+    const visibleNativeBySemanticId = (): ReadonlyMap<string, ReadonlySet<HTMLElement>> => {
+      const result = new Map<string, Set<HTMLElement>>();
+      for (const node of Array.from(document.querySelectorAll<HTMLElement>(nativeSelector))) {
         const style = getComputedStyle(node);
-        return !node.hidden && style.display !== 'none' && style.visibility !== 'hidden';
-      });
-    const baselineSemanticNativeIds = new Set(
-      controller.viewport?.mountedAnnotationSnapshots?.keys() ?? [],
-    );
-    baselineSemanticNativeIds.delete(target.annotationId);
-    if (visibleNative().length === 0 || baselineSemanticNativeIds.size === 0)
-      throw new Error('Mounted native annotation identities are incomplete.');
+        if (
+          node.hidden ||
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          style.opacity === '0'
+        )
+          continue;
+        const dataSemanticId = node.dataset['annotationId']?.trim();
+        const semanticId =
+          dataSemanticId !== undefined && dataSemanticId.length > 0
+            ? dataSemanticId
+            : (controller.viewport?.annotationEditor?.resolveNativeEditor(node.id.trim())?.id ??
+              node.id.trim());
+        if (semanticId.length === 0) continue;
+        const nodes = result.get(semanticId) ?? new Set<HTMLElement>();
+        nodes.add(node);
+        result.set(semanticId, nodes);
+      }
+      return result;
+    };
+    const baselineNativeBySemanticId = visibleNativeBySemanticId();
+    const baselineRetainedNativeSemanticIds = new Set(baselineNativeBySemanticId.keys());
+    baselineRetainedNativeSemanticIds.delete(target.annotationId);
+    if (
+      !baselineNativeBySemanticId.has(target.annotationId) ||
+      baselineRetainedNativeSemanticIds.size === 0
+    )
+      throw new Error(
+        `Mounted native annotation identities are incomplete: ${JSON.stringify({
+          nativeIds: [...baselineNativeBySemanticId.keys()].slice(0, 5),
+          nativeSize: baselineNativeBySemanticId.size,
+          target: target.annotationId,
+        })}`,
+      );
 
     const originalApply = projection.applyViewportBatch;
     const originalRender = controller.renderAnnotationProjection;
@@ -193,6 +227,7 @@ export async function installTenThousandDeleteTrace(
       lastFrameAt: null as number | null,
       maxRafGapMs: 0,
       measurementComplete: false,
+      missingRetainedNativeSemanticIds: new Set<string>(),
       mountedBursts: 0,
       mutationSamples: 0,
       previousSignature: Array.from(
@@ -201,6 +236,7 @@ export async function installTenThousandDeleteTrace(
       ).join('|'),
       pendingIndexedRender: false,
       renderCalls: 0,
+      replacedRetainedNativeSemanticIds: new Set<string>(),
       settledFrames: 0,
       stopped: false,
       unrelatedCardIdentityBreaks: 0,
@@ -211,14 +247,27 @@ export async function installTenThousandDeleteTrace(
     };
     const sample = (source: 'frame' | 'mutation'): void => {
       const cards = Array.from(panel.querySelectorAll<HTMLElement>('.abyss-annotation-card'));
-      const nativeCount = visibleNative().length;
+      const currentNativeBySemanticId = visibleNativeBySemanticId();
       if (cards.length === 0) {
         if (source === 'frame') state.zeroCardFrames += 1;
         else state.zeroCardMutationSamples += 1;
       }
-      if (nativeCount === 0) {
+      if (currentNativeBySemanticId.size === 0) {
         if (source === 'frame') state.zeroNativeFrames += 1;
         else state.zeroNativeMutationSamples += 1;
+      }
+      for (const semanticId of baselineRetainedNativeSemanticIds) {
+        const currentNodes = currentNativeBySemanticId.get(semanticId);
+        if (currentNodes === undefined) {
+          state.missingRetainedNativeSemanticIds.add(semanticId);
+          continue;
+        }
+        const baselineNodes = baselineNativeBySemanticId.get(semanticId);
+        if (
+          baselineNodes !== undefined &&
+          [...currentNodes].every((node) => !baselineNodes.has(node))
+        )
+          state.replacedRetainedNativeSemanticIds.add(semanticId);
       }
       const signature = cards.map((card) => card.dataset['annotationRowId'] ?? '').join('|');
       const currentCards = new Map(
@@ -276,28 +325,33 @@ export async function installTenThousandDeleteTrace(
       originalRender.call(controller, ...args);
     };
     const snapshot = (): TenThousandDeleteTrace => {
-      const currentSemanticNativeIds = new Set(
-        controller.viewport?.mountedAnnotationSnapshots?.keys() ?? [],
-      );
-      currentSemanticNativeIds.delete(target.annotationId);
+      const currentNativeSemanticIds = new Set(visibleNativeBySemanticId().keys());
+      const currentRetainedNativeSemanticIds = new Set(currentNativeSemanticIds);
+      currentRetainedNativeSemanticIds.delete(target.annotationId);
       return {
+        baselineNativeSemanticCount: baselineNativeBySemanticId.size,
+        finalNativeSemanticMismatches: [
+          ...[...baselineRetainedNativeSemanticIds].filter(
+            (id) => !currentRetainedNativeSemanticIds.has(id),
+          ),
+          ...[...currentRetainedNativeSemanticIds].filter(
+            (id) => !baselineRetainedNativeSemanticIds.has(id),
+          ),
+        ],
         indexedBatches: state.indexedBatches,
         indexedRenderCalls: state.indexedRenderCalls,
         maxRafGapMs: state.maxRafGapMs,
+        missingRetainedNativeSemanticIds: [...state.missingRetainedNativeSemanticIds],
         mountedBursts: state.mountedBursts,
         mutationSamples: state.mutationSamples,
+        replacedRetainedNativeSemanticIds: [...state.replacedRetainedNativeSemanticIds],
         renderCalls: state.renderCalls,
-        semanticNativeMismatches: [
-          ...[...baselineSemanticNativeIds].filter((id) => !currentSemanticNativeIds.has(id)),
-          ...[...currentSemanticNativeIds].filter((id) => !baselineSemanticNativeIds.has(id)),
-        ],
         settledFrames: state.settledFrames,
+        targetNativeSemanticPresent: currentNativeSemanticIds.has(target.annotationId),
         targetPresent:
           panel.querySelector(
             `.abyss-annotation-card[data-annotation-row-id="${CSS.escape(target.rowId)}"]`,
           ) !== null,
-        targetSemanticNativePresent:
-          controller.viewport?.mountedAnnotationSnapshots?.has(target.annotationId) ?? false,
         unrelatedCardIdentityBreaks: state.unrelatedCardIdentityBreaks,
         zeroCardFrames: state.zeroCardFrames,
         zeroCardMutationSamples: state.zeroCardMutationSamples,
