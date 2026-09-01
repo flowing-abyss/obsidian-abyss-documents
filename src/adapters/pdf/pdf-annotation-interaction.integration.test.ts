@@ -526,6 +526,7 @@ describe('PDF annotation interaction integration', () => {
       editorType: 'highlight',
       elementBeforePopup: nativeNode,
       getData: () => ({ color: [255, 212, 0], contentsObj: { str: commentValue } }),
+      getNonHCMColor: () => [255, 212, 0],
       mode: 9,
       propertiesToUpdate: [],
       select: vi.fn(),
@@ -551,6 +552,9 @@ describe('PDF annotation interaction integration', () => {
       onNativeMutation: () => {
         notifyNativeMutation();
       },
+    });
+    manager.updateParams.mockImplementation(() => {
+      bridge.updatePopupColor(native);
     });
     let focusedAnnotationId: string | null = null;
     const stopFocus = bridge.onAnnotationFocus((focus) => {
@@ -610,6 +614,12 @@ describe('PDF annotation interaction integration', () => {
     if (comment === null) throw new Error('Expected the shell-owned comment field.');
     comment.value = 'Still focused after autosave';
     comment.dispatchEvent(new Event('input', { bubbles: true }));
+    element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+
+    expect(commentValue).toBe('Still focused after autosave');
+    expect(manager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#5fb236');
+    expect(comment.value).toBe('Still focused after autosave');
+    expect(host.querySelector('[data-annotation-editor-popover]')).toBe(element);
 
     await vi.advanceTimersByTimeAsync(1_050);
 

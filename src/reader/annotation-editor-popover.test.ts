@@ -1745,6 +1745,74 @@ describe('AnnotationEditorPopover', () => {
     host.remove();
   });
 
+  it('persists a dirty comment atomically with an immediate color choice', () => {
+    vi.useFakeTimers();
+    try {
+      const host = document.body.createDiv();
+      const annotation = editableAnnotation({ comment: 'Before' });
+      const onUpdate = vi.fn(() => true);
+      const popover = new AnnotationEditorPopover(host);
+      popover.open({
+        ...editorRequest({ annotation, kind: 'annotation' }),
+        onUpdate,
+      });
+      editComment(popover, 'QA persisted comment');
+
+      popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+
+      expect(onUpdate).toHaveBeenCalledOnce();
+      expect(onUpdate).toHaveBeenLastCalledWith({
+        annotations: [annotation],
+        color: '#5fb236',
+        comment: 'QA persisted comment',
+      });
+      expect(popover.hasPendingChanges).toBe(false);
+      vi.advanceTimersByTime(300);
+      expect(onUpdate).toHaveBeenCalledOnce();
+      popover.destroy();
+      host.remove();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a dirty comment draft when its atomic color update is rejected', async () => {
+    vi.useFakeTimers();
+    try {
+      const host = document.body.createDiv();
+      const annotation = editableAnnotation({ comment: 'Before' });
+      const onUpdate = vi.fn(() => false);
+      const popover = new AnnotationEditorPopover(host);
+      popover.open({
+        ...editorRequest({ annotation, kind: 'annotation' }),
+        onUpdate,
+      });
+      editComment(popover, 'QA retained draft');
+
+      popover.element.querySelector<HTMLButtonElement>('[data-editor-color="#5fb236"]')?.click();
+
+      expect(onUpdate).toHaveBeenLastCalledWith({
+        annotations: [annotation],
+        color: '#5fb236',
+        comment: 'QA retained draft',
+      });
+      expect(popover.hasPendingChanges).toBe(true);
+      expect(
+        popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]')?.value,
+      ).toBe('QA retained draft');
+      onUpdate.mockReturnValue(true);
+      await expect(popover.flushPendingChanges()).resolves.toBe(true);
+      expect(onUpdate).toHaveBeenLastCalledWith({
+        annotations: [annotation],
+        comment: 'QA retained draft',
+      });
+      popover.destroy();
+      host.remove();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ['rejects', (): boolean => false],
     [

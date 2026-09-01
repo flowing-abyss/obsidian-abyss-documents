@@ -2524,6 +2524,108 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('rolls back native color when an atomic comment setter rejects', () => {
+    const host = document.body.createDiv();
+    const native = editor('Before', { uid: 'atomic-comment-failure' });
+    const manager = uiManager(native);
+    mountEditor(host, manager, native);
+    let nativeColor = '#ffd400';
+    manager.updateParams.mockImplementation((_parameter, value) => {
+      nativeColor = String(value);
+    });
+    const originalComment = { metadata: { author: 'PDF.js' }, text: 'Before' };
+    let nativeComment: unknown = originalComment;
+    Object.defineProperty(native, 'comment', {
+      configurable: true,
+      get: () => nativeComment,
+      set: (value: unknown) => {
+        nativeComment = value;
+        if (value === 'After') throw new Error('comment rejected after mutation');
+      },
+    });
+    const failures: PdfCommentMutationFailure[] = [];
+    const mutations = vi.fn();
+    const colors = vi.fn();
+    const bridge = new PdfCommentBridge(host, {
+      onColorChange: colors,
+      onFailure: (failure) => failures.push(failure),
+      onNativeMutation: mutations,
+    });
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) focused.push(focus);
+    });
+    bridge.toggleCommentPopup(native, true, true, true);
+    const annotation = focused[0]?.annotations[0];
+    if (annotation === undefined) throw new Error('Expected a writable annotation.');
+
+    expect(
+      bridge.updateAnnotations({
+        annotations: [annotation],
+        color: '#5fb236',
+        comment: 'After',
+      }),
+    ).toBe(false);
+    expect(nativeColor).toBe('#ffd400');
+    expect(native.comment).toBe(originalComment);
+    expect(native.comment).toMatchObject({ metadata: { author: 'PDF.js' }, text: 'Before' });
+    expect(mutations).not.toHaveBeenCalled();
+    expect(colors).not.toHaveBeenCalled();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.action).toBe('save-comment');
+    expect(failures[0]?.cause).toMatchObject({ message: 'comment rejected after mutation' });
+
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('rolls back a color side effect without applying comment when atomic recoloring throws', () => {
+    const host = document.body.createDiv();
+    const native = editor('Before', { uid: 'atomic-color-failure' });
+    const manager = uiManager(native);
+    mountEditor(host, manager, native);
+    let nativeColor = '#ffd400';
+    manager.updateParams.mockImplementation((_parameter, value) => {
+      nativeColor = String(value);
+      if (nativeColor === '#5fb236') throw new Error('color rejected after mutation');
+    });
+    const failures: PdfCommentMutationFailure[] = [];
+    const mutations = vi.fn();
+    const colors = vi.fn();
+    const bridge = new PdfCommentBridge(host, {
+      onColorChange: colors,
+      onFailure: (failure) => failures.push(failure),
+      onNativeMutation: mutations,
+    });
+    const focused: PdfAnnotationFocus[] = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => {
+      if (focus !== null) focused.push(focus);
+    });
+    bridge.toggleCommentPopup(native, true, true, true);
+    const annotation = focused[0]?.annotations[0];
+    if (annotation === undefined) throw new Error('Expected a writable annotation.');
+
+    expect(
+      bridge.updateAnnotations({
+        annotations: [annotation],
+        color: '#5fb236',
+        comment: 'After',
+      }),
+    ).toBe(false);
+    expect(nativeColor).toBe('#ffd400');
+    expect(native.comment).toBe('Before');
+    expect(mutations).not.toHaveBeenCalled();
+    expect(colors).not.toHaveBeenCalled();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.action).toBe('change-color');
+    expect(failures[0]?.cause).toMatchObject({ message: 'color rejected after mutation' });
+
+    bridge.dispose();
+    host.remove();
+  });
+
   it('does not clear focused state while a native mutation is notifying the reader', () => {
     const host = document.body.createDiv();
     const native = editor('Before native mutation', { uid: 'mutation-guard' });

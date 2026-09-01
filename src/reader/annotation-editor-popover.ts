@@ -226,11 +226,25 @@ export class AnnotationEditorPopover {
       this.createSelection(this.metadataComment());
       return true;
     }
-    if (request?.target.kind === 'annotation')
-      return this.persistUpdate(request, { annotations: [request.target.annotation], color });
+    if (request?.target.kind === 'annotation') return this.persistAnnotationColor(request, color);
     if (request?.target.kind === 'multiple')
       return this.persistUpdate(request, { annotations: request.target.annotations, color });
     return false;
+  }
+
+  private persistAnnotationColor(request: AnnotationEditorPopoverRequest, color: string): boolean {
+    if (request.target.kind !== 'annotation') return false;
+    const comment = this.commentDirty ? this.metadataComment() : undefined;
+    const accepted = this.persistUpdate(request, {
+      annotations: [request.target.annotation],
+      color,
+      ...(comment === undefined ? {} : { comment }),
+    });
+    if (!accepted || comment === undefined) return accepted;
+    this.cancelMetadataTimer();
+    this.commentSource = comment;
+    this.commentDirty = false;
+    return true;
   }
 
   private registerMetadataListeners(): void {

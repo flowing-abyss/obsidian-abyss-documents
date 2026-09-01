@@ -874,9 +874,51 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   updateAnnotations(update: PdfAnnotationUpdate): boolean {
     const bindings = this.resolveBindings(update.annotations);
     if (bindings?.length !== 1) return false;
+    const binding = bindings[0];
+    if (binding === undefined) return false;
+    if (update.color !== undefined && update.comment !== undefined)
+      return this.updateAnnotationAtomically(binding, update.color, update.comment);
     if (update.color !== undefined && !this.updateColors(bindings, update.color)) return false;
     if (update.comment !== undefined && !this.updateComments(bindings, update.comment))
       return false;
+    return true;
+  }
+
+  private updateAnnotationAtomically(
+    binding: NativeAnnotationBinding,
+    color: string,
+    comment: string,
+  ): boolean {
+    const parameter = annotationColorParameter(binding.editor);
+    const previousColor = selectionHighlightColor(binding.editor);
+    if (parameter === null || previousColor === null) return false;
+    const previousComment = binding.editor.comment;
+    let action: PdfCommentMutationFailure['action'] = 'change-color';
+    this.nativeMutationDepth += 1;
+    try {
+      binding.manager.setSelected(binding.editor);
+      binding.manager.updateParams(parameter, color);
+      action = 'save-comment';
+      binding.editor.comment = comment;
+    } catch (cause) {
+      try {
+        binding.manager.setSelected(binding.editor);
+        binding.manager.updateParams(parameter, previousColor);
+      } catch {
+        // The original mutation failure remains the actionable boundary.
+      }
+      try {
+        binding.editor.comment = previousComment;
+      } catch {
+        // The original mutation failure remains the actionable boundary.
+      }
+      this.options.onFailure?.({ action, cause });
+      return false;
+    } finally {
+      this.nativeMutationDepth -= 1;
+    }
+    this.options.onColorChange?.(color);
+    this.options.onNativeMutation?.();
     return true;
   }
 
@@ -1213,7 +1255,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   updatePopupColor(editor: PdfCommentEditor): void {
-    if (this.activeSource !== editor) return;
+    if (this.activeSource !== editor || this.nativeMutationDepth > 0) return;
     this.publishFocus(editor, {
       activation: this.activeFocusActivation,
       anchor: popupAnchor(editor)?.getBoundingClientRect(),
