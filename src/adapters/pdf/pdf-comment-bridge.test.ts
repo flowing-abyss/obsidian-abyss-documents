@@ -120,6 +120,45 @@ function annotation(id: string, writable = true): DocumentAnnotation {
   };
 }
 
+function focusLifecycleFixture(ids: readonly string[]) {
+  const host = document.body.createDiv();
+  const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+  const nodes = ids.map((id, index) => {
+    const node = layer.createDiv({ cls: `highlightEditor${index === 0 ? ' selectedEditor' : ''}` });
+    node.id = id;
+    return node;
+  });
+  const editors = nodes.map((node) =>
+    editor(`Comment ${node.id}`, { anchor: node, dataId: node.id, uid: node.id }),
+  );
+  const manager = uiManager(editors[0] ?? null);
+  manager.getEditor.mockImplementation((id) => editors.find((candidate) => candidate.uid === id));
+  const bridge = new PdfCommentBridge(host);
+  const focused: PdfAnnotationFocus[] = [];
+  bridge.setSidebarUiManager(manager);
+  bridge.onAnnotationFocus((focus) => {
+    if (focus !== null) focused.push(focus);
+  });
+  return { bridge, editors, focused, host, nodes };
+}
+
+async function focusFromSidebar(
+  current: ReturnType<typeof focusLifecycleFixture>,
+  index: number,
+  rowId: string,
+): Promise<void> {
+  const native = current.editors[index];
+  if (native === undefined) throw new Error('Expected a mounted native editor.');
+  await expect(
+    current.bridge.focusAnnotation(native.uid ?? '', undefined, undefined, {
+      activation: { kind: 'sidebar', rowId },
+      editableOnly: true,
+      includeSelectedPeers: true,
+      preserveSelection: true,
+    }),
+  ).resolves.toBe(true);
+}
+
 describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
   it('uses the native annotation color instead of popup color in forced colors mode', () => {
     const host = document.body.createDiv();
@@ -303,6 +342,97 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     expect(bridge.nativeEditorUidForAnnotation('30R')).toBeNull();
     bridge.dispose();
     host.remove();
+  });
+
+  it('retains sidebar activation when selected-peer DOM refresh replaces the focus lease', async () => {
+    const current = focusLifecycleFixture(['refresh-owner', 'refresh-peer']);
+    await focusFromSidebar(current, 0, 'sidebar-row-a');
+    current.nodes[1]?.addClass('selectedEditor');
+
+    current.bridge.refreshAnnotationFocus();
+
+    expect(current.focused).toHaveLength(2);
+    expect(current.focused[1]).toMatchObject({
+      activation: { kind: 'sidebar', rowId: 'sidebar-row-a' },
+      annotations: [
+        { identity: { id: 'refresh-owner', kind: 'stable' } },
+        { identity: { id: 'refresh-peer', kind: 'stable' } },
+      ],
+    });
+    current.bridge.dispose();
+    current.host.remove();
+  });
+
+  it('retains sidebar activation when native color refresh replaces the focus lease', async () => {
+    const current = focusLifecycleFixture(['color-owner']);
+    await focusFromSidebar(current, 0, 'sidebar-row-color');
+    const native = current.editors[0];
+    if (native === undefined) throw new Error('Expected the color owner.');
+
+    current.bridge.updatePopupColor(native);
+
+    expect(current.focused).toHaveLength(2);
+    expect(current.focused[1]?.activation).toEqual({
+      kind: 'sidebar',
+      rowId: 'sidebar-row-color',
+    });
+    current.bridge.dispose();
+    current.host.remove();
+  });
+
+  it('retains sidebar activation for a repeated native popup and clears it with the lease', async () => {
+    const current = focusLifecycleFixture(['popup-owner']);
+    await focusFromSidebar(current, 0, 'sidebar-row-popup');
+    const native = current.editors[0];
+    if (native === undefined) throw new Error('Expected the popup owner.');
+
+    current.bridge.toggleCommentPopup(native, true, true, true);
+    expect(current.focused[1]?.activation).toEqual({
+      kind: 'sidebar',
+      rowId: 'sidebar-row-popup',
+    });
+    current.focused[1]?.lease?.release();
+    current.bridge.toggleCommentPopup(native, true, true, true);
+
+    expect(current.focused[2]?.activation).toBeUndefined();
+    current.bridge.dispose();
+    current.host.remove();
+  });
+
+  it('lets genuine PDF-origin focus of the same editor supersede sidebar activation', async () => {
+    const current = focusLifecycleFixture(['pointer-supersede']);
+    await focusFromSidebar(current, 0, 'sidebar-row-pointer');
+    const node = current.nodes[0];
+    if (node === undefined) throw new Error('Expected the pointer focus target.');
+
+    current.bridge.focusFromPointer(node, true);
+
+    expect(current.focused).toHaveLength(2);
+    expect(current.focused[1]?.activation).toBeUndefined();
+    current.bridge.dispose();
+    current.host.remove();
+  });
+
+  it('does not let stale row A lease work clear or reattach provenance after row B wins', async () => {
+    const current = focusLifecycleFixture(['stale-row-a', 'current-row-b']);
+    await focusFromSidebar(current, 0, 'sidebar-row-a');
+    const staleLease = current.focused[0]?.lease;
+    current.nodes[0]?.removeClass('selectedEditor');
+    current.nodes[1]?.addClass('selectedEditor');
+    await focusFromSidebar(current, 1, 'sidebar-row-b');
+    const staleEditor = current.editors[0];
+    const currentEditor = current.editors[1];
+    if (staleEditor === undefined || currentEditor === undefined)
+      throw new Error('Expected both race editors.');
+
+    staleLease?.release();
+    current.bridge.updatePopupColor(staleEditor);
+    current.bridge.updatePopupColor(currentEditor);
+
+    expect(current.focused).toHaveLength(3);
+    expect(current.focused[2]?.activation).toEqual({ kind: 'sidebar', rowId: 'sidebar-row-b' });
+    current.bridge.dispose();
+    current.host.remove();
   });
 
   it('ignores a persisted highlight mounted during repeated selection before adopting the new one', () => {

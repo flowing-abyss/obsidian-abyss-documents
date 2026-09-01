@@ -208,6 +208,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   private activeSourceEditable = false;
   private activeIncludesSelectedPeers = false;
   private activeFocusLease: PdfAnnotationFocusLease | null = null;
+  private activeFocusActivation: PdfAnnotationFocusActivation | undefined;
   private sidebarUiManager: PdfCommentUiManager | null = null;
   private activeDialogReservation: PendingCommentDialogReservation | null = null;
   private nextDialogReservation: PendingCommentDialogReservation | null = null;
@@ -259,6 +260,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     const source = selected.includes(editor) ? editor : selected[0];
     if (source === undefined) return;
     this.publishFocus(source, {
+      activation: this.activeFocusActivation,
       anchor: popupAnchor(source)?.getBoundingClientRect(),
       includeSelectedPeers: this.activeIncludesSelectedPeers,
       isEditable: this.activeSourceEditable,
@@ -268,7 +270,11 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
 
   private releaseDetachedActiveFocus(): boolean {
     const lease = this.activeFocusLease;
-    if (lease === null || this.activeSourceIsMounted()) return false;
+    if (this.activeSourceIsMounted()) return false;
+    if (lease === null) {
+      this.activeFocusActivation = undefined;
+      return false;
+    }
     lease.release();
     this.emitFocus(null);
     return true;
@@ -353,6 +359,8 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     if (id.length === 0 || !node.matches('.annotationLayer [data-annotation-id]')) return false;
     const position = firstClientPosition(node.getBoundingClientRect(), clientPosition);
     if (position === undefined) return false;
+    this.activeFocusLease?.release();
+    this.activeFocusActivation = undefined;
     this.emitFocus({
       ...(activation === undefined ? {} : { activation }),
       annotations: [
@@ -551,6 +559,8 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   ): boolean {
     const position = firstClientPosition(node.getBoundingClientRect(), request.clientPosition);
     if (position === undefined) return false;
+    this.activeFocusLease?.release();
+    this.activeFocusActivation = request.activation;
     this.clearBindingsForEditor(editor);
     this.bindingIds.set(editor, stableId);
     this.activeSource = editor;
@@ -620,6 +630,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     const { editor, manager, node } = native;
     const position = focusedEditorPosition(editor, node, clientPosition);
     if (position === undefined) return false;
+    this.activeFocusLease?.release();
     this.clearBindingsForEditor(editor);
     this.bindingIds.set(editor, stableId);
     manager.setSelected(editor);
@@ -628,9 +639,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       manager: writableManager(editable, manager),
       writable: editable,
     });
-    if (editable) this.retainActiveBinding(editor);
+    if (editable) this.retainActiveBinding(editor, activation);
     else {
       this.activeSource = editor;
+      this.activeFocusActivation = activation;
     }
     setFocusedCommentButton(editor);
     this.emitFocus({
@@ -964,6 +976,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       return;
     }
     this.publishFocus(editor, {
+      activation: this.activeSource === editor ? this.activeFocusActivation : undefined,
       anchor: popupAnchor(editor)?.getBoundingClientRect(),
       includeSelectedPeers: isSelected,
       isEditable,
@@ -993,6 +1006,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     const position = firstClientPosition(anchor, clientPosition);
     if (position === undefined) return false;
     this.activeFocusLease?.release();
+    this.activeFocusActivation = activation;
     this.popupDestroyRevision += 1;
     this.activeSourceEditable = isEditable;
     const manager = this.sidebarUiManager;
@@ -1006,9 +1020,10 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
         writable: editable,
       }),
     );
-    if (editable && manager !== null) this.retainActiveBinding(editor);
+    if (editable && manager !== null) this.retainActiveBinding(editor, activation);
     else {
       this.activeSource = editor;
+      this.activeFocusActivation = activation;
     }
     this.activeIncludesSelectedPeers = includeSelectedPeers;
     this.replaceActiveSelectedEditors(sources);
@@ -1086,6 +1101,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     this.activeSource = null;
     this.activeSourceEditable = false;
     this.activeIncludesSelectedPeers = false;
+    this.activeFocusActivation = undefined;
     this.activeSelectedEditors.splice(0);
   }
 
@@ -1113,10 +1129,14 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
     return this.findReadyNativeEditor(runtimeId, false)?.editor === source;
   }
 
-  private retainActiveBinding(editor: PdfCommentEditor): void {
+  private retainActiveBinding(
+    editor: PdfCommentEditor,
+    activation?: PdfAnnotationFocusActivation,
+  ): void {
     this.activeSource = editor;
     this.activeSourceEditable = true;
     this.activeIncludesSelectedPeers = false;
+    this.activeFocusActivation = activation;
     this.replaceActiveSelectedEditors([editor]);
   }
 
@@ -1148,6 +1168,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       lease.release();
       this.emitFocus(null);
     }
+    if (manager !== this.sidebarUiManager) this.activeFocusActivation = undefined;
     this.sidebarUiManager = manager;
     for (const check of [...this.focusReadinessChecks]) check();
   }
@@ -1188,6 +1209,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   updatePopupColor(editor: PdfCommentEditor): void {
     if (this.activeSource !== editor) return;
     this.publishFocus(editor, {
+      activation: this.activeFocusActivation,
       anchor: popupAnchor(editor)?.getBoundingClientRect(),
       isEditable: true,
       isSelected: true,
