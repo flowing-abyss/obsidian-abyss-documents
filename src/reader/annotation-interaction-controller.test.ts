@@ -1183,6 +1183,69 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it.each(['success', 'failure'] as const)(
+    'releases an ignored annotation focus while selection commit is pending (%s)',
+    async (outcome) => {
+      const pending = deferred<DocumentAnnotation | 'dismissed'>();
+      const test = fixture();
+      test.commitSelection.mockImplementationOnce(() => pending.promise);
+      test.emitSelection(textSelection(`pending-focus-${outcome}`));
+      const selectionRequest = test.opened[test.opened.length - 1];
+      if (selectionRequest === undefined) throw new Error('Expected a selection editor request.');
+
+      const creation = selectionRequest.onCreate({
+        color: '#ffd400',
+        comment: '',
+        selection: textSelection(`pending-focus-${outcome}`),
+      });
+      await vi.waitFor(() => {
+        expect(test.commitSelection).toHaveBeenCalledOnce();
+      });
+      const release = vi.fn();
+      test.emitAnnotationFocus({
+        annotations: [nativeAnnotation('Pending native focus')],
+        editable: true,
+        lease: { release },
+        position: { x: 10, y: 20 },
+      });
+
+      expect(release).toHaveBeenCalledOnce();
+      expect(test.opened).toHaveLength(1);
+      if (outcome === 'success') {
+        pending.resolve(nativeAnnotation('Committed'));
+        await expect(creation).resolves.toMatchObject({ comment: 'Committed' });
+      } else {
+        const cause = new Error('commit failed');
+        pending.reject(cause);
+        await expect(creation).rejects.toBe(cause);
+      }
+      expect(release).toHaveBeenCalledOnce();
+      expect(test.opened).toHaveLength(1);
+      test.controller.destroy();
+    },
+  );
+
+  it('releases annotation focus when the unified editor host throws', () => {
+    const test = fixture();
+    const cause = new DOMException('Popover host is detached.', 'InvalidStateError');
+    test.openAnnotationEditor.mockImplementationOnce(() => {
+      throw cause;
+    });
+    const release = vi.fn();
+
+    expect(() => {
+      test.emitAnnotationFocus({
+        annotations: [nativeAnnotation('Throwing focus')],
+        editable: true,
+        lease: { release },
+        position: { x: 10, y: 20 },
+      });
+    }).toThrow(cause);
+    expect(release).toHaveBeenCalledOnce();
+    expect(test.opened).toHaveLength(0);
+    test.controller.destroy();
+  });
+
   it('does not move native focus when the current annotation draft refuses to flush', async () => {
     const test = fixture();
     test.emitAnnotationFocus({

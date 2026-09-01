@@ -1041,8 +1041,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       this.emitFocus(null);
       return;
     }
-    if (this.activeFocusLease === null) this.releasePopupState();
-    else this.activeFocusLease.release();
+    this.releasePopupState();
     this.emitFocus(null);
   }
 

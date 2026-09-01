@@ -342,7 +342,7 @@ export class AnnotationInteractionController {
   }
 
   private handleAnnotationFocus(focus: PdfAnnotationFocus | null): void {
-    if (this.destroyed || this.activeAbort !== null) return;
+    if (this.ignoreAnnotationFocus(focus)) return;
     const first = focus?.annotations[0];
     if (focus === null || first === undefined) {
       this.closeActiveSelection();
@@ -355,34 +355,46 @@ export class AnnotationInteractionController {
     const target = this.annotationFocusTarget(focus, first);
     const neutralizeOnClose = target.kind !== 'readonly' || focus.editable;
     const revision = this.activeSelectionRevision + 1;
-    const opened = this.host.openAnnotationEditor({
-      color: first.color ?? undefined,
-      onClose: (_reason, context) => {
-        this.releaseAnnotationFocusLease(focus);
-        if (revision !== this.activeSelectionRevision) {
-          if (this.activeEditorKind === null && neutralizeOnClose)
-            this.neutralizeNativeEditor(context);
-          return;
-        }
-        this.activeEditorKind = null;
-        this.ownedSelectionRevision = null;
-        this.activeSelectionRevision += 1;
-        if (neutralizeOnClose) this.neutralizeNativeEditor(context);
-      },
-      onCreate: () => 'dismissed' as const,
-      onDelete: (annotations) => this.deleteAnnotations(annotations),
-      onPreviewRevert: (update) => this.options.onAnnotationPreview?.(update),
-      onPreviewUpdate: (update) => this.options.onAnnotationPreview?.(update),
-      onUpdate: (update) => this.updateAnnotations(update),
-      palette: this.palette,
-      position: focus.position,
-      resolveAnchor: (resolvedTarget) => {
-        const annotation = singleTargetAnnotation(resolvedTarget) ?? first;
-        return this.interaction.resolveAnnotationAnchor?.(annotationIdentity(annotation)) ?? null;
-      },
-      target,
-    });
+    let opened: boolean;
+    try {
+      opened = this.host.openAnnotationEditor({
+        color: first.color ?? undefined,
+        onClose: (_reason, context) => {
+          this.releaseAnnotationFocusLease(focus);
+          if (revision !== this.activeSelectionRevision) {
+            if (this.activeEditorKind === null && neutralizeOnClose)
+              this.neutralizeNativeEditor(context);
+            return;
+          }
+          this.activeEditorKind = null;
+          this.ownedSelectionRevision = null;
+          this.activeSelectionRevision += 1;
+          if (neutralizeOnClose) this.neutralizeNativeEditor(context);
+        },
+        onCreate: () => 'dismissed' as const,
+        onDelete: (annotations) => this.deleteAnnotations(annotations),
+        onPreviewRevert: (update) => this.options.onAnnotationPreview?.(update),
+        onPreviewUpdate: (update) => this.options.onAnnotationPreview?.(update),
+        onUpdate: (update) => this.updateAnnotations(update),
+        palette: this.palette,
+        position: focus.position,
+        resolveAnchor: (resolvedTarget) => {
+          const annotation = singleTargetAnnotation(resolvedTarget) ?? first;
+          return this.interaction.resolveAnnotationAnchor?.(annotationIdentity(annotation)) ?? null;
+        },
+        target,
+      });
+    } catch (cause) {
+      this.releaseAnnotationFocusLease(focus);
+      throw cause;
+    }
     this.finishAnnotationFocusOpen(opened, target, revision, focus);
+  }
+
+  private ignoreAnnotationFocus(focus: PdfAnnotationFocus | null): boolean {
+    if (!this.destroyed && this.activeAbort === null) return false;
+    if (focus !== null) this.releaseAnnotationFocusLease(focus);
+    return true;
   }
 
   private finishAnnotationFocusOpen(
