@@ -142,6 +142,7 @@ interface PdfAnnotationUiManager {
   disableUserSelect(value?: boolean): void;
   endCurrentEditing(): void;
   readonly firstSelectedEditor?: PdfNativeEditorReference | undefined;
+  readonly hasSelection: boolean;
   getEditor(id: string): PdfNativeEditorReference | undefined;
   getLayer(pageIndex: number):
     | {
@@ -152,6 +153,7 @@ interface PdfAnnotationUiManager {
   highlightSelection(methodOfCreation?: string): void;
   redo(): void;
   setSelected?(editor: PdfNativeEditorReference): void;
+  unselectAll(): void;
   undo(): void;
   updateParams(type: number, value: unknown): void;
 }
@@ -1513,14 +1515,14 @@ export class PdfAnnotationEditor {
     const manager = this.requireManager();
     if (this.logicalMode !== 'neutral') return 'dismissed';
     if (signal?.aborted === true) throw abortReason(signal);
+    const defaultPreparation = this.prepareGlobalHighlightDefault(manager, action.color, signal);
+    if (defaultPreparation !== null) {
+      await defaultPreparation;
+      if (!this.restoreSelectionToken(token)) return 'dismissed';
+    }
     const transaction = this.beginSelectionTransaction(signal);
     const highlight = this.reserveSelectionHighlight(manager);
     try {
-      manager.updateParams(
-        this.dependencies.annotationEditorParamsType.HIGHLIGHT_COLOR,
-        action.color,
-      );
-      this.emitColor(action.color);
       this.setLogicalMode('one-shot');
       const resolved = await this.resolveSelectionAnnotation({
         action,
@@ -1811,13 +1813,67 @@ export class PdfAnnotationEditor {
   }): Promise<void> {
     if (this.interactionsSuspended) return;
     const intentRevision = ++this.toolIntentRevision;
-    if (state.enabled) {
-      await this.setParameter('highlight-color', state.color);
-    }
+    await this.applyToolIntent('select', {}, intentRevision);
     if (intentRevision !== this.toolIntentRevision) {
       throw new DOMException('The PDF annotation tool request was superseded.', 'AbortError');
     }
-    await this.applyToolIntent('select', {}, intentRevision);
+    if (state.enabled) {
+      await this.prepareGlobalHighlightDefault(this.requireManager(), state.color);
+    }
+  }
+
+  private prepareGlobalHighlightDefault(
+    manager: PdfAnnotationUiManager,
+    color: string,
+    signal?: AbortSignal,
+  ): Promise<void> | null {
+    if (signal?.aborted === true) throw abortReason(signal);
+    const contextual = this.contextualEditSession;
+    if (contextual !== null) {
+      return this.closeContextualEditSession(
+        contextual,
+        signal === undefined ? {} : { signal },
+      ).then(() => this.continueGlobalHighlightDefault(manager, color, signal));
+    }
+    this.requireGlobalHighlightManager(manager);
+    const nativeMode = this.dependencies.viewer.annotationEditorMode;
+    if (typeof nativeMode !== 'number') {
+      throw new DOMException('The PDF annotation editor mode is unavailable.', 'InvalidStateError');
+    }
+    if (nativeMode !== this.dependencies.annotationEditorType.NONE) {
+      return this.changeMode(
+        this.dependencies.annotationEditorType.NONE,
+        {},
+        signal === undefined ? {} : { signal },
+      ).then(() => this.continueGlobalHighlightDefault(manager, color, signal));
+    }
+    this.writeGlobalHighlightDefault(manager, color);
+    return null;
+  }
+
+  private continueGlobalHighlightDefault(
+    manager: PdfAnnotationUiManager,
+    color: string,
+    signal?: AbortSignal,
+  ): Promise<void> | void {
+    return this.prepareGlobalHighlightDefault(manager, color, signal) ?? undefined;
+  }
+
+  private requireGlobalHighlightManager(manager: PdfAnnotationUiManager): void {
+    if (manager !== this.manager || this.destroyed) throw this.staleError();
+  }
+
+  private writeGlobalHighlightDefault(manager: PdfAnnotationUiManager, color: string): void {
+    this.requireGlobalHighlightManager(manager);
+    manager.unselectAll();
+    if (manager.hasSelection) {
+      throw new DOMException(
+        'The selected PDF annotation could not be released before changing the highlight default.',
+        'InvalidStateError',
+      );
+    }
+    manager.updateParams(this.dependencies.annotationEditorParamsType.HIGHLIGHT_COLOR, color);
+    this.emitColor(color);
   }
 
   async abortInteraction(message: string): Promise<void> {
@@ -3166,10 +3222,14 @@ export class PdfAnnotationEditor {
       'getLayer',
       'highlightSelection',
       'redo',
+      'unselectAll',
       'undo',
       'updateParams',
     ] as const;
-    return methods.every((method) => typeof data[method] === 'function');
+    return (
+      typeof data['hasSelection'] === 'boolean' &&
+      methods.every((method) => typeof data[method] === 'function')
+    );
   }
 
   private modeFor(tool: PdfAnnotationTool): number {

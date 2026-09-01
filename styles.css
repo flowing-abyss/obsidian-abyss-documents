@@ -7071,7 +7071,7 @@
   flex-direction: column;
   justify-content: flex-start;
   gap: 4px;
-  padding: 6px 8px;
+  padding: 6px 36px 6px 8px;
   border: 0;
   border-radius: var(--radius-s);
   background: transparent;
@@ -7083,8 +7083,56 @@
 .abyss-documents .abyss-annotation-card-row {
   position: relative;
   display: block;
-  margin: 0;
-  border-bottom: var(--border-width) solid var(--background-modifier-border);
+  margin: 1px 0;
+  border-radius: var(--radius-s);
+}
+
+.abyss-documents .abyss-annotation-card-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.abyss-documents .abyss-annotation-card-row.is-selected {
+  background: var(--nav-item-background-active, var(--background-modifier-hover));
+  box-shadow: inset 2px 0 0 var(--interactive-accent);
+}
+
+.abyss-documents .abyss-annotation-card:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -2px;
+}
+
+.abyss-documents .abyss-annotation-card-edit {
+  position: absolute;
+  inset-block-start: 4px;
+  inset-inline-end: 4px;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 4px;
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.abyss-documents .abyss-annotation-card-edit::after {
+  position: absolute;
+  inset-block-start: 2px;
+  inset-inline-end: 2px;
+  width: 6px;
+  height: 6px;
+  border: var(--border-width) solid var(--background-primary);
+  border-radius: 50%;
+  background: var(--abyss-annotation-color, transparent);
+  content: '';
+}
+
+.abyss-documents
+  .abyss-annotation-card-row:is(:hover, :focus-within, .is-selected)
+  > .abyss-annotation-card-edit {
+  opacity: 1;
+  pointer-events: auto;
+  visibility: visible;
 }
 
 .abyss-documents .abyss-annotation-comment-suggestions {
@@ -7108,12 +7156,6 @@
 }
 
 .abyss-documents .abyss-annotation-comment-suggestions > [role='option'][aria-selected='true'] {
-  background: var(--background-modifier-hover);
-}
-
-.abyss-documents .abyss-annotation-card:hover,
-.abyss-documents .abyss-annotation-card:focus-visible,
-.abyss-documents .abyss-annotation-card[aria-current='true'] {
   background: var(--background-modifier-hover);
 }
 
@@ -7343,6 +7385,21 @@
 
   .abyss-documents .abyss-annotation-editor-popover {
     gap: 6px;
+  }
+
+  .abyss-documents .abyss-annotation-card-row {
+    min-height: 44px;
+  }
+
+  .abyss-documents .abyss-annotation-card {
+    padding-inline-end: 52px;
+  }
+
+  .abyss-documents .abyss-annotation-card-edit {
+    inset-block-start: 0;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
   }
 
   .abyss-documents .abyss-annotation-editor-palette {

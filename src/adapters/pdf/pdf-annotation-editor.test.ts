@@ -173,14 +173,49 @@ function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
     disableUserSelect: vi.fn(),
     endCurrentEditing: vi.fn(),
     firstSelectedEditor: selected ?? undefined,
+    hasSelection: selected !== null,
     getEditor: vi.fn(),
     getLayer: vi.fn((pageIndex: number) => layers[pageIndex]),
     highlightSelection: vi.fn(),
     layers,
     redo: vi.fn(),
     setSelected: vi.fn(),
+    unselectAll: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
+  };
+}
+
+function colorRoutingManager(
+  fixtureValue: ReturnType<typeof fixture>,
+  selected: ReturnType<typeof selectedEditor>,
+  initialColor = '#ffd400',
+) {
+  const uiManager = manager(selected);
+  let annotationColor = initialColor;
+  let defaultColor = initialColor;
+  let selectedNative: ReturnType<typeof selectedEditor> | null = selected;
+  Object.defineProperty(uiManager, 'firstSelectedEditor', {
+    configurable: true,
+    get: () => selectedNative ?? undefined,
+  });
+  Object.defineProperty(uiManager, 'hasSelection', {
+    configurable: true,
+    get: () => selectedNative !== null,
+  });
+  uiManager.unselectAll.mockImplementation(() => {
+    if (fixtureValue.viewer.currentMode !== 0) return;
+    selectedNative = null;
+  });
+  uiManager.updateParams.mockImplementation((_type, value) => {
+    if (typeof value !== 'string') return;
+    if (uiManager.hasSelection) annotationColor = value;
+    else defaultColor = value;
+  });
+  return {
+    annotationColor: () => annotationColor,
+    defaultColor: () => defaultColor,
+    uiManager,
   };
 }
 
@@ -1065,6 +1100,69 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(fixtureValue.viewer.annotationEditorMode).toBe(0);
   });
 
+  it('neutralizes and clears a selected native editor before changing the Sticky Highlight default', async () => {
+    const fixtureValue = fixture();
+    const selected = selectedEditor('selected-highlight', 9);
+    const routing = colorRoutingManager(fixtureValue, selected);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: routing.uiManager,
+    });
+    await fixtureValue.editor.setTool('highlight');
+    expect(fixtureValue.viewer.currentMode).toBe(9);
+
+    await fixtureValue.editor.setQuickHighlight({ enabled: true, color: '#5fb236' });
+
+    expect(fixtureValue.viewer.currentMode).toBe(0);
+    expect(routing.uiManager.unselectAll).toHaveBeenCalledOnce();
+    expect(routing.uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#5fb236');
+    expect(routing.annotationColor()).toBe('#ffd400');
+    expect(routing.defaultColor()).toBe('#5fb236');
+  });
+
+  it('clears stale native selection before applying a one-shot highlight creation color', async () => {
+    const fixtureValue = fixture();
+    const selected = selectedEditor('stale-selected-highlight', 9);
+    const routing = colorRoutingManager(fixtureValue, selected);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: routing.uiManager,
+    });
+    fixtureValue.commentBridge.normalizeSelectionHighlight.mockReturnValue(
+      createdAnnotation('', { id: 'one-shot-native' }),
+    );
+
+    const committing = fixtureValue.editor.commitSelection('current', {
+      kind: 'highlight',
+      color: '#38a3d1',
+    });
+    fixtureValue.annotationStorage.onAnnotationEditor?.(9);
+    await expect(committing).resolves.toMatchObject({
+      identity: { id: 'one-shot-native', kind: 'stable' },
+    });
+
+    expect(routing.uiManager.unselectAll).toHaveBeenCalledOnce();
+    expect(routing.uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#38a3d1');
+    expect(routing.annotationColor()).toBe('#ffd400');
+    expect(routing.defaultColor()).toBe('#38a3d1');
+  });
+
+  it('keeps contextual color mutations targeted at the selected annotation', async () => {
+    const fixtureValue = fixture();
+    const selected = selectedEditor('contextual-highlight', 9);
+    const routing = colorRoutingManager(fixtureValue, selected);
+    fixtureValue.eventBus.dispatch('annotationeditoruimanager', {
+      source: fixtureValue.viewer,
+      uiManager: routing.uiManager,
+    });
+
+    await fixtureValue.editor.setParameter('highlight-color', '#64d8cb');
+
+    expect(routing.uiManager.unselectAll).not.toHaveBeenCalled();
+    expect(routing.annotationColor()).toBe('#64d8cb');
+    expect(routing.defaultColor()).toBe('#ffd400');
+  });
+
   it('rolls back a materialized native highlight before an aborted selection transaction settles', async () => {
     const fixtureValue = fixture({ dispatchModeChanges: false });
     const uiManager = manager();
@@ -1320,7 +1418,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       await expect(delayedArming).resolves.toMatchObject({ name: 'AbortError' });
       expect(fixtureValue.modeRequests).toEqual([{ mode }]);
       expect(fixtureValue.viewer.annotationEditorMode).toBe(mode);
-      expect(uiManager.updateParams).toHaveBeenCalledExactlyOnceWith(31, '#5fb236');
+      expect(uiManager.updateParams).not.toHaveBeenCalled();
     },
   );
 

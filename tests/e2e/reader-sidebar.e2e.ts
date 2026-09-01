@@ -1173,7 +1173,11 @@ describe('PDF reader sidebar', () => {
       if (card === null || row === null || chips.length < 12)
         throw new Error('Semantic annotation UI is incomplete.');
       return {
-        actionSurfaceAbsent: row.querySelector('.abyss-annotation-card-actions') === null,
+        editTriggerLabel:
+          row
+            .querySelector<HTMLButtonElement>(':scope > .abyss-annotation-card-edit')
+            ?.getAttribute('aria-label') ?? null,
+        editTriggerNested: card.querySelector('.abyss-annotation-card-edit') !== null,
         cardRight: card.getBoundingClientRect().right,
         chipCount: chips.length,
         chipRoles: chips.map((chip) => ({
@@ -1196,8 +1200,9 @@ describe('PDF reader sidebar', () => {
       };
     });
     expect(initial).toMatchObject({
-      actionSurfaceAbsent: true,
       chipCount: 12,
+      editTriggerLabel: expect.stringMatching(/^Edit color, comment, or delete — .+/u),
+      editTriggerNested: false,
       forbiddenCopy: false,
       hasLinkRegion: false,
       hasTagRegion: false,
@@ -1332,7 +1337,7 @@ describe('PDF reader sidebar', () => {
         ).filter((popover) => !popover.hidden).length,
       })),
     ).toEqual({ selectedEditors: 0, visiblePopovers: 0 });
-    await $('.abyss-annotation-card').click({ button: 'right' });
+    await $('.abyss-annotation-card-edit').click();
     await expect($('[data-annotation-editor-popover]')).toBeDisplayed();
     await expect($('textarea[aria-label="Comment"]')).toHaveValue(
       expect.stringContaining('Annotation 00001'),

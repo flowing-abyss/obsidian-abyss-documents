@@ -80,6 +80,7 @@ export class AnnotationInteractionController {
   private mode: PdfAnnotationLogicalMode = 'neutral';
   private palette: readonly AnnotationPaletteEntry[];
   private quickRequestRevision = 0;
+  private quickColorPending = false;
   private queuedStickySelection: QueuedStickySelection | null = null;
   private stickyArmed = false;
   private stickyArming = false;
@@ -126,7 +127,8 @@ export class AnnotationInteractionController {
 
   requestTool(tool: PdfAnnotationTool, color?: string): boolean {
     if (this.destroyed || (tool !== 'highlight' && tool !== 'select')) return false;
-    if (!this.closeActiveSelection()) return false;
+    if (this.activeEditorKind !== 'annotation' && !this.closeActiveSelection()) return false;
+    this.quickColorPending = false;
     this.discardQueuedStickySelection();
     const enabled = tool === 'highlight';
     if (enabled && color !== undefined && color.trim().length > 0) this.setActiveColor(color);
@@ -171,10 +173,12 @@ export class AnnotationInteractionController {
       return false;
     this.setActiveColor(color);
     this.publishQuickHighlightState();
-    if (this.stickyArmed || !this.stickyArming) return true;
-    if (this.activeAbort !== null) return true;
-    const revision = ++this.quickRequestRevision;
-    this.contain(this.applyQuickHighlight(true, revision));
+    if (!this.stickyArmed && !this.stickyArming) return true;
+    if (this.activeAbort !== null) {
+      this.quickColorPending = true;
+      return true;
+    }
+    this.refreshQuickHighlightColor();
     return true;
   }
 
@@ -182,18 +186,21 @@ export class AnnotationInteractionController {
     if (this.destroyed) return;
     this.palette = palette;
     this.interaction.setPalette?.(palette);
-    const activeColor = this.activeColor.toLocaleLowerCase();
-    if (!palette.some(({ color }) => color.toLocaleLowerCase() === activeColor))
-      this.setActiveColor(palette[0]?.color ?? DEFAULT_COLOR);
+    this.reconcilePaletteColor(palette);
     if (this.activeAbort !== null) {
+      if (this.stickyArmed || this.stickyArming) this.quickColorPending = true;
       this.publishQuickHighlightState();
       return;
     }
-    if (!this.closeActiveSelection()) return;
+    if (this.activeEditorKind !== 'annotation' && !this.closeActiveSelection()) return;
     this.publishQuickHighlightState();
-    if (this.stickyArmed || !this.stickyArming) return;
-    const revision = ++this.quickRequestRevision;
-    this.contain(this.applyQuickHighlight(true, revision));
+    this.refreshQuickHighlightColor();
+  }
+
+  private reconcilePaletteColor(palette: readonly AnnotationPaletteEntry[]): void {
+    const activeColor = this.activeColor.toLocaleLowerCase();
+    if (!palette.some(({ color }) => color.toLocaleLowerCase() === activeColor))
+      this.setActiveColor(palette[0]?.color ?? DEFAULT_COLOR);
   }
 
   invalidate(reason: AnnotationInteractionInvalidation): void {
@@ -480,6 +487,7 @@ export class AnnotationInteractionController {
     if (ownsTransaction) {
       this.activeAbort = null;
       this.publishQuickHighlightState();
+      this.applyPendingQuickColor();
     }
     if (result === 'dismissed') {
       this.options.onSelectionCreateDiscard?.(creation);
@@ -502,6 +510,7 @@ export class AnnotationInteractionController {
     this.options.onSelectionCreateDiscard?.(creation);
     if (this.activeAbort !== abort) return;
     this.activeAbort = null;
+    this.applyPendingQuickColor();
     this.publishQuickHighlightState();
     if (isAbortFailure(cause)) return;
     this.options.onFailure?.('create selection annotation', cause, {
@@ -543,25 +552,66 @@ export class AnnotationInteractionController {
 
   private async applyQuickHighlight(enabled: boolean, revision: number): Promise<void> {
     try {
+      if (!(await this.prepareQuickHighlightOwnership(revision))) return;
       await this.interaction.setQuickHighlight({ color: this.activeColor, enabled });
-      if (this.destroyed || revision !== this.quickRequestRevision) return;
-      this.stickyArming = false;
-      this.stickyArmed = enabled;
-      this.publishQuickHighlightState();
-      this.replayQueuedStickySelection();
+      this.completeQuickHighlight(enabled, revision);
     } catch (cause) {
-      if (this.destroyed || revision !== this.quickRequestRevision) return;
-      this.discardQueuedStickySelection();
-      this.stickyArmed = false;
-      this.stickyArming = false;
-      this.publishQuickHighlightState();
-      if (isAbortFailure(cause)) return;
-      this.host.closeAnnotationEditor();
-      this.options.onModeChange?.(this.mode);
-      this.options.onFailure?.(enabled ? 'arm Quick Highlight' : 'disarm Quick Highlight', cause, {
-        color: this.activeColor,
-      });
+      this.failQuickHighlight(enabled, revision, cause);
     }
+  }
+
+  private completeQuickHighlight(enabled: boolean, revision: number): void {
+    if (!this.quickRequestIsCurrent(revision)) return;
+    this.stickyArming = false;
+    this.stickyArmed = enabled;
+    this.publishQuickHighlightState();
+    this.replayQueuedStickySelection();
+  }
+
+  private failQuickHighlight(enabled: boolean, revision: number, cause: unknown): void {
+    if (!this.quickRequestIsCurrent(revision)) return;
+    this.discardQueuedStickySelection();
+    this.stickyArmed = false;
+    this.stickyArming = false;
+    this.publishQuickHighlightState();
+    if (isAbortFailure(cause)) return;
+    this.host.closeAnnotationEditor();
+    this.options.onModeChange?.(this.mode);
+    this.options.onFailure?.(enabled ? 'arm Quick Highlight' : 'disarm Quick Highlight', cause, {
+      color: this.activeColor,
+    });
+  }
+
+  private async prepareQuickHighlightOwnership(revision: number): Promise<boolean> {
+    if (this.activeEditorKind !== 'annotation') return true;
+    if (!(await this.host.flushAnnotationEditor())) {
+      throw new DOMException('The annotation editor could not be flushed.', 'AbortError');
+    }
+    if (this.destroyed || revision !== this.quickRequestRevision) return false;
+    if (!this.closeActiveSelection()) {
+      throw new DOMException('The annotation editor could not be closed.', 'AbortError');
+    }
+    await this.nativeNeutralization;
+    return this.quickRequestIsCurrent(revision);
+  }
+
+  private quickRequestIsCurrent(revision: number): boolean {
+    return !this.destroyed && revision === this.quickRequestRevision;
+  }
+
+  private refreshQuickHighlightColor(): void {
+    if (!this.stickyArmed && !this.stickyArming) return;
+    this.stickyArmed = false;
+    this.stickyArming = true;
+    this.publishQuickHighlightState();
+    const revision = ++this.quickRequestRevision;
+    this.contain(this.applyQuickHighlight(true, revision));
+  }
+
+  private applyPendingQuickColor(): void {
+    if (!this.quickColorPending) return;
+    this.quickColorPending = false;
+    this.refreshQuickHighlightColor();
   }
 
   private closeActiveSelection(): boolean {

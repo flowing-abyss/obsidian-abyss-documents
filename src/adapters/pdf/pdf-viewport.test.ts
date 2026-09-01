@@ -185,12 +185,14 @@ function annotationManager(
     endCurrentEditing: vi.fn(),
     editors,
     firstSelectedEditor: selected ?? undefined,
+    hasSelection: selected !== null,
     getEditor: vi.fn((id: string) => editors.get(id)),
     getLayer: vi.fn((pageIndex: number) => layers[pageIndex]),
     highlightSelection: vi.fn(),
     layers,
     redo: vi.fn(),
     setSelected: vi.fn(),
+    unselectAll: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
   };
@@ -1243,7 +1245,10 @@ describe('PdfDocumentViewport', () => {
     second.click();
 
     expect(selectAnnotation.mock.calls).toEqual([['overlap-first'], ['overlap-second']]);
-    expect(focusAnnotation).not.toHaveBeenCalled();
+    expect(focusAnnotation.mock.calls).toEqual([
+      ['overlap-first', { clientPosition: { x: 0, y: 0 }, kind: 'root-click' }],
+      ['overlap-second', { clientPosition: { x: 0, y: 0 }, kind: 'root-click' }],
+    ]);
     expect(dirty).not.toHaveBeenCalled();
     expect(viewer.annotationEditorRequests).toEqual([]);
   });
@@ -1280,7 +1285,10 @@ describe('PdfDocumentViewport', () => {
 
     expect(setSidebarUiManager).toHaveBeenCalledWith(manager);
     expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('no-comment');
-    expect(focusAnnotation).not.toHaveBeenCalled();
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('no-comment', {
+      clientPosition: { x: 0, y: 0 },
+      kind: 'root-click',
+    });
     expect(focusFromPointer).not.toHaveBeenCalled();
     expect(dirty).not.toHaveBeenCalled();
     expect(viewer.annotationEditorRequests).toEqual([]);
@@ -1314,7 +1322,7 @@ describe('PdfDocumentViewport', () => {
     });
 
     annotation.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
-    annotation.click();
+    annotation.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 74, clientY: 228 }));
     const contextmenu = new MouseEvent('contextmenu', {
       bubbles: true,
       button: 2,
@@ -1323,9 +1331,10 @@ describe('PdfDocumentViewport', () => {
     annotation.dispatchEvent(contextmenu);
 
     expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('persisted-root');
-    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('persisted-root', {
-      kind: 'root-context',
-    });
+    expect(focusAnnotation.mock.calls).toEqual([
+      ['persisted-root', { clientPosition: { x: 74, y: 228 }, kind: 'root-click' }],
+      ['persisted-root', { kind: 'root-context' }],
+    ]);
     expect(bridgeFocus).not.toHaveBeenCalled();
     expect(nativeClickRelays).toBe(0);
     expect(nativePointerRelays).toBe(1);
@@ -1333,6 +1342,29 @@ describe('PdfDocumentViewport', () => {
 
     annotation.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
     expect(nativeClickRelays).toBe(1);
+    expect(focusAnnotation).toHaveBeenCalledTimes(2);
+  });
+
+  it('activates an ordinary annotation click even when cheap selection cannot resolve it', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected mounted annotation interaction.');
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const selectAnnotation = vi.spyOn(interaction, 'selectAnnotation').mockReturnValue(false);
+    const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
+    if (root === null) throw new Error('Expected PDF root.');
+    const annotation = root
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'recoverable-root';
+
+    annotation.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 96, clientY: 312 }));
+
+    expect(selectAnnotation).toHaveBeenCalledExactlyOnceWith('recoverable-root');
+    expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('recoverable-root', {
+      clientPosition: { x: 96, y: 312 },
+      kind: 'root-click',
+    });
   });
 
   it('intercepts contextual activation before native target handlers can relay focus', async () => {

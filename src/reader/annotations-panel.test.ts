@@ -822,6 +822,8 @@ describe('AnnotationsPanel', () => {
     scrollHost.dispatchEvent(new Event('scroll'));
     expect(firstCard?.isConnected).toBe(false);
     expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
+    expect(host.querySelectorAll('.abyss-annotation-card-edit').length).toBeLessThanOrEqual(48);
+    expect(panel.root.querySelectorAll('*').length).toBeLessThanOrEqual(1_024);
 
     scrollHost.scrollTop = 0;
     scrollHost.dispatchEvent(new Event('scroll'));
@@ -1289,6 +1291,251 @@ describe('AnnotationsPanel', () => {
     expect(selected[0]?.getAttribute('data-annotation-row-id')).toBe('overlap-second-row');
     panel.destroy();
     root.remove();
+  });
+
+  it('routes every compact writable-card edit gesture through the one activation callback', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const onActivate = vi.fn<(activation: AnnotationPanelActivation) => void>();
+    const onSelect = vi.fn<(activation: AnnotationPanelActivation) => void>();
+    const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn(), onSelect });
+    const item = annotation(0, { comment: 'A visible editable comment' });
+    panel.setProjectedAnnotations([
+      {
+        annotation: item,
+        key: 'writable-row',
+        nativeId: 'native-writable',
+        writable: true,
+      },
+    ]);
+    const card = root.querySelector<HTMLButtonElement>('.abyss-annotation-card');
+    const edit = root.querySelector<HTMLButtonElement>('.abyss-annotation-card-edit');
+    const comment = root.querySelector<HTMLElement>('[data-annotation-comment]');
+    if (card === null || edit === null || comment === null)
+      throw new Error('Expected one complete writable annotation card.');
+    vi.spyOn(card, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ height: 52, width: 240, x: 40, y: 80 }),
+    );
+
+    card.click();
+    card.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter' }),
+    );
+    expect(onSelect).toHaveBeenCalledTimes(2);
+    expect(onActivate).not.toHaveBeenCalled();
+
+    const editGestures = [
+      () => {
+        edit.click();
+      },
+      () => {
+        comment.click();
+      },
+      () =>
+        card.dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'F2' }),
+        ),
+      () => card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })),
+      () =>
+        card.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'F10',
+            shiftKey: true,
+          }),
+        ),
+    ];
+    for (const [index, gesture] of editGestures.entries()) {
+      gesture();
+      expect(onActivate).toHaveBeenCalledTimes(index + 1);
+      expect(onActivate).toHaveBeenLastCalledWith({
+        annotation: item,
+        clientPosition: { x: 40, y: 132 },
+        location: {
+          coordinateSpace: 'page-points-top-left',
+          pageIndex: 0,
+          x: 0,
+          y: 0,
+        },
+        nativeId: 'native-writable',
+        rowId: 'writable-row',
+      });
+    }
+    expect(root.querySelectorAll('.abyss-annotation-editor-popover')).toHaveLength(0);
+    panel.destroy();
+    root.remove();
+  });
+
+  it('keeps comments visible and exposes a geometry-neutral sibling edit trigger only when writable', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onActivate: vi.fn(), onNavigate: vi.fn() });
+    panel.setProjectedAnnotations([
+      {
+        annotation: annotation(0, { comment: 'Writable note' }),
+        key: 'writable-row',
+        nativeId: 'native-writable',
+        writable: true,
+      },
+      {
+        annotation: annotation(1, { comment: 'Read-only note' }),
+        key: 'read-only-row',
+        nativeId: 'native-read-only',
+        writable: false,
+      },
+      {
+        annotation: annotation(2, {
+          comment: 'Provisional but writable note',
+          identity: { kind: 'legacy', fingerprint: 'pending-native' },
+        }),
+        key: 'provisional-row',
+        nativeId: 'pending-native',
+        provisionalId: 'pending-native',
+        writable: true,
+      },
+    ]);
+
+    const writableRow = root.querySelector<HTMLElement>(
+      '.abyss-annotation-card-row[data-annotation-row-id="writable-row"]',
+    );
+    const readOnlyRow = root.querySelector<HTMLElement>(
+      '.abyss-annotation-card-row[data-annotation-row-id="read-only-row"]',
+    );
+    const provisionalRow = root.querySelector<HTMLElement>(
+      '.abyss-annotation-card-row[data-annotation-row-id="provisional-row"]',
+    );
+    expect(
+      Array.from(root.querySelectorAll('[data-annotation-comment]'), (node) => node.textContent),
+    ).toEqual(['Writable note', 'Read-only note', 'Provisional but writable note']);
+    expect(writableRow?.querySelector(':scope > .abyss-annotation-card-edit')).not.toBeNull();
+    expect(readOnlyRow?.querySelector(':scope > .abyss-annotation-card-edit')).toBeNull();
+    expect(provisionalRow?.querySelector(':scope > .abyss-annotation-card-edit')).not.toBeNull();
+    expect(
+      writableRow?.querySelector('.abyss-annotation-card .abyss-annotation-card-edit'),
+    ).toBeNull();
+    panel.destroy();
+  });
+
+  it('updates the retained edit trigger with the current semantic color name and fallback', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, {
+      colorMeanings: { '#00aa44': 'Question' },
+      colorNames: { '#5fb236': 'Green' },
+      onActivate: vi.fn(),
+      onNavigate: vi.fn(),
+    });
+    const row = {
+      annotation: annotation(0, { color: '#5fb236' }),
+      key: 'semantic-color-row',
+      nativeId: 'native-semantic-color',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([row]);
+    const action = root.querySelector<HTMLButtonElement>('.abyss-annotation-card-edit');
+    if (action === null) throw new Error('Expected the writable edit trigger.');
+    expect({ label: action.getAttribute('aria-label'), title: action.title }).toEqual({
+      label: 'Edit color, comment, or delete — Green',
+      title: 'Edit color, comment, or delete — Green',
+    });
+
+    panel.setProjectedAnnotations([{ ...row, annotation: annotation(0, { color: '#00aa44' }) }]);
+    expect(root.querySelector('.abyss-annotation-card-edit')).toBe(action);
+    expect({ label: action.getAttribute('aria-label'), title: action.title }).toEqual({
+      label: 'Edit color, comment, or delete — Question',
+      title: 'Edit color, comment, or delete — Question',
+    });
+
+    panel.setProjectedAnnotations([{ ...row, annotation: annotation(0, { color: '#123456' }) }]);
+    expect(root.querySelector('.abyss-annotation-card-edit')).toBe(action);
+    expect({ label: action.getAttribute('aria-label'), title: action.title }).toEqual({
+      label: 'Edit color, comment, or delete — Custom color',
+      title: 'Edit color, comment, or delete — Custom color',
+    });
+    panel.destroy();
+  });
+
+  it('retains and prunes row-keyed writable capability without remounting unrelated cards', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onActivate: vi.fn(), onNavigate: vi.fn() });
+    const first = annotation(0);
+    const second = annotation(1);
+    const rows = [
+      { annotation: first, key: 'first-row', nativeId: 'native-first', writable: true },
+      { annotation: second, key: 'second-row', nativeId: 'native-second', writable: true },
+    ] satisfies readonly AnnotationProjectionRow[];
+    const firstRow = rows[0];
+    const secondRow = rows[1];
+    if (firstRow === undefined || secondRow === undefined)
+      throw new Error('Expected two projected annotation rows.');
+    panel.setProjectedAnnotations(rows);
+    const unrelatedCard = root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="second-row"]',
+    );
+    const unrelatedAction = root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card-row[data-annotation-row-id="second-row"] > .abyss-annotation-card-edit',
+    );
+
+    const updatedFirst = {
+      ...firstRow,
+      annotation: annotation(0, { color: '#00aa44', comment: 'Updated first comment' }),
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([updatedFirst, secondRow]);
+    expect(root.querySelector('.abyss-annotation-card[data-annotation-row-id="second-row"]')).toBe(
+      unrelatedCard,
+    );
+    expect(
+      root.querySelector(
+        '.abyss-annotation-card-row[data-annotation-row-id="second-row"] > .abyss-annotation-card-edit',
+      ),
+    ).toBe(unrelatedAction);
+
+    panel.setProjectedAnnotations([{ ...updatedFirst, writable: false }, secondRow]);
+    expect(
+      root.querySelector(
+        '.abyss-annotation-card-row[data-annotation-row-id="first-row"] > .abyss-annotation-card-edit',
+      ),
+    ).toBeNull();
+    expect(root.querySelector('.abyss-annotation-card[data-annotation-row-id="second-row"]')).toBe(
+      unrelatedCard,
+    );
+    expect(
+      root.querySelector(
+        '.abyss-annotation-card-row[data-annotation-row-id="second-row"] > .abyss-annotation-card-edit',
+      ),
+    ).toBe(unrelatedAction);
+
+    panel.setProjectedAnnotations([secondRow]);
+    expect(root.querySelector('[data-annotation-row-id="first-row"]')).toBeNull();
+    expect(root.querySelector('.abyss-annotation-card[data-annotation-row-id="second-row"]')).toBe(
+      unrelatedCard,
+    );
+    panel.setProjectedAnnotations([updatedFirst, secondRow]);
+    expect(
+      root.querySelector(
+        '.abyss-annotation-card-row[data-annotation-row-id="first-row"] > .abyss-annotation-card-edit',
+      ),
+    ).not.toBeNull();
+    panel.destroy();
+  });
+
+  it('clears a removed selected row without resurrecting aria-current when the key returns', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const row = {
+      annotation: annotation(0),
+      key: 'selected-row',
+      nativeId: 'native-selected',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([row]);
+    panel.selectAnnotation('native-selected', false);
+    expect(root.querySelector('.abyss-annotation-card[aria-current="true"]')).not.toBeNull();
+
+    panel.setProjectedAnnotations([]);
+    panel.setProjectedAnnotations([row]);
+
+    expect(root.querySelector('.abyss-annotation-card[aria-current="true"]')).toBeNull();
+    panel.destroy();
   });
 
   it('context menu activation prevents default and exposes no Copy or Insert surface', () => {

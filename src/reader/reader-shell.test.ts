@@ -143,7 +143,7 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
-  it('synchronizes one sidebar row when PDF focus opens the unified editor', () => {
+  it('keeps the synchronized sidebar row selected after the unified editor closes', () => {
     const host = document.body.createDiv();
     const shell = new ReaderShell(host);
     const annotation: DocumentAnnotation = {
@@ -189,7 +189,7 @@ describe('ReaderShell', () => {
     shell.closeAnnotationEditor();
     expect(
       sidebar.annotationsPanel.root.querySelectorAll('.abyss-annotation-card[aria-current="true"]'),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
     shell.destroy();
     host.remove();
   });
@@ -469,7 +469,7 @@ describe('ReaderShell', () => {
     const focused = annotation('escape-newer-focus');
     const sidebar = openAnnotationSidebar(shell, [focused]);
     const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
-      '[data-annotation-row-id="row-1"]',
+      '.abyss-annotation-card[data-annotation-row-id="row-1"]',
     );
     if (card === null) throw new Error('Expected a sidebar invoker.');
     sidebar.annotationsPanel.selectAnnotation('native-1', false);
@@ -479,7 +479,7 @@ describe('ReaderShell', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
 
     expect(document.activeElement).toBe(newerFocus);
-    expect(card.getAttribute('aria-current')).toBeNull();
+    expect(card.getAttribute('aria-current')).toBe('true');
     shell.destroy();
     newerFocus.remove();
     host.remove();
@@ -491,7 +491,7 @@ describe('ReaderShell', () => {
     const focused = annotation('pdf-origin-focus');
     const sidebar = openAnnotationSidebar(shell, [focused]);
     const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
-      '[data-annotation-row-id="row-1"]',
+      '.abyss-annotation-card[data-annotation-row-id="row-1"]',
     );
     if (card === null) throw new Error('Expected a synchronized sidebar row.');
     shell.documentHost.focus();
@@ -500,19 +500,19 @@ describe('ReaderShell', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
 
     expect(document.activeElement).not.toBe(card);
-    expect(card.getAttribute('aria-current')).toBeNull();
+    expect(card.getAttribute('aria-current')).toBe('true');
     shell.destroy();
     host.remove();
   });
 
-  it('keeps an external click-away target focused while clearing only the owning row', () => {
+  it('keeps an external click-away target focused without clearing the selected row', () => {
     const host = document.body.createDiv();
     const external = document.body.createEl('button');
     const shell = new ReaderShell(host);
     const focused = annotation('click-away-focus');
     const sidebar = openAnnotationSidebar(shell, [focused]);
     const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
-      '[data-annotation-row-id="row-1"]',
+      '.abyss-annotation-card[data-annotation-row-id="row-1"]',
     );
     if (card === null) throw new Error('Expected a sidebar invoker.');
     sidebar.annotationsPanel.selectAnnotation('native-1', false);
@@ -522,7 +522,7 @@ describe('ReaderShell', () => {
     external.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
 
     expect(document.activeElement).toBe(external);
-    expect(card.getAttribute('aria-current')).toBeNull();
+    expect(card.getAttribute('aria-current')).toBe('true');
     shell.destroy();
     external.remove();
     host.remove();
@@ -648,6 +648,62 @@ describe('ReaderShell', () => {
     expect((document.activeElement as HTMLElement | null)?.isConnected).toBe(true);
     shell.destroy();
     host.remove();
+  });
+
+  it('focuses the adjacent roving card after a sidebar-owned annotation is deleted', () => {
+    for (const scenario of [
+      { deletedIndex: 1, expectedRowId: 'row-3' },
+      { deletedIndex: 2, expectedRowId: 'row-2' },
+    ]) {
+      const host = document.body.createDiv();
+      const shell = new ReaderShell(host);
+      const annotations = [
+        annotation('delete-first'),
+        annotation('delete-second'),
+        annotation('delete-last'),
+      ];
+      const sidebar = openAnnotationSidebar(shell, annotations);
+      const deletedRowId = `row-${String(scenario.deletedIndex + 1)}`;
+      const deletedCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+        `.abyss-annotation-card[data-annotation-row-id="${deletedRowId}"]`,
+      );
+      if (deletedCard === null) throw new Error('Expected the deleted sidebar invoker.');
+      sidebar.annotationsPanel.selectAnnotation(`native-${String(scenario.deletedIndex + 1)}`);
+      openFromSidebar(
+        shell,
+        annotationEditorRequest(annotations[scenario.deletedIndex] as DocumentAnnotation),
+        deletedRowId,
+      );
+      const popoverControl = host.querySelector<HTMLButtonElement>(
+        '[data-action="delete-annotation"]',
+      );
+      popoverControl?.focus();
+
+      sidebar.annotationsPanel.setProjectedAnnotations(
+        annotations
+          .map((value, index) => ({
+            annotation: value,
+            key: `row-${String(index + 1)}`,
+            nativeId: `native-${String(index + 1)}`,
+            writable: true,
+          }))
+          .filter((_, index) => index !== scenario.deletedIndex),
+      );
+      shell.closeAnnotationEditor();
+
+      expect(deletedCard.isConnected).toBe(false);
+      expect(document.activeElement?.getAttribute('data-annotation-row-id')).toBe(
+        scenario.expectedRowId,
+      );
+      expect(
+        sidebar.annotationsPanel.root.querySelectorAll('.abyss-annotation-card[tabindex="0"]'),
+      ).toHaveLength(1);
+      expect(
+        sidebar.annotationsPanel.root.querySelector('.abyss-annotation-card[aria-current="true"]'),
+      ).toBeNull();
+      shell.destroy();
+      host.remove();
+    }
   });
 
   it('does not steal focus chosen after a sidebar editor opened', () => {

@@ -247,7 +247,12 @@ export class ReaderShell implements AnnotationInteractionHost {
     const panel = this.sidebarValue?.annotationsPanel;
     if (this.ownsSidebarFocusReturn(lifecycle, reason, focusAtCloseStart, context))
       panel?.focusSelectedAnnotation();
-    if (lifecycle.selectedRowId !== undefined) panel?.clearSelection(lifecycle.selectedRowId);
+    else if (
+      reason === 'external' &&
+      lifecycle.sidebarInvoker !== undefined &&
+      !lifecycle.sidebarInvoker.isConnected
+    )
+      panel?.focusRovingAnnotation();
   }
 
   private ownsSidebarFocusReturn(

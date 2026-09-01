@@ -315,6 +315,19 @@ describe('PDF.js style build', () => {
     expect(mobileDeclarations(touch, ".abyss-documents [data-action='retry']")).toMatchObject({
       'min-height': '2.75rem',
     });
+    expect(mobileDeclarations(touch, '.abyss-documents .abyss-annotation-card-edit')).toMatchObject(
+      {
+        width: '44px',
+        'min-width': '44px',
+        'min-height': '44px',
+      },
+    );
+    expect(mobileDeclarations(touch, '.abyss-documents .abyss-annotation-card')).toMatchObject({
+      'padding-inline-end': '52px',
+    });
+    expect(mobileDeclarations(touch, '.abyss-documents .abyss-annotation-card-row')).toMatchObject({
+      'min-height': '44px',
+    });
   });
 
   it('keeps desktop outline rows and chevrons at native dense metrics', async () => {

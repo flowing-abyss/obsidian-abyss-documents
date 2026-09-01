@@ -111,6 +111,7 @@ function oneShotFixture(options: { readonly deferNeutralMode?: boolean } = {}) {
     disableUserSelect: vi.fn(),
     endCurrentEditing: vi.fn(),
     firstSelectedEditor: undefined,
+    hasSelection: false,
     getEditor: vi.fn(),
     getLayer: vi.fn(),
     highlightSelection: vi.fn(() => {
@@ -130,6 +131,7 @@ function oneShotFixture(options: { readonly deferNeutralMode?: boolean } = {}) {
       });
     }),
     redo: vi.fn(),
+    unselectAll: vi.fn(),
     undo: vi.fn(),
     updateParams: vi.fn(),
   };
@@ -386,11 +388,13 @@ describe('PDF annotation interaction integration', () => {
       disableUserSelect: vi.fn(),
       endCurrentEditing: vi.fn(),
       firstSelectedEditor: undefined as PdfCommentEditor | undefined,
+      hasSelection: false,
       getEditor: vi.fn<(id: string) => PdfCommentEditor | undefined>(),
       getLayer: vi.fn(),
       highlightSelection: vi.fn(),
       redo: vi.fn(),
       setSelected: vi.fn(),
+      unselectAll: vi.fn(),
       undo: vi.fn(),
       updateParams: vi.fn(),
     };
@@ -539,11 +543,13 @@ describe('PDF annotation interaction integration', () => {
       disableUserSelect: vi.fn(),
       endCurrentEditing: vi.fn(),
       firstSelectedEditor: native,
+      hasSelection: true,
       getEditor: vi.fn((id: string) => (id === 'autosave-target' ? native : undefined)),
       getLayer: vi.fn(),
       highlightSelection: vi.fn(),
       redo: vi.fn(),
       setSelected: vi.fn(),
+      unselectAll: vi.fn(),
       undo: vi.fn(),
       updateParams: vi.fn(),
     };

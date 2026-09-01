@@ -601,7 +601,12 @@ describe('AnnotationInteractionController', () => {
       });
     });
     expect(test.controller.selectColor('#5fb236')).toBe(true);
-    expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenNthCalledWith(2, {
+        color: '#5fb236',
+        enabled: true,
+      });
+    });
     expect(test.controller.requestTool('select')).toBe(true);
     await vi.waitFor(() => {
       expect(test.setQuickHighlight).toHaveBeenLastCalledWith({
@@ -611,6 +616,53 @@ describe('AnnotationInteractionController', () => {
     });
 
     expect(test.controller.quickHighlightArmed).toBe(false);
+    test.controller.destroy();
+  });
+
+  it('flushes a dirty contextual editor before closing and transferring toolbar color ownership', async () => {
+    const flush = deferred<boolean>();
+    const order: string[] = [];
+    const test = fixture();
+    test.emitAnnotationFocus({
+      annotations: [nativeAnnotation('Unsaved contextual comment')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+    const request = test.opened[test.opened.length - 1];
+    if (request === undefined) throw new Error('Expected a contextual annotation editor.');
+    test.flushAnnotationEditor.mockImplementationOnce(async () => {
+      order.push('flush');
+      return flush.promise;
+    });
+    test.closeAnnotationEditor.mockImplementationOnce(() => {
+      order.push('close');
+      request.onClose('external');
+      return true;
+    });
+    test.abortInteraction.mockImplementationOnce(async () => {
+      order.push('neutralize');
+    });
+    test.setQuickHighlight.mockImplementationOnce(async () => {
+      order.push('default-color');
+      test.emitMode('neutral');
+    });
+
+    expect(test.controller.requestTool('highlight', '#5fb236')).toBe(true);
+    await vi.waitFor(() => {
+      expect(test.flushAnnotationEditor).toHaveBeenCalledOnce();
+    });
+    expect(test.closeAnnotationEditor).not.toHaveBeenCalled();
+    expect(test.setQuickHighlight).not.toHaveBeenCalled();
+
+    flush.resolve(true);
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledExactlyOnceWith({
+        color: '#5fb236',
+        enabled: true,
+      });
+    });
+
+    expect(order).toEqual(['flush', 'close', 'neutralize', 'default-color']);
     test.controller.destroy();
   });
 
@@ -774,7 +826,9 @@ describe('AnnotationInteractionController', () => {
     });
 
     expect(test.controller.selectColor('#5fb236')).toBe(true);
-    expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenCalledTimes(2);
+    });
     test.emitMode('neutral');
     test.emitSelection(textSelection('sticky-second'));
     await vi.waitFor(() => {
@@ -930,6 +984,7 @@ describe('AnnotationInteractionController', () => {
     first.resolve(nativeAnnotation('', 'sticky-current-color'));
     await vi.waitFor(() => {
       expect(test.controller.quickHighlightArmed).toBe(true);
+      expect(test.setQuickHighlight).toHaveBeenCalledTimes(2);
     });
 
     test.emitSelection(textSelection('sticky-next-color'));
@@ -1139,7 +1194,12 @@ describe('AnnotationInteractionController', () => {
     });
     test.controller.updatePalette([{ color: '#e56eee', meaning: 'Question', name: 'Magenta' }]);
 
-    expect(test.setQuickHighlight).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(test.setQuickHighlight).toHaveBeenNthCalledWith(2, {
+        color: '#e56eee',
+        enabled: true,
+      });
+    });
     expect(test.controller.color).toBe('#e56eee');
     expect(test.observedColors).toEqual(['#ff6666', '#e56eee']);
     test.controller.destroy();

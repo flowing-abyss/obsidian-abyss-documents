@@ -1577,8 +1577,12 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (hasNativeSelectionModifier(event)) return;
     const pending = this.pendingPointerActivation;
     this.clearPendingPointerActivation();
-    if (pending?.id === annotationId) return;
-    this.selectRootAnnotation(annotationId, target);
+    if (event.detail >= 2) return;
+    if (pending?.id !== annotationId) this.selectRootAnnotation(annotationId, target);
+    this.activateRootAnnotation(annotationId, 'root-click', {
+      x: event.clientX,
+      y: event.clientY,
+    });
   }
 
   private readonly onRootPointerDown = (event: PointerEvent): void => {
@@ -1639,9 +1643,14 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.events.emit({ type: 'annotation-select', nativeId: null });
   }
 
-  private activateRootAnnotation(id: string, kind: 'root-context'): void {
+  private activateRootAnnotation(
+    id: string,
+    kind: 'root-click' | 'root-context',
+    clientPosition?: { readonly x: number; readonly y: number },
+  ): void {
     this.annotationInteraction
       ?.focusAnnotation(id, {
+        ...(clientPosition === undefined ? {} : { clientPosition }),
         kind,
       })
       .catch((cause: unknown) => {
