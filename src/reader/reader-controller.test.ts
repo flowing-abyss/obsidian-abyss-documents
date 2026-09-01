@@ -852,6 +852,7 @@ describe('ReaderController', () => {
     expect(createdViewport.focusAnnotation.mock.lastCall?.[1]).toMatchObject({
       clientPosition: { x: 72, y: 288 },
       kind: 'sidebar',
+      rowId: card.dataset['annotationRowId'],
     });
     await Promise.resolve();
     const failure = new Error('Native focus failed');
@@ -3206,6 +3207,8 @@ describe('ReaderController', () => {
       toJSON: () => ({}),
     });
     const openAnnotationEditor = vi.spyOn(shell.created, 'openAnnotationEditor');
+    const sidebarInvokerRowId = card.dataset['annotationRowId'];
+    if (sidebarInvokerRowId === undefined) throw new Error('Expected a stable sidebar row id.');
     openAnnotationContext(card);
 
     await vi.waitFor(() => {
@@ -3214,7 +3217,7 @@ describe('ReaderController', () => {
     await vi.waitFor(() => {
       expect(openAnnotationEditor).toHaveBeenCalledWith(
         expect.objectContaining({ position: { x: 72, y: 288 } }),
-        { preserveResolvedRow: true },
+        { preserveResolvedRow: true, sidebarInvokerRowId },
       );
     });
     await vi.waitFor(() => {

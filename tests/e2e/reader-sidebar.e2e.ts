@@ -327,6 +327,42 @@ async function waitForAnnotationWindowToSettle(): Promise<void> {
   );
 }
 
+async function readerLayoutIsStable(): Promise<boolean> {
+  const sample = (): readonly number[] | null => {
+    const reader = document.querySelector<HTMLElement>('.abyss-documents');
+    const body = document.querySelector<HTMLElement>('.abyss-reader-body');
+    const documentHost = document.querySelector<HTMLElement>('[data-region="document"]');
+    if (reader === null || body === null || documentHost === null) return null;
+    return [
+      reader.getBoundingClientRect().width,
+      body.getBoundingClientRect().width,
+      documentHost.getBoundingClientRect().width,
+    ];
+  };
+  const first = sample();
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
+  });
+  const second = sample();
+  return (
+    first !== null &&
+    second !== null &&
+    first.every((value, index) => value > 0 && Math.abs(value - (second[index] ?? 0)) <= 0.5)
+  );
+}
+
+async function waitForReaderLayoutToSettle(): Promise<void> {
+  await browser.waitUntil(async () => browser.execute(readerLayoutIsStable), {
+    interval: 50,
+    timeout: 3_000,
+    timeoutMsg: 'Reader split layout did not settle across animation frames.',
+  });
+}
+
 async function scrollAnnotationListByViewport(): Promise<void> {
   await browser.execute(() => {
     const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
@@ -600,12 +636,12 @@ describe('PDF reader sidebar', () => {
           )) <= 600,
         { timeout: 3_000, timeoutMsg: 'Reader container did not become narrow.' },
       );
+      await waitForReaderLayoutToSettle();
       const closedDocumentWidth = await browser.execute(
         () =>
           document.querySelector('[data-region="document"]')?.getBoundingClientRect().width ?? 0,
       );
 
-      await browser.pause(300);
       await installSidebarContinuityMonitor();
       await $('[data-control="sidebar"]').click();
 

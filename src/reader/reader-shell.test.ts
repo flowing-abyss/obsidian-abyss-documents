@@ -15,6 +15,73 @@ function selection(): PdfTextSelection {
   };
 }
 
+function annotation(id: string): DocumentAnnotation {
+  return {
+    identity: { id: asAnnotationId(id), kind: 'stable' },
+    type: 'highlight',
+    anchor: {
+      kind: 'fixed-page',
+      pageIndex: 0,
+      coordinateSpace: 'page-points-top-left',
+      geometry: { kind: 'point', point: { x: 10, y: 20 } },
+    },
+    color: '#ffd400',
+    selectedText: id,
+    author: '',
+    createdAt: null,
+    modifiedAt: null,
+    comment: '',
+    tags: [],
+    links: [],
+    capabilities: {} as DocumentAnnotation['capabilities'],
+  };
+}
+
+function annotationEditorRequest(
+  target: DocumentAnnotation,
+  onClose: AnnotationEditorPopoverRequest['onClose'] = vi.fn(),
+): AnnotationEditorPopoverRequest {
+  return {
+    onClose,
+    onCreate: vi.fn(),
+    onDelete: vi.fn(),
+    onUpdate: vi.fn(),
+    palette: [],
+    position: { x: 40, y: 132 },
+    target: { annotation: target, kind: 'annotation' },
+  };
+}
+
+function openAnnotationSidebar(shell: ReaderShell, annotations: readonly DocumentAnnotation[]) {
+  const sidebar = shell.openSidebar('annotations', {
+    onClose: vi.fn(),
+    onOutlineNavigate: vi.fn(),
+    onSearchNavigate: vi.fn(),
+    onSearchQuery: vi.fn(),
+    onTabChange: vi.fn(),
+  });
+  sidebar.annotationsPanel.setProjectedAnnotations(
+    annotations.map((value, index) => ({
+      annotation: value,
+      key: `row-${String(index + 1)}`,
+      nativeId: `native-${String(index + 1)}`,
+      writable: true,
+    })),
+  );
+  return sidebar;
+}
+
+function openFromSidebar(
+  shell: ReaderShell,
+  request: AnnotationEditorPopoverRequest,
+  rowId: string,
+): boolean {
+  return shell.openAnnotationEditor(request, {
+    preserveResolvedRow: true,
+    sidebarInvokerRowId: rowId,
+  });
+}
+
 describe('ReaderShell', () => {
   it('uses horizontal arrow keys for page navigation only in paged reading mode', () => {
     const host = document.body.createDiv();
@@ -288,21 +355,219 @@ describe('ReaderShell', () => {
     );
     if (card === null) throw new Error('Expected a sidebar annotation row.');
     expect(sidebar.annotationsPanel.selectAnnotation('native-focus', false)).toBe(true);
-    shell.documentHost.focus();
-    shell.openAnnotationEditor({
-      onClose: vi.fn(),
-      onCreate: vi.fn(),
-      onDelete: vi.fn(),
-      onUpdate: vi.fn(),
-      palette: [],
-      position: { x: 40, y: 132 },
-      target: { annotation, kind: 'annotation' },
-    });
+    card.focus();
+    openFromSidebar(shell, annotationEditorRequest(annotation), 'sidebar-focus-row');
 
     document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
 
     expect(document.activeElement).toBe(card);
     shell.destroy();
+    host.remove();
+  });
+
+  it('does not replace a newer Escape focus target with the sidebar invoker', () => {
+    const host = document.body.createDiv();
+    const newerFocus = document.body.createEl('button');
+    const shell = new ReaderShell(host);
+    const focused = annotation('escape-newer-focus');
+    const sidebar = openAnnotationSidebar(shell, [focused]);
+    const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-row-id="row-1"]',
+    );
+    if (card === null) throw new Error('Expected a sidebar invoker.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    newerFocus.focus();
+    openFromSidebar(shell, annotationEditorRequest(focused), 'row-1');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(document.activeElement).toBe(newerFocus);
+    expect(card.getAttribute('aria-current')).toBeNull();
+    shell.destroy();
+    newerFocus.remove();
+    host.remove();
+  });
+
+  it('does not return PDF-origin editor focus to an incidental synchronized sidebar row', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const focused = annotation('pdf-origin-focus');
+    const sidebar = openAnnotationSidebar(shell, [focused]);
+    const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-row-id="row-1"]',
+    );
+    if (card === null) throw new Error('Expected a synchronized sidebar row.');
+    shell.documentHost.focus();
+
+    shell.openAnnotationEditor(annotationEditorRequest(focused));
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(document.activeElement).not.toBe(card);
+    expect(card.getAttribute('aria-current')).toBeNull();
+    shell.destroy();
+    host.remove();
+  });
+
+  it('keeps an external click-away target focused while clearing only the owning row', () => {
+    const host = document.body.createDiv();
+    const external = document.body.createEl('button');
+    const shell = new ReaderShell(host);
+    const focused = annotation('click-away-focus');
+    const sidebar = openAnnotationSidebar(shell, [focused]);
+    const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-row-id="row-1"]',
+    );
+    if (card === null) throw new Error('Expected a sidebar invoker.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    openFromSidebar(shell, annotationEditorRequest(focused), 'row-1');
+    external.focus();
+
+    external.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
+
+    expect(document.activeElement).toBe(external);
+    expect(card.getAttribute('aria-current')).toBeNull();
+    shell.destroy();
+    external.remove();
+    host.remove();
+  });
+
+  it('does not focus or clear a newer selected row when the owned sidebar row changes', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const first = annotation('changed-row-first');
+    const second = annotation('changed-row-second');
+    const sidebar = openAnnotationSidebar(shell, [first, second]);
+    const secondCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-row-id="row-2"]',
+    );
+    if (secondCard === null) throw new Error('Expected the newer selected row.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    shell.documentHost.focus();
+    openFromSidebar(shell, annotationEditorRequest(first), 'row-1');
+    sidebar.annotationsPanel.selectAnnotation('native-2', false);
+    expect(
+      sidebar.annotationsPanel.root
+        .querySelector('.abyss-annotation-card[aria-current="true"]')
+        ?.getAttribute('data-annotation-row-id'),
+    ).toBe('row-2');
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(document.activeElement).not.toBe(secondCard);
+    expect(
+      sidebar.annotationsPanel.root
+        .querySelector('.abyss-annotation-card[aria-current="true"]')
+        ?.getAttribute('data-annotation-row-id'),
+    ).toBe('row-2');
+    shell.destroy();
+    host.remove();
+  });
+
+  it('does not let a closing sidebar editor disturb a synchronously opened newer sidebar editor', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const first = annotation('sidebar-generation-first');
+    const second = annotation('sidebar-generation-second');
+    const sidebar = openAnnotationSidebar(shell, [first, second]);
+    const secondCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-row-id="row-2"]',
+    );
+    if (secondCard === null) throw new Error('Expected the newer sidebar invoker.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    shell.documentHost.focus();
+    openFromSidebar(
+      shell,
+      annotationEditorRequest(first, () => {
+        sidebar.annotationsPanel.selectAnnotation('native-2', false);
+        openFromSidebar(shell, annotationEditorRequest(second), 'row-2');
+      }),
+      'row-1',
+    );
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(shell.annotationEditorOpen).toBe(true);
+    expect(document.activeElement).not.toBe(secondCard);
+    expect(
+      sidebar.annotationsPanel.root
+        .querySelector('.abyss-annotation-card[aria-current="true"]')
+        ?.getAttribute('data-annotation-row-id'),
+    ).toBe('row-2');
+    shell.destroy();
+    host.remove();
+  });
+
+  it('does not let a closing sidebar editor disturb a synchronously opened PDF editor', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const first = annotation('sidebar-to-pdf-first');
+    const second = annotation('sidebar-to-pdf-second');
+    const sidebar = openAnnotationSidebar(shell, [first, second]);
+    const secondCard = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-row-id="row-2"]',
+    );
+    if (secondCard === null) throw new Error('Expected the PDF-synchronized row.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    shell.documentHost.focus();
+    openFromSidebar(
+      shell,
+      annotationEditorRequest(first, () => {
+        shell.openAnnotationEditor(annotationEditorRequest(second));
+      }),
+      'row-1',
+    );
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(shell.annotationEditorOpen).toBe(true);
+    expect(document.activeElement).not.toBe(secondCard);
+    expect(
+      sidebar.annotationsPanel.root
+        .querySelector('.abyss-annotation-card[aria-current="true"]')
+        ?.getAttribute('data-annotation-row-id'),
+    ).toBe('row-2');
+    shell.destroy();
+    host.remove();
+  });
+
+  it('does not restore a removed sidebar invoker after its editor closes', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const removed = annotation('removed-sidebar-row');
+    const sidebar = openAnnotationSidebar(shell, [removed]);
+    const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '[data-annotation-row-id="row-1"]',
+    );
+    if (card === null) throw new Error('Expected the removable sidebar invoker.');
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    shell.documentHost.focus();
+    openFromSidebar(shell, annotationEditorRequest(removed), 'row-1');
+    sidebar.annotationsPanel.setProjectedAnnotations([]);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(card.isConnected).toBe(false);
+    expect(document.activeElement).not.toBe(card);
+    expect((document.activeElement as HTMLElement | null)?.isConnected).toBe(true);
+    shell.destroy();
+    host.remove();
+  });
+
+  it('does not steal focus chosen after a sidebar editor opened', () => {
+    const host = document.body.createDiv();
+    const newerFocus = document.body.createEl('button');
+    const shell = new ReaderShell(host);
+    const focused = annotation('newer-focus-target');
+    const sidebar = openAnnotationSidebar(shell, [focused]);
+    sidebar.annotationsPanel.selectAnnotation('native-1', false);
+    openFromSidebar(shell, annotationEditorRequest(focused), 'row-1');
+    newerFocus.focus();
+
+    shell.closeAnnotationEditor();
+
+    expect(document.activeElement).toBe(newerFocus);
+    shell.destroy();
+    newerFocus.remove();
     host.remove();
   });
 

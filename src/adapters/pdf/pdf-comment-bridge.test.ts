@@ -1439,11 +1439,13 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
 
     await expect(
       bridge.focusAnnotation(node.id, undefined, undefined, {
+        activation: { kind: 'sidebar', rowId: 'sidebar-row-17' },
         clientPosition: { x: 72, y: 288 },
       }),
     ).resolves.toBe(true);
 
     expect(focused).toHaveLength(1);
+    expect(focused[0]?.activation).toEqual({ kind: 'sidebar', rowId: 'sidebar-row-17' });
     expect(focused[0]?.position).toEqual({ x: 72, y: 288 });
     bridge.dispose();
     host.remove();

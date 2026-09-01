@@ -5,6 +5,7 @@ import { beginReaderTimedOperation } from '../../reader-performance.js';
 import type { AnnotationPaletteEntry } from '../../settings.js';
 import type {
   PdfAnnotationFocus,
+  PdfAnnotationFocusActivation,
   PdfAnnotationUpdate,
   PdfCommentBridge,
 } from './pdf-comment-bridge.js';
@@ -24,6 +25,7 @@ export type PdfAnnotationActivationSource = {
   readonly clientPosition?: { readonly x: number; readonly y: number } | undefined;
   readonly kind: 'root-click' | 'root-context' | 'sidebar';
   readonly preserveNativeSelection?: boolean | undefined;
+  readonly rowId?: string | undefined;
   readonly signal?: AbortSignal | undefined;
 };
 
@@ -318,6 +320,7 @@ interface AnnotationActivation {
   readonly controller: AbortController;
   readonly deadline: number;
   readonly epoch: number;
+  readonly focusActivation?: PdfAnnotationFocusActivation | undefined;
   readonly id: string;
   readonly lifecycleRevision: number;
   readonly manager: PdfAnnotationUiManager;
@@ -330,6 +333,7 @@ interface AnnotationActivation {
 interface DeferredAnnotationActivation {
   readonly clientPosition: { readonly x: number; readonly y: number } | undefined;
   readonly externalSignal: AbortSignal | undefined;
+  readonly focusActivation: PdfAnnotationFocusActivation | undefined;
   readonly id: string;
   readonly run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>;
 }
@@ -599,11 +603,12 @@ export class PdfAnnotationEditor {
       return Promise.resolve('cancelled');
     const id = this.projectedTargets.get(requestedId)?.canonicalId ?? requestedId;
     const contextualClose = this.pendingContextualClose;
-    return this.startAnnotationActivation(
+    return this.startAnnotationActivation({
+      clientPosition: source.clientPosition,
+      externalSignal: source.signal,
+      focusActivation: sidebarFocusActivation(source),
       id,
-      source.signal,
-      source.clientPosition,
-      async (activation) => {
+      run: async (activation) => {
         if (contextualClose !== null) {
           await waitWithSignal(contextualClose, activation.controller.signal);
           try {
@@ -617,7 +622,7 @@ export class PdfAnnotationEditor {
         if (!this.isCurrentActivation(activation) || projected === null) return 'cancelled';
         return this.focusResolvedAnnotation(id, source, projected, activation);
       },
-    );
+    });
   }
 
   selectAnnotation(stableId: string): boolean {
@@ -682,6 +687,7 @@ export class PdfAnnotationEditor {
   ): Promise<PdfAnnotationActivationResult> {
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+        ...focusActivationOptions(activation.focusActivation),
         ...clientPositionOptions(activation.clientPosition),
         ...this.editorUidOptions(id),
         forceReadonly: true,
@@ -702,6 +708,7 @@ export class PdfAnnotationEditor {
     if (!this.isCurrentActivation(activation)) return 'cancelled';
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, activation.controller.signal, projected, {
+        ...focusActivationOptions(activation.focusActivation),
         ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
         includeSelectedPeers: true,
@@ -724,28 +731,31 @@ export class PdfAnnotationEditor {
     const id = request.id.trim();
     if (id.length === 0 || this.destroyed || this.interactionsSuspended)
       return Promise.resolve('cancelled');
-    return this.startAnnotationActivation(id, undefined, undefined, (activation) =>
-      this.activateWithinEpoch({ ...request, id }, undefined, activation),
-    );
+    return this.startAnnotationActivation({
+      clientPosition: undefined,
+      externalSignal: undefined,
+      focusActivation: undefined,
+      id,
+      run: (activation) => this.activateWithinEpoch({ ...request, id }, undefined, activation),
+    });
   }
 
   private startAnnotationActivation(
-    id: string,
-    externalSignal: AbortSignal | undefined,
-    clientPosition: { readonly x: number; readonly y: number } | undefined,
-    run: (activation: AnnotationActivation) => Promise<PdfAnnotationActivationResult>,
+    request: DeferredAnnotationActivation,
   ): Promise<PdfAnnotationActivationResult> {
+    const { clientPosition, externalSignal, focusActivation, id, run } = request;
     if (this.activationUnavailable(externalSignal)) return Promise.resolve('cancelled');
     const saveBarrier = this.waitForSaveRelease(externalSignal);
     if (saveBarrier !== null)
       return this.resumeActivationAfterSave(saveBarrier, {
         clientPosition,
         externalSignal,
+        focusActivation,
         id,
         run,
       });
     const current = this.activeActivation;
-    const reusable = reusableActivation(current, id);
+    const reusable = reusableActivation(current, id, focusActivation);
     if (reusable !== null) return reusable.promise;
     this.cancelAnnotationActivation('The PDF annotation activation was superseded.');
     const manager = this.availableActivationManager(externalSignal);
@@ -768,6 +778,7 @@ export class PdfAnnotationEditor {
       controller,
       deadline: Date.now() + ANNOTATION_ACTIVATION_TIMEOUT_MS,
       epoch: ++this.activationEpoch,
+      focusActivation,
       id,
       lifecycleRevision: this.lifecycleRevision,
       manager,
@@ -794,9 +805,16 @@ export class PdfAnnotationEditor {
     saveBarrier: Promise<void>,
     request: DeferredAnnotationActivation,
   ): Promise<PdfAnnotationActivationResult> {
-    const { clientPosition, externalSignal, id, run } = request;
+    const { clientPosition, externalSignal, focusActivation, id, run } = request;
     return saveBarrier.then(
-      () => this.startAnnotationActivation(id, externalSignal, clientPosition, run),
+      () =>
+        this.startAnnotationActivation({
+          clientPosition,
+          externalSignal,
+          focusActivation,
+          id,
+          run,
+        }),
       (cause: unknown) => {
         if (externalSignal?.aborted === true || isAbortFailure(cause)) return 'cancelled';
         throw cause;
@@ -959,6 +977,7 @@ export class PdfAnnotationEditor {
         controller.signal,
         projected,
         {
+          ...focusActivationOptions(activation.focusActivation),
           ...clientPositionOptions(activation.clientPosition),
           ...this.editorUidOptions(activation.id),
           forceReadonly: true,
@@ -1231,6 +1250,7 @@ export class PdfAnnotationEditor {
     const editorUid = this.nativeEditorUid(id);
     const focused = await waitWithSignal(
       this.dependencies.commentBridge.focusAnnotation(id, signal, projected, {
+        ...focusActivationOptions(activation.focusActivation),
         ...clientPositionOptions(activation.clientPosition),
         editableOnly: true,
         ...(editorUid === id ? {} : { editorUid }),
@@ -1268,6 +1288,7 @@ export class PdfAnnotationEditor {
         activation.controller.signal,
         projected,
         {
+          ...focusActivationOptions(activation.focusActivation),
           ...clientPositionOptions(activation.clientPosition),
           ...this.editorUidOptions(activation.id),
           forceReadonly: true,
@@ -3319,8 +3340,21 @@ function nativeEditorIdentityIds(native: PdfNativeEditorReference): readonly str
 function reusableActivation(
   activation: AnnotationActivation | null,
   id: string,
+  focusActivation: PdfAnnotationFocusActivation | undefined,
 ): AnnotationActivation | null {
-  return activation?.id === id && !activation.controller.signal.aborted ? activation : null;
+  return activation?.id === id &&
+    sameFocusActivation(activation.focusActivation, focusActivation) &&
+    !activation.controller.signal.aborted
+    ? activation
+    : null;
+}
+
+function sameFocusActivation(
+  left: PdfAnnotationFocusActivation | undefined,
+  right: PdfAnnotationFocusActivation | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.rowId === right.rowId;
 }
 
 function initialSaveRestoreTarget(
@@ -3530,6 +3564,21 @@ function clientPositionOptions(
   clientPosition: { readonly x: number; readonly y: number } | undefined,
 ): { readonly clientPosition?: { readonly x: number; readonly y: number } | undefined } {
   return clientPosition === undefined ? {} : { clientPosition };
+}
+
+function sidebarFocusActivation(
+  source: PdfAnnotationActivationSource,
+): PdfAnnotationFocusActivation | undefined {
+  const rowId = source.rowId?.trim();
+  return source.kind === 'sidebar' && rowId !== undefined && rowId.length > 0
+    ? { kind: 'sidebar', rowId }
+    : undefined;
+}
+
+function focusActivationOptions(activation: PdfAnnotationFocusActivation | undefined): {
+  readonly activation?: PdfAnnotationFocusActivation | undefined;
+} {
+  return activation === undefined ? {} : { activation };
 }
 
 function deferred<T>(): {

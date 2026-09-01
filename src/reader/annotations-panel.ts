@@ -316,8 +316,9 @@ export class AnnotationsPanel {
     return annotation === undefined ? false : this.selectRow(this.rowId(annotation), focus);
   }
 
-  clearSelection(): void {
+  clearSelection(expectedRowId?: string): void {
     if (this.selectedRowId === null) return;
+    if (expectedRowId !== undefined && this.selectedRowId !== expectedRowId) return;
     this.selectedRowId = null;
     for (const card of Array.from(
       this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card'),

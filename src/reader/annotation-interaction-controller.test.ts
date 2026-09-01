@@ -1287,6 +1287,22 @@ describe('AnnotationInteractionController', () => {
     test.controller.destroy();
   });
 
+  it('forwards exact sidebar activation provenance to the unified editor host', () => {
+    const test = fixture();
+
+    test.emitAnnotationFocus({
+      activation: { kind: 'sidebar', rowId: 'sidebar-row-17' },
+      annotations: [nativeAnnotation('Sidebar provenance')],
+      editable: true,
+      position: { x: 10, y: 20 },
+    });
+
+    expect(test.openAnnotationEditor).toHaveBeenCalledWith(expect.any(Object), {
+      sidebarInvokerRowId: 'sidebar-row-17',
+    });
+    test.controller.destroy();
+  });
+
   it('still neutralizes a contextual editor after PDF.js clears focus first', async () => {
     const test = fixture();
     test.emitAnnotationFocus({

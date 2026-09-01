@@ -1935,6 +1935,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
       current.editor.focusAnnotation('sidebar-anchored-highlight', {
         clientPosition: { x: 72, y: 288 },
         kind: 'sidebar',
+        rowId: 'sidebar-row-17',
       }),
     ).resolves.toBe('editable');
 
@@ -1943,11 +1944,41 @@ describe('PdfAnnotationEditor lifecycle', () => {
       expect.any(AbortSignal),
       annotation,
       {
+        activation: { kind: 'sidebar', rowId: 'sidebar-row-17' },
         clientPosition: { x: 72, y: 288 },
         editableOnly: true,
         preserveSelection: true,
       },
     );
+  });
+
+  it('does not reuse an in-flight activation owned by a different sidebar row', async () => {
+    const current = fixture();
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(),
+    });
+    const projected = createdAnnotation('', { id: 'shared-sidebar-id', writable: false });
+    const resolution = deferred<DocumentAnnotation | null>();
+    current.editor.setAnnotationResolver(async () => resolution.promise);
+
+    const first = current.editor.focusAnnotation('shared-sidebar-id', {
+      kind: 'sidebar',
+      rowId: 'sidebar-row-a',
+    });
+    await Promise.resolve();
+    const second = current.editor.focusAnnotation('shared-sidebar-id', {
+      kind: 'sidebar',
+      rowId: 'sidebar-row-b',
+    });
+    resolution.resolve(projected);
+
+    await expect(first).resolves.toBe('cancelled');
+    await expect(second).resolves.toBe('readonly');
+    expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+    expect(current.commentBridge.focusAnnotation.mock.lastCall?.[3]).toMatchObject({
+      activation: { kind: 'sidebar', rowId: 'sidebar-row-b' },
+    });
   });
 
   it('indexes projected annotations through their available stable identifier', async () => {

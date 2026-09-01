@@ -4,6 +4,8 @@ import type { AnnotationPaletteEntry } from '../settings.js';
 import { FocusReturn, PoliteAnnouncer } from './a11y.js';
 import {
   AnnotationEditorPopover,
+  type AnnotationEditorCloseContext,
+  type AnnotationEditorCloseReason,
   type AnnotationEditorPopoverRequest,
   type AnnotationEditorTarget,
 } from './annotation-editor-popover.js';
@@ -33,6 +35,17 @@ const DEFAULT_SIDEBAR_WIDTH = 320;
 const MINIMUM_SIDEBAR_WIDTH = 240;
 const MAXIMUM_SIDEBAR_WIDTH = 480;
 
+interface AnnotationEditorOpenOptions {
+  readonly preserveResolvedRow?: boolean;
+  readonly sidebarInvokerRowId?: string | undefined;
+}
+
+interface AnnotationEditorLifecycle {
+  readonly generation: number;
+  readonly selectedRowId?: string | undefined;
+  readonly sidebarInvoker?: HTMLButtonElement | undefined;
+}
+
 export class ReaderShell implements AnnotationInteractionHost {
   readonly root: HTMLElement;
   readonly documentHost: HTMLElement;
@@ -47,6 +60,7 @@ export class ReaderShell implements AnnotationInteractionHost {
   private readonly body: HTMLElement;
   private readonly focusReturn = new FocusReturn();
   private readonly intentHandler: (intent: ReaderShellIntent) => void;
+  private annotationEditorGeneration = 0;
   private quickHighlightState: QuickHighlightState = { armed: false, color: '#ffd400' };
   private currentLayout: ReaderLayout = { pages: 'single', scrolling: 'continuous' };
   private sidebarValue: ReaderSidebar | null = null;
@@ -143,29 +157,104 @@ export class ReaderShell implements AnnotationInteractionHost {
 
   openAnnotationEditor(
     request: AnnotationEditorPopoverRequest,
-    options: { readonly preserveResolvedRow?: boolean } = {},
+    options: AnnotationEditorOpenOptions = {},
   ): boolean {
     const annotation = editorTargetAnnotation(request.target);
-    if (annotation !== undefined && options.preserveResolvedRow !== true) {
-      const id =
-        annotation.identity.kind === 'stable'
-          ? annotation.identity.id
-          : annotation.identity.fingerprint;
-      this.sidebarValue?.annotationsPanel.selectAnnotation(id, false);
-    }
-    return this.annotationEditor.open({
+    this.synchronizeAnnotationSelection(annotation, options);
+    const generation = this.annotationEditorGeneration + 1;
+    const lifecycle = this.captureAnnotationEditorLifecycle(
+      annotation !== undefined || options.sidebarInvokerRowId !== undefined,
+      options.sidebarInvokerRowId,
+      generation,
+    );
+    const opened = this.annotationEditor.open({
       ...request,
       onClose: (reason, context) => {
-        try {
-          if (context === undefined) request.onClose(reason);
-          else request.onClose(reason, context);
-        } finally {
-          this.sidebarValue?.annotationsPanel.focusSelectedAnnotation();
-          this.sidebarValue?.annotationsPanel.clearSelection();
-          for (const listener of this.annotationEditorCloseListeners) listener();
-        }
+        this.handleAnnotationEditorClose(request, lifecycle, reason, context);
       },
     });
+    if (opened) this.annotationEditorGeneration = generation;
+    return opened;
+  }
+
+  private synchronizeAnnotationSelection(
+    annotation: DocumentAnnotation | undefined,
+    options: AnnotationEditorOpenOptions,
+  ): void {
+    if (annotation === undefined || options.preserveResolvedRow === true) return;
+    const id =
+      annotation.identity.kind === 'stable'
+        ? annotation.identity.id
+        : annotation.identity.fingerprint;
+    this.sidebarValue?.annotationsPanel.selectAnnotation(id, false);
+  }
+
+  private captureAnnotationEditorLifecycle(
+    captureSelectedRow: boolean,
+    sidebarInvokerRowId: string | undefined,
+    generation: number,
+  ): AnnotationEditorLifecycle {
+    const selectedRow = captureSelectedRow
+      ? (this.sidebarValue?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+          '.abyss-annotation-card[aria-current="true"]',
+        ) ?? undefined)
+      : undefined;
+    const selectedRowId = selectedRow?.dataset['annotationRowId'];
+    const sidebarInvoker =
+      selectedRowId !== undefined && selectedRowId === sidebarInvokerRowId
+        ? selectedRow
+        : undefined;
+    return { generation, selectedRowId, sidebarInvoker };
+  }
+
+  private handleAnnotationEditorClose(
+    request: AnnotationEditorPopoverRequest,
+    lifecycle: AnnotationEditorLifecycle,
+    reason: AnnotationEditorCloseReason,
+    context?: AnnotationEditorCloseContext,
+  ): void {
+    const focusAtCloseStart = this.root.doc.activeElement;
+    try {
+      if (context === undefined) request.onClose(reason);
+      else request.onClose(reason, context);
+    } finally {
+      this.releaseAnnotationEditorLifecycle(lifecycle, reason, focusAtCloseStart, context);
+      for (const listener of this.annotationEditorCloseListeners) listener();
+    }
+  }
+
+  private releaseAnnotationEditorLifecycle(
+    lifecycle: AnnotationEditorLifecycle,
+    reason: AnnotationEditorCloseReason,
+    focusAtCloseStart: Element | null,
+    context: AnnotationEditorCloseContext | undefined,
+  ): void {
+    if (this.annotationEditorGeneration !== lifecycle.generation) return;
+    const panel = this.sidebarValue?.annotationsPanel;
+    if (this.ownsSidebarFocusReturn(lifecycle, reason, focusAtCloseStart, context))
+      panel?.focusSelectedAnnotation();
+    if (lifecycle.selectedRowId !== undefined) panel?.clearSelection(lifecycle.selectedRowId);
+  }
+
+  private ownsSidebarFocusReturn(
+    lifecycle: AnnotationEditorLifecycle,
+    reason: AnnotationEditorCloseReason,
+    focusAtCloseStart: Element | null,
+    context: AnnotationEditorCloseContext | undefined,
+  ): boolean {
+    const contextFocusTarget = context?.focusTarget;
+    const currentSelected =
+      this.sidebarValue?.annotationsPanel.root.querySelector<HTMLButtonElement>(
+        '.abyss-annotation-card[aria-current="true"]',
+      );
+    return (
+      reason === 'escape' &&
+      this.root.doc.activeElement === focusAtCloseStart &&
+      this.sidebarValue?.isOpen === true &&
+      lifecycle.sidebarInvoker?.isConnected === true &&
+      allowsSidebarFocusReturn(contextFocusTarget, lifecycle.sidebarInvoker) &&
+      currentSelected === lifecycle.sidebarInvoker
+    );
   }
 
   onAnnotationEditorClose(listener: () => void): () => void {
@@ -364,6 +453,14 @@ function editorTargetAnnotation(
   if (target.kind === 'selection') return undefined;
   if (target.kind === 'multiple') return target.annotations[0];
   return target.annotation;
+}
+
+function allowsSidebarFocusReturn(
+  contextFocusTarget: HTMLElement | undefined,
+  sidebarInvoker: HTMLButtonElement | undefined,
+): boolean {
+  if (contextFocusTarget?.isConnected !== true) return true;
+  return sidebarInvoker?.isSameNode(contextFocusTarget) === true;
 }
 
 function hasOpenReaderMenu(root: HTMLElement): boolean {

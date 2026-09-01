@@ -2356,6 +2356,7 @@ export class ReaderController {
           .activateAnnotation(activation.nativeId, {
             clientPosition: resolved?.clientPosition,
             kind: 'sidebar',
+            rowId: resolved?.rowId,
             signal: abort.signal,
           })
           .catch((cause: unknown) => {
@@ -2406,7 +2407,7 @@ export class ReaderController {
         onDelete: () => false,
         onClose: () => undefined,
       },
-      { preserveResolvedRow: true },
+      { preserveResolvedRow: true, sidebarInvokerRowId: resolved.rowId },
     );
     this.finishAnnotationActivation(abort);
   }

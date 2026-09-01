@@ -25,7 +25,10 @@ export interface QuickHighlightState {
 
 export interface AnnotationInteractionHost {
   setQuickHighlightState(state: QuickHighlightState): void;
-  openAnnotationEditor(request: AnnotationEditorPopoverRequest): boolean;
+  openAnnotationEditor(
+    request: AnnotationEditorPopoverRequest,
+    options?: { readonly sidebarInvokerRowId?: string | undefined },
+  ): boolean;
   closeAnnotationEditor(): boolean;
   flushAnnotationEditor(): Promise<boolean>;
 }
@@ -353,11 +356,12 @@ export class AnnotationInteractionController {
       return;
     }
     const target = this.annotationFocusTarget(focus, first);
-    const neutralizeOnClose = target.kind !== 'readonly' || focus.editable;
+    const neutralizeOnClose = shouldNeutralizeAnnotationFocus(target, focus);
     const revision = this.activeSelectionRevision + 1;
+    const editorOptions = sidebarAnnotationEditorOptions(focus);
     let opened: boolean;
     try {
-      opened = this.host.openAnnotationEditor({
+      const request: AnnotationEditorPopoverRequest = {
         color: first.color ?? undefined,
         onClose: (_reason, context) => {
           this.releaseAnnotationFocusLease(focus);
@@ -383,7 +387,11 @@ export class AnnotationInteractionController {
           return this.interaction.resolveAnnotationAnchor?.(annotationIdentity(annotation)) ?? null;
         },
         target,
-      });
+      };
+      opened =
+        editorOptions === undefined
+          ? this.host.openAnnotationEditor(request)
+          : this.host.openAnnotationEditor(request, editorOptions);
     } catch (cause) {
       this.releaseAnnotationFocusLease(focus);
       throw cause;
@@ -739,6 +747,21 @@ function userFocusTarget(target: EventTarget | null, owner: ReaderOwnerWindow): 
   )
     return null;
   return candidate;
+}
+
+function shouldNeutralizeAnnotationFocus(
+  target: AnnotationEditorTarget,
+  focus: PdfAnnotationFocus,
+): boolean {
+  return target.kind !== 'readonly' || focus.editable;
+}
+
+function sidebarAnnotationEditorOptions(
+  focus: PdfAnnotationFocus,
+): { readonly sidebarInvokerRowId: string } | undefined {
+  return focus.activation === undefined
+    ? undefined
+    : { sidebarInvokerRowId: focus.activation.rowId };
 }
 
 function isUsableClientPosition(
