@@ -251,6 +251,61 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
+  it('returns focus to the resolved sidebar row after closing its editor', () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const annotation: DocumentAnnotation = {
+      identity: { id: asAnnotationId('sidebar-focus-return'), kind: 'stable' },
+      type: 'highlight',
+      anchor: {
+        kind: 'fixed-page',
+        pageIndex: 0,
+        coordinateSpace: 'page-points-top-left',
+        geometry: { kind: 'point', point: { x: 10, y: 20 } },
+      },
+      color: '#ffd400',
+      selectedText: 'Focused from sidebar',
+      author: '',
+      createdAt: null,
+      modifiedAt: null,
+      comment: '',
+      tags: [],
+      links: [],
+      capabilities: {} as DocumentAnnotation['capabilities'],
+    };
+    const sidebar = shell.openSidebar('annotations', {
+      onClose: vi.fn(),
+      onOutlineNavigate: vi.fn(),
+      onSearchNavigate: vi.fn(),
+      onSearchQuery: vi.fn(),
+      onTabChange: vi.fn(),
+    });
+    sidebar.annotationsPanel.setProjectedAnnotations([
+      { annotation, key: 'sidebar-focus-row', nativeId: 'native-focus', writable: true },
+    ]);
+    const card = sidebar.annotationsPanel.root.querySelector<HTMLButtonElement>(
+      '.abyss-annotation-card[data-annotation-row-id="sidebar-focus-row"]',
+    );
+    if (card === null) throw new Error('Expected a sidebar annotation row.');
+    expect(sidebar.annotationsPanel.selectAnnotation('native-focus', false)).toBe(true);
+    shell.documentHost.focus();
+    shell.openAnnotationEditor({
+      onClose: vi.fn(),
+      onCreate: vi.fn(),
+      onDelete: vi.fn(),
+      onUpdate: vi.fn(),
+      palette: [],
+      position: { x: 40, y: 132 },
+      target: { annotation, kind: 'annotation' },
+    });
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+
+    expect(document.activeElement).toBe(card);
+    shell.destroy();
+    host.remove();
+  });
+
   it('keeps a dismissed selection draft visible and retryable in the unified editor', async () => {
     const host = document.body.createDiv();
     const shell = new ReaderShell(host);

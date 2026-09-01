@@ -485,6 +485,7 @@ describe('PDF.js style build', () => {
     expect(
       mobileDeclarations(narrowReader, '.abyss-documents .abyss-reader-sidebar'),
     ).toMatchObject({
+      'min-width': '0',
       position: 'absolute',
       'inset-inline-start': '0',
       width: 'min(var(--abyss-reader-sidebar-width), 90%)',

@@ -325,6 +325,15 @@ export class AnnotationsPanel {
       card.removeAttribute('aria-current');
   }
 
+  focusSelectedAnnotation(): boolean {
+    if (this.selectedRowId === null) return false;
+    const card = this.cardButtons.get(this.selectedRowId);
+    if (card === undefined || !this.list.contains(card)) return false;
+    this.setRovingRow(this.selectedRowId);
+    card.focus({ preventScroll: true });
+    return true;
+  }
+
   resolveActivation(rowId: string): ResolvedAnnotationPanelActivation | null {
     const annotation = this.filtered.find((candidate) => this.rowId(candidate) === rowId);
     if (annotation === undefined || !this.selectRow(rowId, false)) return null;

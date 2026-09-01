@@ -162,6 +162,33 @@ describe('ReaderSidebar', () => {
     expect(shell.sidebar?.isOpen).toBe(true);
   });
 
+  it('keeps the existing sidebar connected when reopening it', () => {
+    const host = createDiv();
+    const handlers = callbacks();
+    const onIntent = (intent: ReaderShellIntent): void => {
+      if (intent.type === 'toggle-sidebar') toggleSidebar(shell, handlers);
+    };
+    const shell = new ReaderShell(host, onIntent);
+    shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
+    const sidebar = shell.sidebar?.root;
+    const body = sidebar?.parentElement;
+    if (sidebar === undefined || body === null || body === undefined)
+      throw new Error('Expected an opened sidebar.');
+    const observer = new MutationObserver(() => undefined);
+    observer.observe(body, { childList: true });
+
+    shell.closeSidebar();
+    observer.takeRecords();
+    shell.root.querySelector<HTMLButtonElement>('[data-control="sidebar"]')?.click();
+
+    const removed = observer
+      .takeRecords()
+      .flatMap((record) => Array.from(record.removedNodes))
+      .some((node) => node === sidebar);
+    observer.disconnect();
+    expect(removed).toBe(false);
+  });
+
   it('uses a fixed, roving tab order for Outline, Annotations, and Search', () => {
     const host = createDiv();
     host.doc.body.append(host);

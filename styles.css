@@ -7312,6 +7312,7 @@
     inset-inline-start: 0;
     width: min(var(--abyss-reader-sidebar-width), 90%);
     max-width: 90%;
+    min-width: 0;
     padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
     padding-inline-start: env(safe-area-inset-left);
   }

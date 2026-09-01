@@ -160,6 +160,7 @@ export class ReaderShell implements AnnotationInteractionHost {
           if (context === undefined) request.onClose(reason);
           else request.onClose(reason, context);
         } finally {
+          this.sidebarValue?.annotationsPanel.focusSelectedAnnotation();
           this.sidebarValue?.annotationsPanel.clearSelection();
           for (const listener of this.annotationEditorCloseListeners) listener();
         }
@@ -237,7 +238,8 @@ export class ReaderShell implements AnnotationInteractionHost {
         callbacks.onClose();
       },
     });
-    this.body.insertBefore(this.sidebarValue.root, this.documentHost);
+    if (this.sidebarValue.root.nextElementSibling !== this.documentHost)
+      this.body.insertBefore(this.sidebarValue.root, this.documentHost);
     this.sidebarValue.open(tab);
     this.setSidebarPressed(true);
     this.announce(`${sidebarLabel(tab)} sidebar opened`);
