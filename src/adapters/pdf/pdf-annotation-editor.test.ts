@@ -2904,6 +2904,75 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(current.editor.hitTestProjectedAnnotation(1, { x: 72, y: 90 })).toBeNull();
   });
 
+  it('refreshes hit stacks when projected pages are reordered, promoted, moved, or restored', () => {
+    const current = fixture();
+    const projected = (id: string, pageIndex = 0) => ({
+      annotation: {
+        ...createdAnnotation('', { id }),
+        anchor: {
+          coordinateSpace: 'page-points-top-left' as const,
+          geometry: { kind: 'point' as const, point: { x: 0, y: 0 } },
+          kind: 'fixed-page' as const,
+          pageIndex,
+        },
+      },
+      editorUid: `editor-${id}`,
+      stableId: id,
+    });
+    const lower = projected('lower');
+    const upper = projected('upper');
+    const otherPage = projected('other', 1);
+    const hits = (pageIndex: number) =>
+      current.editor
+        .hitTestProjectedAnnotations(pageIndex, { x: 0, y: 0 })
+        .map(({ editorUid, stableId }) => [stableId, editorUid]);
+
+    current.editor.setAnnotationProjection([lower, upper, otherPage]);
+    expect(hits(0)).toEqual([
+      ['upper', 'editor-upper'],
+      ['lower', 'editor-lower'],
+    ]);
+    current.editor.setAnnotationProjection([upper, lower, otherPage]);
+    expect(hits(0)).toEqual([
+      ['lower', 'editor-lower'],
+      ['upper', 'editor-upper'],
+    ]);
+    expect(hits(1)).toEqual([['other', 'editor-other']]);
+
+    const promoted = { ...lower, editorUid: 'new-editor', stableId: 'persisted' };
+    current.editor.setAnnotationProjection([upper, promoted, otherPage]);
+    expect(hits(0)).toEqual([
+      ['persisted', 'new-editor'],
+      ['upper', 'editor-upper'],
+    ]);
+    const moved = {
+      ...promoted,
+      annotation: {
+        ...promoted.annotation,
+        anchor: { ...promoted.annotation.anchor, pageIndex: 1 },
+      },
+    };
+    current.editor.setAnnotationProjection([upper, moved, otherPage]);
+    expect(hits(0)).toEqual([['upper', 'editor-upper']]);
+    expect(hits(1)).toEqual([
+      ['other', 'editor-other'],
+      ['persisted', 'new-editor'],
+    ]);
+    current.editor.setAnnotationProjection([moved, otherPage]);
+    expect(hits(0)).toEqual([]);
+    current.editor.setAnnotationProjection([upper, moved, otherPage]);
+    expect(hits(0)).toEqual([['upper', 'editor-upper']]);
+    current.editor.setAnnotationProjection([]);
+    expect(hits(0)).toEqual([]);
+    expect(hits(1)).toEqual([]);
+    current.editor.setAnnotationProjection([lower, upper, otherPage]);
+    expect(hits(0)).toEqual([
+      ['upper', 'editor-upper'],
+      ['lower', 'editor-lower'],
+    ]);
+    expect(hits(1)).toEqual([['other', 'editor-other']]);
+  });
+
   it('rejects empty bounding-box space around angled quadrilaterals and ink segments', () => {
     const current = fixture();
     const quadrilateral = {
@@ -5670,6 +5739,74 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(changedModes).toEqual([]);
     expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
   });
+
+  it.each([false, true])(
+    'requires the matching contextual FreeText handoff for a same-mode native request (accept=%s)',
+    async (accept) => {
+      const current = fixture();
+      document.body.append(current.annotationRoot);
+      const annotationLayer = current.annotationRoot.createDiv({ cls: 'annotationLayer' });
+      const container = annotationLayer.createDiv();
+      const editable = current.annotationRoot.createDiv();
+      editable.setAttribute('contenteditable', 'false');
+      const events: string[] = [];
+      const native = {
+        ...selectedEditor('persisted-freetext', 3),
+        enterInEditMode: () => {
+          events.push('native-entry');
+          editable.setAttribute('contenteditable', 'true');
+        },
+      };
+      const uiManager = manager(native);
+      uiManager.getEditor.mockImplementation((id: string) =>
+        id === 'pdfjs_internal_editor_42' ? native : undefined,
+      );
+      current.commentBridge.nativeEditorIds.mockReturnValue(new Set(['pdfjs_internal_editor_42']));
+      current.commentBridge.nativeEditorUidForAnnotation.mockReturnValue('persisted-freetext');
+      current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+      current.editor.setAnnotationProjection([
+        {
+          annotation: createdAnnotation('', { id: 'persisted-freetext', type: 'free-text' }),
+          stableId: 'persisted-freetext',
+        },
+      ]);
+      await current.editor.editAnnotation({
+        editComment: false,
+        id: 'persisted-freetext',
+        kind: 'freetext',
+      });
+      const modes: string[] = [];
+      current.editor.onMode((mode) => modes.push(mode));
+      current.editor.onNativeTextEdit(() => {
+        events.push('handoff');
+        return accept;
+      });
+      try {
+        current.eventBus.dispatch('switchannotationeditormode', {
+          editId: 'persisted-freetext',
+          mode: 3,
+          mustEnterInEditMode: true,
+          source: {
+            annotationEditorType: 3,
+            container,
+            layer: annotationLayer,
+            data: { id: 'persisted-freetext' },
+          },
+        });
+
+        expect(editable.getAttribute('contenteditable')).toBe(accept ? 'true' : 'false');
+        expect(events).toEqual(accept ? ['handoff', 'native-entry'] : ['handoff']);
+        expect(current.editor.hasContextualEdit).toBe(!accept);
+        expect(modes).toEqual(accept ? ['neutral', 'freetext'] : ['neutral']);
+        expect(current.modeRequests).toEqual([
+          { editComment: false, editId: 'persisted-freetext', mode: 3 },
+        ]);
+      } finally {
+        current.editor.destroy();
+        current.annotationRoot.remove();
+      }
+    },
+  );
 
   it.each(['matching-selection', 'unrelated-selection', 'missing-target'])(
     'resolves the exact native FreeText editor while its mode is already active (%s)',

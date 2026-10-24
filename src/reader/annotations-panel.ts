@@ -15,6 +15,11 @@ const LOADING_SPINNER_DELAY_MS = 250;
 
 type AnnotationPanelState = 'loading' | 'empty' | 'content' | 'filtered-empty' | 'unavailable';
 
+interface AnnotationColorFacetPresentation extends AnnotationColorFacet {
+  readonly accessibleLabel: string;
+  readonly pressed: boolean;
+}
+
 interface AnnotationFocusTarget {
   readonly rowId: string;
 }
@@ -77,6 +82,7 @@ export class AnnotationsPanel {
   private readonly colorSearch: HTMLInputElement;
   private readonly colorRows: HTMLElement;
   private displayColors: readonly AnnotationColorFacet[] = [];
+  private renderedColors: readonly AnnotationColorFacetPresentation[] = [];
   private annotations: readonly DocumentAnnotation[] = [];
   private projectionRows: readonly AnnotationProjectionRow[] | null = null;
   private readonly provisionalRowIds = new Set<string>();
@@ -435,12 +441,11 @@ export class AnnotationsPanel {
   }
 
   private renderColorFacets(): void {
-    this.colorSearch.hidden = this.displayColors.length <= MAX_COLOR_FACETS;
+    setHiddenIfChanged(this.colorSearch, this.displayColors.length <= MAX_COLOR_FACETS);
     this.renderColorRows();
   }
 
   private renderColorRows(): void {
-    this.colorRows.replaceChildren();
     const query = normalize(this.colorSearch.value.trim());
     const selected = new Set(Array.from(this.filter.colors, normalize));
     const matching = this.displayColors.filter(
@@ -452,45 +457,55 @@ export class AnnotationsPanel {
     const visible = [
       ...this.displayColors.filter((facet) => selected.has(normalize(facet.color))),
       ...matching.filter((facet) => !selected.has(normalize(facet.color))),
-    ].slice(0, MAX_COLOR_FACETS);
-    for (const facet of visible) {
-      const chip = ownerWindow(this.root).createEl('button');
-      chip.type = 'button';
-      chip.className = 'abyss-annotation-color-chip';
-      chip.dataset['annotationColorRow'] = '';
-      chip.dataset['annotationColor'] = facet.color;
-      chip.style.setProperty('--abyss-annotation-color', facet.color);
-      const pressed = selected.has(normalize(facet.color));
-      chip.setAttribute('aria-pressed', String(pressed));
-      configureColorFacetTooltip(chip, facet, this.colorFacetAccessibleLabel(facet));
-      const swatch = ownerWindow(this.root).createSpan();
-      swatch.className = 'abyss-annotation-color-chip-swatch';
-      swatch.setAttribute('aria-hidden', 'true');
-      const meaning = ownerWindow(this.root).createSpan();
-      meaning.className = 'abyss-annotation-color-chip-meaning';
-      meaning.textContent = facet.meaning;
-      const count = ownerWindow(this.root).createSpan();
-      count.className = 'abyss-annotation-color-chip-count';
-      count.textContent = String(facet.count);
-      chip.append(swatch);
-      if (facet.meaning.length > 0) chip.append(meaning);
-      chip.append(count);
-      chip.addEventListener('click', () => {
-        const next = new Set(this.filter.colors);
-        const previous = Array.from(next).find(
-          (candidate) => normalize(candidate) === normalize(facet.color),
-        );
-        if (previous === undefined) next.add(facet.color);
-        else next.delete(previous);
-        chip.setAttribute('aria-pressed', String(previous === undefined));
-        this.filter = { ...this.filter, colors: next };
-        this.resetVirtualScroll();
-        this.renderFacets();
-        this.applyFilter(true);
-      });
-      this.colorRows.append(chip);
-    }
+    ]
+      .slice(0, MAX_COLOR_FACETS)
+      .map((facet) => ({
+        ...facet,
+        accessibleLabel: this.colorFacetAccessibleLabel(facet),
+        pressed: selected.has(normalize(facet.color)),
+      }));
+    if (sameColorFacetPresentation(this.renderedColors, visible)) return;
+    this.renderedColors = visible;
+    this.colorRows.replaceChildren();
+    for (const facet of visible) this.colorRows.append(this.createColorFacetChip(facet));
     this.recordPanelDomMaximum();
+  }
+
+  private createColorFacetChip(facet: AnnotationColorFacetPresentation): HTMLButtonElement {
+    const chip = ownerWindow(this.root).createEl('button');
+    chip.type = 'button';
+    chip.className = 'abyss-annotation-color-chip';
+    chip.dataset['annotationColorRow'] = '';
+    chip.dataset['annotationColor'] = facet.color;
+    chip.style.setProperty('--abyss-annotation-color', facet.color);
+    chip.setAttribute('aria-pressed', String(facet.pressed));
+    configureColorFacetTooltip(chip, facet, facet.accessibleLabel);
+    const swatch = ownerWindow(this.root).createSpan();
+    swatch.className = 'abyss-annotation-color-chip-swatch';
+    swatch.setAttribute('aria-hidden', 'true');
+    const meaning = ownerWindow(this.root).createSpan();
+    meaning.className = 'abyss-annotation-color-chip-meaning';
+    meaning.textContent = facet.meaning;
+    const count = ownerWindow(this.root).createSpan();
+    count.className = 'abyss-annotation-color-chip-count';
+    count.textContent = String(facet.count);
+    chip.append(swatch);
+    if (facet.meaning.length > 0) chip.append(meaning);
+    chip.append(count);
+    chip.addEventListener('click', () => {
+      const next = new Set(this.filter.colors);
+      const previous = Array.from(next).find(
+        (candidate) => normalize(candidate) === normalize(facet.color),
+      );
+      if (previous === undefined) next.add(facet.color);
+      else next.delete(previous);
+      chip.setAttribute('aria-pressed', String(previous === undefined));
+      this.filter = { ...this.filter, colors: next };
+      this.resetVirtualScroll();
+      this.renderFacets();
+      this.applyFilter(true);
+    });
+    return chip;
   }
 
   private render(): void {
@@ -501,7 +516,7 @@ export class AnnotationsPanel {
     this.pruneCardCache(visibleRowIds);
     const desired: HTMLElement[] = [];
     if (visible.length > 0) {
-      this.topSpacer.style.height = `${this.offsetAt(this.windowStart)}px`;
+      setStyleIfChanged(this.topSpacer, 'height', `${this.offsetAt(this.windowStart)}px`);
       desired.push(this.topSpacer);
     }
     for (const [offset, annotation] of visible.entries())
@@ -509,7 +524,7 @@ export class AnnotationsPanel {
     const end = this.windowStart + visible.length;
     const remainingHeight = this.offsetAt(this.filtered.length) - this.offsetAt(end);
     if (visible.length > 0) {
-      this.bottomSpacer.style.height = `${remainingHeight}px`;
+      setStyleIfChanged(this.bottomSpacer, 'height', `${remainingHeight}px`);
       desired.push(this.bottomSpacer);
     }
     this.reconcileList(desired);
@@ -524,6 +539,13 @@ export class AnnotationsPanel {
   }
 
   private reconcileList(desired: readonly HTMLElement[]): void {
+    const retained = new Set<Element>(desired);
+    let obsolete = this.list.firstElementChild;
+    while (obsolete !== null) {
+      const next = obsolete.nextElementSibling;
+      if (!retained.has(obsolete)) obsolete.remove();
+      obsolete = next;
+    }
     let cursor = this.list.firstElementChild;
     for (const node of desired) {
       if (cursor === node) {
@@ -608,17 +630,18 @@ export class AnnotationsPanel {
     index: number,
     rowId: string,
   ): void {
-    const contentChanged = this.cardAnnotations.get(button) !== annotation;
+    const contentChanged = !sameCardContent(this.cardAnnotations.get(button), annotation);
     this.cardAnnotations.set(button, annotation);
-    button.dataset['annotationId'] = annotationId(annotation);
-    button.dataset['annotationIndex'] = String(index);
-    button.dataset['annotationRowId'] = rowId;
-    delete button.dataset['annotationProvisional'];
-    if (annotation.identity.kind !== 'stable' || this.provisionalRowIds.has(rowId))
-      button.dataset['annotationProvisional'] = 'true';
-    button.tabIndex = rowId === this.rovingRowId ? 0 : -1;
-    if (rowId === this.selectedRowId) button.setAttribute('aria-current', 'true');
-    else button.removeAttribute('aria-current');
+    setAttributeIfChanged(button, 'data-annotation-id', annotationId(annotation));
+    setAttributeIfChanged(button, 'data-annotation-index', String(index));
+    setAttributeIfChanged(button, 'data-annotation-row-id', rowId);
+    setAttributeIfChanged(
+      button,
+      'data-annotation-provisional',
+      annotation.identity.kind !== 'stable' || this.provisionalRowIds.has(rowId) ? 'true' : null,
+    );
+    setAttributeIfChanged(button, 'tabindex', rowId === this.rovingRowId ? '0' : '-1');
+    setAttributeIfChanged(button, 'aria-current', rowId === this.selectedRowId ? 'true' : null);
     if (contentChanged) {
       button.replaceChildren(
         this.cardHeader(annotation),
@@ -741,12 +764,12 @@ export class AnnotationsPanel {
     index: number,
     rowId: string,
   ): void {
-    row.dataset['annotationCardId'] = annotationId(annotation);
-    row.dataset['annotationRowId'] = rowId;
-    row.setAttribute('aria-posinset', String(index + 1));
-    row.setAttribute('aria-setsize', String(this.filtered.length));
+    setAttributeIfChanged(row, 'data-annotation-card-id', annotationId(annotation));
+    setAttributeIfChanged(row, 'data-annotation-row-id', rowId);
+    setAttributeIfChanged(row, 'aria-posinset', String(index + 1));
+    setAttributeIfChanged(row, 'aria-setsize', String(this.filtered.length));
     row.classList.toggle('is-selected', rowId === this.selectedRowId);
-    row.draggable = isTransferableAnnotation(annotation);
+    setAttributeIfChanged(row, 'draggable', String(isTransferableAnnotation(annotation)));
   }
 
   private updateCardEditButton(
@@ -764,7 +787,7 @@ export class AnnotationsPanel {
       action = this.createCardEditButton(rowId);
       this.cardEditButtons.set(rowId, action);
     }
-    action.style.setProperty('--abyss-annotation-color', annotation.color ?? 'transparent');
+    setStyleIfChanged(action, '--abyss-annotation-color', annotation.color ?? 'transparent');
     this.configureCardEditButton(action, annotation);
     if (action.parentElement !== row) row.append(action);
   }
@@ -776,9 +799,11 @@ export class AnnotationsPanel {
       (color === null ? null : colorSetting(color, this.options.colorMeanings)) ??
       (color === null ? 'No color' : 'Custom color');
     const label = `Edit color, comment, or delete — ${semanticColor}`;
-    action.title = label;
-    setTooltip(action, label, { delay: 250 });
-    action.setAttribute('aria-label', label);
+    if (action.title !== label) {
+      action.title = label;
+      setTooltip(action, label, { delay: 250 });
+    }
+    setAttributeIfChanged(action, 'aria-label', label);
   }
 
   private createCardEditButton(rowId: string): HTMLButtonElement {
@@ -851,7 +876,11 @@ export class AnnotationsPanel {
       (element) => element as HTMLButtonElement,
     );
     for (const card of cards) {
-      card.tabIndex = card.dataset['annotationRowId'] === rowId ? 0 : -1;
+      setAttributeIfChanged(
+        card,
+        'tabindex',
+        card.dataset['annotationRowId'] === rowId ? '0' : '-1',
+      );
     }
   }
 
@@ -910,8 +939,11 @@ export class AnnotationsPanel {
     for (const card of Array.from(
       this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
     )) {
-      if (card.dataset['annotationRowId'] === rowId) card.setAttribute('aria-current', 'true');
-      else card.removeAttribute('aria-current');
+      setAttributeIfChanged(
+        card,
+        'aria-current',
+        card.dataset['annotationRowId'] === rowId ? 'true' : null,
+      );
     }
     for (const row of Array.from(
       this.list.querySelectorAll<HTMLElement>('.abyss-annotation-card-row'),
@@ -1171,16 +1203,18 @@ export class AnnotationsPanel {
   }
 
   private renderState(): void {
-    this.root.dataset['annotationState'] = this.state;
+    setAttributeIfChanged(this.root, 'data-annotation-state', this.state);
     const hasControls = this.state === 'content' || this.state === 'filtered-empty';
-    this.controls.hidden = false;
-    this.footer.hidden = !hasControls || this.displayColors.length === 0;
-    this.query.hidden = false;
-    this.list.hidden = this.state !== 'content';
-    this.status.hidden =
-      this.state === 'content' || (this.state === 'loading' && !this.loadingVisible);
-    this.status.removeAttribute('role');
-    this.status.replaceChildren();
+    setHiddenIfChanged(this.controls, false);
+    setHiddenIfChanged(this.footer, !hasControls || this.displayColors.length === 0);
+    setHiddenIfChanged(this.query, false);
+    setHiddenIfChanged(this.list, this.state !== 'content');
+    setHiddenIfChanged(
+      this.status,
+      this.state === 'content' || (this.state === 'loading' && !this.loadingVisible),
+    );
+    setAttributeIfChanged(this.status, 'role', null);
+    if (this.status.hasChildNodes()) this.status.replaceChildren();
     if (this.state === 'content') return;
     this.status.setAttribute('role', 'status');
     if (this.state === 'loading') {
@@ -1208,9 +1242,9 @@ export class AnnotationsPanel {
   }
 
   private clearResolutionFeedback(): void {
-    this.contextStatus.hidden = true;
-    this.contextStatus.removeAttribute('role');
-    this.contextStatus.replaceChildren();
+    setHiddenIfChanged(this.contextStatus, true);
+    setAttributeIfChanged(this.contextStatus, 'role', null);
+    if (this.contextStatus.hasChildNodes()) this.contextStatus.replaceChildren();
   }
 
   private resetFocusTracking(): void {
@@ -1244,6 +1278,55 @@ export class AnnotationsPanel {
         : `Color ${String(peers.indexOf(facet) + 1)} of ${String(peers.length)}`;
     return `${facet.meaning} — ${qualifier}, ${count}`;
   }
+}
+
+function sameCardContent(
+  current: DocumentAnnotation | undefined,
+  next: DocumentAnnotation,
+): boolean {
+  return (
+    current === next ||
+    (current !== undefined &&
+      annotationPage(current) === annotationPage(next) &&
+      current.type === next.type &&
+      current.externalType === next.externalType &&
+      current.color === next.color &&
+      nonEmpty(current.selectedText) === nonEmpty(next.selectedText) &&
+      nonEmpty(current.comment) === nonEmpty(next.comment))
+  );
+}
+
+function setAttributeIfChanged(element: HTMLElement, name: string, value: string | null): void {
+  if (element.getAttribute(name) === value) return;
+  if (value === null) element.removeAttribute(name);
+  else element.setAttribute(name, value);
+}
+
+function setStyleIfChanged(element: HTMLElement, name: string, value: string): void {
+  if (element.style.getPropertyValue(name) !== value) element.style.setProperty(name, value);
+}
+
+function setHiddenIfChanged(element: HTMLElement, hidden: boolean): void {
+  if (element.hidden !== hidden) element.hidden = hidden;
+}
+
+function sameColorFacetPresentation(
+  current: readonly AnnotationColorFacetPresentation[],
+  next: readonly AnnotationColorFacetPresentation[],
+): boolean {
+  return (
+    current.length === next.length &&
+    current.every((facet, index) => {
+      const candidate = next[index];
+      return (
+        facet.color === candidate?.color &&
+        facet.meaning === candidate.meaning &&
+        facet.count === candidate.count &&
+        facet.accessibleLabel === candidate.accessibleLabel &&
+        facet.pressed === candidate.pressed
+      );
+    })
+  );
 }
 
 function sameProjectionRows(

@@ -1867,3 +1867,228 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 });
+
+describe('AnnotationsPanel retained presentation', () => {
+  it('retains unchanged facets and edit controls while rebinding actions to the latest annotation', () => {
+    const root = createDiv();
+    const onActivate = vi.fn<(activation: AnnotationPanelActivation) => void>();
+    const onSelect = vi.fn<(activation: AnnotationPanelActivation) => void>();
+    const panel = new AnnotationsPanel(root, { onActivate, onNavigate: vi.fn(), onSelect });
+    const first = annotation(0);
+    const row = {
+      annotation: first,
+      key: 'retained-presentation',
+      nativeId: 'native-before',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([row]);
+    const card = root.querySelector<HTMLButtonElement>('.abyss-annotation-card');
+    const action = root.querySelector<HTMLButtonElement>('.abyss-annotation-card-edit');
+    const color = root.querySelector<HTMLButtonElement>('[data-annotation-color]');
+    if (card === null || action === null || color === null)
+      throw new Error('Expected a writable card and its facet.');
+    const header = card.querySelector('[data-annotation-header]');
+    const quote = card.querySelector('[data-annotation-quote]');
+    const comment = card.querySelector('[data-annotation-comment]');
+    const observer = new MutationObserver(() => undefined);
+    observer.observe(action, { attributes: true });
+    const latest = { ...first, author: 'Current author metadata' };
+
+    panel.setProjectedAnnotations([{ ...row, annotation: latest, nativeId: 'native-after' }]);
+
+    expect(root.querySelector('[data-annotation-color]')).toBe(color);
+    expect(root.querySelector('.abyss-annotation-card')).toBe(card);
+    expect(root.querySelector('.abyss-annotation-card-edit')).toBe(action);
+    expect(card.querySelector('[data-annotation-header]')).toBe(header);
+    expect(card.querySelector('[data-annotation-quote]')).toBe(quote);
+    expect(card.querySelector('[data-annotation-comment]')).toBe(comment);
+    expect(observer.takeRecords()).toEqual([]);
+    action.click();
+    expect(onActivate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ annotation: latest, nativeId: 'native-after' }),
+    );
+    expect(onActivate.mock.calls[0]?.[0].annotation).toBe(latest);
+    card.click();
+    expect(onSelect.mock.calls[0]?.[0].annotation).toBe(latest);
+    observer.disconnect();
+    panel.destroy();
+    root.remove();
+  });
+
+  it('refreshes visible facet labels when hidden peers change and keeps retained filters current', () => {
+    const root = createDiv();
+    const colors = Array.from(
+      { length: 18 },
+      (_, index) => `#${index.toString(16).padStart(6, '0')}`,
+    );
+    const meanings = Object.fromEntries(colors.map((color) => [color, 'Important']));
+    const panel = new AnnotationsPanel(root, { colorMeanings: meanings, onNavigate: vi.fn() });
+    const rows = colors.map(
+      (color, index) =>
+        ({
+          annotation: annotation(index, { color }),
+          key: `facet-row-${index}`,
+          nativeId: `facet-native-${index}`,
+          writable: true,
+        }) satisfies AnnotationProjectionRow,
+    );
+    panel.setProjectedAnnotations(rows.slice(0, 17));
+    const first = root.querySelector<HTMLButtonElement>('[data-annotation-color="#000000"]');
+    expect(first?.getAttribute('aria-label')).toBe('Important — Color 1 of 17, 1 annotation');
+
+    panel.setProjectedAnnotations(rows);
+
+    const current = root.querySelector<HTMLButtonElement>('[data-annotation-color="#000000"]');
+    if (current === null) throw new Error('Expected the first visible facet.');
+    expect(current.getAttribute('aria-label')).toBe('Important — Color 1 of 18, 1 annotation');
+    current.click();
+    expect(panel.visibleIds()).toEqual(['annotation-0']);
+    const search = root.querySelector<HTMLInputElement>('[data-annotation-color-search]');
+    if (search === null) throw new Error('Expected a high-cardinality color search.');
+    search.value = 'missing';
+    search.dispatchEvent(new Event('input'));
+    const selected = root.querySelector<HTMLButtonElement>('[data-annotation-color="#000000"]');
+    expect(selected?.getAttribute('aria-pressed')).toBe('true');
+    panel.setProjectedAnnotations(
+      rows.map((row) => ({ ...row, annotation: { ...row.annotation, author: 'Updated author' } })),
+    );
+    expect(root.querySelector('[data-annotation-color="#000000"]')).toBe(selected);
+    selected?.click();
+    expect(panel.visibleIds()).toHaveLength(18);
+    expect(root.querySelectorAll('[data-annotation-color]')).toHaveLength(0);
+    panel.destroy();
+    root.remove();
+  });
+});
+
+describe('AnnotationsPanel differential projection rendering', () => {
+  it('deletes an obsolete first row without detaching retained rows', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const rows = Array.from(
+      { length: 60 },
+      (_, index) =>
+        ({
+          annotation: annotation(index),
+          key: `retained-row-${index}`,
+          nativeId: `retained-native-${index}`,
+          writable: true,
+        }) satisfies AnnotationProjectionRow,
+    );
+    panel.setProjectedAnnotations(rows);
+    const retained = Array.from(
+      root.querySelectorAll<HTMLElement>('.abyss-annotation-card-row'),
+    ).slice(1);
+    const firstRetained = retained[0];
+    if (firstRetained === undefined) throw new Error('Expected retained annotation rows.');
+    const observer = new MutationObserver(() => undefined);
+    observer.observe(root, { childList: true, subtree: true });
+
+    panel.setProjectedAnnotations(rows.slice(1));
+
+    const removed = observer.takeRecords().flatMap((record) => Array.from(record.removedNodes));
+    expect(retained.some((row) => removed.includes(row))).toBe(false);
+    expect(
+      root.querySelector('.abyss-annotation-card-row[data-annotation-row-id="retained-row-1"]'),
+    ).toBe(firstRetained);
+    expect(firstRetained.getAttribute('aria-posinset')).toBe('1');
+    expect(panel.visibleIds()).toEqual(
+      Array.from({ length: 48 }, (_, index) => `annotation-${index + 1}`),
+    );
+    observer.disconnect();
+    panel.destroy();
+    root.remove();
+  });
+
+  it.each([
+    {
+      name: 'page',
+      update: { anchor: annotation(3).anchor },
+      selector: '[data-annotation-page]',
+      text: 'Page 4',
+    },
+    { name: 'type', update: { type: 'ink' }, selector: '[data-annotation-meaning]', text: 'Ink' },
+    {
+      name: 'external type',
+      update: { type: 'unsupported', externalType: 'Polygon' },
+      selector: '[data-annotation-meaning]',
+      text: 'Polygon',
+    },
+    {
+      name: 'quote',
+      update: { selectedText: 'Current quote' },
+      selector: '[data-annotation-quote]',
+      text: 'Current quote',
+    },
+    {
+      name: 'comment',
+      update: { comment: 'Current comment' },
+      selector: '[data-annotation-comment]',
+      text: 'Current comment',
+    },
+    {
+      name: 'empty quote',
+      update: { selectedText: '   ' },
+      selector: '[data-annotation-quote]',
+      text: undefined,
+    },
+    {
+      name: 'empty comment',
+      update: { comment: '   ' },
+      selector: '[data-annotation-comment]',
+      text: undefined,
+    },
+  ] satisfies ReadonlyArray<{
+    readonly name: string;
+    readonly update: Partial<DocumentAnnotation>;
+    readonly selector: string;
+    readonly text: string | undefined;
+  }>)('updates retained card content when its $name changes', ({ update, selector, text }) => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const row = {
+      annotation: annotation(0),
+      key: 'visual-row',
+      nativeId: 'visual-native',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([row]);
+    const card = root.querySelector('.abyss-annotation-card');
+
+    panel.setProjectedAnnotations([{ ...row, annotation: { ...row.annotation, ...update } }]);
+
+    expect(root.querySelector('.abyss-annotation-card')).toBe(card);
+    expect(card?.querySelector(selector)?.textContent).toBe(text);
+    panel.destroy();
+    root.remove();
+  });
+
+  it('updates retained quote and header colors when annotation color changes', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const row = {
+      annotation: annotation(0),
+      key: 'color-row',
+      nativeId: 'color-native',
+      writable: true,
+    } satisfies AnnotationProjectionRow;
+    panel.setProjectedAnnotations([row]);
+
+    panel.setProjectedAnnotations([
+      { ...row, annotation: { ...row.annotation, color: '#123456' } },
+    ]);
+
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-color-swatch]')
+        ?.style.getPropertyValue('--abyss-annotation-color'),
+    ).toBe('#123456');
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-annotation-quote]')
+        ?.style.getPropertyValue('--abyss-annotation-color'),
+    ).toBe('#123456');
+    panel.destroy();
+    root.remove();
+  });
+});

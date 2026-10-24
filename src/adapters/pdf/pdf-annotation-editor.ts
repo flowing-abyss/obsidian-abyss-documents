@@ -496,7 +496,12 @@ export class PdfAnnotationEditor {
   private activeActivation: AnnotationActivation | null = null;
   private annotationResolver: PdfAnnotationResolver | null = null;
   private projectedTargets = new Map<string, PdfProjectedTarget>();
+  private readonly projectedEntries = new WeakMap<PdfProjectedAnnotation, PdfProjectedEntry>();
   private projectedHitGrid: PdfProjectedHitGrid = new Map();
+  private readonly projectedHitPageEntries = new WeakMap<
+    Map<string, PdfProjectedHitRegion[]>,
+    readonly PdfProjectedEntry[]
+  >();
   // Geometry is immutable; current identity, page, and ordering are rebuilt separately.
   private readonly projectedGeometryRegions = new WeakMap<
     AnnotationGeometry,
@@ -620,8 +625,23 @@ export class PdfAnnotationEditor {
   }
 
   setAnnotationProjection(annotations: readonly PdfProjectedAnnotation[]): void {
-    this.projectedTargets = pdfProjectedTargetIndex(annotations);
-    this.projectedHitGrid = pdfProjectedHitGrid(annotations, this.projectedGeometryRegions);
+    const entries = annotations.map((annotation) => this.projectedEntry(annotation));
+    this.projectedTargets = pdfProjectedTargetIndex(entries);
+    this.projectedHitGrid = pdfProjectedHitGrid(
+      entries,
+      this.projectedGeometryRegions,
+      this.projectedHitGrid,
+      this.projectedHitPageEntries,
+    );
+  }
+
+  private projectedEntry(projected: PdfProjectedAnnotation): PdfProjectedEntry {
+    const cached = this.projectedEntries.get(projected);
+    if (cached !== undefined) return cached;
+    const target = pdfProjectedTarget(projected);
+    const entry = { aliases: pdfProjectedAliases(projected, target), target };
+    this.projectedEntries.set(projected, entry);
+    return entry;
   }
 
   hitTestProjectedAnnotation(
@@ -2902,10 +2922,27 @@ export class PdfAnnotationEditor {
         nativeEditorIdentityIds(candidate).some((id) => identities.has(id)),
     );
     if (native?.enterInEditMode === undefined) return false;
+    const contextual = this.contextualTextSessionForNativeEditor(manager, native);
+    if (contextual !== null) {
+      this.enterNativeTextEditSession(contextual);
+      return true;
+    }
     // PDFViewer ignores same-mode requests, including mustEnterInEditMode.
     // The already materialized FreeText editor can enter its native text mode.
     native.enterInEditMode();
     return true;
+  }
+
+  private contextualTextSessionForNativeEditor(
+    manager: PdfAnnotationUiManager,
+    native: PdfNativeEditorReference,
+  ): ContextualEditSession | null {
+    const session = this.contextualEditSession;
+    return session?.manager === manager &&
+      manager.firstSelectedEditor === native &&
+      this.isRequestedEditorSelected(session)
+      ? session
+      : null;
   }
 
   private isCurrentNativeModeRequest(
@@ -3871,16 +3908,68 @@ const PDF_PROJECTED_HIT_CELL_SIZE = 64;
 const PDF_PROJECTED_POINT_HIT_RADIUS = 8;
 
 function pdfProjectedHitGrid(
-  annotations: readonly PdfProjectedAnnotation[],
+  entries: readonly PdfProjectedEntry[],
   geometryRegions: WeakMap<
     AnnotationGeometry,
     ReadonlyArray<Omit<PdfProjectedHitRegion, 'target'>>
   >,
+  previousGrid: PdfProjectedHitGrid,
+  pageEntries: WeakMap<Map<string, PdfProjectedHitRegion[]>, readonly PdfProjectedEntry[]>,
 ): PdfProjectedHitGrid {
   const grid: PdfProjectedHitGrid = new Map();
-  for (const projected of annotations) {
-    const target = pdfProjectedTarget(projected);
-    const anchor = projected.annotation.anchor;
+  for (const [pageIndex, currentEntries] of pdfProjectedEntriesByPage(entries, geometryRegions)) {
+    const previousPage = previousGrid.get(pageIndex);
+    const previousEntries = previousPage === undefined ? undefined : pageEntries.get(previousPage);
+    if (
+      previousPage !== undefined &&
+      previousEntries?.length === currentEntries.length &&
+      currentEntries.every((entry, index) => entry === previousEntries[index])
+    ) {
+      grid.set(pageIndex, previousPage);
+      continue;
+    }
+    pdfProjectedHitGridPage(grid, pageIndex, currentEntries, geometryRegions);
+    const page = grid.get(pageIndex);
+    if (page !== undefined) pageEntries.set(page, currentEntries);
+  }
+  return grid;
+}
+
+function pdfProjectedEntriesByPage(
+  entries: readonly PdfProjectedEntry[],
+  geometryRegions: WeakMap<
+    AnnotationGeometry,
+    ReadonlyArray<Omit<PdfProjectedHitRegion, 'target'>>
+  >,
+): Map<number, PdfProjectedEntry[]> {
+  const pages = new Map<number, PdfProjectedEntry[]>();
+  for (const entry of entries) {
+    const anchor = entry.target.annotation.anchor;
+    if (anchor.kind !== 'fixed-page') continue;
+    let regions = geometryRegions.get(anchor.geometry);
+    if (regions === undefined) {
+      regions = pdfAnnotationHitRegions(anchor.geometry);
+      geometryRegions.set(anchor.geometry, regions);
+    }
+    if (regions.length === 0) continue;
+    const page = pages.get(anchor.pageIndex);
+    if (page === undefined) pages.set(anchor.pageIndex, [entry]);
+    else page.push(entry);
+  }
+  return pages;
+}
+
+function pdfProjectedHitGridPage(
+  grid: PdfProjectedHitGrid,
+  pageIndex: number,
+  entries: readonly PdfProjectedEntry[],
+  geometryRegions: WeakMap<
+    AnnotationGeometry,
+    ReadonlyArray<Omit<PdfProjectedHitRegion, 'target'>>
+  >,
+): void {
+  for (const { target } of entries) {
+    const anchor = target.annotation.anchor;
     if (anchor.kind !== 'fixed-page') continue;
     let regions = geometryRegions.get(anchor.geometry);
     if (regions === undefined) {
@@ -3895,10 +3984,9 @@ function pdfProjectedHitGrid(
           ...(target.editorUid === undefined ? {} : { editorUid: target.editorUid }),
         },
       };
-      pdfProjectedHitGridInsert(grid, anchor.pageIndex, region);
+      pdfProjectedHitGridInsert(grid, pageIndex, region);
     }
   }
-  return grid;
 }
 
 function pdfProjectedHitGridInsert(
@@ -4079,12 +4167,8 @@ function pdfProjectedHitRegion(
 }
 
 function pdfProjectedTargetIndex(
-  annotations: readonly PdfProjectedAnnotation[],
+  entries: readonly PdfProjectedEntry[],
 ): Map<string, PdfProjectedTarget> {
-  const entries: PdfProjectedEntry[] = annotations.map((projected) => {
-    const target = pdfProjectedTarget(projected);
-    return { aliases: pdfProjectedAliases(projected, target), target };
-  });
   const indexed = new Map<string, PdfProjectedTarget>();
   for (const { target } of entries) indexed.set(target.canonicalId, target);
   indexUnambiguousProjectedAliases(entries, indexed);

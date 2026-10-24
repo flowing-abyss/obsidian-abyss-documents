@@ -1772,6 +1772,12 @@ async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Pr
       controller?: {
         viewport?: {
           annotationEditorInstance?: {
+            readonly logicalMode?: string;
+            readonly contextualEditSession?: {
+              readonly id: string;
+              readonly phase: string;
+              readonly closing: unknown;
+            } | null;
             focusAnnotation: (...args: [string, unknown]) => Promise<unknown>;
             onAnnotationFocus(listener: (focus: { editable?: boolean } | null) => void): () => void;
           };
@@ -1864,6 +1870,7 @@ async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Pr
       },
       focusEvents,
       modeEvents,
+      interaction,
       mode: viewport.viewer.annotationEditorMode ?? null,
       viewer: viewport.viewer,
     };
@@ -1937,6 +1944,14 @@ async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Pr
         calls: number;
         cleanup(): void;
         focusEvents: Array<boolean | null>;
+        interaction: {
+          readonly logicalMode?: string;
+          readonly contextualEditSession?: {
+            readonly id: string;
+            readonly phase: string;
+            readonly closing: unknown;
+          } | null;
+        };
         modeEvents: Array<Record<string, unknown>>;
         mode: number | null;
         viewer: { annotationEditorMode?: number };
@@ -1951,10 +1966,16 @@ async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Pr
     if (editable === null) throw new Error('Persisted FreeText did not enter native edit mode.');
     const active = document.activeElement;
     const innerText = editable.innerText;
+    const contextual = state.interaction.contextualEditSession;
     const result = {
       calls: state.calls,
+      contextualEditSession:
+        contextual == null
+          ? null
+          : { id: contextual.id, phase: contextual.phase, closing: contextual.closing != null },
       editorConnected: editor?.isConnected ?? false,
       focused: active === editable || (active !== null && editable.contains(active)),
+      logicalMode: state.interaction.logicalMode ?? null,
       mode: state.viewer.annotationEditorMode ?? null,
       modeBefore: state.mode,
       focusEvents: state.focusEvents,
@@ -1970,19 +1991,24 @@ async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Pr
     delete host.__abyssTask3FreeTextProbe;
     return result;
   });
-  expect(result).toMatchObject({
-    calls: 1,
-    editorConnected: true,
-    focused: true,
-    mode: 3,
-    modeBefore: 0,
-    popoverVisible: false,
-    selected: true,
-  });
-  if (result.focusEvents.includes(false))
-    console.info('[native-freetext-focus-trace]', JSON.stringify(result.modeEvents));
-  expect(result.focusEvents).not.toContain(false);
-  expect(result.text).toContain(' caret');
+  try {
+    expect(result).toMatchObject({
+      calls: 1,
+      editorConnected: true,
+      focused: true,
+      mode: 3,
+      modeBefore: 0,
+      popoverVisible: false,
+      selected: true,
+    });
+    if (result.focusEvents.includes(false))
+      console.info('[native-freetext-focus-trace]', JSON.stringify(result.modeEvents));
+    expect(result.focusEvents).not.toContain(false);
+    expect(result.text).toContain(' caret');
+  } catch (cause) {
+    console.info('[native-freetext-edit-failure]', JSON.stringify(result));
+    throw cause;
+  }
   await browser.keys(Key.Escape);
   await browser.waitUntil(async () => !(await editable.isExisting()), {
     timeout: 5_000,
