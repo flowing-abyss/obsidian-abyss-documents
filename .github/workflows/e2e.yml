@@ -94,6 +94,17 @@ jobs:
           # Native tooltip and focus assertions require one foreground Obsidian window.
           WDIO_MAX_INSTANCES: 1
           E2E_DIAGNOSTICS_DIR: ${{ runner.os == 'Windows' && format('{0}/e2e-diagnostics', runner.temp) || '' }}
+          E2E_DELETE_TIMELINE_DIR: ${{ runner.os == 'macOS' && format('{0}/e2e-delete-timelines', runner.temp) || '' }}
+
+      # Temporary exact-scenario evidence for the legacy macOS frame stall.
+      - name: Upload macOS deletion timelines
+        if: ${{ always() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-delete-timelines-${{ matrix.os }}
+          path: ${{ runner.temp }}/e2e-delete-timelines
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Collect Windows application failures
         if: ${{ always() && runner.os == 'Windows' }}

@@ -78,6 +78,26 @@ function renumberedOverlapProjection(): AnnotationProjection {
 }
 
 describe('AnnotationProjection', () => {
+  it('keeps a verified row when only nested DTO property order changes', () => {
+    const projection = new AnnotationProjection();
+    const annotation = verifiedAnnotation('stable-id');
+    projection.reconcile([annotation], 1);
+    const rows = projection.snapshot();
+    const reordered: DocumentAnnotation = {
+      ...annotation,
+      anchor: {
+        geometry: { rectangle: { height: 8, width: 30, y: 20, x: 10 }, kind: 'rectangle' },
+        coordinateSpace: 'page-points-top-left',
+        pageIndex: 1,
+        kind: 'fixed-page',
+      },
+    };
+
+    expect(projection.reconcile([reordered], 2)).toBe(false);
+    expect(projection.snapshot()).toBe(rows);
+    expect(projection.snapshot()[0]).toBe(rows[0]);
+  });
+
   it('adds a provisional annotation immediately', () => {
     const projection = new AnnotationProjection();
 

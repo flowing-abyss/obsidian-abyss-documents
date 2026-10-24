@@ -1,4 +1,5 @@
 import { decodeAnnotationComment } from '../annotation-tokens.js';
+import { annotationsEqual } from '../document-core/annotation-equality.js';
 import type {
   AnnotationCapabilities,
   AnnotationGeometry,
@@ -912,7 +913,7 @@ function verifiedRowIsCurrent(
   return (
     current.nativeId === annotationId(annotation) &&
     current.writable === annotationIsWritable(annotation) &&
-    JSON.stringify(current.annotation) === JSON.stringify(projected)
+    annotationsEqual(current.annotation, projected)
   );
 }
 
@@ -1566,7 +1567,7 @@ function rowMatchesSnapshot(
       ),
     ) &&
     row.writable === (snapshot.writable ?? annotationIsWritable(annotation)) &&
-    JSON.stringify(row.annotation) === JSON.stringify(annotation)
+    annotationsEqual(row.annotation, annotation)
   );
 }
 

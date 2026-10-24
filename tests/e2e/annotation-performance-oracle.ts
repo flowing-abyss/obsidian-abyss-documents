@@ -653,11 +653,32 @@ export interface TenThousandDeleteFrameTrace extends TenThousandDeleteStatus {
     readonly installedAtMs: number;
     readonly deleteClickedAtMs: number | null;
     readonly completedAtMs: number | null;
+    readonly installedDocument: {
+      readonly visibilityState: DocumentVisibilityState;
+      readonly hasFocus: boolean;
+    };
+    readonly finalDocument: {
+      readonly visibilityState: DocumentVisibilityState;
+      readonly hasFocus: boolean;
+    };
+    readonly indexedApply: {
+      readonly lastStartedAtMs: number | null;
+      readonly lastEndedAtMs: number | null;
+      readonly lastDurationMs: number;
+      readonly maxDurationMs: number;
+    };
+    readonly statusReads: number;
+    readonly maxStatusReadMs: number;
     readonly maxGap: {
       readonly fromFrameAtMs: number | null;
       readonly toFrameAtMs: number | null;
       readonly fromCallbackAtMs: number | null;
       readonly toCallbackAtMs: number | null;
+      readonly previousCallbackDurationMs: number | null;
+      readonly fromSettledFrames: number | null;
+      readonly toSettledFrames: number | null;
+      readonly fromIndexedBatches: number | null;
+      readonly toIndexedBatches: number | null;
     };
   };
 }
@@ -682,21 +703,41 @@ export async function installTenThousandDeleteFrameTrace(
       panel.querySelector(selector) === null
     )
       throw new Error('Ten-thousand delete frame boundary is unavailable.');
+    const documentState = () => ({
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+    });
+    const installedDocument = documentState();
     const state = {
       complete: false,
       installedAtMs: performance.now(),
       deleteClickedAtMs: null as number | null,
       completedAtMs: null as number | null,
+      finalDocument: null as ReturnType<typeof documentState> | null,
       deleteClickTrusted: null as boolean | null,
       frame: null as number | null,
       indexedBatches: 0,
       lastFrameAt: null as number | null,
       lastCallbackAtMs: null as number | null,
+      lastCallbackDurationMs: 0,
+      lastFrameSettledFrames: 0,
+      lastFrameIndexedBatches: 0,
       maxRafGapMs: 0,
       fromFrameAtMs: null as number | null,
       toFrameAtMs: null as number | null,
       fromCallbackAtMs: null as number | null,
       toCallbackAtMs: null as number | null,
+      previousCallbackDurationMs: null as number | null,
+      fromSettledFrames: null as number | null,
+      toSettledFrames: null as number | null,
+      fromIndexedBatches: null as number | null,
+      toIndexedBatches: null as number | null,
+      lastApplyStartedAtMs: null as number | null,
+      lastApplyEndedAtMs: null as number | null,
+      lastApplyDurationMs: 0,
+      maxApplyDurationMs: 0,
+      statusReads: 0,
+      maxStatusReadMs: 0,
       setSize: Number(
         panel.querySelector('.abyss-annotation-card-row')?.getAttribute('aria-setsize'),
       ),
@@ -707,7 +748,15 @@ export async function installTenThousandDeleteFrameTrace(
     const originalApply = projection.applyViewportBatch;
     const apply = (events: readonly unknown[]): boolean => {
       state.indexedBatches += 1;
-      return originalApply.call(projection, events);
+      const startedAtMs = performance.now();
+      state.lastApplyStartedAtMs = startedAtMs;
+      try {
+        return originalApply.call(projection, events);
+      } finally {
+        state.lastApplyEndedAtMs = performance.now();
+        state.lastApplyDurationMs = state.lastApplyEndedAtMs - startedAtMs;
+        state.maxApplyDurationMs = Math.max(state.maxApplyDurationMs, state.lastApplyDurationMs);
+      }
     };
     const onClick = (event: MouseEvent): void => {
       if (
@@ -723,14 +772,20 @@ export async function installTenThousandDeleteFrameTrace(
       if (state.stopped || state.complete) return;
       state.frame = null;
       const callbackAtMs = performance.now();
+      let updatedMaxGap = false;
       if (state.lastFrameAt !== null) {
         const gapMs = frameAt - state.lastFrameAt;
         if (gapMs > state.maxRafGapMs) {
+          updatedMaxGap = true;
           state.maxRafGapMs = gapMs;
           state.fromFrameAtMs = state.lastFrameAt;
           state.toFrameAtMs = frameAt;
           state.fromCallbackAtMs = state.lastCallbackAtMs;
           state.toCallbackAtMs = callbackAtMs;
+          state.previousCallbackDurationMs = state.lastCallbackDurationMs;
+          state.fromSettledFrames = state.lastFrameSettledFrames;
+          state.fromIndexedBatches = state.lastFrameIndexedBatches;
+          state.toIndexedBatches = state.indexedBatches;
         }
       }
       state.lastFrameAt = frameAt;
@@ -743,19 +798,31 @@ export async function installTenThousandDeleteFrameTrace(
         !state.targetPresent && state.setSize === 9_999 && state.indexedBatches >= 1
           ? state.settledFrames + 1
           : 0;
+      if (updatedMaxGap) state.toSettledFrames = state.settledFrames;
+      state.lastFrameSettledFrames = state.settledFrames;
+      state.lastFrameIndexedBatches = state.indexedBatches;
       if (state.settledFrames >= 5) {
         state.complete = true;
+        state.finalDocument = documentState();
         state.completedAtMs = performance.now();
-        return;
+      } else {
+        state.frame = requestAnimationFrame(onFrame);
       }
-      state.frame = requestAnimationFrame(onFrame);
+      state.lastCallbackDurationMs = performance.now() - callbackAtMs;
     };
-    const status = (): TenThousandDeleteStatus => ({
+    const snapshotStatus = (): TenThousandDeleteStatus => ({
       indexedBatches: state.indexedBatches,
       setSize: state.setSize,
       settledFrames: state.settledFrames,
       targetPresent: state.targetPresent,
     });
+    const status = (): TenThousandDeleteStatus => {
+      const startedAtMs = performance.now();
+      const result = snapshotStatus();
+      state.statusReads += 1;
+      state.maxStatusReadMs = Math.max(state.maxStatusReadMs, performance.now() - startedAtMs);
+      return result;
+    };
     projection.applyViewportBatch = apply;
     reader.addEventListener('click', onClick, true);
     state.frame = requestAnimationFrame(onFrame);
@@ -773,18 +840,33 @@ export async function installTenThousandDeleteFrameTrace(
         reader.removeEventListener('click', onClick, true);
         if (projection.applyViewportBatch === apply) projection.applyViewportBatch = originalApply;
         return {
-          ...status(),
+          ...snapshotStatus(),
           deleteClickTrusted: state.deleteClickTrusted,
           maxRafGapMs: state.maxRafGapMs,
           diagnostics: {
             installedAtMs: state.installedAtMs,
             deleteClickedAtMs: state.deleteClickedAtMs,
             completedAtMs: state.completedAtMs,
+            installedDocument,
+            finalDocument: state.finalDocument ?? documentState(),
+            indexedApply: {
+              lastStartedAtMs: state.lastApplyStartedAtMs,
+              lastEndedAtMs: state.lastApplyEndedAtMs,
+              lastDurationMs: state.lastApplyDurationMs,
+              maxDurationMs: state.maxApplyDurationMs,
+            },
+            statusReads: state.statusReads,
+            maxStatusReadMs: state.maxStatusReadMs,
             maxGap: {
               fromFrameAtMs: state.fromFrameAtMs,
               toFrameAtMs: state.toFrameAtMs,
               fromCallbackAtMs: state.fromCallbackAtMs,
               toCallbackAtMs: state.toCallbackAtMs,
+              previousCallbackDurationMs: state.previousCallbackDurationMs,
+              fromSettledFrames: state.fromSettledFrames,
+              toSettledFrames: state.toSettledFrames,
+              fromIndexedBatches: state.fromIndexedBatches,
+              toIndexedBatches: state.toIndexedBatches,
             },
           },
         };

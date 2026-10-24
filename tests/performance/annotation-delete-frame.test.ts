@@ -73,7 +73,9 @@ function fixture() {
   transport.execute.mockImplementation(async (script, ...args) => invoke(script, ...args));
   const frames = new Map<number, FrameRequestCallback>();
   let callbackClock = 0;
-  vi.spyOn(performance, 'now').mockImplementation(() => callbackClock);
+  const clock = vi.spyOn(performance, 'now').mockImplementation(() => callbackClock);
+  const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
   let nextFrame = 0;
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
     const id = ++nextFrame;
@@ -89,6 +91,13 @@ function fixture() {
     originalApply,
     frames,
     cancel,
+    clock,
+    focus,
+    visibility,
+    retainedRow,
+    advance(milliseconds: number) {
+      callbackClock += milliseconds;
+    },
     async install() {
       await installTenThousandDeleteFrameTrace({
         annotationId: 'delete-annotation',
@@ -149,7 +158,27 @@ describe('passive ten-thousand deletion frame budget', () => {
           installedAtMs: 0,
           deleteClickedAtMs: 0,
           completedAtMs: gap + 80,
-          maxGap: { fromFrameAtMs: 0, toFrameAtMs: gap, fromCallbackAtMs: 0, toCallbackAtMs: gap },
+          installedDocument: { visibilityState: 'visible', hasFocus: true },
+          finalDocument: { visibilityState: 'visible', hasFocus: true },
+          indexedApply: {
+            lastStartedAtMs: gap,
+            lastEndedAtMs: gap,
+            lastDurationMs: 0,
+            maxDurationMs: 0,
+          },
+          statusReads: 1,
+          maxStatusReadMs: 0,
+          maxGap: {
+            fromFrameAtMs: 0,
+            toFrameAtMs: gap,
+            fromCallbackAtMs: 0,
+            toCallbackAtMs: gap,
+            previousCallbackDurationMs: 0,
+            fromSettledFrames: 0,
+            toSettledFrames: 0,
+            fromIndexedBatches: 0,
+            toIndexedBatches: 0,
+          },
         },
         setSize: 9999,
         settledFrames: 5,
@@ -175,8 +204,114 @@ describe('passive ten-thousand deletion frame budget', () => {
       installedAtMs: 0,
       deleteClickedAtMs: 10,
       completedAtMs: 249,
-      maxGap: { fromFrameAtMs: 0, toFrameAtMs: 150, fromCallbackAtMs: 7, toCallbackAtMs: 180 },
+      installedDocument: { visibilityState: 'visible', hasFocus: true },
+      finalDocument: { visibilityState: 'visible', hasFocus: true },
+      indexedApply: {
+        lastStartedAtMs: 10,
+        lastEndedAtMs: 10,
+        lastDurationMs: 0,
+        maxDurationMs: 0,
+      },
+      statusReads: 0,
+      maxStatusReadMs: 0,
+      maxGap: {
+        fromFrameAtMs: 0,
+        toFrameAtMs: 150,
+        fromCallbackAtMs: 7,
+        toCallbackAtMs: 180,
+        previousCallbackDurationMs: 0,
+        fromSettledFrames: 0,
+        toSettledFrames: 1,
+        fromIndexedBatches: 0,
+        toIndexedBatches: 1,
+      },
     });
+  });
+
+  it('records callback, indexing and poll cost without excluding an unfocused interval', async () => {
+    const current = fixture();
+    current.focus.mockReturnValue(false);
+    current.visibility.mockReturnValue('hidden');
+    await current.install();
+    for (const row of current.reader.querySelectorAll<HTMLElement>('.abyss-annotation-card-row')) {
+      const originalGet = row.getAttribute.bind(row);
+      vi.spyOn(row, 'getAttribute').mockImplementation((name) => {
+        if (name === 'aria-setsize') current.advance(4);
+        return originalGet(name);
+      });
+    }
+    current.frame(100);
+    current.click();
+    current.removeTarget();
+    current.originalApply.mockImplementationOnce(() => {
+      current.advance(7);
+      return true;
+    });
+    current.projection.applyViewportBatch([]);
+    current.clock.mockReturnValueOnce(200).mockReturnValueOnce(203);
+    await readTenThousandDeleteFrameStatus();
+    current.frame(250);
+    current.focus.mockReturnValue(true);
+    current.visibility.mockReturnValue('visible');
+    for (const timestamp of [266, 282, 298, 314]) current.frame(timestamp);
+    // Final document state belongs to measurement completion, not a later read.
+    current.focus.mockReturnValue(false);
+    current.visibility.mockReturnValue('hidden');
+
+    const trace = await current.finish();
+
+    expect(trace.maxRafGapMs).toBe(150);
+    expect(trace.settledFrames).toBe(5);
+    expect(trace.diagnostics).toEqual({
+      installedAtMs: 0,
+      deleteClickedAtMs: 104,
+      completedAtMs: 318,
+      installedDocument: { visibilityState: 'hidden', hasFocus: false },
+      finalDocument: { visibilityState: 'visible', hasFocus: true },
+      indexedApply: {
+        lastStartedAtMs: 104,
+        lastEndedAtMs: 111,
+        lastDurationMs: 7,
+        maxDurationMs: 7,
+      },
+      statusReads: 1,
+      maxStatusReadMs: 3,
+      maxGap: {
+        fromFrameAtMs: 100,
+        toFrameAtMs: 250,
+        fromCallbackAtMs: 100,
+        toCallbackAtMs: 250,
+        previousCallbackDurationMs: 4,
+        fromSettledFrames: 0,
+        toSettledFrames: 1,
+        fromIndexedBatches: 0,
+        toIndexedBatches: 1,
+      },
+    });
+  });
+
+  it('preserves an indexing failure and records its duration before restoring ownership', async () => {
+    const current = fixture();
+    await current.install();
+    const failure = new Error('indexing failed');
+    current.originalApply.mockImplementationOnce(() => {
+      current.advance(9);
+      throw failure;
+    });
+
+    expect(() => current.projection.applyViewportBatch([])).toThrow(failure);
+    const trace = await current.finish();
+
+    expect(trace.diagnostics.indexedApply).toEqual({
+      lastStartedAtMs: 0,
+      lastEndedAtMs: 9,
+      lastDurationMs: 9,
+      maxDurationMs: 9,
+    });
+    expect(trace.diagnostics.statusReads).toBe(0);
+    expect(trace.diagnostics.completedAtMs).toBeNull();
+    expect(current.projection.applyViewportBatch).toBe(current.originalApply);
+    expect(current.frames.size).toBe(0);
   });
 
   it('keeps a pre-click stall inside the monitoring interval', async () => {
