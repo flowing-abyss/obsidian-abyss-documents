@@ -309,6 +309,7 @@ interface ContextualSaveRestore {
 
 interface ContextualEditSession {
   closing: Promise<void> | null;
+  finishClosePaint?: (() => void) | undefined;
   guarded: boolean;
   id: string;
   readonly manager: PdfAnnotationUiManager;
@@ -493,8 +494,13 @@ export class PdfAnnotationEditor {
   private activationMaterialization: ActivationMaterialization | null = null;
   private activeActivation: AnnotationActivation | null = null;
   private annotationResolver: PdfAnnotationResolver | null = null;
-  private readonly projectedTargets = new Map<string, PdfProjectedTarget>();
+  private projectedTargets = new Map<string, PdfProjectedTarget>();
   private projectedHitGrid: PdfProjectedHitGrid = new Map();
+  // Geometry is immutable; current identity, page, and ordering are rebuilt separately.
+  private readonly projectedGeometryRegions = new WeakMap<
+    AnnotationGeometry,
+    ReadonlyArray<Omit<PdfProjectedHitRegion, 'target'>>
+  >();
   private readonly removeBridgeFocusListener: () => void;
   private pendingAnnotationFocus: PendingAnnotationFocus | null = null;
 
@@ -613,10 +619,8 @@ export class PdfAnnotationEditor {
   }
 
   setAnnotationProjection(annotations: readonly PdfProjectedAnnotation[]): void {
-    this.projectedTargets.clear();
-    for (const [identity, target] of pdfProjectedTargetIndex(annotations))
-      this.projectedTargets.set(identity, target);
-    this.projectedHitGrid = pdfProjectedHitGrid(annotations);
+    this.projectedTargets = pdfProjectedTargetIndex(annotations);
+    this.projectedHitGrid = pdfProjectedHitGrid(annotations, this.projectedGeometryRegions);
   }
 
   hitTestProjectedAnnotation(
@@ -1666,6 +1670,10 @@ export class PdfAnnotationEditor {
     return this.contextualEditSession !== null;
   }
 
+  get contextualClose(): Promise<void> | null {
+    return this.contextualEditSession?.closing ?? null;
+  }
+
   resolveNativeEditor(internalId: string): {
     readonly color: string | null;
     readonly id: string;
@@ -2093,6 +2101,7 @@ export class PdfAnnotationEditor {
   async suspendInteractions(): Promise<void> {
     if (this.destroyed || this.interactionsSuspended) return;
     this.interactionsSuspended = true;
+    this.contextualEditSession?.finishClosePaint?.();
     this.cancelQueuedToolIntent('The PDF annotation interaction is closing.');
     try {
       this.commitNativeTextEdit();
@@ -2481,6 +2490,11 @@ export class PdfAnnotationEditor {
 
   private waitForInteractionBeforeSave(signal: AbortSignal): Promise<void> | null {
     const pending: Array<Promise<unknown>> = [];
+    const contextual = this.contextualEditSession;
+    if (contextual?.closing !== null && contextual?.closing !== undefined) {
+      contextual.finishClosePaint?.();
+      pending.push(contextual.closing);
+    }
     const pendingSelection = this.pendingSelectionTransaction;
     if (pendingSelection !== null) pending.push(pendingSelection.settled.promise);
     const activation = this.activeActivation;
@@ -3119,20 +3133,94 @@ export class PdfAnnotationEditor {
   ): Promise<void> {
     if (session.closing !== null) return session.closing;
     session.phase = 'closing';
-    const transition = this.changeMode(this.dependencies.annotationEditorType.NONE, {}, wait).then(
-      () => {
-        this.releaseContextualEditSession(session);
-      },
-    );
-    const closing = transition.finally(() => {
+    const pending = deferred<void>();
+    const closing = pending.promise.finally(() => {
       if (session.closing === closing) session.closing = null;
     });
     session.closing = closing;
+    const revision = this.lifecycleRevision;
+    const paint = this.waitForContextualClosePaint(session, wait.signal);
+    const transition =
+      paint === null
+        ? this.completeContextualClose(session, revision, wait)
+        : paint.then(() => this.completeContextualClose(session, revision, wait));
+    void transition.then(pending.resolve, pending.reject);
     return closing;
+  }
+
+  private completeContextualClose(
+    session: ContextualEditSession,
+    revision: number,
+    wait: { readonly signal?: AbortSignal },
+  ): Promise<void> {
+    if (
+      this.destroyed ||
+      this.contextualEditSession !== session ||
+      this.manager !== session.manager ||
+      this.lifecycleRevision !== revision
+    )
+      return Promise.resolve();
+    return this.changeMode(this.dependencies.annotationEditorType.NONE, {}, wait).then(() => {
+      this.releaseContextualEditSession(session);
+    });
+  }
+
+  private waitForContextualClosePaint(
+    session: ContextualEditSession,
+    signal?: AbortSignal,
+  ): Promise<void> | null {
+    const root = this.dependencies.annotationRoot;
+    const document = root.ownerDocument;
+    const owner = document.defaultView;
+    if (
+      !root.isConnected ||
+      document.visibilityState !== 'visible' ||
+      owner === null ||
+      this.saving ||
+      this.interactionsSuspended
+    )
+      return null;
+    if (signal?.aborted === true) return Promise.reject(abortReason(signal));
+    return new Promise<void>((resolve, reject) => {
+      let frame: number | null = null;
+      let remainingFrames = 2;
+      const cleanup = (): void => {
+        if (frame !== null) owner.cancelAnimationFrame(frame);
+        frame = null;
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        owner.removeEventListener('pagehide', finish);
+        signal?.removeEventListener('abort', onAbort);
+        if (session.finishClosePaint === finish) session.finishClosePaint = undefined;
+      };
+      const finish = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onAbort = (): void => {
+        cleanup();
+        if (signal !== undefined) reject(abortReason(signal));
+      };
+      const onVisibilityChange = (): void => {
+        if (document.visibilityState !== 'visible') finish();
+      };
+      const onFrame = (): void => {
+        frame = null;
+        remainingFrames -= 1;
+        if (remainingFrames === 0 || !root.isConnected || document.visibilityState !== 'visible')
+          finish();
+        else frame = owner.requestAnimationFrame(onFrame);
+      };
+      session.finishClosePaint = finish;
+      document.addEventListener('visibilitychange', onVisibilityChange);
+      owner.addEventListener('pagehide', finish);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      frame = owner.requestAnimationFrame(onFrame);
+    });
   }
 
   private releaseContextualEditSession(session = this.contextualEditSession): void {
     if (session === null) return;
+    session.finishClosePaint?.();
     session.toolbarObserver?.disconnect();
     session.toolbarObserver = null;
     for (const [toolbar, state] of session.suppressedToolbars) {
@@ -3775,13 +3863,24 @@ type PdfProjectedHitGrid = Map<number, Map<string, PdfProjectedHitRegion[]>>;
 const PDF_PROJECTED_HIT_CELL_SIZE = 64;
 const PDF_PROJECTED_POINT_HIT_RADIUS = 8;
 
-function pdfProjectedHitGrid(annotations: readonly PdfProjectedAnnotation[]): PdfProjectedHitGrid {
+function pdfProjectedHitGrid(
+  annotations: readonly PdfProjectedAnnotation[],
+  geometryRegions: WeakMap<
+    AnnotationGeometry,
+    ReadonlyArray<Omit<PdfProjectedHitRegion, 'target'>>
+  >,
+): PdfProjectedHitGrid {
   const grid: PdfProjectedHitGrid = new Map();
   for (const projected of annotations) {
     const target = pdfProjectedTarget(projected);
     const anchor = projected.annotation.anchor;
     if (anchor.kind !== 'fixed-page') continue;
-    for (const rect of pdfAnnotationHitRegions(anchor.geometry)) {
+    let regions = geometryRegions.get(anchor.geometry);
+    if (regions === undefined) {
+      regions = pdfAnnotationHitRegions(anchor.geometry);
+      geometryRegions.set(anchor.geometry, regions);
+    }
+    for (const rect of regions) {
       const region: PdfProjectedHitRegion = {
         ...rect,
         target: {
@@ -3979,28 +4078,28 @@ function pdfProjectedTargetIndex(
     const target = pdfProjectedTarget(projected);
     return { aliases: pdfProjectedAliases(projected, target), target };
   });
-  const indexed = new Map(entries.map(({ target }) => [target.canonicalId, target]));
-  const aliases = unambiguousProjectedAliases(entries, new Set(indexed.keys()));
-  for (const [alias, target] of aliases) indexed.set(alias, target);
+  const indexed = new Map<string, PdfProjectedTarget>();
+  for (const { target } of entries) indexed.set(target.canonicalId, target);
+  indexUnambiguousProjectedAliases(entries, indexed);
   return indexed;
 }
 
-function unambiguousProjectedAliases(
+function indexUnambiguousProjectedAliases(
   entries: readonly PdfProjectedEntry[],
-  canonicalIds: ReadonlySet<string>,
-): Map<string, PdfProjectedTarget> {
+  indexed: Map<string, PdfProjectedTarget>,
+): void {
   const candidates = new Map<string, PdfProjectedTarget | null>();
   for (const { aliases, target } of entries) {
     for (const alias of aliases) {
-      if (canonicalIds.has(alias)) continue;
+      if (indexed.has(alias)) continue;
       const current = candidates.get(alias);
       if (current === undefined) candidates.set(alias, target);
       else if (current?.canonicalId !== target.canonicalId) candidates.set(alias, null);
     }
   }
-  return new Map(
-    [...candidates].filter((entry): entry is [string, PdfProjectedTarget] => entry[1] !== null),
-  );
+  candidates.forEach((target, alias) => {
+    if (target !== null) indexed.set(alias, target);
+  });
 }
 
 function nativeEditorUid(native: PdfNativeEditorReference | undefined): string | null {

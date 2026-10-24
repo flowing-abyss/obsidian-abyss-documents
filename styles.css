@@ -6928,6 +6928,7 @@
   min-height: 0;
   flex: 1 1 0;
   overflow: hidden auto;
+  overflow-anchor: none;
 }
 
 .abyss-documents .abyss-annotations-status {

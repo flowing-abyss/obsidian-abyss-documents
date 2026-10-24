@@ -4,6 +4,7 @@ import type {
   PdfAnnotationInteraction,
   PdfAnnotationLogicalMode,
   PdfAnnotationTool,
+  PdfProjectedAnnotation,
 } from '../adapters/pdf/pdf-annotation-editor.js';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
 import { StaleAnnotationCacheReadError, type AnnotationCache } from '../annotation-cache.js';
@@ -332,6 +333,10 @@ export class ReaderController {
   private annotationIntentFor: DocumentSession | null = null;
   private annotationProjectionRevision = 0;
   private readonly annotationProjection = new AnnotationProjection();
+  private readonly activationDescriptors = new WeakMap<
+    AnnotationProjectionRow,
+    PdfProjectedAnnotation
+  >();
   private annotationProjectionFrame: number | null = null;
   private annotationProjectionFrameWindow: Window | null = null;
   private annotationProjectionEvents: AnnotationProjectionViewportObservation[] = [];
@@ -2789,18 +2794,26 @@ export class ReaderController {
   private renderAnnotationProjection(shell: ReaderShell): void {
     this.currentAnnotations = this.annotationProjection.annotations();
     annotationEditorOf(this.viewport)?.setAnnotationProjection(
-      this.annotationProjection.snapshot().map((row) => ({
-        aliases: [row.provisionalId, ...(row.aliases ?? [])].filter(
-          (alias): alias is string => alias !== undefined,
-        ),
-        annotation: annotationForActivation(row.annotation, row.writable),
-        ...(row.runtimeId === undefined ? {} : { editorUid: row.runtimeId }),
-        stableId: row.nativeId,
-      })),
+      this.annotationProjection.snapshot().map((row) => this.activationDescriptorForRow(row)),
     );
     shell.sidebar?.annotationsPanel.setProjectedAnnotations(this.annotationProjection.snapshot());
     shell.sidebar?.annotationsPanel.setCurrentPage(this.currentPageIndex);
     this.applyAnnotationSelection(shell);
+  }
+
+  private activationDescriptorForRow(row: AnnotationProjectionRow): PdfProjectedAnnotation {
+    const cached = this.activationDescriptors.get(row);
+    if (cached !== undefined) return cached;
+    const descriptor: PdfProjectedAnnotation = {
+      aliases: [row.provisionalId, ...(row.aliases ?? [])].filter(
+        (alias): alias is string => alias !== undefined,
+      ),
+      annotation: annotationForActivation(row.annotation, row.writable),
+      ...(row.runtimeId === undefined ? {} : { editorUid: row.runtimeId }),
+      stableId: row.nativeId,
+    };
+    this.activationDescriptors.set(row, descriptor);
+    return descriptor;
   }
 
   private projectedAnnotationForStableId(stableId: string): DocumentAnnotation | null {
@@ -2813,7 +2826,7 @@ export class ReaderController {
       uniqueProjectedRow(rows, (candidate) => candidate.provisionalId === id) ??
       uniqueProjectedRow(rows, (candidate) => projectedAnnotationIdentity(candidate) === id) ??
       uniqueProjectedRow(rows, (candidate) => candidate.aliases?.includes(id) === true);
-    return row === undefined ? null : annotationForActivation(row.annotation, row.writable);
+    return row === undefined ? null : this.activationDescriptorForRow(row).annotation;
   }
 
   private acceptVerifiedAnnotations(

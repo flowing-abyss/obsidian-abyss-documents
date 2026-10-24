@@ -778,8 +778,22 @@ describe('PDF reader foundation', () => {
     await expect($('[data-document-search]')).toBeFocused();
 
     const firstResult = $('[data-search-result]');
+    const firstResultId = await firstResult.getAttribute('data-search-result');
+    if (firstResultId === null) throw new Error('The first search result has no identity.');
     await firstResult.click();
-    await expect(firstResult).toHaveAttribute('aria-current', 'true');
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          (id) =>
+            Array.from(document.querySelectorAll<HTMLElement>('[data-search-result]')).some(
+              (result) =>
+                result.dataset['searchResult'] === id &&
+                result.getAttribute('aria-current') === 'true',
+            ),
+          firstResultId,
+        ),
+      { timeout: 5_000, timeoutMsg: 'The selected PDF search result did not become current.' },
+    );
     await browser.waitUntil(
       async () =>
         browser.execute(

@@ -4477,3 +4477,88 @@ describe('PdfDocumentViewport', () => {
     expect(fixture.host.children).toHaveLength(0);
   });
 });
+
+async function contextualPaintSnapshotFixture() {
+  const current = await annotationBarrierFixture([['paint-target', 'paint-retained']]);
+  document.body.append(current.host);
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const uiManager = annotationManager(nativeHighlight('paint-target'));
+  current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+  const editor = current.viewport.annotationEditor;
+  if (editor === null) throw new Error('Expected native annotation interactions.');
+  await editor.editAnnotation({ editComment: false, id: 'paint-target', kind: 'highlight' });
+  current.events.splice(0);
+  return {
+    ...current,
+    editor,
+    uiManager,
+    dispose: async () => {
+      current.host.remove();
+      await current.viewport.destroy();
+      visibility.mockRestore();
+    },
+  };
+}
+
+describe('PdfDocumentViewport contextual close snapshot ownership', () => {
+  it('publishes only the stable mode-exit snapshot when close waits for optimistic paint', async () => {
+    const current = await contextualPaintSnapshotFixture();
+    current.viewer.annotationEditorRequestHook = (request) => {
+      if ((typeof request === 'number' ? request : request.mode) !== 0) return;
+      queueMicrotask(() => {
+        mountAnnotationIds(current.host, 1, ['paint-retained']);
+        dispatchAnnotationLayer(current.runtime, 1);
+      });
+    };
+    try {
+      current.uiManager.firstSelectedEditor = undefined;
+      current.uiManager.hasSelection = false;
+      current.eventBus.dispatch('editingstateschanged', {
+        source: current.uiManager,
+        details: { hasSelectedEditor: false },
+      });
+      const closing = current.editor.abortInteraction('Finish the deleted contextual editor.');
+      current.editor.notifyNativeMutation();
+      await nextFrame();
+      expect(current.events.filter(({ type }) => type === 'annotation-snapshot')).toEqual([]);
+      await closing;
+      await nextFrame();
+      const snapshots = current.events.filter(({ type }) => type === 'annotation-snapshot');
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]).toMatchObject({
+        annotations: [expect.objectContaining({ nativeId: 'paint-retained' })],
+      });
+      expect(current.viewer.annotationEditorMode).toBe(0);
+    } finally {
+      await current.dispose();
+    }
+  });
+
+  it('publishes one waiting mutation after close failure and accepts the next mutation', async () => {
+    const current = await contextualPaintSnapshotFixture();
+    const failure = new Error('Native mode cleanup failed.');
+    current.viewer.annotationEditorRequestHook = (request) => {
+      if ((typeof request === 'number' ? request : request.mode) === 0) throw failure;
+    };
+    try {
+      const closing = current.editor.abortInteraction('Close the contextual editor.');
+      const rejected = closing.then(
+        () => ({ failure: null }),
+        (cause: unknown) => ({ failure: cause }),
+      );
+      current.editor.notifyNativeMutation();
+      current.editor.notifyNativeMutation();
+      await nextFrame();
+      expect(current.events.filter(({ type }) => type === 'annotation-snapshot')).toEqual([]);
+      expect(await rejected).toEqual({ failure });
+      await nextFrame();
+      expect(current.events.filter(({ type }) => type === 'annotation-snapshot')).toHaveLength(1);
+      current.editor.notifyNativeMutation();
+      await nextFrame();
+      expect(current.events.filter(({ type }) => type === 'annotation-snapshot')).toHaveLength(2);
+    } finally {
+      current.viewer.annotationEditorRequestHook = null;
+      await current.dispose();
+    }
+  });
+});

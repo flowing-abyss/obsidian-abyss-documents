@@ -7161,3 +7161,287 @@ describe('PdfAnnotationEditor save boundary', () => {
     expect(fixtureValue.saveDocument).not.toHaveBeenCalled();
   });
 });
+
+async function settleClosePaintMicrotasks(): Promise<void> {
+  for (let index = 0; index < 12; index += 1) await Promise.resolve();
+}
+
+async function closePaintFixture(
+  options: {
+    readonly connected?: boolean;
+    readonly visibility?: DocumentVisibilityState;
+  } = {},
+) {
+  const current = fixture();
+  const owner = current.annotationRoot.ownerDocument.defaultView;
+  if (owner === null) throw new Error('Expected a document window.');
+  let visibility = options.visibility ?? 'visible';
+  const visibilitySpy = vi
+    .spyOn(owner.document, 'visibilityState', 'get')
+    .mockImplementation(() => visibility);
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
+  let timestamp = 0;
+  const requestFrame = vi.spyOn(owner, 'requestAnimationFrame').mockImplementation((callback) => {
+    const id = ++nextFrame;
+    frames.set(id, callback);
+    return id;
+  });
+  const cancelFrame = vi.spyOn(owner, 'cancelAnimationFrame').mockImplementation((id) => {
+    frames.delete(id);
+  });
+  if (options.connected !== false) owner.document.body.append(current.annotationRoot);
+  const uiManager = manager(selectedEditor('paint-delete', 9));
+  current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+  await current.editor.editAnnotation({
+    editComment: false,
+    id: 'paint-delete',
+    kind: 'highlight',
+  });
+  current.commentBridge.deleteAnnotations.mockImplementation(() => {
+    uiManager.firstSelectedEditor = undefined;
+    uiManager.hasSelection = false;
+    current.eventBus.dispatch('editingstateschanged', {
+      source: uiManager,
+      details: { hasSelectedEditor: false },
+    });
+    return true;
+  });
+  return {
+    ...current,
+    uiManager,
+    frames,
+    delete: () => current.editor.deleteAnnotations([createdAnnotation('', { id: 'paint-delete' })]),
+    frame: async () => {
+      timestamp += 16;
+      const ready = [...frames.values()];
+      frames.clear();
+      for (const callback of ready) callback(timestamp);
+      await settleClosePaintMicrotasks();
+    },
+    hide: async () => {
+      visibility = 'hidden';
+      owner.document.dispatchEvent(new Event('visibilitychange'));
+      await settleClosePaintMicrotasks();
+    },
+    dispose: () => {
+      current.editor.destroy();
+      current.annotationRoot.remove();
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+      visibilitySpy.mockRestore();
+    },
+  };
+}
+
+describe('PdfAnnotationEditor contextual close paint boundary', () => {
+  it('allows optimistic publication before native cleanup after reentrant deletion deselection', async () => {
+    const current = await closePaintFixture();
+    const row = current.annotationRoot.createDiv({ text: 'Delete me' });
+    try {
+      expect(current.delete()).toBe(true);
+      row.remove();
+      expect(row.isConnected).toBe(false);
+      expect(current.viewer.annotationEditorMode).toBe(9);
+      expect(current.editor.hasContextualEdit).toBe(true);
+      await current.frame();
+      expect(row.isConnected).toBe(false);
+      expect(current.viewer.annotationEditorMode).toBe(9);
+      await current.frame();
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.modeRequests).toEqual([
+        { editComment: false, editId: 'paint-delete', mode: 9 },
+        { mode: 0 },
+      ]);
+    } finally {
+      current.dispose();
+    }
+  });
+
+  it('finishes an existing close before save without restoring the deleted annotation', async () => {
+    const current = await closePaintFixture();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(current.delete()).toBe(true);
+      const saving = current.editor.save(new AbortController().signal);
+      expect(current.saveDocument).not.toHaveBeenCalled();
+      await expect(saving).resolves.toEqual(new Uint8Array([37, 80, 68, 70, 45]));
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.frames.size).toBe(0);
+      expect(current.modeRequests).toEqual([
+        { editComment: false, editId: 'paint-delete', mode: 9 },
+        { mode: 0 },
+      ]);
+      expect(warning).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+      current.dispose();
+    }
+  });
+
+  it.each(['detach', 'rebind', 'destroy'] as const)(
+    'does not close a replacement document after %s during the paint wait',
+    async (lifecycle) => {
+      const current = await closePaintFixture();
+      try {
+        expect(current.delete()).toBe(true);
+        if (lifecycle === 'detach') current.editor.detachFromDocument();
+        else if (lifecycle === 'destroy') current.editor.destroy();
+        else
+          current.eventBus.dispatch('annotationeditoruimanager', {
+            source: current.viewer,
+            uiManager: manager(),
+          });
+        await settleClosePaintMicrotasks();
+        await current.frame();
+        await current.frame();
+        expect(current.modeRequests).toEqual([
+          { editComment: false, editId: 'paint-delete', mode: 9 },
+        ]);
+        expect(current.editor.hasContextualEdit).toBe(false);
+        expect(current.frames.size).toBe(0);
+      } finally {
+        current.dispose();
+      }
+    },
+  );
+
+  it.each([
+    { connected: false, visibility: 'visible' as const },
+    { connected: true, visibility: 'hidden' as const },
+  ])('immediately cleans up when no paint is possible: %j', async (options) => {
+    const current = await closePaintFixture(options);
+    try {
+      expect(current.delete()).toBe(true);
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.frames.size).toBe(0);
+      await settleClosePaintMicrotasks();
+      expect(current.editor.hasContextualEdit).toBe(false);
+    } finally {
+      current.dispose();
+    }
+  });
+
+  it('finishes a pending paint wait when its document becomes hidden', async () => {
+    const current = await closePaintFixture();
+    try {
+      expect(current.delete()).toBe(true);
+      await current.hide();
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.frames.size).toBe(0);
+    } finally {
+      current.dispose();
+    }
+  });
+
+  it('finishes a pending paint wait before suspending interactions', async () => {
+    const current = await closePaintFixture();
+    try {
+      expect(current.delete()).toBe(true);
+      await current.editor.suspendInteractions();
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.frames.size).toBe(0);
+      expect(current.modeRequests.filter((request) => request['mode'] === 0)).toHaveLength(1);
+    } finally {
+      current.dispose();
+    }
+  });
+
+  it('keeps an unsuccessfully deleted annotation editable without scheduling cleanup', async () => {
+    const current = await closePaintFixture();
+    current.commentBridge.deleteAnnotations.mockReturnValue(false);
+    try {
+      expect(current.delete()).toBe(false);
+      await current.frame();
+      await current.frame();
+      expect(current.viewer.annotationEditorMode).toBe(9);
+      expect(current.editor.hasContextualEdit).toBe(true);
+      expect(current.frames.size).toBe(0);
+    } finally {
+      current.dispose();
+    }
+  });
+
+  it('cancels its frame wait when a superseding activation signal aborts', async () => {
+    const current = await closePaintFixture();
+    const external = new AbortController();
+    const replacement = createdAnnotation('', { id: 'paint-replacement' });
+    current.editor.setAnnotationProjection([
+      { annotation: replacement, stableId: 'paint-replacement' },
+    ]);
+    const focusing = current.editor.focusAnnotation('paint-replacement', {
+      kind: 'sidebar',
+      signal: external.signal,
+    });
+    try {
+      await settleClosePaintMicrotasks();
+      expect(current.viewer.annotationEditorMode).toBe(9);
+      expect(current.frames.size).toBe(1);
+      external.abort(new DOMException('Activation cancelled.', 'AbortError'));
+      await expect(focusing).resolves.toBe('cancelled');
+      expect(current.frames.size).toBe(0);
+      await current.editor.suspendInteractions();
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.editor.hasContextualEdit).toBe(false);
+    } finally {
+      external.abort();
+      current.dispose();
+      await focusing;
+    }
+  });
+
+  it('immediately closes a connected contextual editor when preparing save', async () => {
+    const current = await closePaintFixture();
+    try {
+      const saving = current.editor.save(new AbortController().signal);
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.frames.size).toBe(0);
+      await saving;
+      expect(current.viewer.annotationEditorMode).toBe(9);
+    } finally {
+      current.dispose();
+    }
+  });
+
+  it('immediately closes a connected contextual editor when suspending interactions', async () => {
+    const current = await closePaintFixture();
+    try {
+      const suspending = current.editor.suspendInteractions();
+      expect(current.viewer.annotationEditorMode).toBe(0);
+      expect(current.frames.size).toBe(0);
+      await suspending;
+      expect(current.editor.hasContextualEdit).toBe(false);
+    } finally {
+      current.dispose();
+    }
+  });
+
+  it('owns one close before a synchronous mode setter can reenter abortInteraction', async () => {
+    const current = await closePaintFixture({ connected: false });
+    const property = Object.getOwnPropertyDescriptor(current.viewer, 'annotationEditorMode');
+    if (property?.get === undefined || property.set === undefined)
+      throw new Error('Expected the native mode boundary.');
+    const reentrant: Array<Promise<void>> = [];
+    Object.defineProperty(current.viewer, 'annotationEditorMode', {
+      configurable: true,
+      get: () => current.viewer.currentMode,
+      set: (request: { readonly mode: number }) => {
+        property.set?.call(current.viewer, request);
+        if (request.mode === 0)
+          reentrant.push(current.editor.abortInteraction('Native deselection reentered close.'));
+      },
+    });
+    try {
+      await current.editor.abortInteraction('Close the contextual editor.');
+      await Promise.all(reentrant);
+      expect(current.editor.hasContextualEdit).toBe(false);
+      expect(current.uiManager.disableUserSelect.mock.calls).toEqual([[true], [false]]);
+    } finally {
+      current.dispose();
+    }
+  });
+});

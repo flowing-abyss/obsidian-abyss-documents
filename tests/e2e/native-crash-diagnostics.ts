@@ -1,9 +1,7 @@
-import { execFile } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { appendFile, cp, mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
-import { promisify } from 'node:util';
 
 type DiagnosticHooks = Pick<WebdriverIO.Config, 'outputDir' | 'beforeSession' | 'before' | 'after'>;
 
@@ -15,12 +13,13 @@ type NativeInstaller = (
   app: unknown,
   fileSystem: unknown,
   nativeProcess: unknown,
-  logFile: string,
+  options: { readonly crashReporter: unknown; readonly logFile: string },
 ) => NativePaths;
 
 interface NativeRemote {
   app: unknown;
   process: unknown;
+  crashReporter: unknown;
   require(module: 'node:fs'): unknown;
   require(module: 'node:vm'): {
     runInThisContext(source: string, options: { filename: string }): NativeInstaller;
@@ -31,7 +30,7 @@ interface NativeRemote {
 // report the death of their own renderer. The source is fixed; paths are arguments.
 // https://github.com/electron/remote#passing-callbacks-to-the-main-process
 // https://github.com/nodejs/node/blob/v18.18.2/doc/api/vm.md#vmruninthiscontextcode-options
-const MAIN_OBSERVER_SOURCE = String.raw`((app, fileSystem, nativeProcess, logFile) => {
+const MAIN_OBSERVER_SOURCE = String.raw`((app, fileSystem, nativeProcess, { crashReporter, logFile }) => {
   const key = Symbol.for('abyss.e2e.nativeCrashDiagnostics');
   if (app[key] !== undefined) return app[key];
   const append = (event, details) => {
@@ -56,6 +55,18 @@ const MAIN_OBSERVER_SOURCE = String.raw`((app, fileSystem, nativeProcess, logFil
   const paths = { crashDumps: app.getPath('crashDumps') };
   app[key] = paths;
   append('runtime', { versions: nativeProcess.versions });
+  try {
+    // Capture future GPU retries locally; never submit diagnostic reports.
+    // https://github.com/electron/electron/blob/v28.2.3/docs/api/crash-reporter.md
+    crashReporter.start({ uploadToServer: false, ignoreSystemCrashHandler: false });
+    crashReporter.setUploadToServer(false);
+    append('local-crash-capture', {
+      uploadToServer: crashReporter.getUploadToServer(),
+      handlerPipeAvailable: Boolean(nativeProcess.env.CHROME_CRASHPAD_PIPE_NAME),
+    });
+  } catch (error) {
+    append('local-crash-capture-error', { message: String(error) });
+  }
   try {
     append('gpu-feature-status', { status: app.getGPUFeatureStatus() });
     app.getGPUInfo('complete').then(
@@ -100,7 +111,10 @@ async function installMainObserver(session: WebdriverIO.Browser, logFile: string
       const install = remote.require('node:vm').runInThisContext(source, {
         filename: 'abyss-e2e-native-crash-diagnostics.cjs',
       });
-      const installed = install(remote.app, remote.require('node:fs'), remote.process, destination);
+      const installed = install(remote.app, remote.require('node:fs'), remote.process, {
+        crashReporter: remote.crashReporter,
+        logFile: destination,
+      });
       // Return a plain value rather than asking WebDriver to serialize a remote proxy.
       return installed.crashDumps;
     },
@@ -147,29 +161,6 @@ export function createNativeCrashDiagnostics(directory: string | undefined): Dia
         const destination = path.join(root, cid);
         await mkdir(destination, { recursive: true });
         workerDirectory = destination;
-        const binary = capabilities['goog:chromeOptions']?.binary;
-        if (typeof binary === 'string') {
-          try {
-            await promisify(execFile)(
-              'pwsh',
-              [
-                '-NoProfile',
-                '-NonInteractive',
-                '-File',
-                path.join(import.meta.dirname, 'prepare-windows-sandbox.ps1'),
-                '-Installer',
-                binary,
-                '-RepoRoot',
-                path.resolve(import.meta.dirname, '../..'),
-                '-ReportPath',
-                path.join(destination, 'sandbox-acl.json'),
-              ],
-              { windowsHide: true, timeout: 30_000 },
-            );
-          } catch (error) {
-            await reportFailure('sandbox ACL preparation failed', error);
-          }
-        }
         const driverLoggingOptions = {
           ...capabilities['wdio:chromedriverOptions'],
           verbose: true,
@@ -217,7 +208,7 @@ export function createNativeCrashDiagnostics(directory: string | undefined): Dia
       if (workerDirectory === null || crashDumpsDirectory === null) return;
       try {
         // The service deletes its temporary profiles in afterSession. Preserve any
-        // existing dumps while the profile exists; never start or reconfigure reporting.
+        // local dumps while the profile exists; report upload stays disabled.
         // https://github.com/jesse-r-s-hines/wdio-obsidian-service/blob/3.3.0/packages/wdio-obsidian-service/src/service.ts#L747
         await cp(crashDumpsDirectory, path.join(workerDirectory, 'crashDumps'), {
           recursive: true,

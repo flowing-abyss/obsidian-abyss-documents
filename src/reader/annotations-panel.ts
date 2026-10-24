@@ -259,7 +259,6 @@ export class AnnotationsPanel {
     this.clearResolutionFeedback();
     this.clearLoadingTimer();
     this.loadingVisible = false;
-    const scrollTop = this.scrollHost.scrollTop;
     const roving = this.captureProjectionRoving();
     this.projectionRows = rows;
     this.provisionalRowIds.clear();
@@ -281,7 +280,6 @@ export class AnnotationsPanel {
     this.renderFacets();
     this.applyFilter();
     this.restoreProjectionRoving(roving);
-    this.scrollHost.scrollTop = scrollTop;
   }
 
   private retainProjectionState(retainedKeys: ReadonlySet<string>): void {
@@ -1111,9 +1109,7 @@ export class AnnotationsPanel {
     if (row === undefined) return;
     const target = row.querySelector<HTMLElement>('.abyss-annotation-card');
     if (target === null) return;
-    const scrollTop = this.scrollHost.scrollTop;
-    this.focusCard(target, focus.rowId);
-    this.scrollHost.scrollTop = scrollTop;
+    this.focusCard(target, focus.rowId, true);
   }
 
   private focusCard(target: HTMLElement | null, rowId: string | null, preventScroll = false): void {

@@ -3918,11 +3918,22 @@ describe('reader selection-first annotations', () => {
 
     await browser.waitUntil(
       async () =>
-        browser.execute(
-          () =>
-            document.querySelectorAll('.abyss-annotation-card').length === 2 &&
-            document.querySelector('.abyss-annotation-card[data-annotation-provisional]') === null,
-        ),
+        browser.execute(() => {
+          const cards = Array.from(
+            document.querySelectorAll<HTMLElement>('.abyss-annotation-card'),
+          );
+          return (
+            cards.length === 2 &&
+            cards.every((card) => {
+              const id = card.dataset['annotationId'] ?? '';
+              return (
+                id.length > 0 &&
+                !id.startsWith('pdfjs_internal_editor_') &&
+                !card.hasAttribute('data-annotation-provisional')
+              );
+            })
+          );
+        }),
       {
         timeout: 15_000,
         timeoutMsg: 'Saved annotations did not receive their persisted identities.',

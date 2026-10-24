@@ -870,11 +870,26 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (root === null || this.annotationModeExitBarrier !== null) return;
     const ownerWindow = root.ownerDocument.defaultView;
     if (ownerWindow === null || this.annotationSnapshotFrame !== null) return;
-    this.annotationSnapshotFrame = ownerWindow.requestAnimationFrame(() => {
-      this.annotationSnapshotFrame = null;
-      if (this.annotationModeExitBarrier !== null) return;
-      this.publishMountedAnnotationSnapshot(true);
+    const generation = this.annotationModeExitGeneration;
+    const editor = this.annotationEditorInstance;
+    const frame = ownerWindow.requestAnimationFrame(() => {
+      const publish = (): void => {
+        if (
+          this.annotationSnapshotFrame !== frame ||
+          this.annotationModeExitGeneration !== generation ||
+          this.annotationEditorInstance !== editor ||
+          this.root !== root
+        )
+          return;
+        this.annotationSnapshotFrame = null;
+        if (this.annotationModeExitBarrier !== null) return;
+        this.publishMountedAnnotationSnapshot(true);
+      };
+      const closing = editor?.contextualClose ?? null;
+      if (closing === null) publish();
+      else void closing.then(publish, publish);
     });
+    this.annotationSnapshotFrame = frame;
   }
 
   private beginAnnotationModeExitSnapshot(event: unknown): void {
