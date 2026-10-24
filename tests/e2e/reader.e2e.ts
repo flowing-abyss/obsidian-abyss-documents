@@ -201,17 +201,20 @@ async function waitForFirstPage(): Promise<void> {
     });
     await waitForPdfPageReady();
   } catch (error) {
-    const diagnostics = await browser.execute(() => ({
-      errorBoundary: document.querySelector<HTMLElement>('[data-reader-error]')?.innerText ?? null,
-      pages: document.querySelectorAll('[data-page-number]').length,
-      performance: (
-        window as Window & {
-          __abyssDocumentsPerformance?: unknown;
-        }
-      ).__abyssDocumentsPerformance,
-      readerText: document.querySelector<HTMLElement>('[data-abyss-document]')?.innerText ?? null,
-      viewer: document.querySelector('.pdfViewer') !== null,
-    }));
+    const diagnostics = await browser
+      .execute(() => ({
+        errorBoundary:
+          document.querySelector<HTMLElement>('[data-reader-error]')?.innerText ?? null,
+        pages: document.querySelectorAll('[data-page-number]').length,
+        performance: (
+          window as Window & {
+            __abyssDocumentsPerformance?: unknown;
+          }
+        ).__abyssDocumentsPerformance,
+        readerText: document.querySelector<HTMLElement>('[data-abyss-document]')?.innerText ?? null,
+        viewer: document.querySelector('.pdfViewer') !== null,
+      }))
+      .catch((diagnosticError: unknown) => ({ diagnosticFailure: String(diagnosticError) }));
     throw new Error(
       `First PDF page did not become usable: ${JSON.stringify(diagnostics)}; ${String(error)}`,
     );

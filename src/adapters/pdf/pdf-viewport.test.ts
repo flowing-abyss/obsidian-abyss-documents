@@ -2109,6 +2109,7 @@ describe('PdfDocumentViewport', () => {
     const nativeClick = vi.fn(() => {
       editable.focus();
     });
+    const clearSelection = vi.spyOn(interaction, 'clearAnnotationSelection');
     editable.addEventListener('click', nativeClick);
 
     editable.click();
@@ -2116,6 +2117,7 @@ describe('PdfDocumentViewport', () => {
     editable.click();
 
     expect(nativeClick).toHaveBeenCalledTimes(2);
+    expect(clearSelection).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(editable);
     expect(focusAnnotation).not.toHaveBeenCalled();
     expect(dirty).not.toHaveBeenCalled();
@@ -2170,6 +2172,58 @@ describe('PdfDocumentViewport', () => {
       kind: 'root-context',
     });
   });
+
+  it.each([
+    ['accepted', 'page'],
+    ['unowned', 'page'],
+    ['failed', 'page'],
+    ['accepted', 'canvas'],
+    ['unowned', 'canvas'],
+    ['failed', 'canvas'],
+  ] as const)(
+    'preserves a double-click retargeted to a rebuilding FreeText surface (%s, %s)',
+    async (outcome, surface) => {
+      const fixture = await mountedViewport(3);
+      const editor = fixture.viewport.annotationEditor;
+      const page = fixture.host.querySelector<HTMLElement>('[data-page-number="1"]');
+      if (editor === null || page === null)
+        throw new Error('Expected mounted PDF editor and page.');
+      const cause = new Error('Native text entry failed');
+      vi.spyOn(editor, 'hitTestProjectedAnnotations').mockReturnValue([
+        { stableId: 'overlapping-highlight' },
+        { stableId: '30R' },
+      ]);
+      const request = vi.spyOn(editor, 'requestNativeTextEdit').mockImplementation((id) => {
+        if (id !== '30R' || outcome === 'unowned') return null;
+        return outcome === 'failed' ? Promise.reject(cause) : Promise.resolve(true);
+      });
+      const clearSelection = vi.spyOn(editor, 'clearAnnotationSelection');
+      const events: ViewportEvent[] = [];
+      fixture.viewport.onEvent((event) => events.push(event));
+
+      const target =
+        surface === 'canvas' ? page.createDiv({ cls: 'canvasWrapper' }).createEl('canvas') : page;
+      target.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          button: 0,
+          detail: 2,
+          clientX: 50,
+          clientY: 80,
+        }),
+      );
+      await Promise.resolve();
+
+      expect(request.mock.calls.map(([id]) => id)).toEqual(['overlapping-highlight', '30R']);
+      expect(clearSelection).toHaveBeenCalledTimes(outcome === 'unowned' ? 1 : 0);
+      expect(events.filter((event) => event.type === 'annotation-mutation-error')).toEqual(
+        outcome === 'failed'
+          ? [{ type: 'annotation-mutation-error', action: 'open-annotation', cause }]
+          : [],
+      );
+      await fixture.viewport.destroy();
+    },
+  );
 
   it('owns a persisted FreeText pointer gesture before PDF.js and coalesces its click', async () => {
     const fixture = await mountedViewport(3);

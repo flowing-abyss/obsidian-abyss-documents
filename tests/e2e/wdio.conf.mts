@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { env } from 'node:process';
 import { parseObsidianVersions } from 'wdio-obsidian-service';
+import { createNativeCrashDiagnostics } from './native-crash-diagnostics.js';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 const cacheDir = path.resolve(repoRoot, '.obsidian-cache');
@@ -91,6 +92,7 @@ export const config: WebdriverIO.Config = {
   logLevel: 'warn',
 
   cacheDir,
+  ...createNativeCrashDiagnostics(env['E2E_DIAGNOSTICS_DIR']),
 
   // Import describe/it/expect explicitly instead of relying on injected globals —
   // matches this repo's vitest config (`globals: false`) and keeps ESLint honest.

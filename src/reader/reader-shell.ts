@@ -287,8 +287,8 @@ export class ReaderShell implements AnnotationInteractionHost {
     return this.sidebarValue?.annotationsPanel.resolveActivation(rowId) ?? null;
   }
 
-  closeAnnotationEditor(): boolean {
-    return this.annotationEditor.close();
+  closeAnnotationEditor(reason?: AnnotationEditorCloseReason): boolean {
+    return this.annotationEditor.close(reason);
   }
 
   flushAnnotationEditor(): Promise<boolean> {

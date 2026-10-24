@@ -1779,6 +1779,11 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
             on(name: string, listener: (event: unknown) => void): void;
             off(name: string, listener: (event: unknown) => void): void;
           };
+          commentBridge?: {
+            onAnnotationFocus(
+              listener: (focus: { editable?: boolean; annotations?: unknown } | null) => void,
+            ): () => void;
+          };
           viewer?: { annotationEditorMode?: number };
         };
       };
@@ -1790,6 +1795,30 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
     const original = interaction.focusAnnotation;
     const focusEvents: Array<boolean | null> = [];
     const modeEvents: Array<Record<string, unknown>> = [];
+    const stopBridgeFocus = viewport.commentBridge?.onAnnotationFocus((focus) => {
+      if (focus?.editable === false)
+        modeEvents.push({
+          kind: 'bridge-readonly',
+          annotations: focus.annotations,
+          stack: new Error().stack,
+          mode: viewport.viewer?.annotationEditorMode,
+        });
+    });
+    const tracePointerClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element) || modeEvents.length >= 80) return;
+      modeEvents.push({
+        type: event.type,
+        detail: event.detail,
+        trusted: event.isTrusted,
+        target: target.tagName,
+        class: target.getAttribute('class'),
+        annotationId: target.closest('[data-annotation-id]')?.getAttribute('data-annotation-id'),
+        mode: viewport.viewer?.annotationEditorMode,
+      });
+    };
+    document.addEventListener('click', tracePointerClick, { capture: true });
+    document.addEventListener('dblclick', tracePointerClick, { capture: true });
     const onModeRequest = (event: unknown) => {
       const request = event as { editId?: unknown; mode?: unknown };
       modeEvents.push({
@@ -1814,7 +1843,10 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
       cleanup: () => {
         interaction.focusAnnotation = original;
         stopFocus();
+        stopBridgeFocus?.();
         viewport.eventBus?.off('switchannotationeditormode', onModeRequest);
+        document.removeEventListener('click', tracePointerClick, { capture: true });
+        document.removeEventListener('dblclick', tracePointerClick, { capture: true });
       },
       focusEvents,
       modeEvents,
@@ -1823,7 +1855,16 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
     };
     interaction.focusAnnotation = function (...args: [string, unknown]): Promise<unknown> {
       state.calls += 1;
-      return original.apply(this, args);
+      const pending = original.apply(this, args);
+      void pending.then(
+        (result) => {
+          modeEvents.push({ kind: 'activation-result', result });
+        },
+        (cause: unknown) => {
+          modeEvents.push({ kind: 'activation-error', cause: String(cause) });
+        },
+      );
+      return pending;
     };
     (window as Window & { __abyssTask3FreeTextProbe?: typeof state }).__abyssTask3FreeTextProbe =
       state;
@@ -1873,6 +1914,7 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
         calls: number;
         cleanup(): void;
         focusEvents: Array<boolean | null>;
+        modeEvents: Array<Record<string, unknown>>;
         mode: number | null;
         viewer: { annotationEditorMode?: number };
       };
@@ -1893,6 +1935,7 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
       mode: state.viewer.annotationEditorMode ?? null,
       modeBefore: state.mode,
       focusEvents: state.focusEvents,
+      modeEvents: state.modeEvents,
       popoverVisible:
         document.querySelector<HTMLElement>(
           '.workspace-leaf.mod-active [data-annotation-editor-popover]:not([hidden])',
@@ -1913,6 +1956,8 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
     popoverVisible: false,
     selected: true,
   });
+  if (result.focusEvents.includes(false))
+    console.info('[native-freetext-focus-trace]', JSON.stringify(result.modeEvents));
   expect(result.focusEvents).not.toContain(false);
   expect(result.text).toContain(' caret');
   await browser.keys(Key.Escape);

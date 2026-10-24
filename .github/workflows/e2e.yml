@@ -71,6 +71,16 @@ jobs:
         env:
           # Native tooltip and focus assertions require one foreground Obsidian window.
           WDIO_MAX_INSTANCES: 1
+          E2E_DIAGNOSTICS_DIR: ${{ runner.os == 'Windows' && format('{0}/e2e-diagnostics', runner.temp) || '' }}
+
+      - name: Upload Windows native crash diagnostics
+        if: ${{ always() && runner.os == 'Windows' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-native-diagnostics-${{ matrix.os }}
+          path: ${{ runner.temp }}/e2e-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
 
   android:
     strategy:

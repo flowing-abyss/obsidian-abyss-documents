@@ -6,9 +6,11 @@ import { waitForPdfPageReady } from './pdf-ready.js';
 import {
   installTenThousandDeleteTrace,
   measureNextAnnotationCardNavigation,
+  readTenThousandDeleteStatus,
   readTenThousandDeleteTrace,
   waitForAnimationFrames,
   waitForAnnotationProjectionToSettle,
+  type TenThousandDeleteStatus,
   type TenThousandDeleteTrace,
 } from './annotation-performance-oracle';
 
@@ -1409,24 +1411,38 @@ describe('PDF reader sidebar', () => {
     });
     await browser.keys(Key.Home);
     await waitForAnnotationWindowToSettle();
-    await browser.execute(() => {
+    const hoverPoint = await browser.execute(() => {
       const scrollHost = document.querySelector<HTMLElement>('[data-annotation-scroll-host]');
       if (scrollHost === null) throw new Error('Annotation scroll host is missing.');
       const viewport = scrollHost.getBoundingClientRect();
       const cards = Array.from(document.querySelectorAll<HTMLElement>('.abyss-annotation-card'));
       const visible = cards.find((card) => {
         const rect = card.getBoundingClientRect();
-        return rect.top >= viewport.top && rect.bottom <= viewport.bottom;
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        return (
+          rect.top >= Math.max(0, viewport.top) &&
+          rect.bottom <= Math.min(innerHeight, viewport.bottom) &&
+          document.elementFromPoint(x, y)?.closest('.abyss-annotation-card') === card
+        );
       });
       if (visible === undefined)
         throw new Error('No visible annotation card for pointer geometry.');
       visible.dataset['annotationHoverProbe'] = '';
+      const bounds = visible.getBoundingClientRect();
+      return {
+        x: Math.round(bounds.left + bounds.width / 2),
+        y: Math.round(bounds.top + bounds.height / 2),
+      };
     });
     const restingGeometry = await annotationCardGeometry();
     expect(restingGeometry.headerHeight).toBeLessThanOrEqual(34);
     expect(restingGeometry.cardHeight).toBeLessThanOrEqual(128);
 
-    await $('[data-annotation-hover-probe]').moveTo();
+    await browser
+      .action('pointer')
+      .move({ origin: 'viewport', ...hoverPoint })
+      .perform();
     expect(await annotationCardGeometry()).toEqual(restingGeometry);
 
     await browser.execute(() => {
@@ -1905,16 +1921,16 @@ describe('PDF reader sidebar', () => {
       expect(firstFrame.targetPresent).toBe(false);
       expect(firstFrame.cards).toBeGreaterThan(0);
 
-      let lastTrace: TenThousandDeleteTrace | null = null;
+      let lastStatus: TenThousandDeleteStatus | null = null;
       try {
         await browser.waitUntil(
           async () => {
-            lastTrace = await readTenThousandDeleteTrace();
+            lastStatus = await readTenThousandDeleteStatus();
             return (
-              !lastTrace.targetPresent &&
-              lastTrace.indexedBatches >= 1 &&
-              lastTrace.settledFrames >= 5 &&
-              (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '9999'
+              !lastStatus.targetPresent &&
+              lastStatus.indexedBatches >= 1 &&
+              lastStatus.settledFrames >= 5 &&
+              lastStatus.setSize === 9_999
             );
           },
           {
@@ -1925,10 +1941,10 @@ describe('PDF reader sidebar', () => {
         );
       } catch (cause) {
         throw new Error(
-          `Ten-thousand delete projection did not converge: ${JSON.stringify(lastTrace)}; ${String(cause)}`,
+          `Ten-thousand delete projection did not converge: ${JSON.stringify(lastStatus)}; ${String(cause)}`,
         );
       }
-      trace = await readTenThousandDeleteTrace(true);
+      trace = await readTenThousandDeleteTrace();
     } finally {
       if (trace === null) {
         const traceExists = await browser.execute(
@@ -1939,8 +1955,18 @@ describe('PDF reader sidebar', () => {
               }
             ).__abyssTask7DeleteTrace !== undefined,
         );
-        if (traceExists) trace = await readTenThousandDeleteTrace(true);
+        if (traceExists) trace = await readTenThousandDeleteTrace();
       }
+      if (trace !== null)
+        console.info(
+          '[annotation-delete-trace]',
+          JSON.stringify({
+            ...trace,
+            finalNativeSemanticMismatches: trace.finalNativeSemanticMismatches.length,
+            missingRetainedNativeSemanticIds: trace.missingRetainedNativeSemanticIds.length,
+            replacedRetainedNativeSemanticIds: trace.replacedRetainedNativeSemanticIds.length,
+          }),
+        );
     }
 
     expect(trace).toMatchObject({

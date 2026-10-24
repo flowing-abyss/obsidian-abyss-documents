@@ -29,7 +29,8 @@ export interface AnnotationEditorUpdate {
   readonly comment?: string | undefined;
 }
 
-export type AnnotationEditorCloseReason = 'escape' | 'click-away' | 'focus-away' | 'external';
+export type AnnotationEditorCloseReason =
+  'escape' | 'click-away' | 'focus-away' | 'external' | 'native-edit';
 
 export interface AnnotationEditorCloseContext {
   readonly focusTarget?: HTMLElement | undefined;

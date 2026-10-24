@@ -41,10 +41,12 @@ export async function measureNextAnnotationCardNavigation(): Promise<number> {
           trace.startedAt !== null &&
           event.target instanceof HTMLElement &&
           event.target.closest('.abyss-annotation-card-row')?.getAttribute('aria-posinset') === '2'
-        )
+        ) {
           trace.durationMs = performance.now() - trace.startedAt;
+          trace.abort.abort();
+        }
       },
-      { capture: true, once: true, signal: trace.abort.signal },
+      { capture: true, signal: trace.abort.signal },
     );
     (
       window as Window & {
@@ -96,7 +98,53 @@ export interface TenThousandDeleteTarget {
   readonly rowId: string;
 }
 
+export interface TenThousandDeleteStatus {
+  readonly indexedBatches: number;
+  readonly setSize: number;
+  readonly settledFrames: number;
+  readonly targetPresent: boolean;
+}
+
+interface DeleteTiming {
+  readonly count: number;
+  readonly totalMs: number;
+  readonly maxMs: number;
+  readonly maxStartedAtMs: number | null;
+}
+
 export interface TenThousandDeleteTrace {
+  readonly diagnostics: {
+    readonly deleteClickedAtMs: number | null;
+    readonly deleteClickTrusted: boolean | null;
+    readonly measurementCompletedAtMs: number | null;
+    readonly stoppedAtMs: number | null;
+    readonly statusReads: number;
+    readonly timings: {
+      readonly frameSample: DeleteTiming;
+      readonly mutationSample: DeleteTiming;
+      readonly snapshot: DeleteTiming;
+      readonly apply: DeleteTiming;
+      readonly render: DeleteTiming;
+    };
+    readonly maxGap: {
+      readonly fromFrameAtMs: number | null;
+      readonly toFrameAtMs: number | null;
+      readonly fromCallbackAtMs: number | null;
+      readonly toCallbackAtMs: number | null;
+      readonly frameSampleMs: number;
+      readonly frameSamples: number;
+      readonly mutationSampleMs: number;
+      readonly mutationSamples: number;
+      readonly applyMs: number;
+      readonly renderMs: number;
+    };
+    readonly phases: ReadonlyArray<{
+      readonly phase: 'apply' | 'render';
+      readonly startedAtMs: number;
+      readonly durationMs: number;
+    }>;
+    readonly droppedPhases: number;
+  };
   readonly baselineNativeSemanticCount: number;
   readonly finalNativeSemanticMismatches: readonly string[];
   readonly indexedBatches: number;
@@ -217,6 +265,71 @@ export async function installTenThousandDeleteTrace(
         })}`,
       );
 
+    // Diagnostic timestamps start after the baseline native scan.
+    const installedAt = performance.now();
+    const now = (): number => performance.now() - installedAt;
+    const timing = () => ({
+      count: 0,
+      totalMs: 0,
+      maxMs: 0,
+      maxStartedAtMs: null as number | null,
+    });
+    const timings = {
+      frameSample: timing(),
+      mutationSample: timing(),
+      snapshot: timing(),
+      apply: timing(),
+      render: timing(),
+    };
+    const recordTiming = (
+      metric: ReturnType<typeof timing>,
+      startedAtMs: number,
+      endedAtMs: number,
+    ): void => {
+      const durationMs = endedAtMs - startedAtMs;
+      metric.count += 1;
+      metric.totalMs += durationMs;
+      if (durationMs > metric.maxMs) {
+        metric.maxMs = durationMs;
+        metric.maxStartedAtMs = startedAtMs;
+      }
+    };
+    // Fixed diagnostic storage avoids allocating timing records per sample.
+    const maxGap = {
+      fromFrameAtMs: null as number | null,
+      toFrameAtMs: null as number | null,
+      fromCallbackAtMs: null as number | null,
+      toCallbackAtMs: null as number | null,
+      frameSampleMs: 0,
+      frameSamples: 0,
+      mutationSampleMs: 0,
+      mutationSamples: 0,
+      applyMs: 0,
+      renderMs: 0,
+    };
+    const previousFrameTimings = {
+      frameSampleMs: 0,
+      frameSamples: 0,
+      mutationSampleMs: 0,
+      mutationSamples: 0,
+      applyMs: 0,
+      renderMs: 0,
+    };
+    const phaseKinds = new Uint8Array(16);
+    const phaseStarts = new Float64Array(16);
+    const phaseDurations = new Float64Array(16);
+    let phaseCount = 0;
+    let droppedPhases = 0;
+    const recordPhase = (kind: 0 | 1, startedAtMs: number, endedAtMs: number): void => {
+      if (phaseCount === phaseKinds.length) {
+        droppedPhases += 1;
+        return;
+      }
+      phaseKinds[phaseCount] = kind;
+      phaseStarts[phaseCount] = startedAtMs;
+      phaseDurations[phaseCount] = endedAtMs - startedAtMs;
+      phaseCount += 1;
+    };
     const originalApply = projection.applyViewportBatch;
     const originalRender = controller.renderAnnotationProjection;
     const brokenCards = new WeakSet<HTMLElement>();
@@ -225,6 +338,16 @@ export async function installTenThousandDeleteTrace(
       indexedBatches: 0,
       indexedRenderCalls: 0,
       lastFrameAt: null as number | null,
+      lastCallbackAtMs: null as number | null,
+      deleteClickedAtMs: null as number | null,
+      deleteClickTrusted: null as boolean | null,
+      measurementCompletedAtMs: null as number | null,
+      stoppedAtMs: null as number | null,
+      statusReads: 0,
+      setSize: Number(
+        panel.querySelector('.abyss-annotation-card-row')?.getAttribute('aria-setsize'),
+      ),
+      targetPresent: true,
       maxRafGapMs: 0,
       measurementComplete: false,
       missingRetainedNativeSemanticIds: new Set<string>(),
@@ -246,6 +369,7 @@ export async function installTenThousandDeleteTrace(
       zeroNativeMutationSamples: 0,
     };
     const sample = (source: 'frame' | 'mutation'): void => {
+      const startedAtMs = now();
       const cards = Array.from(panel.querySelectorAll<HTMLElement>('.abyss-annotation-card'));
       const currentNativeBySemanticId = visibleNativeBySemanticId();
       if (cards.length === 0) {
@@ -290,31 +414,83 @@ export async function installTenThousandDeleteTrace(
       const setSize = Number(
         panel.querySelector('.abyss-annotation-card-row')?.getAttribute('aria-setsize'),
       );
+      state.targetPresent = !targetAbsent;
+      state.setSize = setSize;
       if (source === 'frame')
         state.settledFrames =
           targetAbsent && setSize === 9_999 && state.indexedBatches >= 1
             ? state.settledFrames + 1
             : 0;
+      recordTiming(
+        source === 'frame' ? timings.frameSample : timings.mutationSample,
+        startedAtMs,
+        now(),
+      );
     };
+    const onDeleteClick = (event: MouseEvent): void => {
+      if (
+        state.deleteClickedAtMs === null &&
+        event.target instanceof Element &&
+        event.target.closest('[data-action="delete-annotation"]') !== null
+      ) {
+        state.deleteClickedAtMs = now();
+        state.deleteClickTrusted = event.isTrusted;
+      }
+    };
+    reader.addEventListener('click', onDeleteClick, true);
     const observer = new MutationObserver((records) => {
       state.mutationSamples += records.length;
       sample('mutation');
     });
     observer.observe(reader, { attributes: true, childList: true, subtree: true });
-    const onFrame = (now: number): void => {
+    const onFrame = (frameAt: number): void => {
       if (state.stopped) return;
-      if (!state.measurementComplete && state.lastFrameAt !== null)
-        state.maxRafGapMs = Math.max(state.maxRafGapMs, now - state.lastFrameAt);
-      state.lastFrameAt = now;
+      const callbackAtMs = performance.now() - installedAt;
+      if (!state.measurementComplete && state.lastFrameAt !== null) {
+        const gapMs = frameAt - state.lastFrameAt;
+        if (gapMs > state.maxRafGapMs) {
+          state.maxRafGapMs = gapMs;
+          maxGap.fromFrameAtMs = state.lastFrameAt - installedAt;
+          maxGap.toFrameAtMs = frameAt - installedAt;
+          maxGap.fromCallbackAtMs = state.lastCallbackAtMs;
+          maxGap.toCallbackAtMs = callbackAtMs;
+          maxGap.frameSampleMs = timings.frameSample.totalMs - previousFrameTimings.frameSampleMs;
+          maxGap.frameSamples = timings.frameSample.count - previousFrameTimings.frameSamples;
+          maxGap.mutationSampleMs =
+            timings.mutationSample.totalMs - previousFrameTimings.mutationSampleMs;
+          maxGap.mutationSamples =
+            timings.mutationSample.count - previousFrameTimings.mutationSamples;
+          maxGap.applyMs = timings.apply.totalMs - previousFrameTimings.applyMs;
+          maxGap.renderMs = timings.render.totalMs - previousFrameTimings.renderMs;
+        }
+      }
+      previousFrameTimings.frameSampleMs = timings.frameSample.totalMs;
+      previousFrameTimings.frameSamples = timings.frameSample.count;
+      previousFrameTimings.mutationSampleMs = timings.mutationSample.totalMs;
+      previousFrameTimings.mutationSamples = timings.mutationSample.count;
+      previousFrameTimings.applyMs = timings.apply.totalMs;
+      previousFrameTimings.renderMs = timings.render.totalMs;
+      state.lastFrameAt = frameAt;
+      state.lastCallbackAtMs = callbackAtMs;
       sample('frame');
-      if (state.settledFrames >= 5) state.measurementComplete = true;
+      if (!state.measurementComplete && state.settledFrames >= 5) {
+        state.measurementComplete = true;
+        state.measurementCompletedAtMs = performance.now() - installedAt;
+      }
       state.frame = requestAnimationFrame(onFrame);
     };
     projection.applyViewportBatch = (events) => {
       state.indexedBatches += 1;
-      const changed = originalApply.call(projection, events);
-      state.pendingIndexedRender ||= changed;
-      return changed;
+      const startedAtMs = now();
+      try {
+        const changed = originalApply.call(projection, events);
+        state.pendingIndexedRender ||= changed;
+        return changed;
+      } finally {
+        const endedAtMs = now();
+        recordTiming(timings.apply, startedAtMs, endedAtMs);
+        recordPhase(0, startedAtMs, endedAtMs);
+      }
     };
     controller.renderAnnotationProjection = (...args) => {
       state.renderCalls += 1;
@@ -322,22 +498,55 @@ export async function installTenThousandDeleteTrace(
         state.indexedRenderCalls += 1;
         state.pendingIndexedRender = false;
       }
-      originalRender.call(controller, ...args);
+      const startedAtMs = now();
+      try {
+        originalRender.call(controller, ...args);
+      } finally {
+        const endedAtMs = now();
+        recordTiming(timings.render, startedAtMs, endedAtMs);
+        recordPhase(1, startedAtMs, endedAtMs);
+      }
+    };
+    const status = (): TenThousandDeleteStatus => {
+      state.statusReads += 1;
+      return {
+        indexedBatches: state.indexedBatches,
+        setSize: state.setSize,
+        settledFrames: state.settledFrames,
+        targetPresent: state.targetPresent,
+      };
     };
     const snapshot = (): TenThousandDeleteTrace => {
+      const startedAtMs = now();
       const currentNativeSemanticIds = new Set(visibleNativeBySemanticId().keys());
       const currentRetainedNativeSemanticIds = new Set(currentNativeSemanticIds);
       currentRetainedNativeSemanticIds.delete(target.annotationId);
-      return {
+      const finalNativeSemanticMismatches = [
+        ...[...baselineRetainedNativeSemanticIds].filter(
+          (id) => !currentRetainedNativeSemanticIds.has(id),
+        ),
+        ...[...currentRetainedNativeSemanticIds].filter(
+          (id) => !baselineRetainedNativeSemanticIds.has(id),
+        ),
+      ];
+      const result: TenThousandDeleteTrace = {
+        diagnostics: {
+          deleteClickedAtMs: state.deleteClickedAtMs,
+          deleteClickTrusted: state.deleteClickTrusted,
+          measurementCompletedAtMs: state.measurementCompletedAtMs,
+          stoppedAtMs: state.stoppedAtMs,
+          statusReads: state.statusReads,
+          timings,
+          maxGap,
+          phases: Array.from({ length: phaseCount }, (_, index) => ({
+            phase: phaseKinds[index] === 0 ? ('apply' as const) : ('render' as const),
+            startedAtMs: phaseStarts[index] ?? 0,
+            durationMs: phaseDurations[index] ?? 0,
+          })),
+          droppedPhases,
+        },
         baselineNativeSemanticCount: baselineNativeBySemanticId.size,
-        finalNativeSemanticMismatches: [
-          ...[...baselineRetainedNativeSemanticIds].filter(
-            (id) => !currentRetainedNativeSemanticIds.has(id),
-          ),
-          ...[...currentRetainedNativeSemanticIds].filter(
-            (id) => !baselineRetainedNativeSemanticIds.has(id),
-          ),
-        ],
+        finalNativeSemanticMismatches,
         indexedBatches: state.indexedBatches,
         indexedRenderCalls: state.indexedRenderCalls,
         maxRafGapMs: state.maxRafGapMs,
@@ -358,19 +567,23 @@ export async function installTenThousandDeleteTrace(
         zeroNativeFrames: state.zeroNativeFrames,
         zeroNativeMutationSamples: state.zeroNativeMutationSamples,
       };
+      recordTiming(timings.snapshot, startedAtMs, now());
+      return result;
     };
     state.frame = requestAnimationFrame(onFrame);
     (
       window as Window & {
         __abyssTask7DeleteTrace?: {
           cleanup(): TenThousandDeleteTrace;
-          snapshot(): TenThousandDeleteTrace;
+          status(): TenThousandDeleteStatus;
         };
       }
     ).__abyssTask7DeleteTrace = {
       cleanup() {
         state.stopped = true;
+        state.stoppedAtMs = now();
         cancelAnimationFrame(state.frame);
+        reader.removeEventListener('click', onDeleteClick, true);
         const pending = observer.takeRecords();
         if (pending.length > 0) {
           state.mutationSamples += pending.length;
@@ -381,23 +594,36 @@ export async function installTenThousandDeleteTrace(
         controller.renderAnnotationProjection = originalRender;
         return snapshot();
       },
-      snapshot,
+      status,
     };
   }, deleteTarget);
 }
 
-export async function readTenThousandDeleteTrace(cleanup = false): Promise<TenThousandDeleteTrace> {
-  return browser.execute((shouldCleanup) => {
+export async function readTenThousandDeleteStatus(): Promise<TenThousandDeleteStatus> {
+  return browser.execute(() => {
+    const monitor = (
+      window as Window & {
+        __abyssTask7DeleteTrace?: { status(): TenThousandDeleteStatus };
+      }
+    ).__abyssTask7DeleteTrace;
+    if (monitor === undefined) throw new Error('Ten-thousand delete trace is unavailable.');
+    return monitor.status();
+  });
+}
+
+// Full native snapshots run only after cancelling the measured animation loop.
+export async function readTenThousandDeleteTrace(): Promise<TenThousandDeleteTrace> {
+  return browser.execute(() => {
     const host = window as Window & {
       __abyssTask7DeleteTrace?: {
         cleanup(): TenThousandDeleteTrace;
-        snapshot(): TenThousandDeleteTrace;
+        status(): TenThousandDeleteStatus;
       };
     };
     const monitor = host.__abyssTask7DeleteTrace;
     if (monitor === undefined) throw new Error('Ten-thousand delete trace is unavailable.');
-    const result = shouldCleanup ? monitor.cleanup() : monitor.snapshot();
-    if (shouldCleanup) delete host.__abyssTask7DeleteTrace;
+    const result = monitor.cleanup();
+    delete host.__abyssTask7DeleteTrace;
     return result;
-  }, cleanup);
+  });
 }

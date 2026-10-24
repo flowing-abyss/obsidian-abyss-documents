@@ -834,6 +834,47 @@ describe('AnnotationsPanel', () => {
     expect(host.querySelectorAll('.abyss-annotation-card').length).toBeLessThanOrEqual(48);
   });
 
+  it('keeps a distant scroll window after measuring rows that displaced the focused card', () => {
+    const host = createDiv();
+    host.doc.body.append(host);
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(ownerWindow(host), 'requestAnimationFrame').mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return DOMRect.fromRect({
+        height: this.classList.contains('abyss-annotation-card-row') ? 112 : 0,
+      });
+    });
+    const panel = new AnnotationsPanel(host, { onNavigate: vi.fn() });
+    panel.setAnnotations(Array.from({ length: 10_000 }, (_, index) => annotation(index)));
+    for (let frame = 0; frame < 3; frame += 1)
+      frames.splice(0).forEach((callback) => {
+        callback(frame);
+      });
+    const oldCard = host.querySelector<HTMLButtonElement>('[data-annotation-id="annotation-1"]');
+    expect(oldCard).toBeTruthy();
+    oldCard?.focus();
+    const scrollHost = annotationScrollHost(host);
+
+    scrollHost.scrollTop = 600 * 112;
+    scrollHost.dispatchEvent(new Event('scroll'));
+    expect(oldCard?.isConnected).toBe(false);
+    expect(Number(panel.visibleIds()[0]?.slice('annotation-'.length))).toBeGreaterThan(500);
+    frames.splice(0).forEach((callback) => {
+      callback(4);
+    });
+
+    expect(Number(panel.visibleIds()[0]?.slice('annotation-'.length))).toBeGreaterThan(500);
+    expect(oldCard?.isConnected).toBe(false);
+    expect(host.querySelectorAll('.abyss-annotation-card[tabindex="0"]')).toHaveLength(1);
+    panel.destroy();
+    host.remove();
+  });
+
   it('moves its bounded virtual window on scroll, resize, filters, and page sync', () => {
     const host = createDiv();
     host.doc.body.append(host);

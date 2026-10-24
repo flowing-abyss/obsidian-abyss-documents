@@ -543,7 +543,18 @@ export class AnnotationsPanel {
     }
   }
 
+  private pruneFocusTracking(retainedRowIds: ReadonlySet<string>): void {
+    if (this.focusedTarget !== null && !retainedRowIds.has(this.focusedTarget.rowId))
+      this.focusedTarget = null;
+    if (
+      this.lastFocusedVisualAnchor !== null &&
+      !retainedRowIds.has(this.lastFocusedVisualAnchor.rowId)
+    )
+      this.lastFocusedVisualAnchor = null;
+  }
+
   private pruneCardCache(retainedRowIds: ReadonlySet<string>): void {
+    this.pruneFocusTracking(retainedRowIds);
     for (const key of this.cardButtons.keys()) {
       if (!retainedRowIds.has(key)) this.cardButtons.delete(key);
     }

@@ -74,6 +74,8 @@ export interface PdfAnnotationInteraction {
     stableId: string,
     source: PdfAnnotationActivationSource,
   ): Promise<PdfAnnotationActivationResult>;
+  requestNativeTextEdit?(stableId: string): Promise<boolean> | null;
+  onNativeTextEdit?(listener: () => boolean): () => void;
   selectAnnotation?(stableId: string): boolean;
   clearAnnotationSelection?(): void;
   retainSelection?(token: string): boolean;
@@ -155,6 +157,7 @@ interface PdfAnnotationUiManager {
     | {
         disableClick(): void;
         disableTextSelection(): void;
+        updateMode?(mode: number): void;
       }
     | undefined;
   highlightSelection(methodOfCreation?: string): void;
@@ -449,6 +452,7 @@ function nativeAnnotationModeRequest(
 }
 
 export class PdfAnnotationEditor {
+  private readonly nativeTextEditListeners = new Set<() => boolean>();
   private readonly annotationFocusListeners = new Set<(focus: PdfAnnotationFocus | null) => void>();
   private readonly colorListeners = new Set<(color: string) => void>();
   private readonly dirtyListeners = new Set<(dirty: boolean) => void>();
@@ -670,6 +674,130 @@ export class PdfAnnotationEditor {
         return this.focusResolvedAnnotation(id, source, projected, activation);
       },
     });
+  }
+
+  requestNativeTextEdit(stableId: string): Promise<boolean> | null {
+    const requestedId = stableId.trim();
+    const target = this.projectedTargets.get(requestedId);
+    const id = target?.canonicalId ?? requestedId;
+    const activation = this.activeActivation;
+    if (activation === null) return this.requestSettledNativeTextEdit(id);
+    const annotation = target?.annotation ?? activation.projected;
+    if (!this.nativeTextActivationMatches(activation, id, annotation)) return null;
+    // The second click can land on the bare page while PDF.js materializes the
+    // first click's editor. Keep that intent within the existing activation.
+    return activation.promise.then(
+      (result) => {
+        if (
+          result !== 'editable' ||
+          !this.isActivationEpochCurrent(activation) ||
+          this.activationUnavailable(activation.controller.signal)
+        )
+          return false;
+        const session = this.contextualEditSession;
+        return session?.id === activation.id && this.enterNativeTextEditSession(session);
+      },
+      () => false, // The original focus request owns activation failure reporting.
+    );
+  }
+
+  private requestSettledNativeTextEdit(id: string): Promise<boolean> | null {
+    const session = this.contextualEditSession;
+    if (
+      session?.id !== id ||
+      session.mode !== this.dependencies.annotationEditorType.FREETEXT ||
+      session.phase !== 'selected'
+    )
+      return null;
+    const epoch = this.activationEpoch;
+    const revision = this.lifecycleRevision;
+    const manager = this.manager;
+    return Promise.resolve().then(() => {
+      if (!this.nativeTextRequestCurrent(epoch, revision, manager)) return false;
+      return this.enterNativeTextEditSession(session);
+    });
+  }
+
+  private nativeTextRequestCurrent(
+    epoch: number,
+    revision: number,
+    manager: PdfAnnotationUiManager | null,
+  ): boolean {
+    return (
+      epoch === this.activationEpoch &&
+      revision === this.lifecycleRevision &&
+      manager === this.manager &&
+      !this.activationUnavailable(undefined) &&
+      !this.saving &&
+      this.managerEventsEnabled
+    );
+  }
+
+  private nativeTextActivationMatches(
+    activation: AnnotationActivation,
+    id: string,
+    annotation: DocumentAnnotation | null,
+  ): boolean {
+    return (
+      annotation?.type === 'free-text' &&
+      annotationIsWritable(annotation) &&
+      activation.id === id &&
+      this.isCurrentActivation(activation)
+    );
+  }
+
+  private nativeTextSessionAvailable(session: ContextualEditSession): boolean {
+    return (
+      this.contextualEditSession === session &&
+      session.manager === this.manager &&
+      session.phase === 'selected' &&
+      session.closing === null &&
+      this.dependencies.viewer.annotationEditorMode ===
+        this.dependencies.annotationEditorType.FREETEXT &&
+      this.isRequestedEditorSelected(session)
+    );
+  }
+
+  private enterNativeTextEditSession(session: ContextualEditSession): boolean {
+    if (
+      this.activationUnavailable(undefined) ||
+      this.saving ||
+      !this.managerEventsEnabled ||
+      !this.nativeTextSessionAvailable(session)
+    )
+      return false;
+    const native = session.manager.firstSelectedEditor;
+    if (native?.enterInEditMode === undefined) return false;
+    const epoch = this.activationEpoch;
+    const revision = this.lifecycleRevision;
+    if (![...this.nativeTextEditListeners].every((listener) => listener())) return false;
+    if (!this.nativeTextHandoffCurrent(session, native, epoch, revision)) return false;
+    this.clearPendingAnnotationFocus();
+    this.cancelContextualSaveRestore();
+    this.releaseContextualEditSession(session);
+    this.restoreNativeTextLayers(session.manager);
+    this.setLogicalMode('freetext');
+    native.enterInEditMode();
+    return true;
+  }
+
+  private nativeTextHandoffCurrent(
+    session: ContextualEditSession,
+    native: PdfNativeEditorReference,
+    epoch: number,
+    revision: number,
+  ): boolean {
+    return (
+      this.nativeTextRequestCurrent(epoch, revision, session.manager) &&
+      this.nativeTextSessionAvailable(session) &&
+      session.manager.firstSelectedEditor === native
+    );
+  }
+
+  private restoreNativeTextLayers(manager: PdfAnnotationUiManager): void {
+    // Restore the mode's click and passive-layer handling disabled by contextual guards.
+    for (let index = 0; index < this.dependencies.pdf.numPages; index += 1)
+      manager.getLayer(index)?.updateMode?.(this.dependencies.annotationEditorType.FREETEXT);
   }
 
   selectAnnotation(stableId: string): boolean {
@@ -1471,8 +1599,11 @@ export class PdfAnnotationEditor {
   }
 
   private isOwnedActivation(activation: AnnotationActivation): boolean {
+    return this.activeActivation === activation && this.isActivationEpochCurrent(activation);
+  }
+
+  private isActivationEpochCurrent(activation: AnnotationActivation): boolean {
     return (
-      this.activeActivation === activation &&
       activation.epoch === this.activationEpoch &&
       activation.lifecycleRevision === this.lifecycleRevision &&
       activation.manager === this.manager &&
@@ -1535,6 +1666,11 @@ export class PdfAnnotationEditor {
     if (id === undefined || id.length === 0 || typeof mode !== 'number') return null;
     const kind = this.editableKindForMode(mode);
     return kind === null ? null : { color: nativeEditorColor(native), id, kind, mode };
+  }
+
+  onNativeTextEdit(listener: () => boolean): () => void {
+    this.nativeTextEditListeners.add(listener);
+    return () => this.nativeTextEditListeners.delete(listener);
   }
 
   onMode(listener: (mode: PdfAnnotationLogicalMode) => void): () => void {
@@ -2520,7 +2656,7 @@ export class PdfAnnotationEditor {
     this.dirtyListeners.clear();
     this.editorAddedListeners.clear();
     this.mutationListeners.clear();
-    this.modeListeners.clear();
+    this.clearModeListeners();
     this.colorListeners.clear();
     this.projectedTargets.clear();
     this.projectedHitGrid.clear();
@@ -2529,6 +2665,11 @@ export class PdfAnnotationEditor {
     this.clearPendingAnnotationFocus();
     this.removeBridgeFocusListener();
     this.annotationFocusListeners.clear();
+  }
+
+  private clearModeListeners(): void {
+    this.modeListeners.clear();
+    this.nativeTextEditListeners.clear();
   }
 
   private nativeEditorUid(annotationId: string): string {

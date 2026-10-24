@@ -11,6 +11,7 @@ import type { DocumentAnnotation } from '../document-core/annotations.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import type {
   AnnotationEditorCloseContext,
+  AnnotationEditorCloseReason,
   AnnotationEditorCreation,
   AnnotationEditorPopoverRequest,
   AnnotationEditorTarget,
@@ -29,7 +30,7 @@ export interface AnnotationInteractionHost {
     request: AnnotationEditorPopoverRequest,
     options?: { readonly sidebarInvokerRowId?: string | undefined },
   ): boolean;
-  closeAnnotationEditor(): boolean;
+  closeAnnotationEditor(reason?: AnnotationEditorCloseReason): boolean;
   flushAnnotationEditor(): Promise<boolean>;
 }
 
@@ -111,6 +112,12 @@ export class AnnotationInteractionController {
         this.handleAnnotationFocus(focus);
       }),
     );
+    const stopNativeTextEdit = interaction.onNativeTextEdit?.(() => {
+      if (!this.closeActiveSelection('native-edit')) return false;
+      this.stopNativeFocusGuard();
+      return true;
+    });
+    if (stopNativeTextEdit !== undefined) this.cleanups.push(stopNativeTextEdit);
   }
 
   get color(): string {
@@ -373,17 +380,17 @@ export class AnnotationInteractionController {
     try {
       const request: AnnotationEditorPopoverRequest = {
         color: first.color ?? undefined,
-        onClose: (_reason, context) => {
+        onClose: (reason, context) => {
           this.releaseAnnotationFocusLease(focus);
           if (revision !== this.activeSelectionRevision) {
-            if (this.activeEditorKind === null && neutralizeOnClose)
+            if (this.activeEditorKind === null && neutralizeOnClose && reason !== 'native-edit')
               this.neutralizeNativeEditor(context);
             return;
           }
           this.activeEditorKind = null;
           this.ownedSelectionRevision = null;
           this.activeSelectionRevision += 1;
-          if (neutralizeOnClose) this.neutralizeNativeEditor(context);
+          if (neutralizeOnClose && reason !== 'native-edit') this.neutralizeNativeEditor(context);
         },
         onCreate: () => 'dismissed' as const,
         onDelete: (annotations) => this.deleteAnnotations(annotations),
@@ -635,9 +642,13 @@ export class AnnotationInteractionController {
     this.refreshQuickHighlightColor();
   }
 
-  private closeActiveSelection(): boolean {
+  private closeActiveSelection(reason?: AnnotationEditorCloseReason): boolean {
     const revision = this.activeSelectionRevision;
-    if (!this.host.closeAnnotationEditor()) return false;
+    const closed =
+      reason === undefined
+        ? this.host.closeAnnotationEditor()
+        : this.host.closeAnnotationEditor(reason);
+    if (!closed) return false;
     this.activeEditorKind = null;
     this.activeSelectionToken = null;
     this.ownedSelectionRevision = null;

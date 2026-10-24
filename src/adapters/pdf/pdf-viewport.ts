@@ -1561,7 +1561,9 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly onRootClick = (event: MouseEvent): void => {
     const target = event.target;
     if (!isElementTarget(target)) return;
+    if (isNativeFreeTextEditingTarget(target)) return;
     if (this.hasRootTextSelection(target)) return;
+    if (this.requestRetargetedNativeTextEdit(event, target)) return;
     const annotation = this.annotationActivationTarget(target, event.clientX, event.clientY);
     if (annotation !== null) {
       if (!nativeAnnotationClickShouldPropagate(event, target)) event.stopPropagation();
@@ -1573,11 +1575,45 @@ export class PdfDocumentViewport implements DocumentViewport {
       this.clearRootAnnotationSelection();
       return;
     }
+    this.retryRootPage(target, retry);
+  };
+
+  private retryRootPage(target: Element, retry: HTMLButtonElement): void {
     const page = target.closest<HTMLElement>('[data-page-number]');
     const pageNumber = positiveInteger(Number(page?.dataset['pageNumber']));
     if (page === null || pageNumber === null || this.viewer === null) return;
     this.retryPage(this.viewer, page, pageNumber, retry);
-  };
+  }
+
+  private requestRetargetedNativeTextEdit(event: MouseEvent, target: Element): boolean {
+    const page = this.nativeTextRetargetPage(event, target);
+    if (page === null) return false;
+    const pageNumber = positiveInteger(Number(page.dataset['pageNumber']));
+    if (pageNumber === null) return false;
+    const point = this.projectClientRects(pageNumber - 1, [
+      { bottom: event.clientY, left: event.clientX, right: event.clientX, top: event.clientY },
+    ])[0];
+    const editor = this.annotationEditorInstance;
+    if (point === undefined || editor === null) return false;
+    for (const hit of editor.hitTestProjectedAnnotations(pageNumber - 1, point)) {
+      const pending = editor.requestNativeTextEdit(hit.stableId);
+      if (pending === null) continue;
+      event.stopPropagation();
+      void pending.catch((cause: unknown) => {
+        this.events.emit({ type: 'annotation-mutation-error', action: 'open-annotation', cause });
+      });
+      return true;
+    }
+    return false;
+  }
+
+  private nativeTextRetargetPage(event: MouseEvent, target: Element): HTMLElement | null {
+    if (event.detail !== 2 || event.button !== 0 || hasNativeSelectionModifier(event)) return null;
+    const page = target.closest<HTMLElement>('.page[data-page-number]');
+    return page !== null && (target === page || target.closest('.canvasWrapper') !== null)
+      ? page
+      : null;
+  }
 
   private hasRootTextSelection(target: Element): boolean {
     const root = this.root;

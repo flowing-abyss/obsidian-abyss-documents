@@ -510,7 +510,7 @@ describe('PDF reader foundation on Android', () => {
           cardHeight: card.getBoundingClientRect().height,
           editableControls: Array.from(
             editor.querySelectorAll<HTMLElement>(
-              '[aria-label="Comment"], [data-editor-color], [data-action="delete-annotation"]',
+              'textarea[aria-label="Comment"], [data-editor-color], [data-action="delete-annotation"]',
             ),
           ).filter((element) => element.offsetParent !== null).length,
           edgeInset: Math.min(
@@ -521,6 +521,7 @@ describe('PDF reader foundation on Android', () => {
           ),
           label: editor.getAttribute('aria-label'),
           metadataVisible: metadata.hidden === false,
+          metadataComment: metadata.querySelector('[data-field="comment"]')?.textContent,
           width: bounds.width,
         };
       });
@@ -528,6 +529,7 @@ describe('PDF reader foundation on Android', () => {
         editableControls: 0,
         label: 'Annotation details',
         metadataVisible: true,
+        metadataComment: qualification.comment,
       });
       expect(readOnlyGeometry.cardHeight).toBeLessThanOrEqual(152);
       expect(readOnlyGeometry.edgeInset).toBeGreaterThanOrEqual(8);

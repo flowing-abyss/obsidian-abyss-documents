@@ -166,6 +166,7 @@ function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
   const layers = Array.from({ length: 3 }, () => ({
     disableClick: vi.fn(),
     disableTextSelection: vi.fn(),
+    updateMode: vi.fn(),
   }));
   return {
     commentSelection: vi.fn(),
@@ -1775,6 +1776,139 @@ describe('PdfAnnotationEditor lifecycle', () => {
       undefined,
       { editableOnly: true, preserveSelection: true },
     );
+  });
+
+  it.each([
+    'complete',
+    'clear',
+    'replace-manager',
+    'change-tool',
+    'block-handoff',
+    'cancel-during-handoff',
+    'replace-native-during-handoff',
+  ] as const)(
+    'keeps a native text double-click within its pending activation (%s)',
+    async (action) => {
+      const current = fixture();
+      const prepare = vi.fn(() => {
+        if (action === 'cancel-during-handoff') current.editor.clearAnnotationSelection();
+        if (action === 'replace-native-during-handoff')
+          uiManager.firstSelectedEditor = selectedEditor('30R', 3);
+        return action !== 'block-handoff';
+      });
+      const stopPreparing = current.editor.onNativeTextEdit(prepare);
+      const annotation = createdAnnotation('', { id: '30R', type: 'free-text' });
+      current.editor.setAnnotationProjection([{ annotation, stableId: '30R' }]);
+      const native = { ...selectedEditor('30R', 3), enterInEditMode: vi.fn() };
+      const uiManager = manager(native);
+      current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+      const focus = deferred<boolean>();
+      current.commentBridge.focusAnnotation.mockReturnValueOnce(focus.promise);
+      expect(current.editor.requestNativeTextEdit('30R')).toBeNull();
+      const activation = current.editor.focusAnnotation('30R', { kind: 'root-click' });
+      await vi.waitFor(() => {
+        expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+      });
+
+      const edit = current.editor.requestNativeTextEdit('30R');
+      expect(edit).not.toBeNull();
+      expect(current.editor.requestNativeTextEdit('different-annotation')).toBeNull();
+      expect(native.enterInEditMode).not.toHaveBeenCalled();
+      if (action === 'clear') current.editor.clearAnnotationSelection();
+      if (action === 'replace-manager')
+        current.eventBus.dispatch('annotationeditoruimanager', {
+          source: current.viewer,
+          uiManager: manager(),
+        });
+      const tool = action === 'change-tool' ? current.editor.setTool('select') : Promise.resolve();
+      focus.resolve(true);
+      await tool;
+      await activation;
+
+      await expect(edit).resolves.toBe(action === 'complete');
+      expect(native.enterInEditMode).toHaveBeenCalledTimes(action === 'complete' ? 1 : 0);
+      for (const layer of uiManager.layers) {
+        expect(layer.updateMode).toHaveBeenCalledTimes(action === 'complete' ? 1 : 0);
+        if (action === 'complete') expect(layer.updateMode).toHaveBeenCalledWith(3);
+      }
+      expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
+      expect(prepare).toHaveBeenCalledTimes(
+        action === 'complete' ||
+          action === 'block-handoff' ||
+          action === 'cancel-during-handoff' ||
+          action === 'replace-native-during-handoff'
+          ? 1
+          : 0,
+      );
+      if (action === 'complete') expect(current.editor.hasContextualEdit).toBe(false);
+      if (action === 'block-handoff') expect(current.editor.hasContextualEdit).toBe(true);
+      stopPreparing();
+      current.editor.destroy();
+    },
+  );
+
+  it.each([
+    ['projection', false],
+    ['resolver', false],
+    ['projection', true],
+    ['resolver', true],
+  ] as const)(
+    'honors settled native text editing from %s with cancellation=%s',
+    async (source, cancelled) => {
+      const current = fixture();
+      const annotation = createdAnnotation('', { id: '30R', type: 'free-text' });
+      if (source === 'projection')
+        current.editor.setAnnotationProjection([{ annotation, stableId: '30R' }]);
+      else current.editor.setAnnotationResolver(async () => annotation);
+      const native = { ...selectedEditor('30R', 3), enterInEditMode: vi.fn() };
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(native),
+      });
+      await expect(current.editor.focusAnnotation('30R', { kind: 'root-click' })).resolves.toBe(
+        'editable',
+      );
+
+      const edit = current.editor.requestNativeTextEdit('30R');
+
+      expect(edit).not.toBeNull();
+      if (cancelled) current.editor.clearAnnotationSelection();
+      await expect(edit).resolves.toBe(!cancelled);
+      expect(native.enterInEditMode).toHaveBeenCalledTimes(cancelled ? 0 : 1);
+      if (!cancelled) expect(current.editor.hasContextualEdit).toBe(false);
+      current.editor.destroy();
+    },
+  );
+
+  it('supersedes a queued static popup when native text takes editing ownership', async () => {
+    const current = fixture();
+    const annotation = createdAnnotation('', { id: '30R', type: 'free-text' });
+    current.editor.setAnnotationProjection([{ annotation, stableId: '30R' }]);
+    const native = { ...selectedEditor('30R', 3), enterInEditMode: vi.fn() };
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: manager(native),
+    });
+    await expect(current.editor.focusAnnotation('30R', { kind: 'root-click' })).resolves.toBe(
+      'editable',
+    );
+    const relayed: Array<PdfAnnotationFocus | null> = [];
+    current.editor.onAnnotationFocus((focus) => {
+      relayed.push(focus);
+    });
+    vi.useFakeTimers();
+    try {
+      current.emitBridgeFocus(annotationFocus('pdf-comment-1', false, { writable: false }));
+
+      await expect(current.editor.requestNativeTextEdit('30R')).resolves.toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(relayed.filter((focus) => focus?.editable === false)).toEqual([]);
+      expect(native.enterInEditMode).toHaveBeenCalledOnce();
+      current.editor.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('materializes a verified persisted annotation before publishing editable focus', async () => {

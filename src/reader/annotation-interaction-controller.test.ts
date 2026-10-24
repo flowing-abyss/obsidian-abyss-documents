@@ -8,6 +8,7 @@ import type { PdfAnnotationFocus } from '../adapters/pdf/pdf-comment-bridge.js';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
 import { asAnnotationId, type DocumentAnnotation } from '../document-core/annotations.js';
 import type {
+  AnnotationEditorCloseReason,
   AnnotationEditorCreation,
   AnnotationEditorPopoverRequest,
 } from './annotation-editor-popover.js';
@@ -84,6 +85,7 @@ function fixture(
   let mode = initialMode;
   const modeListeners = new Set<(value: PdfAnnotationLogicalMode) => void>();
   const selectionListeners = new Set<(value: PdfTextSelection | null) => void>();
+  const nativeTextListeners = new Set<() => boolean>();
   const commitSelection = vi.fn(
     async (
       _token: string,
@@ -127,6 +129,10 @@ function fixture(
       selectionListeners.add(listener);
       return () => selectionListeners.delete(listener);
     },
+    onNativeTextEdit(listener) {
+      nativeTextListeners.add(listener);
+      return () => nativeTextListeners.delete(listener);
+    },
     retainSelection,
     releaseSelection,
     setQuickHighlight,
@@ -134,7 +140,9 @@ function fixture(
   };
   const opened: AnnotationEditorPopoverRequest[] = [];
   const states: QuickHighlightState[] = [];
-  const closeAnnotationEditor = vi.fn(() => true);
+  const closeAnnotationEditor = vi.fn<(reason?: AnnotationEditorCloseReason) => boolean>(
+    () => true,
+  );
   const flushAnnotationEditor = vi.fn(async () => true);
   const openAnnotationEditor = vi.fn((request: AnnotationEditorPopoverRequest) => {
     opened.push(request);
@@ -179,6 +187,8 @@ function fixture(
     flushAnnotationEditor,
     focusAnnotation,
     modeListenerCount: () => modeListeners.size,
+    nativeTextListenerCount: () => nativeTextListeners.size,
+    requestNativeTextEdit: () => [...nativeTextListeners].every((listener) => listener()),
     observedColors,
     observedModes,
     openAnnotationEditor,
@@ -193,6 +203,34 @@ function fixture(
 }
 
 describe('AnnotationInteractionController', () => {
+  it.each([true, false])(
+    'acknowledges native text editing only after metadata can close (%s)',
+    (canClose) => {
+      const test = fixture();
+      test.emitAnnotationFocus({
+        annotations: [nativeAnnotation()],
+        editable: true,
+        position: { x: 10, y: 20 },
+      });
+      const request = test.opened[0];
+      if (request === undefined) throw new Error('Expected an annotation editor.');
+      const closed = vi.spyOn(request, 'onClose');
+      test.closeAnnotationEditor.mockImplementationOnce((reason) => {
+        if (canClose) request.onClose(reason ?? 'external');
+        return canClose;
+      });
+
+      expect(test.requestNativeTextEdit()).toBe(canClose);
+
+      expect(test.closeAnnotationEditor).toHaveBeenCalledWith('native-edit');
+      expect(closed).toHaveBeenCalledTimes(canClose ? 1 : 0);
+      expect(test.abortInteraction).not.toHaveBeenCalled();
+      expect(test.nativeTextListenerCount()).toBe(1);
+      test.controller.destroy();
+      expect(test.nativeTextListenerCount()).toBe(0);
+    },
+  );
+
   it('publishes a successful contextual deletion to the live projection', () => {
     const deleted: DocumentAnnotation[][] = [];
     const test = fixture('neutral', {
