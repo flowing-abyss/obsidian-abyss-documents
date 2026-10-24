@@ -645,3 +645,135 @@ export async function readTenThousandDeleteTrace(): Promise<TenThousandDeleteTra
     return result;
   });
 }
+
+export interface TenThousandDeleteFrameTrace extends TenThousandDeleteStatus {
+  readonly deleteClickTrusted: boolean | null;
+  readonly maxRafGapMs: number;
+}
+
+export async function installTenThousandDeleteFrameTrace(
+  deleteTarget: TenThousandDeleteTarget,
+): Promise<void> {
+  await browser.executeObsidian(({ app }, target) => {
+    interface ProjectionFrameTrace {
+      applyViewportBatch: (events: readonly unknown[]) => boolean;
+    }
+    const view = app.workspace.getLeavesOfType('abyss-document-view')[0]?.view as unknown as
+      { controller?: { annotationProjection: ProjectionFrameTrace } } | undefined;
+    const projection = view?.controller?.annotationProjection;
+    const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+    const reader = document.querySelector<HTMLElement>('[data-abyss-document]');
+    const selector = `.abyss-annotation-card[data-annotation-row-id="${CSS.escape(target.rowId)}"]`;
+    if (
+      projection === undefined ||
+      panel === null ||
+      reader === null ||
+      panel.querySelector(selector) === null
+    )
+      throw new Error('Ten-thousand delete frame boundary is unavailable.');
+    const state = {
+      complete: false,
+      deleteClickTrusted: null as boolean | null,
+      frame: null as number | null,
+      indexedBatches: 0,
+      lastFrameAt: null as number | null,
+      maxRafGapMs: 0,
+      setSize: Number(
+        panel.querySelector('.abyss-annotation-card-row')?.getAttribute('aria-setsize'),
+      ),
+      settledFrames: 0,
+      stopped: false,
+      targetPresent: true,
+    };
+    const originalApply = projection.applyViewportBatch;
+    const apply = (events: readonly unknown[]): boolean => {
+      state.indexedBatches += 1;
+      return originalApply.call(projection, events);
+    };
+    const onClick = (event: MouseEvent): void => {
+      if (
+        state.deleteClickTrusted === null &&
+        event.target instanceof Element &&
+        event.target.closest('[data-action="delete-annotation"]') !== null
+      )
+        state.deleteClickTrusted = event.isTrusted;
+    };
+    const onFrame = (frameAt: number): void => {
+      if (state.stopped || state.complete) return;
+      state.frame = null;
+      if (state.lastFrameAt !== null)
+        state.maxRafGapMs = Math.max(state.maxRafGapMs, frameAt - state.lastFrameAt);
+      state.lastFrameAt = frameAt;
+      state.targetPresent = panel.querySelector(selector) !== null;
+      state.setSize = Number(
+        panel.querySelector('.abyss-annotation-card-row')?.getAttribute('aria-setsize'),
+      );
+      state.settledFrames =
+        !state.targetPresent && state.setSize === 9_999 && state.indexedBatches >= 1
+          ? state.settledFrames + 1
+          : 0;
+      if (state.settledFrames >= 5) {
+        state.complete = true;
+        return;
+      }
+      state.frame = requestAnimationFrame(onFrame);
+    };
+    const status = (): TenThousandDeleteStatus => ({
+      indexedBatches: state.indexedBatches,
+      setSize: state.setSize,
+      settledFrames: state.settledFrames,
+      targetPresent: state.targetPresent,
+    });
+    projection.applyViewportBatch = apply;
+    reader.addEventListener('click', onClick, true);
+    state.frame = requestAnimationFrame(onFrame);
+    (
+      window as Window & {
+        __abyssTask7DeleteFrameTrace?: {
+          cleanup(): TenThousandDeleteFrameTrace;
+          status(): TenThousandDeleteStatus;
+        };
+      }
+    ).__abyssTask7DeleteFrameTrace = {
+      cleanup() {
+        state.stopped = true;
+        if (state.frame !== null) cancelAnimationFrame(state.frame);
+        reader.removeEventListener('click', onClick, true);
+        if (projection.applyViewportBatch === apply) projection.applyViewportBatch = originalApply;
+        return {
+          ...status(),
+          deleteClickTrusted: state.deleteClickTrusted,
+          maxRafGapMs: state.maxRafGapMs,
+        };
+      },
+      status,
+    };
+  }, deleteTarget);
+}
+
+export async function readTenThousandDeleteFrameStatus(): Promise<TenThousandDeleteStatus> {
+  return browser.execute(() => {
+    const monitor = (
+      window as Window & {
+        __abyssTask7DeleteFrameTrace?: { status(): TenThousandDeleteStatus };
+      }
+    ).__abyssTask7DeleteFrameTrace;
+    if (monitor === undefined) throw new Error('Ten-thousand delete frame trace is unavailable.');
+    return monitor.status();
+  });
+}
+
+export async function readTenThousandDeleteFrameTrace(): Promise<TenThousandDeleteFrameTrace> {
+  return browser.execute(() => {
+    const host = window as Window & {
+      __abyssTask7DeleteFrameTrace?: { cleanup(): TenThousandDeleteFrameTrace };
+    };
+    const monitor = host.__abyssTask7DeleteFrameTrace;
+    if (monitor === undefined) throw new Error('Ten-thousand delete frame trace is unavailable.');
+    try {
+      return monitor.cleanup();
+    } finally {
+      delete host.__abyssTask7DeleteFrameTrace;
+    }
+  });
+}

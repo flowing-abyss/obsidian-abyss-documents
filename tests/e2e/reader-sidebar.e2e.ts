@@ -4,13 +4,18 @@ import { Key } from 'webdriverio';
 import { waitForPdfPageReady } from './pdf-ready.js';
 
 import {
+  installTenThousandDeleteFrameTrace,
   installTenThousandDeleteTrace,
   measureNextAnnotationCardNavigation,
+  readTenThousandDeleteFrameStatus,
+  readTenThousandDeleteFrameTrace,
   readTenThousandDeleteStatus,
   readTenThousandDeleteTrace,
   waitForAnimationFrames,
   waitForAnnotationProjectionToSettle,
+  type TenThousandDeleteFrameTrace,
   type TenThousandDeleteStatus,
+  type TenThousandDeleteTarget,
   type TenThousandDeleteTrace,
 } from './annotation-performance-oracle';
 
@@ -564,6 +569,98 @@ async function assertSidebarContinuityMonitor(): Promise<void> {
     emptySurfaceSamples: 0,
     identityBreaks: 0,
   });
+}
+
+async function prepareTenThousandDeleteScenario(): Promise<TenThousandDeleteTarget> {
+  const workingPath = 'Documents/e2e-annotations-10000-delete.pdf';
+  await resetWorkingPdf('Documents/annotations-10000.pdf', workingPath);
+  await openAnnotations(workingPath);
+  await browser.waitUntil(
+    async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
+    { timeout: 15_000, timeoutMsg: 'Annotation delete fixture did not load ten thousand items.' },
+  );
+  await waitForAnnotationWindowToSettle();
+  await waitForAnimationFrames(5);
+
+  expect(await measureNextAnnotationCardNavigation()).toBeLessThan(250);
+  await browser.keys(Key.ArrowUp);
+  await browser.waitUntil(
+    async () =>
+      browser.execute(
+        () =>
+          document.activeElement
+            ?.closest('.abyss-annotation-card-row')
+            ?.getAttribute('aria-posinset') === '1',
+      ),
+    { timeout: 2_000, timeoutMsg: 'Delete target card did not regain keyboard focus.' },
+  );
+
+  const target = await browser.execute(() => {
+    const card = document.querySelector<HTMLButtonElement>('.abyss-annotation-card[tabindex="0"]');
+    const rowId = card?.dataset['annotationRowId'];
+    const annotationId = card?.dataset['annotationId'];
+    if (card === null || rowId === undefined || annotationId === undefined)
+      throw new Error('Delete target identity is incomplete.');
+    return { annotationId, rowId };
+  });
+  await $('.abyss-annotation-card[tabindex="0"]').click({ button: 'right' });
+  await expect($('[data-annotation-editor-popover]')).toBeDisplayed();
+  await expect($('[data-action="delete-annotation"]')).toBeEnabled();
+  await waitForAnnotationProjectionToSettle();
+  await waitForAnimationFrames(5);
+  return target;
+}
+
+async function deleteAnnotationAndExpectFirstFrame(target: TenThousandDeleteTarget): Promise<void> {
+  // Prime each monitor before trusted input; its first raw timestamp stays in the interval window.
+  await waitForAnimationFrames(1);
+  await $('[data-action="delete-annotation"]').click();
+  const firstFrame = await browser.execute(
+    (rowId) =>
+      new Promise<{ readonly cards: number; readonly targetPresent: boolean }>((resolve) => {
+        requestAnimationFrame(() => {
+          const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
+          resolve({
+            cards: panel?.querySelectorAll('.abyss-annotation-card').length ?? 0,
+            targetPresent:
+              panel?.querySelector(
+                `.abyss-annotation-card[data-annotation-row-id="${CSS.escape(rowId)}"]`,
+              ) !== null,
+          });
+        });
+      }),
+    target.rowId,
+  );
+  expect(firstFrame.targetPresent).toBe(false);
+  expect(firstFrame.cards).toBeGreaterThan(0);
+}
+
+async function waitForTenThousandDeleteConvergence(
+  readStatus: () => Promise<TenThousandDeleteStatus>,
+): Promise<void> {
+  let lastStatus: TenThousandDeleteStatus | null = null;
+  try {
+    await browser.waitUntil(
+      async () => {
+        lastStatus = await readStatus();
+        return (
+          !lastStatus.targetPresent &&
+          lastStatus.indexedBatches >= 1 &&
+          lastStatus.settledFrames >= 5 &&
+          lastStatus.setSize === 9_999
+        );
+      },
+      {
+        interval: 0,
+        timeout: 10_000,
+        timeoutMsg: 'Ten-thousand delete projection did not converge.',
+      },
+    );
+  } catch (cause) {
+    throw new Error(
+      `Ten-thousand delete projection did not converge: ${JSON.stringify(lastStatus)}; ${String(cause)}`,
+    );
+  }
 }
 
 describe('PDF reader sidebar', () => {
@@ -1965,93 +2062,14 @@ describe('PDF reader sidebar', () => {
   });
 
   it('deletes one annotation from ten thousand without replacing unrelated mounted content', async () => {
-    const workingPath = 'Documents/e2e-annotations-10000-delete.pdf';
-    await resetWorkingPdf('Documents/annotations-10000.pdf', workingPath);
-    await openAnnotations(workingPath);
-    await browser.waitUntil(
-      async () => (await $('.abyss-annotation-card-row').getAttribute('aria-setsize')) === '10000',
-      { timeout: 15_000, timeoutMsg: 'Annotation delete fixture did not load ten thousand items.' },
-    );
-    await waitForAnnotationWindowToSettle();
-    await waitForAnimationFrames(5);
-
-    expect(await measureNextAnnotationCardNavigation()).toBeLessThan(250);
-    await browser.keys(Key.ArrowUp);
-    await browser.waitUntil(
-      async () =>
-        browser.execute(
-          () =>
-            document.activeElement
-              ?.closest('.abyss-annotation-card-row')
-              ?.getAttribute('aria-posinset') === '1',
-        ),
-      { timeout: 2_000, timeoutMsg: 'Delete target card did not regain keyboard focus.' },
-    );
-
-    const target = await browser.execute(() => {
-      const card = document.querySelector<HTMLButtonElement>(
-        '.abyss-annotation-card[tabindex="0"]',
-      );
-      const rowId = card?.dataset['annotationRowId'];
-      const annotationId = card?.dataset['annotationId'];
-      if (card === null || rowId === undefined || annotationId === undefined)
-        throw new Error('Delete target identity is incomplete.');
-      return { annotationId, rowId };
-    });
-    await $('.abyss-annotation-card[tabindex="0"]').click({ button: 'right' });
-    await expect($('[data-annotation-editor-popover]')).toBeDisplayed();
-    await expect($('[data-action="delete-annotation"]')).toBeEnabled();
-    await waitForAnnotationProjectionToSettle();
-    await waitForAnimationFrames(5);
+    const target = await prepareTenThousandDeleteScenario();
     await installTenThousandDeleteTrace(target);
 
     let trace: TenThousandDeleteTrace | null = null;
     try {
-      await $('[data-action="delete-annotation"]').click();
-      const firstFrame = await browser.execute(
-        (rowId) =>
-          new Promise<{ readonly cards: number; readonly targetPresent: boolean }>((resolve) => {
-            requestAnimationFrame(() => {
-              const panel = document.querySelector<HTMLElement>(
-                '[data-sidebar-panel="annotations"]',
-              );
-              resolve({
-                cards: panel?.querySelectorAll('.abyss-annotation-card').length ?? 0,
-                targetPresent:
-                  panel?.querySelector(
-                    `.abyss-annotation-card[data-annotation-row-id="${CSS.escape(rowId)}"]`,
-                  ) !== null,
-              });
-            });
-          }),
-        target.rowId,
-      );
-      expect(firstFrame.targetPresent).toBe(false);
-      expect(firstFrame.cards).toBeGreaterThan(0);
+      await deleteAnnotationAndExpectFirstFrame(target);
 
-      let lastStatus: TenThousandDeleteStatus | null = null;
-      try {
-        await browser.waitUntil(
-          async () => {
-            lastStatus = await readTenThousandDeleteStatus();
-            return (
-              !lastStatus.targetPresent &&
-              lastStatus.indexedBatches >= 1 &&
-              lastStatus.settledFrames >= 5 &&
-              lastStatus.setSize === 9_999
-            );
-          },
-          {
-            interval: 0,
-            timeout: 10_000,
-            timeoutMsg: 'Ten-thousand delete projection did not converge.',
-          },
-        );
-      } catch (cause) {
-        throw new Error(
-          `Ten-thousand delete projection did not converge: ${JSON.stringify(lastStatus)}; ${String(cause)}`,
-        );
-      }
+      await waitForTenThousandDeleteConvergence(readTenThousandDeleteStatus);
       trace = await readTenThousandDeleteTrace();
     } finally {
       if (trace === null) {
@@ -2091,12 +2109,40 @@ describe('PDF reader sidebar', () => {
     });
     expect(trace.renderCalls).toBeGreaterThanOrEqual(2);
     expect(trace.renderCalls).toBeLessThanOrEqual(3);
-    expect(trace.maxRafGapMs).toBeLessThan(100);
     expect(trace.mutationSamples).toBeGreaterThan(0);
     expect(trace.settledFrames).toBeGreaterThanOrEqual(5);
     expect(trace.baselineNativeSemanticCount).toBeGreaterThan(1);
     expect(trace.finalNativeSemanticMismatches).toEqual([]);
     expect(trace.missingRetainedNativeSemanticIds).toEqual([]);
     expect(trace.replacedRetainedNativeSemanticIds.length).toBeGreaterThan(0);
+  });
+
+  it('deletes one annotation from ten thousand within the raw frame budget', async () => {
+    const target = await prepareTenThousandDeleteScenario();
+    await installTenThousandDeleteFrameTrace(target);
+    let trace: TenThousandDeleteFrameTrace | null = null;
+    try {
+      await deleteAnnotationAndExpectFirstFrame(target);
+      await waitForTenThousandDeleteConvergence(readTenThousandDeleteFrameStatus);
+      trace = await readTenThousandDeleteFrameTrace();
+    } finally {
+      if (trace === null) {
+        const traceExists = await browser.execute(
+          () =>
+            (window as Window & { __abyssTask7DeleteFrameTrace?: unknown })
+              .__abyssTask7DeleteFrameTrace !== undefined,
+        );
+        if (traceExists) trace = await readTenThousandDeleteFrameTrace();
+      }
+      if (trace !== null) console.info('[annotation-delete-frame-trace]', JSON.stringify(trace));
+    }
+    expect(trace).toMatchObject({
+      deleteClickTrusted: true,
+      indexedBatches: 1,
+      setSize: 9_999,
+      settledFrames: 5,
+      targetPresent: false,
+    });
+    expect(trace.maxRafGapMs).toBeLessThan(100);
   });
 });
