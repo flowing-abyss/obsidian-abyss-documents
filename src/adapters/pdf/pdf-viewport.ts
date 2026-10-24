@@ -1563,7 +1563,7 @@ export class PdfDocumentViewport implements DocumentViewport {
     if (!isElementTarget(target)) return;
     if (isNativeFreeTextEditingTarget(target)) return;
     if (this.hasRootTextSelection(target)) return;
-    if (this.requestRetargetedNativeTextEdit(event, target)) return;
+    if (this.requestNativeTextEditFromPointer(event, target)) return;
     const annotation = this.annotationActivationTarget(target, event.clientX, event.clientY);
     if (annotation !== null) {
       if (!nativeAnnotationClickShouldPropagate(event, target)) event.stopPropagation();
@@ -1585,8 +1585,8 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.retryPage(this.viewer, page, pageNumber, retry);
   }
 
-  private requestRetargetedNativeTextEdit(event: MouseEvent, target: Element): boolean {
-    const page = this.nativeTextRetargetPage(event, target);
+  private requestNativeTextEditFromPointer(event: MouseEvent, target: Element): boolean {
+    const page = this.nativeTextEntryPage(event, target);
     if (page === null) return false;
     const pageNumber = positiveInteger(Number(page.dataset['pageNumber']));
     if (pageNumber === null) return false;
@@ -1607,12 +1607,23 @@ export class PdfDocumentViewport implements DocumentViewport {
     return false;
   }
 
-  private nativeTextRetargetPage(event: MouseEvent, target: Element): HTMLElement | null {
+  private nativeTextEntryPage(event: MouseEvent, target: Element): HTMLElement | null {
     if (event.detail !== 2 || event.button !== 0 || hasNativeSelectionModifier(event)) return null;
     const page = target.closest<HTMLElement>('.page[data-page-number]');
-    return page !== null && (target === page || target.closest('.canvasWrapper') !== null)
-      ? page
-      : null;
+    return page !== null && this.isNativeTextEntrySurface(target, page) ? page : null;
+  }
+
+  private isNativeTextEntrySurface(target: Element, page: HTMLElement): boolean {
+    if (target.closest('a, button, input, select, textarea') !== null) return false;
+    const nativeText = target.closest('.annotationEditorLayer .freeTextEditor');
+    const editing =
+      nativeText?.querySelector('[contenteditable]:not([contenteditable="false"])') ?? null;
+    if (editing !== null) return false;
+    return (
+      target === page ||
+      target.closest('.canvasWrapper, .annotationLayer .freeTextAnnotation') !== null ||
+      nativeText !== null
+    );
   }
 
   private hasRootTextSelection(target: Element): boolean {
@@ -1664,13 +1675,12 @@ export class PdfDocumentViewport implements DocumentViewport {
   };
 
   private readonly onRootMouseDown = (event: MouseEvent): void => {
-    if (event.button !== 2 || hasNativeSelectionModifier(event)) return;
     const target = event.target;
-    if (
-      !isElementTarget(target) ||
-      this.annotationActivationTarget(target, event.clientX, event.clientY) === null
-    )
-      return;
+    if (!isElementTarget(target)) return;
+    // Chromium can suppress click when PDF.js replaces this press target before mouseup.
+    if (this.requestNativeTextEditFromPointer(event, target)) return;
+    if (event.button !== 2 || hasNativeSelectionModifier(event)) return;
+    if (this.annotationActivationTarget(target, event.clientX, event.clientY) === null) return;
     event.stopPropagation();
   };
 

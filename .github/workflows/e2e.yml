@@ -66,12 +66,53 @@ jobs:
           herbstluftwm &
           sleep 1
 
+      - name: Prepare local Windows crash dumps
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          try {
+            # Local per-executable WER minidumps; no crash-report upload service.
+            # https://learn.microsoft.com/windows/win32/wer/collecting-user-mode-dumps
+            $dumps = Join-Path $destination 'wer'
+            New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+            $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\Obsidian.exe'
+            New-Item -Force -Path $key | Out-Null
+            New-ItemProperty -Path $key -Name DumpFolder -PropertyType ExpandString -Value $dumps -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpType -PropertyType DWord -Value 1 -Force | Out-Null
+            New-ItemProperty -Path $key -Name DumpCount -PropertyType DWord -Value 8 -Force | Out-Null
+          } catch {
+            $_.Exception.Message | Set-Content (Join-Path $destination 'wer-setup-error.txt')
+          }
+
       - name: Run e2e tests
         run: pnpm run test:e2e
         env:
           # Native tooltip and focus assertions require one foreground Obsidian window.
           WDIO_MAX_INSTANCES: 1
           E2E_DIAGNOSTICS_DIR: ${{ runner.os == 'Windows' && format('{0}/e2e-diagnostics', runner.temp) || '' }}
+
+      - name: Collect Windows application failures
+        if: ${{ always() && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $destination = Join-Path $env:RUNNER_TEMP 'e2e-diagnostics'
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          try {
+            $failures = @(Get-WinEvent -FilterHashtable @{
+              LogName = 'Application'; Id = 1000, 1001; StartTime = (Get-Date).AddHours(-1)
+            } -ErrorAction Stop | Where-Object { $_.Message -match 'Obsidian\.exe' -or $_.ToXml() -match 'Obsidian\.exe' } | ForEach-Object {
+              @{ timestamp = $_.TimeCreated; provider = $_.ProviderName; id = $_.Id; message = $_.Message; xml = $_.ToXml() }
+            })
+            ConvertTo-Json -InputObject $failures -Depth 4 | Set-Content (Join-Path $destination 'application-events.json')
+          } catch {
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') {
+              '[]' | Set-Content (Join-Path $destination 'application-events.json')
+            } else {
+              $_.Exception.Message | Set-Content (Join-Path $destination 'application-events-error.txt')
+            }
+          }
 
       - name: Upload Windows native crash diagnostics
         if: ${{ always() && runner.os == 'Windows' }}

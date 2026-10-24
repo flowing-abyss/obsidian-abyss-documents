@@ -226,16 +226,15 @@ export async function installTenThousandDeleteTrace(
       throw new Error('Unrelated mounted card identities are incomplete.');
     const nativeSelector =
       '.annotationLayer [data-annotation-id], .annotationEditorLayer :is(.highlightEditor, .inkEditor, .freeTextEditor)[id]';
-    const visibleNativeBySemanticId = (): ReadonlyMap<string, ReadonlySet<HTMLElement>> => {
-      const result = new Map<string, Set<HTMLElement>>();
-      for (const node of Array.from(document.querySelectorAll<HTMLElement>(nativeSelector))) {
+    const visibleNativeBySemanticId = (
+      result = new Map<string, Set<HTMLElement>>(),
+      reusableSets?: Map<string, Set<HTMLElement>>,
+    ): ReadonlyMap<string, ReadonlySet<HTMLElement>> => {
+      result.clear();
+      for (const node of document.querySelectorAll<HTMLElement>(nativeSelector)) {
+        if (node.hidden !== false) continue;
         const style = getComputedStyle(node);
-        if (
-          node.hidden !== false ||
-          style.display === 'none' ||
-          style.visibility === 'hidden' ||
-          style.opacity === '0'
-        )
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
           continue;
         const dataSemanticId = node.dataset['annotationId']?.trim();
         const semanticId =
@@ -244,9 +243,14 @@ export async function installTenThousandDeleteTrace(
             : (controller.viewport?.annotationEditor?.resolveNativeEditor(node.id.trim())?.id ??
               node.id.trim());
         if (semanticId.length === 0) continue;
-        const nodes = result.get(semanticId) ?? new Set<HTMLElement>();
+        let nodes = result.get(semanticId);
+        if (nodes === undefined) {
+          nodes = reusableSets?.get(semanticId) ?? new Set<HTMLElement>();
+          nodes.clear();
+          reusableSets?.set(semanticId, nodes);
+          result.set(semanticId, nodes);
+        }
         nodes.add(node);
-        result.set(semanticId, nodes);
       }
       return result;
     };
@@ -264,6 +268,11 @@ export async function installTenThousandDeleteTrace(
           target: target.annotationId,
         })}`,
       );
+
+    // Reuse current-sample storage; baseline nodes remain independent identity witnesses.
+    const sampledNativeNodes = new Map<string, Set<HTMLElement>>();
+    const reusableNativeSets = new Map<string, Set<HTMLElement>>();
+    const currentCards = new Map<string, HTMLElement>();
 
     // Diagnostic timestamps start after the baseline native scan.
     const installedAt = performance.now();
@@ -370,8 +379,11 @@ export async function installTenThousandDeleteTrace(
     };
     const sample = (source: 'frame' | 'mutation'): void => {
       const startedAtMs = now();
-      const cards = Array.from(panel.querySelectorAll<HTMLElement>('.abyss-annotation-card'));
-      const currentNativeBySemanticId = visibleNativeBySemanticId();
+      const cards = panel.querySelectorAll<HTMLElement>('.abyss-annotation-card');
+      const currentNativeBySemanticId = visibleNativeBySemanticId(
+        sampledNativeNodes,
+        reusableNativeSets,
+      );
       if (cards.length === 0) {
         if (source === 'frame') state.zeroCardFrames += 1;
         else state.zeroCardMutationSamples += 1;
@@ -387,16 +399,22 @@ export async function installTenThousandDeleteTrace(
           continue;
         }
         const baselineNodes = baselineNativeBySemanticId.get(semanticId);
-        if (
-          baselineNodes !== undefined &&
-          [...currentNodes].every((node) => !baselineNodes.has(node))
-        )
-          state.replacedRetainedNativeSemanticIds.add(semanticId);
+        if (baselineNodes !== undefined) {
+          let retainsBaselineNode = false;
+          for (const node of currentNodes) {
+            if (baselineNodes.has(node)) {
+              retainsBaselineNode = true;
+              break;
+            }
+          }
+          if (!retainsBaselineNode) state.replacedRetainedNativeSemanticIds.add(semanticId);
+        }
       }
-      const signature = cards.map((card) => card.dataset['annotationRowId'] ?? '').join('|');
-      const currentCards = new Map(
-        cards.map((card) => [card.dataset['annotationRowId'] ?? '', card] as const),
+      const signature = Array.from(cards, (card) => card.dataset['annotationRowId'] ?? '').join(
+        '|',
       );
+      currentCards.clear();
+      for (const card of cards) currentCards.set(card.dataset['annotationRowId'] ?? '', card);
       if (signature !== state.previousSignature) {
         state.previousSignature = signature;
         state.mountedBursts += 1;

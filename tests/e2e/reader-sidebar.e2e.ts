@@ -1606,11 +1606,87 @@ describe('PDF reader sidebar', () => {
         `Color meaning tooltip did not become visible: ${JSON.stringify(diagnostic)}; ${String(cause)}`,
       );
     }
-    await movePointerTo(1, 1);
-    await browser.waitUntil(async () => !(await $('.tooltip').isDisplayed()), {
-      timeout: 2_000,
-      timeoutMsg: 'Color meaning tooltip did not close after pointer exit.',
+    const tooltipExitPoint = await browser.execute(() => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const xs = [
+        Math.round(width / 2),
+        24,
+        width - 24,
+        Math.round(width / 4),
+        Math.round((width * 3) / 4),
+      ];
+      const ys = [
+        Math.round(height / 2),
+        Math.round(height / 4),
+        Math.round((height * 3) / 4),
+        height - 24,
+      ];
+      for (const y of ys) {
+        for (const x of xs) {
+          if (x < 16 || y < 64 || x >= width - 16 || y >= height - 16) continue;
+          const hit = document.elementFromPoint(x, y);
+          if (hit === null) continue;
+          if (hit.closest('.tooltip') !== null) continue;
+          let inert = true;
+          for (
+            let element: Element | null = hit;
+            element !== null;
+            element = element.parentElement
+          ) {
+            if (
+              element.hasAttribute('aria-label') ||
+              element.hasAttribute('title') ||
+              getComputedStyle(element).getPropertyValue('-webkit-app-region') === 'drag'
+            ) {
+              inert = false;
+              break;
+            }
+          }
+          if (inert) return { x, y };
+        }
+      }
+      throw new Error(`No inert interior tooltip exit point: ${width}x${height}.`);
     });
+    await movePointerTo(tooltipExitPoint.x, tooltipExitPoint.y);
+    try {
+      await browser.waitUntil(async () => !(await $('.tooltip').isDisplayed()), {
+        timeout: 2_000,
+        timeoutMsg: 'Color meaning tooltip did not close after pointer exit.',
+      });
+    } catch (cause) {
+      const diagnostic = await browser.execute(({ x, y }) => {
+        const hit = document.elementFromPoint(x, y);
+        let dragAncestor: string | null = null;
+        for (let element: Element | null = hit; element !== null; element = element.parentElement) {
+          if (getComputedStyle(element).getPropertyValue('-webkit-app-region') === 'drag') {
+            dragAncestor = element.outerHTML.slice(0, 400);
+            break;
+          }
+        }
+        return {
+          dragAncestor,
+          focused: document.hasFocus(),
+          hovered: document
+            .querySelector('[data-sidebar-panel="annotations"] [data-annotation-color]')
+            ?.matches(':hover'),
+          hit: hit?.outerHTML.slice(0, 400) ?? null,
+          tooltipOwner: hit?.closest('[aria-label], [title]')?.outerHTML.slice(0, 400) ?? null,
+          tooltips: Array.from(document.querySelectorAll<HTMLElement>('.tooltip'), (tooltip) => {
+            const style = getComputedStyle(tooltip);
+            return {
+              display: style.display,
+              hidden: tooltip.hidden,
+              text: tooltip.textContent,
+              visibility: style.visibility,
+            };
+          }),
+        };
+      }, tooltipExitPoint);
+      throw new Error(
+        `Color meaning tooltip did not close after pointer exit: ${JSON.stringify({ point: tooltipExitPoint, ...diagnostic })}; ${String(cause)}`,
+      );
+    }
 
     await browser.execute(() => {
       const reader = document.querySelector<HTMLElement>('.abyss-documents');

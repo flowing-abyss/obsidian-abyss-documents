@@ -79,7 +79,7 @@ export class AnnotationsPanel {
   private displayColors: readonly AnnotationColorFacet[] = [];
   private annotations: readonly DocumentAnnotation[] = [];
   private projectionRows: readonly AnnotationProjectionRow[] | null = null;
-  private provisionalRowIds = new Set<string>();
+  private readonly provisionalRowIds = new Set<string>();
   private filtered: readonly DocumentAnnotation[] = [];
   private filter: AnnotationPanelFilter = { query: '', colors: new Set() };
   private currentPage = 0;
@@ -262,31 +262,29 @@ export class AnnotationsPanel {
     const scrollTop = this.scrollHost.scrollTop;
     const roving = this.captureProjectionRoving();
     this.projectionRows = rows;
-    this.provisionalRowIds = new Set(
-      rows
-        .filter((row) => row.provisionalId !== undefined && row.nativeId === row.provisionalId)
-        .map((row) => row.key),
-    );
-    this.annotations = rows.map((row) => row.annotation);
-    this.rowIds = new WeakMap();
-    this.nativeIds = new WeakMap();
+    this.provisionalRowIds.clear();
+    const annotations = new Array<DocumentAnnotation>(rows.length);
+    const retainedKeys = new Set<string>();
+    let index = 0;
     for (const row of rows) {
+      annotations[index] = row.annotation;
+      index += 1;
+      if (row.provisionalId !== undefined && row.nativeId === row.provisionalId)
+        this.provisionalRowIds.add(row.key);
       this.rowIds.set(row.annotation, row.key);
       this.nativeIds.set(row.annotation, row.nativeId);
+      this.writableRows.set(row.key, row.writable);
+      retainedKeys.add(row.key);
     }
-    const retainedKeys = new Set(rows.map((row) => row.key));
-    this.retainProjectionState(rows, retainedKeys);
+    this.annotations = annotations;
+    this.retainProjectionState(retainedKeys);
     this.renderFacets();
     this.applyFilter();
     this.restoreProjectionRoving(roving);
     this.scrollHost.scrollTop = scrollTop;
   }
 
-  private retainProjectionState(
-    rows: readonly AnnotationProjectionRow[],
-    retainedKeys: ReadonlySet<string>,
-  ): void {
-    for (const row of rows) this.writableRows.set(row.key, row.writable);
+  private retainProjectionState(retainedKeys: ReadonlySet<string>): void {
     for (const key of this.writableRows.keys()) {
       if (!retainedKeys.has(key)) this.writableRows.delete(key);
     }

@@ -1,7 +1,9 @@
+import { execFile } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { appendFile, cp, mkdir, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
+import { promisify } from 'node:util';
 
 type DiagnosticHooks = Pick<WebdriverIO.Config, 'outputDir' | 'beforeSession' | 'before' | 'after'>;
 
@@ -145,6 +147,29 @@ export function createNativeCrashDiagnostics(directory: string | undefined): Dia
         const destination = path.join(root, cid);
         await mkdir(destination, { recursive: true });
         workerDirectory = destination;
+        const binary = capabilities['goog:chromeOptions']?.binary;
+        if (typeof binary === 'string') {
+          try {
+            await promisify(execFile)(
+              'pwsh',
+              [
+                '-NoProfile',
+                '-NonInteractive',
+                '-File',
+                path.join(import.meta.dirname, 'prepare-windows-sandbox.ps1'),
+                '-Installer',
+                binary,
+                '-RepoRoot',
+                path.resolve(import.meta.dirname, '../..'),
+                '-ReportPath',
+                path.join(destination, 'sandbox-acl.json'),
+              ],
+              { windowsHide: true, timeout: 30_000 },
+            );
+          } catch (error) {
+            await reportFailure('sandbox ACL preparation failed', error);
+          }
+        }
         const driverLoggingOptions = {
           ...capabilities['wdio:chromedriverOptions'],
           verbose: true,

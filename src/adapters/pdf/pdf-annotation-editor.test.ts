@@ -162,6 +162,12 @@ function selectedEditor(uid: string, mode: number, elementBeforePopup?: Element)
   };
 }
 
+interface NativeTestCommand {
+  cmd(): void;
+  undo(): void;
+  mustExec?: boolean;
+}
+
 function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
   const layers = Array.from({ length: 3 }, () => ({
     disableClick: vi.fn(),
@@ -169,6 +175,9 @@ function manager(selected: ReturnType<typeof selectedEditor> | null = null) {
     updateMode: vi.fn(),
   }));
   return {
+    addCommands: vi.fn((command: NativeTestCommand) => {
+      if (command.mustExec === true) command.cmd();
+    }),
     commentSelection: vi.fn(),
     delete: vi.fn(),
     disableUserSelect: vi.fn(),
@@ -413,6 +422,116 @@ function activationInternals(editor: PdfAnnotationEditor): AnnotationActivationI
 }
 
 describe('PdfAnnotationEditor lifecycle', () => {
+  it.each([false, true])(
+    'tracks native command registration and replay (mustExec=%s)',
+    (mustExec) => {
+      const current = fixture();
+      const uiManager = manager();
+      const originalAdd = uiManager.addCommands;
+      current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+      const dirty = vi.fn();
+      const mutations: string[] = [];
+      let text = mustExec ? 'original' : 'edited';
+      current.editor.onDirty(dirty);
+      current.editor.onMutation(() => mutations.push(text));
+
+      uiManager.addCommands({
+        cmd: () => {
+          text = 'edited';
+        },
+        undo: () => {
+          text = 'original';
+        },
+        mustExec,
+      });
+      const registered = originalAdd.mock.calls[0]?.[0];
+      if (registered === undefined) throw new Error('Expected a registered native command.');
+      registered.undo();
+      registered.cmd();
+
+      expect(mutations).toEqual(['edited', 'original', 'edited']);
+      expect(dirty.mock.calls).toEqual([[true], [true], [true]]);
+      current.editor.destroy();
+      expect(uiManager.addCommands).toBe(originalAdd);
+      registered.undo();
+      expect(text).toBe('original');
+      expect(mutations).toHaveLength(3);
+    },
+  );
+
+  it('does not publish a failed native command or registration', () => {
+    const current = fixture();
+    const uiManager = manager();
+    const originalAdd = uiManager.addCommands;
+    current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+    const mutation = vi.fn();
+    current.editor.onMutation(mutation);
+    const failure = new Error('Native command failed');
+    expect(() => {
+      uiManager.addCommands({
+        cmd: () => {
+          throw failure;
+        },
+        undo: vi.fn(),
+        mustExec: true,
+      });
+    }).toThrow(failure);
+    originalAdd.mockImplementationOnce(() => {
+      throw failure;
+    });
+    expect(() => {
+      uiManager.addCommands({ cmd: vi.fn(), undo: vi.fn(), mustExec: false });
+    }).toThrow(failure);
+    expect(mutation).not.toHaveBeenCalled();
+    current.editor.destroy();
+  });
+
+  it.each(['rebind', 'detach'] as const)('retires native command observers on %s', (action) => {
+    const current = fixture();
+    const previous = manager();
+    const originalAdd = previous.addCommands;
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager: previous,
+    });
+    const mutation = vi.fn();
+    current.editor.onMutation(mutation);
+    previous.addCommands({ cmd: vi.fn(), undo: vi.fn(), mustExec: false });
+    const registered = originalAdd.mock.calls[0]?.[0];
+    if (registered === undefined) throw new Error('Expected a registered native command.');
+    mutation.mockClear();
+    if (action === 'rebind')
+      current.eventBus.dispatch('annotationeditoruimanager', {
+        source: current.viewer,
+        uiManager: manager(),
+      });
+    else current.editor.detachFromDocument();
+
+    expect(previous.addCommands).toBe(originalAdd);
+    registered.undo();
+    registered.cmd();
+    expect(mutation).not.toHaveBeenCalled();
+    current.editor.destroy();
+  });
+
+  it('commits native text before closing even while interactions are suspended', async () => {
+    const current = fixture();
+    const uiManager = manager();
+    current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+    await current.editor.setTool('freetext');
+    const mutation = vi.fn();
+    current.editor.onMutation(mutation);
+    uiManager.endCurrentEditing.mockImplementation(() => {
+      uiManager.addCommands({ cmd: vi.fn(), undo: vi.fn(), mustExec: false });
+    });
+
+    await current.editor.suspendInteractions();
+
+    expect(uiManager.endCurrentEditing).toHaveBeenCalledOnce();
+    expect(mutation).toHaveBeenCalledOnce();
+    current.editor.destroy();
+  });
+
   it('dismisses a stale token before requiring a live manager', async () => {
     const fixtureValue = fixture();
     fixtureValue.selectionObserver.validate.mockReturnValue('stale');
@@ -1780,6 +1899,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
 
   it.each([
     'complete',
+    'same-selection',
     'clear',
     'replace-manager',
     'change-tool',
@@ -1790,6 +1910,7 @@ describe('PdfAnnotationEditor lifecycle', () => {
     'keeps a native text double-click within its pending activation (%s)',
     async (action) => {
       const current = fixture();
+      const completes = action === 'complete' || action === 'same-selection';
       const prepare = vi.fn(() => {
         if (action === 'cancel-during-handoff') current.editor.clearAnnotationSelection();
         if (action === 'replace-native-during-handoff')
@@ -1811,9 +1932,11 @@ describe('PdfAnnotationEditor lifecycle', () => {
       });
 
       const edit = current.editor.requestNativeTextEdit('30R');
+      const repeatedEdit = completes ? current.editor.requestNativeTextEdit('30R') : null;
       expect(edit).not.toBeNull();
       expect(current.editor.requestNativeTextEdit('different-annotation')).toBeNull();
       expect(native.enterInEditMode).not.toHaveBeenCalled();
+      if (action === 'same-selection') current.editor.selectAnnotation('30R');
       if (action === 'clear') current.editor.clearAnnotationSelection();
       if (action === 'replace-manager')
         current.eventBus.dispatch('annotationeditoruimanager', {
@@ -1825,15 +1948,16 @@ describe('PdfAnnotationEditor lifecycle', () => {
       await tool;
       await activation;
 
-      await expect(edit).resolves.toBe(action === 'complete');
-      expect(native.enterInEditMode).toHaveBeenCalledTimes(action === 'complete' ? 1 : 0);
+      await expect(edit).resolves.toBe(completes);
+      if (repeatedEdit !== null) await expect(repeatedEdit).resolves.toBe(false);
+      expect(native.enterInEditMode).toHaveBeenCalledTimes(completes ? 1 : 0);
       for (const layer of uiManager.layers) {
-        expect(layer.updateMode).toHaveBeenCalledTimes(action === 'complete' ? 1 : 0);
-        if (action === 'complete') expect(layer.updateMode).toHaveBeenCalledWith(3);
+        expect(layer.updateMode).toHaveBeenCalledTimes(completes ? 1 : 0);
+        if (completes) expect(layer.updateMode).toHaveBeenCalledWith(3);
       }
       expect(current.commentBridge.focusAnnotation).toHaveBeenCalledOnce();
       expect(prepare).toHaveBeenCalledTimes(
-        action === 'complete' ||
+        completes ||
           action === 'block-handoff' ||
           action === 'cancel-during-handoff' ||
           action === 'replace-native-during-handoff'

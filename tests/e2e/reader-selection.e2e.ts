@@ -1739,7 +1739,7 @@ async function waitForPassivePersistedTarget(selector: string): Promise<string> 
   }
 }
 
-async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
+async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Promise<void> {
   const inputSelector = activeReaderDescendant(
     '.freeTextEditor.selectedEditor [contenteditable="true"]',
   );
@@ -1811,14 +1811,28 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
         type: event.type,
         detail: event.detail,
         trusted: event.isTrusted,
+        at: performance.now(),
+        id: target.id,
+        connected: target.isConnected,
+        x: event.clientX,
+        y: event.clientY,
         target: target.tagName,
         class: target.getAttribute('class'),
         annotationId: target.closest('[data-annotation-id]')?.getAttribute('data-annotation-id'),
         mode: viewport.viewer?.annotationEditorMode,
       });
     };
-    document.addEventListener('click', tracePointerClick, { capture: true });
-    document.addEventListener('dblclick', tracePointerClick, { capture: true });
+    const pointerTraceEvents = [
+      'pointerdown',
+      'pointerup',
+      'pointercancel',
+      'mousedown',
+      'mouseup',
+      'click',
+      'dblclick',
+    ] as const;
+    for (const type of pointerTraceEvents)
+      document.addEventListener(type, tracePointerClick, { capture: true });
     const onModeRequest = (event: unknown) => {
       const request = event as { editId?: unknown; mode?: unknown };
       modeEvents.push({
@@ -1845,8 +1859,8 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
         stopFocus();
         stopBridgeFocus?.();
         viewport.eventBus?.off('switchannotationeditormode', onModeRequest);
-        document.removeEventListener('click', tracePointerClick, { capture: true });
-        document.removeEventListener('dblclick', tracePointerClick, { capture: true });
+        for (const type of pointerTraceEvents)
+          document.removeEventListener(type, tracePointerClick, { capture: true });
       },
       focusEvents,
       modeEvents,
@@ -1870,7 +1884,16 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
       state;
   });
 
-  await $(nativeSurface).doubleClick();
+  if (selectedNative) {
+    await $(nativeSurface).click();
+    await expect($(nativeEditorSelector)).toBeDisplayed();
+    await expect($(activeReaderDescendant('.freeTextEditor.selectedEditor .internal'))).toHaveText(
+      expect.stringContaining(' caret'),
+    );
+    await $(activeReaderDescendant('.freeTextEditor.selectedEditor')).doubleClick();
+  } else {
+    await $(nativeSurface).doubleClick();
+  }
   const editable = $(inputSelector);
   try {
     await editable.waitForExist({ timeout: 5_000 });
@@ -3395,6 +3418,10 @@ describe('reader selection-first annotations', () => {
         ).click({ button: 'right' });
         await assertEditablePersistedActivation(fixture);
         await assertNativeFreeTextEditingUnaffected();
+        hash = await waitForPdfBytesToChange(workingPath, hash);
+        await reopenPdf(workingPath);
+        await assertFreshNeutralReader(fixture);
+        await assertNativeFreeTextEditingUnaffected(true);
       }
 
       await reopenPdf(workingPath);
@@ -3409,7 +3436,9 @@ describe('reader selection-first annotations', () => {
       await installPersistedActivationTrace(fixture);
       await $('.abyss-annotation-card').click({ button: 'right' });
       await assertEditablePersistedActivation(fixture);
-      await expect($(`${nativeEditorSelector} [aria-label="Comment"]`)).toHaveValue(comment);
+      await expect($(`${nativeEditorSelector} [aria-label="Comment"]`)).toHaveValue(
+        fixture.kind === 'freetext' ? 'Persisted FreeText caret caret' : comment,
+      );
       const deletedId = await $('.abyss-annotation-card').getAttribute('data-annotation-id');
       expect(deletedId).not.toBeNull();
       await $(nativeEditorSelector).$('[data-action="delete-annotation"]').click();
@@ -3886,6 +3915,19 @@ describe('reader selection-first annotations', () => {
       await expect($(nativeEditorSelector)).not.toBeDisplayed();
       hash = await waitForPdfBytesToChange(workingPath, hash);
     }
+
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          () =>
+            document.querySelectorAll('.abyss-annotation-card').length === 2 &&
+            document.querySelector('.abyss-annotation-card[data-annotation-provisional]') === null,
+        ),
+      {
+        timeout: 15_000,
+        timeoutMsg: 'Saved annotations did not receive their persisted identities.',
+      },
+    );
 
     const persistedIds = await browser.execute(() =>
       Array.from(

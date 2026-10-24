@@ -474,6 +474,7 @@ export class ReaderController {
     this.manualSaveOverrideDepth += 1;
     this.wakeDeferredAutomaticSave();
     try {
+      annotationInteractionOf(this.viewport)?.commitNativeTextEdit?.();
       if ((await this.shell?.flushAnnotationEditor()) === false)
         throw new DOMException(
           'The annotation editor still has changes that could not be persisted.',

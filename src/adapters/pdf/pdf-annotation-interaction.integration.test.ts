@@ -106,6 +106,7 @@ function oneShotFixture(options: { readonly deferNeutralMode?: boolean } = {}) {
     },
   });
   const manager = {
+    addCommands: vi.fn(),
     commentSelection: vi.fn(),
     delete: vi.fn(),
     disableUserSelect: vi.fn(),
@@ -383,6 +384,7 @@ describe('PDF annotation interaction integration', () => {
       onSetModified: null as (() => void) | null,
     };
     const manager = {
+      addCommands: vi.fn(),
       commentSelection: vi.fn(),
       delete: vi.fn(),
       disableUserSelect: vi.fn(),
@@ -538,6 +540,7 @@ describe('PDF annotation interaction integration', () => {
       uid: 'autosave-target',
     };
     const manager = {
+      addCommands: vi.fn(),
       commentSelection: vi.fn(),
       delete: vi.fn(),
       disableUserSelect: vi.fn(),

@@ -179,6 +179,7 @@ function annotationManager(
   }));
   const editors = new Map(nativeEditors);
   return {
+    addCommands: vi.fn(),
     commentSelection: vi.fn(),
     delete: vi.fn(),
     disableUserSelect: vi.fn(),
@@ -2174,15 +2175,23 @@ describe('PdfDocumentViewport', () => {
   });
 
   it.each([
-    ['accepted', 'page'],
-    ['unowned', 'page'],
-    ['failed', 'page'],
-    ['accepted', 'canvas'],
-    ['unowned', 'canvas'],
-    ['failed', 'canvas'],
+    ['accepted', 'page', 'click'],
+    ['unowned', 'page', 'click'],
+    ['failed', 'page', 'click'],
+    ['accepted', 'canvas', 'click'],
+    ['unowned', 'canvas', 'click'],
+    ['failed', 'canvas', 'click'],
+    ['accepted', 'page', 'mousedown'],
+    ['unowned', 'page', 'mousedown'],
+    ['failed', 'page', 'mousedown'],
+    ['accepted', 'canvas', 'mousedown'],
+    ['unowned', 'canvas', 'mousedown'],
+    ['failed', 'canvas', 'mousedown'],
+    ['accepted', 'static-freetext', 'mousedown'],
+    ['accepted', 'native-freetext', 'mousedown'],
   ] as const)(
-    'preserves a double-click retargeted to a rebuilding FreeText surface (%s, %s)',
-    async (outcome, surface) => {
+    'preserves a double-click retargeted to a rebuilding FreeText surface (%s, %s, %s)',
+    async (outcome, surface, eventType) => {
       const fixture = await mountedViewport(3);
       const editor = fixture.viewport.annotationEditor;
       const page = fixture.host.querySelector<HTMLElement>('[data-page-number="1"]');
@@ -2201,10 +2210,19 @@ describe('PdfDocumentViewport', () => {
       const events: ViewportEvent[] = [];
       fixture.viewport.onEvent((event) => events.push(event));
 
-      const target =
-        surface === 'canvas' ? page.createDiv({ cls: 'canvasWrapper' }).createEl('canvas') : page;
+      let target: HTMLElement = page;
+      if (surface === 'canvas')
+        target = page.createDiv({ cls: 'canvasWrapper' }).createEl('canvas');
+      else if (surface === 'static-freetext')
+        target = page
+          .createDiv({ cls: 'annotationLayer' })
+          .createDiv({ cls: 'freeTextAnnotation' });
+      else if (surface === 'native-freetext')
+        target = page
+          .createDiv({ cls: 'annotationEditorLayer' })
+          .createDiv({ cls: 'freeTextEditor selectedEditor' });
       target.dispatchEvent(
-        new MouseEvent('click', {
+        new MouseEvent(eventType, {
           bubbles: true,
           button: 0,
           detail: 2,
@@ -2215,7 +2233,9 @@ describe('PdfDocumentViewport', () => {
       await Promise.resolve();
 
       expect(request.mock.calls.map(([id]) => id)).toEqual(['overlapping-highlight', '30R']);
-      expect(clearSelection).toHaveBeenCalledTimes(outcome === 'unowned' ? 1 : 0);
+      expect(clearSelection).toHaveBeenCalledTimes(
+        outcome === 'unowned' && eventType === 'click' ? 1 : 0,
+      );
       expect(events.filter((event) => event.type === 'annotation-mutation-error')).toEqual(
         outcome === 'failed'
           ? [{ type: 'annotation-mutation-error', action: 'open-annotation', cause }]

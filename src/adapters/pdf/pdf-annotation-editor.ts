@@ -59,6 +59,7 @@ export type PdfSelectionAction =
 export interface PdfAnnotationInteraction {
   abortInteraction?(message: string): Promise<void>;
   suspendInteractions?(): Promise<void>;
+  commitNativeTextEdit?(): void;
   resumeInteractions?(): void;
   onColor(listener: (color: string) => void): () => void;
   onAnnotationFocus(listener: (focus: PdfAnnotationFocus | null) => void): () => void;
@@ -145,7 +146,14 @@ interface PdfAnnotationModeOptions extends PdfAnnotationToolOptions {
   readonly editId?: string | undefined;
 }
 
+interface PdfNativeCommand {
+  cmd: (this: unknown) => void;
+  undo: (this: unknown) => void;
+  readonly mustExec?: boolean;
+}
+
 interface PdfAnnotationUiManager {
+  addCommands: (this: PdfAnnotationUiManager, command: PdfNativeCommand) => void;
   commentSelection(methodOfCreation?: string): void;
   delete(): void;
   disableUserSelect(value?: boolean): void;
@@ -222,6 +230,7 @@ interface PdfAnnotationEditorDependencies {
 }
 
 interface CallbackOwnership {
+  readonly restoreCommands: () => void;
   readonly ownedEditor: (type: number | null) => void;
   readonly ownedReset: () => void;
   readonly ownedSet: () => void;
@@ -806,7 +815,7 @@ export class PdfAnnotationEditor {
     if (requestedId.length === 0) return false;
     const target = this.projectedTargets.get(requestedId);
     const id = target?.canonicalId ?? requestedId;
-    this.cancelAnnotationActivation('The PDF annotation activation was superseded by selection.');
+    this.cancelSupersededSelection(id);
     return (
       this.dependencies.commentBridge.synchronizeAnnotationSelection?.(
         id,
@@ -819,6 +828,11 @@ export class PdfAnnotationEditor {
     if (this.destroyed) return;
     this.cancelAnnotationActivation('The PDF annotation activation was cleared.');
     this.dependencies.onAnnotationSelectionClear?.();
+  }
+
+  private cancelSupersededSelection(id: string): void {
+    if (this.activeActivation?.id !== id)
+      this.cancelAnnotationActivation('The PDF annotation activation was superseded by selection.');
   }
 
   resolveAnnotationAnchor(stableId: string): DOMRect | null {
@@ -2081,11 +2095,21 @@ export class PdfAnnotationEditor {
     this.interactionsSuspended = true;
     this.cancelQueuedToolIntent('The PDF annotation interaction is closing.');
     try {
+      this.commitNativeTextEdit();
       await this.abortInteraction('The PDF annotation interaction is closing.');
     } catch (cause) {
       this.interactionsSuspended = false;
       throw cause;
     }
+  }
+
+  commitNativeTextEdit(): void {
+    if (this.destroyed || this.contextualEditSession !== null) return;
+    if (
+      this.dependencies.viewer.annotationEditorMode ===
+      this.dependencies.annotationEditorType.FREETEXT
+    )
+      this.manager?.endCurrentEditing();
   }
 
   resumeInteractions(): void {
@@ -3259,6 +3283,7 @@ export class PdfAnnotationEditor {
       this.emitDirty(false);
     };
     this.callbackOwnership = {
+      restoreCommands: this.ownNativeCommands(this.requireManager()),
       ownedEditor,
       ownedReset,
       ownedSet,
@@ -3275,6 +3300,7 @@ export class PdfAnnotationEditor {
     const ownership = this.callbackOwnership;
     this.callbackOwnership = null;
     if (ownership === null) return;
+    ownership.restoreCommands();
     if (this.storage.onAnnotationEditor === ownership.ownedEditor) {
       this.storage.onAnnotationEditor = ownership.previousEditor;
     }
@@ -3284,6 +3310,33 @@ export class PdfAnnotationEditor {
     if (this.storage.onResetModified === ownership.ownedReset) {
       this.storage.onResetModified = ownership.previousReset;
     }
+  }
+
+  private ownNativeCommands(manager: PdfAnnotationUiManager): () => void {
+    const descriptor = Object.getOwnPropertyDescriptor(manager, 'addCommands');
+    const original = manager.addCommands;
+    const revision = this.lifecycleRevision;
+    const notify = (): void => {
+      if (!this.destroyed && this.manager === manager && this.lifecycleRevision === revision)
+        this.notifyNativeMutation();
+    };
+    const observe = (action: (this: unknown) => void): (() => void) =>
+      function (this: unknown): void {
+        action.call(this);
+        notify();
+      };
+    // PDF.js mutates stored editor objects without setting AnnotationStorage dirty.
+    // Commands also retain these callbacks for later native undo/redo replay.
+    const owned = function (this: PdfAnnotationUiManager, command: PdfNativeCommand): void {
+      original.call(this, { ...command, cmd: observe(command.cmd), undo: observe(command.undo) });
+      if (command.mustExec !== true) notify();
+    };
+    manager.addCommands = owned;
+    return () => {
+      if (manager.addCommands !== owned) return;
+      if (descriptor === undefined) Reflect.deleteProperty(manager, 'addCommands');
+      else Object.defineProperty(manager, 'addCommands', descriptor);
+    };
   }
 
   private emitDirty(dirty: boolean): void {
@@ -3429,6 +3482,7 @@ export class PdfAnnotationEditor {
     const data = record(value);
     if (data === null) return false;
     const methods = [
+      'addCommands',
       'commentSelection',
       'delete',
       'disableUserSelect',

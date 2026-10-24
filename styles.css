@@ -6398,7 +6398,7 @@
 }
 
 .abyss-documents .abyss-annotation-editor-popover {
-  position: fixed;
+  position: absolute;
   z-index: calc(var(--layer-modal) + 1);
   box-sizing: border-box;
   display: flex;
