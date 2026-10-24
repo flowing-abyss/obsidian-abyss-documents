@@ -7,7 +7,7 @@ import {
   setReaderPdfjsVersion,
 } from '../../reader-performance.js';
 
-const PDFJS_VERSION = '6.2.108';
+const PDFJS_VERSION = '6.4.299';
 const PDF_EDITOR_DOCUMENT_METRICS = {
   '--freetext-padding': '2px',
   '--outline-width': '2px',

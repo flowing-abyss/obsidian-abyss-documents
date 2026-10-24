@@ -10,6 +10,8 @@
     "@wdio/local-runner",
     "@wdio/mocha-framework",
     "wdio-obsidian-reporter",
+    // Local agent MCP and prompt hooks, outside the plugin dependency graph.
+    "@colbymchenry/codegraph",
   ],
   "include": ["files", "dependencies", "unlisted", "unresolved", "exports", "types", "duplicates"],
 }

@@ -270,7 +270,7 @@ describe('ReaderToolbar', () => {
 
   it('closes the active Fit menu when its disclosure is activated again', () => {
     const entries = captureMenuItems();
-    const close = vi.spyOn(Menu.prototype, 'close');
+    const close = vi.spyOn(Menu.prototype, 'hide');
     const { host, toolbar } = fixture();
     const trigger = host.querySelector<HTMLButtonElement>('[data-control="fit-menu"]');
     if (trigger === null) throw new Error('Expected Fit options.');

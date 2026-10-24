@@ -10,7 +10,7 @@ const MODIFY_CONTENTS = 0x08;
 function pdf(
   options: {
     readonly isPureXfa?: boolean;
-    readonly permissions?: readonly number[] | null;
+    readonly permissions?: ReadonlySet<number> | null;
     readonly signatures?: readonly object[] | null;
   } = {},
 ): PDFDocumentProxy {
@@ -120,7 +120,7 @@ describe('loadPdfAnnotationCapabilities', () => {
     },
     {
       label: 'restricted permissions',
-      document: pdf({ permissions: [0x04, 0x10] }),
+      document: pdf({ permissions: new Set([0x04, 0x10]) }),
       code: 'permission-restricted',
     },
   ] as const)('marks every native writer read-only for $label', async ({ document, code }) => {
@@ -143,5 +143,25 @@ describe('loadPdfAnnotationCapabilities', () => {
     const capabilities = await loadPdfAnnotationCapabilities(pdf(), { MODIFY_CONTENTS });
 
     expect(capabilities.types.highlight.create).toEqual({ available: true });
+  });
+
+  it('allows editing when the PDF.js permission set includes modify contents', async () => {
+    const capabilities = await loadPdfAnnotationCapabilities(
+      pdf({ permissions: new Set([0x04, MODIFY_CONTENTS]) }),
+      { MODIFY_CONTENTS },
+    );
+
+    expect(capabilities.editing.mutation).toEqual({ available: true });
+  });
+
+  it('keeps an empty PDF.js permission set read-only', async () => {
+    const capabilities = await loadPdfAnnotationCapabilities(pdf({ permissions: new Set() }), {
+      MODIFY_CONTENTS,
+    });
+
+    expect(capabilities.editing.mutation).toMatchObject({
+      available: false,
+      reason: { code: 'permission-restricted' },
+    });
   });
 });

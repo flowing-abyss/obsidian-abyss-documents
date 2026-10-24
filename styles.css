@@ -17,32 +17,197 @@
  * limitations under the License.
  */
 
+.abyss-documents {
+  --button-primary-bg-color: var(--button-background-color-primary, light-dark(#0060df, #0df));
+  --button-primary-fg-color: var(--button-text-color-primary, light-dark(#fbfbfe, #15141a));
+  --button-primary-border-color: var(--button-primary-bg-color);
+  --button-primary-active-bg-color: var(
+    --button-background-color-primary-active,
+    light-dark(#054096, #aaf2ff)
+  );
+  --button-primary-active-fg-color: var(--button-primary-fg-color);
+  --button-primary-active-border-color: var(--button-primary-active-bg-color);
+  --button-primary-hover-bg-color: var(
+    --button-background-color-primary-hover,
+    light-dark(#0250bb, #80ebff)
+  );
+  --button-primary-hover-fg-color: var(--button-primary-fg-color);
+  --button-primary-hover-border-color: var(--button-primary-hover-bg-color);
+  --button-primary-disabled-bg-color: var(--button-primary-bg-color);
+  --button-primary-disabled-border-color: var(--button-primary-border-color);
+  --button-primary-disabled-fg-color: var(--button-primary-fg-color);
+
+  --button-secondary-bg-color: var(
+    --button-background-color,
+    light-dark(rgb(21 20 26 / 0.07), rgb(251 251 254 / 0.07))
+  );
+  --button-secondary-fg-color: var(--text-color, light-dark(#15141a, #fbfbfe));
+  --button-secondary-border-color: var(--button-border-color, var(--button-secondary-bg-color));
+  --button-secondary-active-bg-color: var(
+    --button-background-color-active,
+    light-dark(rgb(21 20 26 / 0.21), rgb(251 251 254 / 0.21))
+  );
+  --button-secondary-active-fg-color: var(--button-secondary-fg-color);
+  --button-secondary-active-border-color: var(--button-secondary-bg-color);
+  --button-secondary-hover-bg-color: var(
+    --button-background-color-hover,
+    light-dark(rgb(21 20 26 / 0.14), rgb(251 251 254 / 0.14))
+  );
+  --button-secondary-hover-fg-color: var(--button-secondary-fg-color);
+  --button-secondary-hover-border-color: var(--button-secondary-hover-bg-color);
+  --button-secondary-disabled-bg-color: var(--button-secondary-bg-color);
+  --button-secondary-disabled-border-color: var(--button-secondary-border-color);
+  --button-secondary-disabled-fg-color: var(--button-secondary-fg-color);
+  --button-disabled-opacity: 0.4;
+  --hover-filter: brightness(0.9);
+
+  @media (prefers-color-scheme: dark) {
+    --button-disabled-opacity: 0.6;
+    --hover-filter: brightness(1.4);
+  }
+
+  @media screen and (forced-colors: active) {
+    --button-primary-bg-color: var(--button-background-color-primary, ButtonText);
+    --button-primary-fg-color: var(--button-text-color-primary, ButtonFace);
+    --button-primary-border-color: var(--button-border-color-primary, ButtonText);
+    --button-primary-active-bg-color: var(--button-background-color-primary-active, SelectedItem);
+    --button-primary-active-fg-color: var(--button-text-color-primary-active, HighlightText);
+    --button-primary-active-border-color: var(--button-border-color-primary-active, ButtonText);
+    --button-primary-hover-bg-color: var(--button-background-color-primary-hover, SelectedItem);
+    --button-primary-hover-fg-color: var(--button-text-color-primary-hover, HighlightText);
+    --button-primary-hover-border-color: var(--button-border-color-primary-hover, SelectedItem);
+    --button-primary-disabled-bg-color: var(--button-background-color-primary-disabled, GrayText);
+    --button-primary-disabled-fg-color: var(--button-text-color-primary-disabled, ButtonFace);
+    --button-primary-disabled-border-color: var(--button-border-color-primary-disabled, GrayText);
+
+    --button-secondary-bg-color: var(--button-background-color, ButtonFace);
+    --button-secondary-fg-color: var(--button-text-color, ButtonText);
+    --button-secondary-border-color: var(--button-border-color, ButtonText);
+    --button-secondary-active-bg-color: var(--button-background-color-active, HighlightText);
+    --button-secondary-active-fg-color: var(--button-text-color-active, SelectedItem);
+    --button-secondary-active-border-color: var(--button-border-color-active, ButtonText);
+    --button-secondary-hover-bg-color: var(--button-background-color-hover, HighlightText);
+    --button-secondary-hover-fg-color: var(--button-text-color-hover, SelectedItem);
+    --button-secondary-hover-border-color: var(--button-border-color-hover, SelectedItem);
+    --button-secondary-disabled-fg-color: var(--button-text-color-disabled, GrayText);
+    --button-secondary-disabled-border-color: var(--button-border-color-disabled, GrayText);
+    --button-disabled-opacity: 1;
+    --hover-filter: none;
+  }
+}
+
+.abyss-documents .primaryButton,
+.abyss-documents .secondaryButton {
+  border-radius: var(--button-border-radius, 4px);
+  border: 1px solid;
+  font: menu;
+  font-weight: var(--button-font-weight, 590);
+  font-size: var(--button-font-size, 13px);
+  padding: var(--button-padding, 4px 16px);
+  width: auto;
+  min-height: var(--button-min-height, 32px);
+
+  &:hover {
+    cursor: pointer;
+    filter: var(--hover-filter);
+  }
+
+  > span {
+    color: inherit;
+    font: inherit;
+  }
+
+  &:disabled {
+    pointer-events: none;
+  }
+}
+
+.abyss-documents .primaryButton {
+  color: var(--button-primary-fg-color);
+  background-color: var(--button-primary-bg-color);
+  border-color: var(--button-primary-border-color);
+  opacity: 1;
+
+  &:hover {
+    color: var(--button-primary-hover-fg-color);
+    background-color: var(--button-primary-hover-bg-color);
+    border-color: var(--button-primary-hover-border-color);
+  }
+
+  &:active {
+    color: var(--button-primary-active-fg-color);
+    background-color: var(--button-primary-active-bg-color);
+    border-color: var(--button-primary-active-border-color);
+  }
+
+  &:disabled {
+    background-color: var(--button-primary-disabled-bg-color);
+    border-color: var(--button-primary-disabled-border-color);
+    color: var(--button-primary-disabled-fg-color);
+    opacity: var(--button-disabled-opacity);
+  }
+}
+
+.abyss-documents .secondaryButton {
+  color: var(--button-secondary-fg-color);
+  background-color: var(--button-secondary-bg-color);
+  border-color: var(--button-secondary-border-color);
+
+  &:hover {
+    color: var(--button-secondary-hover-fg-color);
+    background-color: var(--button-secondary-hover-bg-color);
+    border-color: var(--button-secondary-hover-border-color);
+  }
+
+  &:active {
+    color: var(--button-secondary-active-fg-color);
+    background-color: var(--button-secondary-active-bg-color);
+    border-color: var(--button-secondary-active-border-color);
+  }
+
+  &:disabled {
+    background-color: var(--button-secondary-disabled-bg-color);
+    border-color: var(--button-secondary-disabled-border-color);
+    color: var(--button-secondary-disabled-fg-color);
+    opacity: var(--button-disabled-opacity);
+  }
+}
+
 .abyss-documents .messageBar {
   --closing-button-icon: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxwYXRoIGQ9Ik03Ljg1ODIyIDguODQ5MjJMNC44NTMyMiAxMS44NTQyQzQuNzU4OTEgMTEuOTQ1MyA0LjYzMjYxIDExLjk5NTcgNC41MDE1MSAxMS45OTQ2QzQuMzcwNDIgMTEuOTkzNCA0LjI0NTAxIDExLjk0MDggNC4xNTIzMSAxMS44NDgxQzQuMDU5NiAxMS43NTU0IDQuMDA3MDIgMTEuNjMgNC4wMDU4OCAxMS40OTg5QzQuMDA0NzQgMTEuMzY3OCA0LjA1NTE0IDExLjI0MTUgNC4xNDYyMiAxMS4xNDcyTDcuMTUxMjIgOC4xNDIyMlY3Ljg1OTIyTDQuMTQ2MjIgNC44NTMyMkM0LjA1NTE0IDQuNzU4OTEgNC4wMDQ3NCA0LjYzMjYxIDQuMDA1ODggNC41MDE1MUM0LjAwNzAyIDQuMzcwNDIgNC4wNTk2IDQuMjQ1MDEgNC4xNTIzMSA0LjE1MjMxQzQuMjQ1MDEgNC4wNTk2IDQuMzcwNDIgNC4wMDcwMiA0LjUwMTUxIDQuMDA1ODhDNC42MzI2MSA0LjAwNDc0IDQuNzU4OTEgNC4wNTUxNCA0Ljg1MzIyIDQuMTQ2MjJMNy44NTgyMiA3LjE1MTIySDguMTQxMjJMMTEuMTQ2MiA0LjE0NjIyQzExLjI0MDUgNC4wNTUxNCAxMS4zNjY4IDQuMDA0NzQgMTEuNDk3OSA0LjAwNTg4QzExLjYyOSA0LjAwNzAyIDExLjc1NDQgNC4wNTk2IDExLjg0NzEgNC4xNTIzMUMxMS45Mzk4IDQuMjQ1MDEgMTEuOTkyNCA0LjM3MDQyIDExLjk5MzYgNC41MDE1MUMxMS45OTQ3IDQuNjMyNjEgMTEuOTQ0MyA0Ljc1ODkxIDExLjg1MzIgNC44NTMyMkw4Ljg0ODIyIDcuODU5MjJWOC4xNDIyMkwxMS44NTMyIDExLjE0NzJDMTEuOTQ0MyAxMS4yNDE1IDExLjk5NDcgMTEuMzY3OCAxMS45OTM2IDExLjQ5ODlDMTEuOTkyNCAxMS42MyAxMS45Mzk4IDExLjc1NTQgMTEuODQ3MSAxMS44NDgxQzExLjc1NDQgMTEuOTQwOCAxMS42MjkgMTEuOTkzNCAxMS40OTc5IDExLjk5NDZDMTEuMzY2OCAxMS45OTU3IDExLjI0MDUgMTEuOTQ1MyAxMS4xNDYyIDExLjg1NDJMOC4xNDEyMiA4Ljg0OTIyTDguMTQyMjIgOC44NTAyMkw3Ljg1ODIyIDguODQ5MjJaIiBmaWxsPSJibGFjayIvPgo8L3N2Zz4K);
   --message-bar-close-button-color: var(--text-primary-color);
   --message-bar-close-button-color-hover: var(--text-primary-color);
-  --message-bar-close-button-border-radius: 4px;
+  --message-bar-close-button-border-radius: var(--border-radius-small, 4px);
   --message-bar-close-button-border: none;
-  --message-bar-close-button-hover-bg-color: light-dark(
-    rgb(21 20 26 / 0.14),
-    rgb(251 251 254 / 0.14)
+  --message-bar-close-button-hover-bg-color: var(
+    --button-background-color-hover,
+    light-dark(rgb(21 20 26 / 0.14), rgb(251 251 254 / 0.14))
   );
-  --message-bar-close-button-active-bg-color: light-dark(
-    rgb(21 20 26 / 0.21),
-    rgb(251 251 254 / 0.21)
+  --message-bar-close-button-active-bg-color: var(
+    --button-background-color-active,
+    light-dark(rgb(21 20 26 / 0.21), rgb(251 251 254 / 0.21))
   );
-  --message-bar-close-button-focus-bg-color: light-dark(
-    rgb(21 20 26 / 0.07),
-    rgb(251 251 254 / 0.07)
+  --message-bar-close-button-focus-bg-color: var(
+    --button-background-color,
+    light-dark(rgb(21 20 26 / 0.07), rgb(251 251 254 / 0.07))
   );
 
   @media screen and (forced-colors: active) {
-    --message-bar-close-button-color: ButtonText;
-    --message-bar-close-button-border: 1px solid ButtonText;
-    --message-bar-close-button-hover-bg-color: ButtonText;
-    --message-bar-close-button-active-bg-color: ButtonText;
-    --message-bar-close-button-focus-bg-color: ButtonText;
-    --message-bar-close-button-color-hover: HighlightText;
+    --message-bar-close-button-color: var(--button-text-color, ButtonText);
+    --message-bar-close-button-border: 1px solid var(--button-border-color, ButtonText);
+    --message-bar-close-button-hover-bg-color: var(
+      --button-background-color-hover,
+      SelectedItemText
+    );
+    --message-bar-close-button-active-bg-color: var(
+      --button-background-color-hover,
+      SelectedItemText
+    );
+    --message-bar-close-button-focus-bg-color: var(
+      --button-background-color-hover,
+      SelectedItemText
+    );
+    --message-bar-close-button-color-hover: var(--button-text-color-hover, SelectedItem);
   }
 
   display: flex;
@@ -55,8 +220,7 @@
   -webkit-user-select: none;
   -moz-user-select: none;
   user-select: none;
-
-  border-radius: 4px;
+  border-radius: var(--border-radius-small, 4px);
 
   border: 1px solid var(--message-bar-border-color);
   background: var(--message-bar-bg-color);
@@ -140,40 +304,16 @@
 }
 
 .abyss-documents #editorUndoBar {
-  --text-primary-color: light-dark(#15141a, #fbfbfe);
-
   --message-bar-icon: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KIDxwYXRoIGQ9Ik03LjYyNSAwLjVDNi42NDAwOSAwLjUgNS42NjQ4MiAwLjY5Mzk5MyA0Ljc1NDg3IDEuMDcwOUMzLjg0NDkzIDEuNDQ3ODEgMy4wMTgxNCAyLjAwMDI2IDIuMzIxNyAyLjY5NjdDMS42MjUyNiAzLjM5MzE0IDEuMDcyODEgNC4yMTk5MyAwLjY5NTkwNCA1LjEyOTg3QzAuMzE4OTkzIDYuMDM5ODIgMC4xMjUgNy4wMTUwOSAwLjEyNSA4QzAuMTI1IDguOTg0OTEgMC4zMTg5OTMgOS45NjAxOCAwLjY5NTkwNCAxMC44NzAxQzEuMDcyODEgMTEuNzgwMSAxLjYyNTI2IDEyLjYwNjkgMi4zMjE3IDEzLjMwMzNDMy4wMTgxNCAxMy45OTk3IDMuODQ0OTMgMTQuNTUyMiA0Ljc1NDg3IDE0LjkyOTFDNS42NjQ4MiAxNS4zMDYgNi42NDAwOSAxNS41IDcuNjI1IDE1LjVDOS42MTQxMiAxNS41IDExLjUyMTggMTQuNzA5OCAxMi45MjgzIDEzLjMwMzNDMTQuMzM0OCAxMS44OTY4IDE1LjEyNSA5Ljk4OTEyIDE1LjEyNSA4QzE1LjEyNSA2LjAxMDg4IDE0LjMzNDggNC4xMDMyMiAxMi45MjgzIDIuNjk2N0MxMS41MjE4IDEuMjkwMTggOS42MTQxMiAwLjUgNy42MjUgMC41Wk04LjI1IDExLjM3NUM4LjI1IDExLjU0MDggOC4xODQxNSAxMS42OTk3IDguMDY2OTQgMTEuODE2OUM3Ljk0OTczIDExLjkzNDIgNy43OTA3NiAxMiA3LjYyNSAxMkM3LjQ1OTI0IDEyIDcuMzAwMjcgMTEuOTM0MiA3LjE4MzA2IDExLjgxNjlDNy4wNjU4NSAxMS42OTk3IDcgMTEuNTQwOCA3IDExLjM3NVY2LjkzOEM3IDYuNzcyMjQgNy4wNjU4NSA2LjYxMzI3IDcuMTgzMDYgNi40OTYwNkM3LjMwMDI3IDYuMzc4ODUgNy40NTkyNCA2LjMxMyA3LjYyNSA2LjMxM0M3Ljc5MDc2IDYuMzEzIDcuOTQ5NzMgNi4zNzg4NSA4LjA2Njk0IDYuNDk2MDZDOC4xODQxNSA2LjYxMzI3IDguMjUgNi43NzIyNCA4LjI1IDYuOTM4VjExLjM3NVpNOC4yNSA1TDggNS4yNUg3LjI1TDcgNVY0LjI1TDcuMjUgNEg4TDguMjUgNC4yNVY1WiIgZmlsbD0iYmxhY2siIC8+Cjwvc3ZnPgo=);
   --message-bar-icon-color: light-dark(#0060df, #73a7f3);
   --message-bar-bg-color: light-dark(#deeafc, #003070);
   --message-bar-fg-color: var(--text-primary-color);
   --message-bar-border-color: light-dark(rgb(0 0 0 / 0.08), rgb(255 255 255 / 0.08));
 
-  --undo-button-bg-color: light-dark(rgb(21 20 26 / 0.07), rgb(255 255 255 / 0.08));
-  --undo-button-bg-color-hover: light-dark(rgb(21 20 26 / 0.14), rgb(255 255 255 / 0.14));
-  --undo-button-bg-color-active: light-dark(rgb(21 20 26 / 0.21), rgb(255 255 255 / 0.21));
-
-  --undo-button-border: 1px solid light-dark(#0060df, #0df);
-
-  --undo-button-fg-color: var(--message-bar-fg-color);
-  --undo-button-fg-color-hover: var(--undo-button-fg-color);
-  --undo-button-fg-color-active: var(--undo-button-fg-color);
-
   @media screen and (forced-colors: active) {
-    --text-primary-color: CanvasText;
-
     --message-bar-icon-color: CanvasText;
     --message-bar-bg-color: Canvas;
     --message-bar-border-color: CanvasText;
-
-    --undo-button-bg-color: ButtonText;
-    --undo-button-bg-color-hover: SelectedItem;
-    --undo-button-bg-color-active: SelectedItem;
-
-    --undo-button-fg-color: ButtonFace;
-    --undo-button-fg-color-hover: SelectedItemText;
-    --undo-button-fg-color-active: SelectedItemText;
-
-    --undo-button-border: none;
   }
 
   position: fixed;
@@ -195,26 +335,8 @@
   }
 
   #editorUndoBarUndoButton {
-    border-radius: 4px;
-    font-weight: 590;
-    line-height: 19.5px;
-    color: var(--undo-button-fg-color);
-    border: var(--undo-button-border);
-    padding: 4px 16px;
     margin-inline-start: 8px;
-    height: 32px;
-
-    background-color: var(--undo-button-bg-color);
-
-    &:hover {
-      background-color: var(--undo-button-bg-color-hover);
-      color: var(--undo-button-fg-color-hover);
-    }
-
-    &:active {
-      background-color: var(--undo-button-bg-color-active);
-      color: var(--undo-button-fg-color-active);
-    }
+    border-color: var(--color-accent-primary, light-dark(#0060df, #0df));
   }
 
   > div {
@@ -223,105 +345,28 @@
 }
 
 .abyss-documents .dialog {
-  --dialog-bg-color: light-dark(white, #1c1b22);
-  --dialog-border-color: light-dark(white, #1c1b22);
+  --dialog-bg-color: var(--background-color-canvas, light-dark(white, #1c1b22));
+  --dialog-border-color: var(--background-color-canvas, light-dark(white, #1c1b22));
   --dialog-shadow: 0 2px 14px 0 light-dark(rgb(58 57 68 / 0.2), #15141a);
-  --text-primary-color: light-dark(#15141a, #fbfbfe);
   --text-secondary-color: light-dark(#5b5b66, #cfcfd8);
-  --hover-filter: brightness(0.9);
-  --link-fg-color: light-dark(#0060df, #0df);
-  --link-hover-fg-color: light-dark(#0250bb, #80ebff);
   --separator-color: light-dark(#f0f0f4, #52525e);
-
-  --textarea-border-color: #8f8f9d;
+  --textarea-border-color: var(--border-color-interactive, #8f8f9d);
   --textarea-bg-color: light-dark(white, #42414d);
   --textarea-fg-color: var(--text-secondary-color);
-
-  --radio-bg-color: light-dark(#f0f0f4, #2b2a33);
-  --radio-checked-bg-color: light-dark(#fbfbfe, #15141a);
-  --radio-border-color: #8f8f9d;
-  --radio-checked-border-color: light-dark(#0060df, #0df);
-
-  --button-secondary-bg-color: light-dark(rgb(21 20 26 / 0.07), rgb(251 251 254 / 0.07));
-  --button-secondary-fg-color: var(--text-primary-color);
-  --button-secondary-border-color: var(--button-secondary-bg-color);
-  --button-secondary-active-bg-color: light-dark(rgb(21 20 26 / 0.21), rgb(251 251 254 / 0.21));
-  --button-secondary-active-fg-color: var(--button-secondary-fg-color);
-  --button-secondary-active-border-color: var(--button-secondary-bg-color);
-  --button-secondary-hover-bg-color: light-dark(rgb(21 20 26 / 0.14), rgb(251 251 254 / 0.14));
-  --button-secondary-hover-fg-color: var(--button-secondary-fg-color);
-  --button-secondary-hover-border-color: var(--button-secondary-hover-bg-color);
-  --button-secondary-disabled-bg-color: var(--button-secondary-bg-color);
-  --button-secondary-disabled-border-color: var(--button-secondary-border-color);
-  --button-secondary-disabled-fg-color: var(--button-secondary-fg-color);
-
-  --button-primary-bg-color: light-dark(#0060df, #0df);
-  --button-primary-fg-color: light-dark(#fbfbfe, #15141a);
-  --button-primary-border-color: var(--button-primary-bg-color);
-  --button-primary-active-bg-color: light-dark(#054096, #aaf2ff);
-  --button-primary-active-fg-color: var(--button-primary-fg-color);
-  --button-primary-active-border-color: var(--button-primary-active-bg-color);
-  --button-primary-hover-bg-color: light-dark(#0250bb, #80ebff);
-  --button-primary-hover-fg-color: var(--button-primary-fg-color);
-  --button-primary-hover-border-color: var(--button-primary-hover-bg-color);
-  --button-primary-disabled-bg-color: var(--button-primary-bg-color);
-  --button-primary-disabled-border-color: var(--button-primary-border-color);
-  --button-primary-disabled-fg-color: var(--button-primary-fg-color);
-  --button-disabled-opacity: 0.4;
 
   --input-text-bg-color: light-dark(white, #42414d);
   --input-text-fg-color: var(--text-primary-color);
 
-  @media (prefers-color-scheme: dark) {
-    --hover-filter: brightness(1.4);
-    --button-disabled-opacity: 0.6;
-  }
-
   @media screen and (forced-colors: active) {
-    --dialog-bg-color: Canvas;
-    --dialog-border-color: CanvasText;
+    --dialog-bg-color: var(--background-color-canvas, Canvas);
+    --dialog-border-color: var(--border-color, CanvasText);
     --dialog-shadow: none;
-    --text-primary-color: CanvasText;
     --text-secondary-color: CanvasText;
-    --hover-filter: none;
-    --link-fg-color: LinkText;
-    --link-hover-fg-color: LinkText;
     --separator-color: CanvasText;
 
     --textarea-border-color: ButtonBorder;
     --textarea-bg-color: Field;
     --textarea-fg-color: ButtonText;
-
-    --radio-bg-color: ButtonFace;
-    --radio-checked-bg-color: ButtonFace;
-    --radio-border-color: ButtonText;
-    --radio-checked-border-color: ButtonText;
-
-    --button-secondary-bg-color: ButtonFace;
-    --button-secondary-fg-color: ButtonText;
-    --button-secondary-border-color: ButtonText;
-    --button-secondary-active-bg-color: HighlightText;
-    --button-secondary-active-fg-color: SelectedItem;
-    --button-secondary-active-border-color: ButtonText;
-    --button-secondary-hover-bg-color: HighlightText;
-    --button-secondary-hover-fg-color: SelectedItem;
-    --button-secondary-hover-border-color: SelectedItem;
-    --button-secondary-disabled-fg-color: GrayText;
-    --button-secondary-disabled-border-color: GrayText;
-
-    --button-primary-bg-color: ButtonText;
-    --button-primary-fg-color: ButtonFace;
-    --button-primary-border-color: ButtonText;
-    --button-primary-active-bg-color: SelectedItem;
-    --button-primary-active-fg-color: HighlightText;
-    --button-primary-active-border-color: ButtonText;
-    --button-primary-hover-bg-color: SelectedItem;
-    --button-primary-hover-fg-color: HighlightText;
-    --button-primary-hover-border-color: SelectedItem;
-    --button-primary-disabled-bg-color: GrayText;
-    --button-primary-disabled-fg-color: ButtonFace;
-    --button-primary-disabled-border-color: GrayText;
-    --button-disabled-opacity: 1;
 
     --input-text-bg-color: Field;
     --input-text-fg-color: FieldText;
@@ -331,7 +376,7 @@
   font-size: 13px;
   font-weight: 400;
   line-height: 150%;
-  border-radius: 4px;
+  border-radius: var(--border-radius-medium, 4px);
   padding: 12px 16px;
   border: 1px solid var(--dialog-border-color);
   background: var(--dialog-bg-color);
@@ -373,6 +418,11 @@
       gap: 12px;
       align-self: flex-end;
     }
+    input:is([type='checkbox'], [type='radio']) {
+      accent-color: var(--color-accent-primary, light-dark(#0060df, #0df));
+      width: var(--checkbox-size, 16px);
+      height: var(--checkbox-size, 16px);
+    }
 
     .radio {
       display: flex;
@@ -385,27 +435,6 @@
         gap: 8px;
         align-self: stretch;
         align-items: center;
-
-        input {
-          -webkit-appearance: none;
-          -moz-appearance: none;
-          appearance: none;
-          box-sizing: border-box;
-          width: 16px;
-          height: 16px;
-          border-radius: 50%;
-          background-color: var(--radio-bg-color);
-          border: 1px solid var(--radio-border-color);
-
-          &:hover {
-            filter: var(--hover-filter);
-          }
-
-          &:checked {
-            background-color: var(--radio-checked-bg-color);
-            border: 4px solid var(--radio-checked-border-color);
-          }
-        }
       }
 
       > .radioLabel {
@@ -424,14 +453,15 @@
     }
 
     button:not(:is(.toggle-button, .closeButton, .clearInputButton)) {
-      border-radius: 4px;
-      border: 1px solid;
+      border-radius: var(--button-border-radius, 4px);
+      border-width: 1px;
+      border-style: solid;
       font: menu;
-      font-weight: 590;
-      font-size: 13px;
-      padding: 4px 16px;
+      font-weight: var(--button-font-weight, 590);
+      font-size: var(--button-font-size, 13px);
+      padding: var(--button-padding, 4px 16px);
       width: auto;
-      height: 32px;
+      min-height: var(--button-min-height, 32px);
 
       &:hover {
         cursor: pointer;
@@ -442,58 +472,6 @@
         color: inherit;
         font: inherit;
       }
-
-      &.secondaryButton {
-        color: var(--button-secondary-fg-color);
-        background-color: var(--button-secondary-bg-color);
-        border-color: var(--button-secondary-border-color);
-
-        &:hover {
-          color: var(--button-secondary-hover-fg-color);
-          background-color: var(--button-secondary-hover-bg-color);
-          border-color: var(--button-secondary-hover-border-color);
-        }
-
-        &:active {
-          color: var(--button-secondary-active-fg-color);
-          background-color: var(--button-secondary-active-bg-color);
-          border-color: var(--button-secondary-active-border-color);
-        }
-
-        &:disabled {
-          background-color: var(--button-secondary-disabled-bg-color);
-          border-color: var(--button-secondary-disabled-border-color);
-          color: var(--button-secondary-disabled-fg-color);
-          opacity: var(--button-disabled-opacity);
-        }
-      }
-
-      &.primaryButton {
-        color: var(--button-primary-fg-color);
-        background-color: var(--button-primary-bg-color);
-        border-color: var(--button-primary-border-color);
-        opacity: 1;
-
-        &:hover {
-          color: var(--button-primary-hover-fg-color);
-          background-color: var(--button-primary-hover-bg-color);
-          border-color: var(--button-primary-hover-border-color);
-        }
-
-        &:active {
-          color: var(--button-primary-active-fg-color);
-          background-color: var(--button-primary-active-bg-color);
-          border-color: var(--button-primary-active-border-color);
-        }
-
-        &:disabled {
-          background-color: var(--button-primary-disabled-bg-color);
-          border-color: var(--button-primary-disabled-border-color);
-          color: var(--button-primary-disabled-fg-color);
-          opacity: var(--button-disabled-opacity);
-        }
-      }
-
       &:disabled {
         pointer-events: none;
       }
@@ -513,7 +491,7 @@
       resize: none;
       margin: 0;
       box-sizing: border-box;
-      border-radius: 4px;
+      border-radius: var(--border-radius-small, 4px);
       border: 1px solid var(--textarea-border-color);
       background: var(--textarea-bg-color);
       color: var(--textarea-fg-color);
@@ -1633,54 +1611,41 @@
 }
 
 .abyss-documents .toggle-button {
-  --button-background-color: color-mix(in srgb, currentColor 7%, transparent);
-  --button-background-color-hover: color-mix(in srgb, currentColor 14%, transparent);
-  --button-background-color-active: color-mix(in srgb, currentColor 21%, transparent);
-  --color-accent-primary: light-dark(#0060df, #0df);
-  --color-accent-primary-hover: light-dark(#0250bb, #80ebff);
-  --color-accent-primary-active: light-dark(#054096, #aaf2ff);
-  --border-radius-circle: 9999px;
-  --border-width: 1px;
-  --size-item-small: 16px;
-  --size-item-large: 32px;
-  --color-canvas: light-dark(white, #1c1b22);
-  --background-color-canvas: var(--color-canvas);
-  --border-color-interactive: light-dark(#8f8f9d, #f9f9fa);
-  --border-color-interactive-hover: var(--border-color-interactive);
-  --border-color-interactive-active: var(--border-color-interactive);
-  --focus-outline-offset: 2px;
-
-  @media (forced-colors: active) {
-    --color-accent-primary: ButtonText;
-    --color-accent-primary-hover: SelectedItem;
-    --color-accent-primary-active: SelectedItem;
-    --button-background-color: ButtonFace;
-    --border-color-interactive: ButtonText;
-    --border-color-interactive-hover: SelectedItem;
-    --border-color-interactive-active: ButtonText;
-    --color-canvas: ButtonText;
-    --background-color-canvas: Canvas;
-  }
-}
-
-.abyss-documents .toggle-button {
-  --toggle-background-color: var(--button-background-color);
-  --toggle-background-color-hover: var(--button-background-color-hover);
-  --toggle-background-color-active: var(--button-background-color-active);
-  --toggle-background-color-pressed: var(--color-accent-primary);
-  --toggle-background-color-pressed-hover: var(--color-accent-primary-hover);
-  --toggle-background-color-pressed-active: var(--color-accent-primary-active);
-  --toggle-border-color: var(--border-color-interactive);
+  --toggle-background-color: var(
+    --button-background-color,
+    color-mix(in srgb, currentColor 7%, transparent)
+  );
+  --toggle-background-color-hover: var(
+    --button-background-color-hover,
+    color-mix(in srgb, currentColor 14%, transparent)
+  );
+  --toggle-background-color-active: var(
+    --button-background-color-active,
+    color-mix(in srgb, currentColor 21%, transparent)
+  );
+  --toggle-background-color-pressed: var(--color-accent-primary, light-dark(#0060df, #0df));
+  --toggle-background-color-pressed-hover: var(
+    --color-accent-primary-hover,
+    light-dark(#0250bb, #80ebff)
+  );
+  --toggle-background-color-pressed-active: var(
+    --color-accent-primary-active,
+    light-dark(#054096, #aaf2ff)
+  );
+  --toggle-border-color: var(--border-color-interactive, light-dark(#8f8f9d, #f9f9fa));
   --toggle-border-color-hover: var(--toggle-border-color);
   --toggle-border-color-active: var(--toggle-border-color);
-  --toggle-border-radius: var(--border-radius-circle);
-  --toggle-border-width: var(--border-width);
-  --toggle-height: var(--size-item-small);
-  --toggle-width: var(--size-item-large);
+  --toggle-border-radius: var(--border-radius-circle, 9999px);
+  --toggle-border-width: var(--border-width, 1px);
+  --toggle-height: var(--size-item-small, 16px);
+  --toggle-width: var(--size-item-large, 32px);
   --toggle-dot-background-color: var(--toggle-border-color);
   --toggle-dot-background-color-hover: var(--toggle-dot-background-color);
   --toggle-dot-background-color-active: var(--toggle-dot-background-color);
-  --toggle-dot-background-color-on-pressed: var(--background-color-canvas);
+  --toggle-dot-background-color-on-pressed: var(
+    --background-color-canvas,
+    light-dark(white, #1c1b22)
+  );
   --toggle-dot-margin: 1px;
   --toggle-dot-height: calc(
     var(--toggle-height) - 2 * var(--toggle-dot-margin) - 2 * var(--toggle-border-width)
@@ -1705,8 +1670,8 @@
   box-sizing: border-box;
 
   &:focus-visible {
-    outline: var(--focus-outline);
-    outline-offset: var(--focus-outline-offset);
+    outline: var(--focus-ring-outline);
+    outline-offset: var(--focus-outline-offset, 2px);
   }
 
   &:enabled:hover {
@@ -1798,16 +1763,21 @@
 
 @media (forced-colors) {
   .abyss-documents .toggle-button {
-    --toggle-dot-background-color: var(--color-accent-primary);
-    --toggle-dot-background-color-hover: var(--color-accent-primary-hover);
-    --toggle-dot-background-color-active: var(--color-accent-primary-active);
-    --toggle-dot-background-color-on-pressed: var(--button-background-color);
-    --toggle-border-color-hover: var(--border-color-interactive-hover);
-    --toggle-border-color-active: var(--border-color-interactive-active);
+    --toggle-background-color: var(--button-background-color, ButtonFace);
+    --toggle-background-color-pressed: var(--color-accent-primary, ButtonText);
+    --toggle-background-color-pressed-hover: var(--color-accent-primary-hover, SelectedItem);
+    --toggle-background-color-pressed-active: var(--color-accent-primary-active, SelectedItem);
+    --toggle-border-color: var(--border-color-interactive, ButtonText);
+    --toggle-dot-background-color: var(--color-accent-primary, ButtonText);
+    --toggle-dot-background-color-hover: var(--color-accent-primary-hover, SelectedItem);
+    --toggle-dot-background-color-active: var(--color-accent-primary-active, SelectedItem);
+    --toggle-dot-background-color-on-pressed: var(--button-background-color, ButtonFace);
+    --toggle-border-color-hover: var(--border-color-interactive-hover, SelectedItem);
+    --toggle-border-color-active: var(--border-color-interactive-active, ButtonText);
   }
 
   .abyss-documents .toggle-button[aria-pressed='true']:enabled::after {
-    border: 1px solid var(--button-background-color);
+    border: 1px solid var(--button-background-color, ButtonFace);
     content: '';
     position: absolute;
     height: var(--toggle-height);
@@ -1824,8 +1794,11 @@
 
 .abyss-documents {
   --clear-signature-button-icon: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxwYXRoIGZpbGwtcnVsZT0iZXZlbm9kZCIgY2xpcC1ydWxlPSJldmVub2RkIgogICAgICAgIGQ9Ik0xMSAzSDEzLjZDMTQgMyAxNC4zIDMuMyAxNC4zIDMuNkMxNC4zIDMuOSAxNCA0LjIgMTMuNyA0LjJIMTMuM1YxNEMxMy4zIDE1LjEgMTIuNCAxNiAxMS4zIDE2SDQuODAwMDVDMy43MDAwNSAxNiAyLjgwMDA1IDE1LjEgMi44MDAwNSAxNFY0LjJIMi40MDAwNUMyLjAwMDA1IDQuMiAxLjgwMDA1IDQgMS44MDAwNSAzLjZDMS44MDAwNSAzLjIgMi4wMDAwNSAzIDIuNDAwMDUgM0g1LjAwMDA1VjJDNS4wMDAwNSAwLjkgNS45MDAwNSAwIDcuMDAwMDUgMEg5LjAwMDA1QzEwLjEgMCAxMSAwLjkgMTEgMlYzWk02LjkwMDA1IDEuMkw2LjMwMDA1IDEuOFYzSDkuODAwMDVWMS44TDkuMjAwMDUgMS4ySDYuOTAwMDVaTTExLjQgMTQuN0wxMiAxNC4xVjQuMkg0LjAwMDA1VjE0LjFMNC42MDAwNSAxNC43SDExLjRaTTcuMDAwMDUgMTIuNEM3LjAwMDA1IDEyLjcgNi43MDAwNSAxMyA2LjQwMDA1IDEzQzYuMTAwMDUgMTMgNS44MDAwNSAxMi43IDUuODAwMDUgMTIuNFY3LjZDNS43MDAwNSA3LjMgNi4wMDAwNSA3IDYuNDAwMDUgN0M2LjgwMDA1IDcgNy4wMDAwNSA3LjMgNy4wMDAwNSA3LjZWMTIuNFpNMTAuMjAwMSAxMi40QzEwLjIwMDEgMTIuNyA5LjkwMDA2IDEzIDkuNjAwMDYgMTNDOS4zMDAwNiAxMyA5LjAwMDA2IDEyLjcgOS4wMDAwNiAxMi40VjcuNkM5LjAwMDA2IDcuMyA5LjMwMDA2IDcgOS42MDAwNiA3QzkuOTAwMDYgNyAxMC4yMDAxIDcuMyAxMC4yMDAxIDcuNlYxMi40WiIKICAgICAgICBmaWxsPSJibGFjayIgLz4KPC9zdmc+);
-  --signature-bg: light-dark(#f9f9fb, #2b2a33);
-  --signature-hover-bg: light-dark(#f0f0f4, var(--signature-bg));
+  --signature-bg: var(--background-color-box-info, light-dark(#f9f9fb, #2b2a33));
+  --signature-hover-bg: var(
+    --button-background-color-hover,
+    light-dark(#f0f0f4, var(--signature-bg))
+  );
   --button-signature-bg: transparent;
   --button-signature-color: var(--main-color);
   --button-signature-active-bg: light-dark(#cfcfd8, #5b5b66);
@@ -1850,13 +1823,13 @@
 
 .abyss-documents .signatureDialog {
   --primary-color: var(--text-primary-color);
-  --border-color: #8f8f9d;
+  --signature-border-color: var(--border-color-interactive, #8f8f9d);
   --open-link-fg: var(--link-fg-color);
   --open-link-hover-fg: var(--link-hover-fg-color);
 
   @media screen and (forced-colors: active) {
     --primary-color: ButtonText;
-    --border-color: ButtonText;
+    --signature-border-color: var(--border-color-interactive, ButtonText);
     --open-link-fg: ButtonText;
     --open-link-hover-fg: ButtonText;
   }
@@ -1897,11 +1870,11 @@
 
     > input {
       width: 100%;
-      height: 32px;
+      height: var(--size-item-large, 32px);
       padding-inline: 8px calc(4px + var(--button-dimension));
       box-sizing: border-box;
-      border-radius: 4px;
-      border: 1px solid var(--border-color);
+      border-radius: var(--border-radius-small, 4px);
+      border: 1px solid var(--signature-border-color);
     }
 
     .clearInputButton {
@@ -1924,11 +1897,11 @@
 
 .abyss-documents #addSignatureDialog {
   --secondary-color: var(--text-secondary-color);
-  --bg-hover: #e0e0e6;
-  --tab-top-line-active-color: #0060df;
+  --bg-hover: var(--button-background-color-hover, light-dark(#e0e0e6, #52525e));
+  --tab-top-line-active-color: var(--color-accent-primary, light-dark(#0060df, #0df));
   --tab-top-line-active-hover-color: var(--tab-text-hover-color);
-  --tab-top-line-hover-color: #8f8f9d;
-  --tab-top-line-inactive-color: #cfcfd8;
+  --tab-top-line-hover-color: var(--border-color-interactive, #8f8f9d);
+  --tab-top-line-inactive-color: light-dark(#cfcfd8, #8f8f9d);
   --tab-bottom-line-active-color: var(--tab-top-line-inactive-color);
   --tab-bottom-line-hover-color: var(--tab-top-line-inactive-color);
   --tab-bottom-line-inactive-color: var(--tab-top-line-inactive-color);
@@ -1937,7 +1910,7 @@
   --tab-bg-active-hover-color: var(--bg-hover);
   --tab-bg-hover: var(--bg-hover);
   --tab-panel-border: none;
-  --tab-panel-border-radius: 4px;
+  --tab-panel-border-radius: var(--border-radius-small, 4px);
   --tab-text-color: var(--primary-color);
   --tab-text-active-color: var(--tab-top-line-active-color);
   --tab-text-active-hover-color: var(--tab-text-hover-color);
@@ -1945,20 +1918,6 @@
   --signature-placeholder-color: var(--secondary-color);
   --signature-draw-placeholder-color: var(--primary-color);
   --signature-color: var(--primary-color);
-  --clear-signature-button-border-width: 0;
-  --clear-signature-button-border-style: solid;
-  --clear-signature-button-border-color: transparent;
-  --clear-signature-button-border-disabled-color: transparent;
-  --clear-signature-button-color: var(--primary-color);
-  --clear-signature-button-hover-color: var(--clear-signature-button-color);
-  --clear-signature-button-active-color: var(--clear-signature-button-color);
-  --clear-signature-button-disabled-color: var(--clear-signature-button-color);
-  --clear-signature-button-focus-color: var(--clear-signature-button-color);
-  --clear-signature-button-bg: var(--dialog-bg-color);
-  --clear-signature-button-bg-hover: var(--bg-hover);
-  --clear-signature-button-bg-active: #cfcfd8;
-  --clear-signature-button-bg-focus: #f0f0f4;
-  --clear-signature-button-bg-disabled: color-mix(in srgb, #f0f0f4, transparent 40%);
   --save-warning-color: var(--secondary-color);
   --thickness-bg: var(--dialog-bg-color);
   --thickness-label-color: var(--primary-color);
@@ -1969,25 +1928,13 @@
       0 16,
     pointer;
 
-  @media (prefers-color-scheme: dark) {
-    --dialog-bg-color: #42414d;
-    --bg-hover: #52525e;
-    --primary-color: #fbfbfe;
-    --secondary-color: #cfcfd8;
-    --tab-top-line-active-color: #0df;
-    --tab-top-line-inactive-color: #8f8f9d;
-    --clear-signature-button-bg-active: #5b5b66;
-    --clear-signature-button-bg-focus: #2b2a33;
-    --clear-signature-button-bg-disabled: color-mix(in srgb, #2b2a33, transparent 40%);
-  }
-
   @media screen and (forced-colors: active) {
     --secondary-color: ButtonText;
     --bg: HighlightText;
     --bg-hover: var(--bg);
-    --tab-top-line-active-color: ButtonText;
+    --tab-top-line-active-color: var(--color-accent-primary, ButtonText);
     --tab-top-line-active-hover-color: HighlightText;
-    --tab-top-line-hover-color: SelectedItem;
+    --tab-top-line-hover-color: var(--border-color-interactive, SelectedItem);
     --tab-top-line-inactive-color: ButtonText;
     --tab-bottom-line-active-color: var(--tab-top-line-active-color);
     --tab-bottom-line-hover-color: var(--tab-top-line-hover-color);
@@ -2001,24 +1948,10 @@
     --tab-text-active-hover-color: HighlightText;
     --tab-text-hover-color: SelectedItem;
     --signature-color: ButtonText;
-    --clear-signature-button-border-width: 1px;
-    --clear-signature-button-border-style: solid;
-    --clear-signature-button-border-color: ButtonText;
-    --clear-signature-button-border-disabled-color: GrayText;
-    --clear-signature-button-color: ButtonText;
-    --clear-signature-button-hover-color: HighlightText;
-    --clear-signature-button-active-color: SelectedItem;
-    --clear-signature-button-focus-color: CanvasText;
-    --clear-signature-button-disabled-color: GrayText;
-    --clear-signature-button-bg: var(--bg);
-    --clear-signature-button-bg-hover: SelectedItem;
-    --clear-signature-button-bg-active: var(--bg);
-    --clear-signature-button-bg-focus: var(--bg);
-    --clear-signature-button-bg-disabled: var(--bg);
     --thickness-bg: Canvas;
     --thickness-label-color: CanvasText;
     --thickness-slider-color: ButtonText;
-    --thickness-border: 1px solid var(--border-color);
+    --thickness-border: 1px solid var(--signature-border-color);
   }
 
   #addSignatureDialogLabel {
@@ -2344,14 +2277,7 @@
 
           #clearSignatureButton {
             display: flex;
-            height: 32px;
-            padding: 4px 8px;
             align-items: center;
-            background-color: var(--clear-signature-button-bg);
-            border-width: var(--clear-signature-button-border-width);
-            border-style: var(--clear-signature-button-border-style);
-            border-color: var(--clear-signature-button-border-color);
-            border-radius: 4px;
 
             > span {
               display: flex;
@@ -2359,8 +2285,6 @@
               align-items: center;
               gap: 4px;
               flex-shrink: 0;
-
-              color: var(--clear-signature-button-color);
 
               &::after {
                 content: '';
@@ -2371,53 +2295,8 @@
                 mask-image: var(--clear-signature-button-icon);
                 -webkit-mask-size: cover;
                 mask-size: cover;
-                background-color: var(--clear-signature-button-color);
+                background-color: currentColor;
                 flex-shrink: 0;
-              }
-            }
-
-            &:hover {
-              background-color: var(--clear-signature-button-bg-hover);
-
-              > span {
-                color: var(--clear-signature-button-hover-color);
-                &::after {
-                  background-color: var(--clear-signature-button-hover-color);
-                }
-              }
-            }
-
-            &:active {
-              background-color: var(--clear-signature-button-bg-active);
-
-              > span {
-                color: var(--clear-signature-button-active-color);
-                &::after {
-                  background-color: var(--clear-signature-button-active-color);
-                }
-              }
-            }
-
-            &:focus-visible {
-              background-color: var(--clear-signature-button-bg-focus);
-
-              > span {
-                color: var(--clear-signature-button-focus-color);
-                &::after {
-                  background-color: var(--clear-signature-button-focus-color);
-                }
-              }
-            }
-
-            &:disabled {
-              background-color: var(--clear-signature-button-bg-disabled);
-              border-color: var(--clear-signature-button-border-disabled-color);
-
-              > span {
-                color: var(--clear-signature-button-disabled-color);
-                &::after {
-                  background-color: var(--clear-signature-button-disabled-color);
-                }
               }
             }
           }
@@ -2706,39 +2585,38 @@
 .abyss-documents :is(.annotationLayer, .annotationEditorLayer) {
   .annotationCommentButton {
     color-scheme: light dark;
-    --comment-button-bg: light-dark(white, #1c1b22);
+    --comment-button-bg: var(--background-color-canvas, light-dark(white, #1c1b22));
     --comment-button-fg: light-dark(#5b5b66, #fbfbfe);
     --comment-button-active-bg: light-dark(#0041a4, #a6ecf4);
-    --comment-button-active-fg: light-dark(white, #15141a);
-    --comment-button-hover-bg: light-dark(#0053cb, #61dce9);
-    --comment-button-hover-fg: light-dark(white, #15141a);
-    --comment-button-selected-bg: light-dark(#0062fa, #00cadb);
-    --comment-button-border-color: light-dark(#8f8f9d, #bfbfc9);
+    --comment-button-active-fg: var(--button-text-color-primary, light-dark(white, #15141a));
+    --comment-button-hover-bg: var(--color-accent-primary-hover, light-dark(#0053cb, #61dce9));
+    --comment-button-hover-fg: var(--button-text-color-primary, light-dark(white, #15141a));
+    --comment-button-selected-bg: var(--color-accent-primary, light-dark(#0062fa, #00cadb));
+    --comment-button-border-color: var(--border-color-interactive, light-dark(#8f8f9d, #bfbfc9));
     --comment-button-active-border-color: var(--comment-button-active-bg);
     --comment-button-focus-border-color: light-dark(#cfcfd8, #3a3944);
     --comment-button-hover-border-color: var(--comment-button-hover-bg);
     --comment-button-selected-border-color: var(--comment-button-selected-bg);
-    --comment-button-selected-fg: light-dark(white, #15141a);
+    --comment-button-selected-fg: var(--button-text-color-primary, light-dark(white, #15141a));
     --comment-button-dim: 24px;
     --comment-button-box-shadow:
       0 0.25px 0.75px 0 light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.2)),
       0 2px 6px 0 light-dark(rgb(0 0 0 / 0.1), rgb(0 0 0 / 0.4));
-    --comment-button-focus-outline-color: light-dark(#0062fa, #00cadb);
-
+    --comment-button-focus-outline-color: var(--focus-outline-color, light-dark(#0062fa, #00cadb));
     @media screen and (forced-colors: active) {
-      --comment-button-bg: ButtonFace;
-      --comment-button-fg: ButtonText;
-      --comment-button-hover-bg: SelectedItemText;
-      --comment-button-hover-fg: SelectedItem;
-      --comment-button-active-bg: SelectedItemText;
-      --comment-button-active-fg: SelectedItem;
-      --comment-button-border-color: ButtonBorder;
-      --comment-button-active-border-color: ButtonBorder;
-      --comment-button-hover-border-color: SelectedItem;
+      --comment-button-bg: var(--button-background-color, ButtonFace);
+      --comment-button-fg: var(--button-text-color, ButtonText);
+      --comment-button-hover-bg: var(--button-background-color-hover, SelectedItemText);
+      --comment-button-hover-fg: var(--button-text-color-hover, SelectedItem);
+      --comment-button-active-bg: var(--button-background-color-active, SelectedItemText);
+      --comment-button-active-fg: var(--button-text-color-active, SelectedItem);
+      --comment-button-border-color: var(--button-border-color, ButtonBorder);
+      --comment-button-active-border-color: var(--button-border-color-active, ButtonBorder);
+      --comment-button-hover-border-color: var(--button-border-color-hover, SelectedItem);
       --comment-button-box-shadow: none;
-      --comment-button-focus-outline-color: CanvasText;
-      --comment-button-selected-bg: ButtonBorder;
-      --comment-button-selected-fg: ButtonFace;
+      --comment-button-focus-outline-color: var(--focus-outline-color, CanvasText);
+      --comment-button-selected-bg: var(--button-background-color-primary, ButtonBorder);
+      --comment-button-selected-fg: var(--button-text-color-primary, ButtonFace);
     }
 
     position: absolute;
@@ -2826,15 +2704,18 @@
   --comment-active-brightness: 0.825;
   --comment-active-filter: brightness(var(--comment-active-brightness));
   --comment-border-color: light-dark(#f0f0f4, #52525e);
-  --comment-focus-outline-color: light-dark(#0062fa, #00cadb);
-  --comment-fg-color: light-dark(#15141a, #fbfbfe);
+  --comment-focus-outline-color: var(--focus-outline-color, light-dark(#0062fa, #00cadb));
+  --comment-fg-color: var(--text-color, light-dark(#15141a, #fbfbfe));
   --comment-count-bg-color: light-dark(#e2f7ff, #00317e);
   --comment-indicator-active-fg-color: light-dark(#0041a4, #a6ecf4);
   --comment-indicator-active-filter: brightness(calc(1 / var(--comment-active-brightness)));
   --comment-indicator-focus-fg-color: light-dark(#5b5b66, #fbfbfe);
-  --comment-indicator-hover-fg-color: light-dark(#0053cb, #61dce9);
+  --comment-indicator-hover-fg-color: var(
+    --color-accent-primary-hover,
+    light-dark(#0053cb, #61dce9)
+  );
   --comment-indicator-hover-filter: brightness(calc(1 / var(--comment-hover-brightness)));
-  --comment-indicator-selected-fg-color: light-dark(#0062fa, #00cadb);
+  --comment-indicator-selected-fg-color: var(--color-accent-primary, light-dark(#0062fa, #00cadb));
 
   --button-comment-bg: transparent;
   --button-comment-color: var(--main-color);
@@ -2845,9 +2726,6 @@
   --button-comment-hover-bg: light-dark(#e0e0e6, #52525e);
   --button-comment-hover-color: var(--button-comment-color);
 
-  --link-fg-color: light-dark(#0060df, #0df);
-  --link-hover-fg-color: light-dark(#0250bb, #80ebff);
-
   @media screen and (forced-colors: active) {
     --comment-date-fg-color: CanvasText;
     --comment-bg-color: Canvas;
@@ -2856,11 +2734,11 @@
     --comment-active-bg-color: Canvas;
     --comment-active-filter: none;
     --comment-border-color: CanvasText;
-    --comment-fg-color: CanvasText;
+    --comment-fg-color: var(--text-color, CanvasText);
     --comment-count-bg-color: Canvas;
     --comment-indicator-active-fg-color: SelectedItem;
-    --comment-indicator-focus-fg-color: CanvasText;
-    --comment-indicator-hover-fg-color: CanvasText;
+    --comment-indicator-focus-fg-color: var(--text-color, CanvasText);
+    --comment-indicator-hover-fg-color: var(--text-color, CanvasText);
     --comment-indicator-selected-fg-color: SelectedItem;
     --button-comment-bg: ButtonFace;
     --button-comment-color: ButtonText;
@@ -2869,8 +2747,6 @@
     --button-comment-border: 1px solid ButtonText;
     --button-comment-hover-bg: Highlight;
     --button-comment-hover-color: HighlightText;
-    --link-fg-color: LinkText;
-    --link-hover-fg-color: LinkText;
   }
 }
 
@@ -3311,14 +3187,14 @@
 .abyss-documents {
   --editor-toolbar-vert-offset: 6px;
   --outline-width: 2px;
-  --outline-color: #0060df;
+  --outline-color: var(--color-blue-60, #0060df);
   --outline-around-width: 1px;
-  --outline-around-color: #f0f0f4;
+  --outline-around-color: var(--color-gray-20, #f0f0f4);
   --hover-outline-around-color: var(--outline-around-color);
-  --focus-outline: solid var(--outline-width) var(--outline-color);
+  --editor-selection-outline: solid var(--outline-width) var(--outline-color);
   --unfocus-outline: solid var(--outline-width) transparent;
   --focus-outline-around: solid var(--outline-around-width) var(--outline-around-color);
-  --hover-outline-color: #8f8f9d;
+  --hover-outline-color: var(--color-gray-60, #8f8f9d);
   --hover-outline: solid var(--outline-width) var(--hover-outline-color);
   --hover-outline-around: solid var(--outline-around-width) var(--hover-outline-around-color);
   --freetext-line-height: 1.35;
@@ -3389,7 +3265,7 @@
     --outline-color: CanvasText;
     --outline-around-color: ButtonFace;
     --resizer-bg-color: ButtonText;
-    --hover-outline-color: Highlight;
+    --hover-outline-color: var(--color-accent-primary-hover, Highlight);
     --hover-outline-around-color: SelectedItemText;
   }
 }
@@ -3477,7 +3353,7 @@
   }
 
   &.selectedEditor {
-    border: var(--focus-outline);
+    border: var(--editor-selection-outline);
     outline: var(--focus-outline-around);
 
     &::before {
@@ -3511,29 +3387,29 @@
     --editor-toolbar-bg-color: light-dark(#f0f0f4, #2b2a33);
     --editor-toolbar-highlight-image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTciIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNyAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxnPgogICAgICA8cGF0aCBmaWxsLXJ1bGU9ImV2ZW5vZGQiIGNsaXAtcnVsZT0iZXZlbm9kZCIgZD0iTTcuMTA5MTggMTEuNjZDNy4yNDkxOCAxMS44IDcuNDM5MTggMTEuODggNy42MzkxOCAxMS44OEM3LjgzOTE4IDExLjg4IDguMDI5MTggMTEuOCA4LjE2OTE4IDExLjY2TDE0LjkxOTIgNC45MUMxNS4yNjkyIDQuNTcgMTUuNDU5MiA0LjExIDE1LjQ1OTIgMy42MkMxNS40NTkyIDMuMTMgMTUuMjY5MiAyLjY3IDE0LjkxOTIgMi4zM0wxMy4xMjkyIDAuNTRDMTIuNzg5MiAwLjE5IDEyLjMyOTIgMCAxMS44MzkyIDBDMTEuMzQ5MiAwIDEwLjg4OTIgMC4yIDEwLjU0OTIgMC41NEwzLjc5OTE4IDcuMjlDMy41MDkxOCA3LjU4IDMuNTA5MTggOC4wNiAzLjc5OTE4IDguMzVMNC4zODk4OCA4Ljk0MDdMMS40MDkxOCAxMS45M0g1LjY0OTE4TDYuNTE0MTkgMTEuMDY1TDcuMTA5MTggMTEuNjZaTTcuNjM5MTggMTAuMDdMNS4zODkxOCA3LjgyVjcuODFMNy44NjQ4IDUuMzM0MzhMMTAuMTE5OCA3LjU4OTM4TDcuNjM5MTggMTAuMDdaTTExLjE4MDUgNi41Mjg3MkwxMy44NTkyIDMuODVDMTMuOTg5MiAzLjcyIDEzLjk4OTIgMy41MiAxMy44NTkyIDMuMzlMMTIuMDY5MiAxLjZDMTEuOTg5MiAxLjUyIDExLjg4OTIgMS41IDExLjgzOTIgMS41QzExLjgzOTIgMS41IDExLjY4OTIgMS41MSAxMS42MDkyIDEuNTlMOC45MjU0NiA0LjI3MzcyTDExLjE4MDUgNi41Mjg3MloiIGZpbGw9IiMwMDAiLz4KICAgICAgPHBhdGggZD0iTTAuNDA5MTggMTRIMTUuNDA5MlYxNkgwLjQwOTE4VjE0WiIgZmlsbD0iIzAwMCIvPgogICAgPC9nPgogIDwvc3ZnPg==);
     --editor-toolbar-fg-color: light-dark(#2e2e56, #fbfbfe);
-    --editor-toolbar-border-color: #8f8f9d;
+    --editor-toolbar-border-color: var(--border-color-interactive, #8f8f9d);
     --editor-toolbar-hover-border-color: var(--editor-toolbar-border-color);
     --editor-toolbar-hover-bg-color: light-dark(#e0e0e6, #52525e);
     --editor-toolbar-hover-fg-color: var(--editor-toolbar-fg-color);
     --editor-toolbar-hover-outline: none;
-    --editor-toolbar-focus-outline-color: light-dark(#0060df, #0df);
+    --editor-toolbar-focus-outline-color: var(--focus-outline-color, light-dark(#0060df, #0df));
     --editor-toolbar-shadow: 0 2px 6px 0 rgb(58 57 68 / 0.2);
     --editor-toolbar-height: 28px;
     --editor-toolbar-padding: 2px;
-    --alt-text-done-color: light-dark(#2ac3a2, #54ffbd);
+    --alt-text-done-color: var(--color-accent-attention, light-dark(#2ac3a2, #54ffbd));
     --alt-text-warning-color: light-dark(#0090ed, #80ebff);
     --alt-text-hover-done-color: var(--alt-text-done-color);
     --alt-text-hover-warning-color: var(--alt-text-warning-color);
 
     @media screen and (forced-colors: active) {
-      --editor-toolbar-bg-color: ButtonFace;
-      --editor-toolbar-fg-color: ButtonText;
-      --editor-toolbar-border-color: ButtonText;
-      --editor-toolbar-hover-border-color: AccentColor;
-      --editor-toolbar-hover-bg-color: ButtonFace;
-      --editor-toolbar-hover-fg-color: AccentColor;
+      --editor-toolbar-bg-color: var(--button-background-color, ButtonFace);
+      --editor-toolbar-fg-color: var(--button-text-color, ButtonText);
+      --editor-toolbar-border-color: var(--button-border-color, ButtonText);
+      --editor-toolbar-hover-border-color: var(--button-border-color-hover, AccentColor);
+      --editor-toolbar-hover-bg-color: var(--button-background-color-hover, ButtonFace);
+      --editor-toolbar-hover-fg-color: var(--button-text-color-hover, AccentColor);
       --editor-toolbar-hover-outline: 2px solid var(--editor-toolbar-hover-border-color);
-      --editor-toolbar-focus-outline-color: ButtonBorder;
+      --editor-toolbar-focus-outline-color: var(--button-border-color, ButtonBorder);
       --editor-toolbar-shadow: none;
       --alt-text-done-color: var(--editor-toolbar-fg-color);
       --alt-text-warning-color: var(--editor-toolbar-fg-color);
@@ -3741,14 +3617,14 @@
 
           &.show {
             --alt-text-tooltip-bg: light-dark(#f0f0f4, #1c1b22);
-            --alt-text-tooltip-fg: light-dark(#15141a, #fbfbfe);
-            --alt-text-tooltip-border: #8f8f9d;
+            --alt-text-tooltip-fg: var(--text-color, light-dark(#15141a, #fbfbfe));
+            --alt-text-tooltip-border: var(--border-color-interactive, #8f8f9d);
             --alt-text-tooltip-shadow: 0 2px 6px 0 light-dark(rgb(58 57 68 / 0.2), #15141a);
 
             @media screen and (forced-colors: active) {
               --alt-text-tooltip-bg: Canvas;
-              --alt-text-tooltip-fg: CanvasText;
-              --alt-text-tooltip-border: CanvasText;
+              --alt-text-tooltip-fg: var(--text-color, CanvasText);
+              --alt-text-tooltip-border: var(--border-color, CanvasText);
               --alt-text-tooltip-shadow: none;
             }
 
@@ -4348,7 +4224,7 @@
 }
 
 .abyss-documents .colorPicker {
-  --hover-outline-color: light-dark(#0250bb, #80ebff);
+  --hover-outline-color: var(--color-accent-primary-hover, light-dark(#0250bb, #80ebff));
   --selected-outline-color: light-dark(#0060df, #aaf2ff);
   --swatch-border-color: light-dark(#cfcfd8, #52525e);
 
@@ -4730,10 +4606,10 @@
   --menuitem-text-active-fg: var(--menu-text-color);
   --menuitem-active-border-color: var(--menuitem-border-color);
   --menuitem-focus-bg: color-mix(in srgb, var(--menu-text-color), transparent 93%);
-  --menuitem-focus-outline-color: light-dark(#0062fa, #00cadb);
+  --menuitem-focus-outline-color: var(--focus-outline-color, light-dark(#0062fa, #00cadb));
   --menuitem-focus-border-color: light-dark(white, black);
 
-  --menu-bg: light-dark(white, #23222b);
+  --menu-bg: var(--background-color-box, light-dark(white, #23222b));
   --menu-background-blend-mode: normal;
   --menu-box-shadow:
     0 0.375px 1.5px 0 light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.2)),
@@ -4741,7 +4617,7 @@
   --menu-border-color: light-dark(rgb(21 20 26 / 0.1), rgb(251 251 254 / 0.1));
   --menuitem-border-radius: 8px;
   --menu-backdrop-filter: none;
-  --menu-text-color: light-dark(#15141a, #fbfbfe);
+  --menu-text-color: var(--text-color, light-dark(#15141a, #fbfbfe));
   --menu-text-disabled-color: var(--menu-text-color);
   --menuitem-text-hover-fg: var(--menu-text-color);
   --menuitem-hover-bg: color-mix(in srgb, var(--menu-text-color), transparent 86%);
@@ -4749,11 +4625,11 @@
   --disabled-opacity: 0.62;
 
   @media screen and (forced-colors: active) {
-    --menu-bg: Canvas;
+    --menu-bg: var(--background-color-box, Canvas);
     --menu-background-blend-mode: normal;
     --menu-box-shadow: none;
     --menu-backdrop-filter: none;
-    --menu-text-color: ButtonText;
+    --menu-text-color: var(--text-color, ButtonText);
     --menu-text-disabled-color: GrayText;
     --menu-border-color: CanvasText;
     --menuitem-border-color: none;
@@ -4763,7 +4639,7 @@
     --menuitem-active-border-color: ButtonText;
     --menuitem-text-active-fg: SelectedItem;
     --menuitem-focus-bg: ButtonFace;
-    --menuitem-focus-outline-color: CanvasText;
+    --menuitem-focus-outline-color: var(--focus-outline-color, CanvasText);
     --menuitem-focus-border-color: none;
     --disabled-opacity: 1;
   }
@@ -4819,7 +4695,7 @@
       position: absolute;
       inset-inline-start: var(--menuitem-gap);
       top: 50%;
-      transform: translateY(-50%);
+      transform: translateY(-50%) scaleX(var(--dir-factor));
     }
 
     &:disabled {
@@ -5062,25 +4938,34 @@
   --sidebar-max-width: 50vw;
   --sidebar-block-padding: 8px;
 
-  --text-color: light-dark(#15141a, #fbfbfe);
-  --button-fg: var(--text-color);
-  --button-no-bg: transparent;
-  --button-bg: light-dark(rgb(21 20 26 / 0.07), rgb(251 251 254 / 0.07));
-  --button-border-color: transparent;
-  --button-hover-bg: light-dark(rgb(21 20 26 / 0.14), rgb(251 251 254 / 0.14));
-  --button-hover-fg: var(--text-color);
-  --button-hover-border-color: var(--button-border-color);
-  --button-active-bg: light-dark(rgb(21 20 26 / 0.21), rgb(251 251 254 / 0.21));
-  --button-active-fg: var(--text-color);
-  --button-active-border-color: var(--button-border-color);
-  --button-focus-no-bg: color-mix(in srgb, var(--text-color), transparent 93%);
-  --button-focus-outline-color: light-dark(#0062fa, #00cadb);
+  --views-text-color: var(--text-color, light-dark(#15141a, #fbfbfe));
+  --button-fg: var(--views-text-color);
+  --button-no-bg: var(--button-background-color-toolbar, transparent);
+  --button-bg: var(
+    --button-background-color,
+    light-dark(rgb(21 20 26 / 0.07), rgb(251 251 254 / 0.07))
+  );
+  --views-button-border-color: var(--button-border-color, transparent);
+  --button-hover-bg: var(
+    --button-background-color-hover,
+    light-dark(rgb(21 20 26 / 0.14), rgb(251 251 254 / 0.14))
+  );
+  --button-hover-fg: var(--views-text-color);
+  --button-hover-border-color: var(--views-button-border-color);
+  --button-active-bg: var(
+    --button-background-color-active,
+    light-dark(rgb(21 20 26 / 0.21), rgb(251 251 254 / 0.21))
+  );
+  --button-active-fg: var(--views-text-color);
+  --button-active-border-color: var(--views-button-border-color);
+  --button-focus-no-bg: color-mix(in srgb, var(--views-text-color), transparent 93%);
+  --button-focus-outline-color: var(--focus-outline-color, light-dark(#0062fa, #00cadb));
   --button-focus-border-color: light-dark(white, black);
   --status-border-color: transparent;
   --status-actions-bg: light-dark(rgb(21 20 26 / 0.03), rgb(251 251 254 / 0.03));
   --status-undo-bg: light-dark(rgb(0 98 250 / 0.08), rgb(0 202 219 / 0.08));
   --status-waiting-bg: var(--status-undo-bg);
-  --indicator-color: light-dark(#0062fa, #00cadb);
+  --indicator-color: var(--color-accent-primary, light-dark(#0062fa, #00cadb));
   --status-warning-bg: light-dark(#ffe8ea, #6e001f);
   --indicator-warning-color: light-dark(#b20037, #ffa0aa);
   --header-shadow:
@@ -5094,7 +4979,7 @@
   --image-current-border-color: var(--button-focus-outline-color);
   --image-current-focused-outline-color: var(--image-hover-border-color);
   --image-page-number-bg: light-dark(#f0f0f4, #42414d);
-  --image-page-number-fg: var(--text-color);
+  --image-page-number-fg: var(--views-text-color);
   --image-page-number-border-color: transparent;
   --image-hover-page-number-bg: var(--image-page-number-bg);
   --image-hover-page-number-fg: var(--image-page-number-fg);
@@ -5128,23 +5013,23 @@
   --multiple-dragging-text-color: light-dark(#fbfbfe, #15141a);
 
   @media screen and (forced-colors: active) {
-    --text-color: CanvasText;
-    --button-fg: ButtonText;
-    --button-bg: ButtonFace;
-    --button-no-bg: ButtonFace;
-    --button-border-color: ButtonText;
-    --button-hover-bg: SelectedItemText;
-    --button-hover-fg: SelectedItem;
-    --button-hover-border-color: SelectedItem;
-    --button-active-bg: SelectedItemText;
-    --button-active-fg: SelectedItem;
-    --button-active-border-color: ButtonText;
-    --button-focus-no-bg: ButtonFace;
-    --button-focus-outline-color: CanvasText;
+    --views-text-color: var(--text-color, CanvasText);
+    --button-fg: var(--button-text-color, ButtonText);
+    --button-bg: var(--button-background-color, ButtonFace);
+    --button-no-bg: var(--button-background-color, ButtonFace);
+    --views-button-border-color: var(--button-border-color, ButtonText);
+    --button-hover-bg: var(--button-background-color-hover, SelectedItemText);
+    --button-hover-fg: var(--button-text-color-hover, SelectedItem);
+    --button-hover-border-color: var(--button-border-color-hover, SelectedItem);
+    --button-active-bg: var(--button-background-color-active, SelectedItemText);
+    --button-active-fg: var(--button-text-color-active, SelectedItem);
+    --button-active-border-color: var(--button-border-color-active, ButtonText);
+    --button-focus-no-bg: var(--button-background-color, ButtonFace);
+    --button-focus-outline-color: var(--focus-outline-color, CanvasText);
     --button-focus-border-color: none;
     --status-border-color: CanvasText;
     --status-undo-bg: none;
-    --indicator-color: CanvasText;
+    --indicator-color: var(--text-color, CanvasText);
     --status-warning-bg: none;
     --indicator-warning-color: CanvasText;
     --header-shadow: none;
@@ -5156,7 +5041,7 @@
     --image-hover-page-number-fg: SelectedItem;
     --image-current-page-number-bg: ButtonText;
     --image-current-page-number-fg: ButtonFace;
-    --image-current-border-color: ButtonText;
+    --image-current-border-color: var(--border-color, ButtonText);
     --image-current-focused-outline-color: var(--image-hover-border-color);
     --image-current-hover-page-number-bg: SelectedItem;
     --image-current-hover-page-number-fg: SelectedItemText;
@@ -5164,14 +5049,14 @@
     --image-page-number-fg: ButtonText;
     --image-page-number-border-color: var(--image-page-number-fg);
     --multiple-dragging-bg: Canvas;
-    --multiple-dragging-indicator-bg: ButtonBorder;
+    --multiple-dragging-indicator-bg: var(--text-color, ButtonBorder);
     --multiple-dragging-text-color: Canvas;
     --image-dragging-placeholder-bg: Canvas;
     --image-dragging-placeholder-border: 1px GrayText solid;
   }
 
   display: flex;
-  padding-bottom: 16px;
+  padding-block: 0 16px;
   flex-direction: column;
   align-items: flex-start;
   inset-block-start: calc(100% + var(--sidebar-block-padding));
@@ -5190,8 +5075,8 @@
   .viewsManagerButton {
     width: auto;
     color: var(--button-fg);
-    border-radius: 8px;
-    border: 1px solid var(--button-border-color);
+    border-radius: var(--button-border-radius, 8px);
+    border: 1px solid var(--views-button-border-color);
     background: var(--button-bg);
 
     &:hover {
@@ -5219,13 +5104,17 @@
     }
 
     &.viewsCloseButton {
-      width: 26px;
-      height: 26px;
-      padding: 4px;
-      border-radius: 8px;
+      width: var(--size-item-large, 26px);
+      height: var(--size-item-large, 26px);
+      border-radius: var(--button-border-radius, 8px);
       background: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
 
       &::before {
+        width: 16px;
+        height: 16px;
         -webkit-mask-image: var(--close-button-icon);
         mask-image: var(--close-button-icon);
       }
@@ -5241,10 +5130,12 @@
     box-shadow: var(--header-shadow);
     flex: 0 0 auto;
     background-color: var(--header-bg);
+    border-start-start-radius: calc(var(--sidebar-border-radius) - 1px);
+    border-start-end-radius: calc(var(--sidebar-border-radius) - 1px);
 
     .viewsManagerLabel {
       flex: 1 1 auto;
-      color: var(--text-color);
+      color: var(--views-text-color);
       text-align: center;
       height: -moz-fit-content;
       height: fit-content;
@@ -5268,7 +5159,8 @@
       align-self: stretch;
       justify-content: space-between;
       width: auto;
-      padding: 12px 16px 12px 8px;
+      padding-block: 12px;
+      padding-inline: 8px 16px;
 
       &:not(:has(#viewsManagerHeaderLabel ~ button:not([hidden])))::after {
         content: '';
@@ -5305,7 +5197,7 @@
             display: inline-block;
             width: 12px;
             height: 12px;
-            margin-left: 8px;
+            margin-inline-start: 8px;
             -webkit-mask-repeat: no-repeat;
             mask-repeat: no-repeat;
             -webkit-mask-position: center;
@@ -5908,6 +5800,7 @@
               &::after {
                 content: attr(data-multiple-count);
                 border-radius: calc(8px * var(--thumbnail-dragging-scale));
+
                 background-color: var(--multiple-dragging-indicator-bg);
                 color: var(--multiple-dragging-text-color);
                 position: absolute;
@@ -5969,7 +5862,7 @@
 }
 
 .abyss-documents .sidebar {
-  --sidebar-bg-color: light-dark(#fff, #23222b);
+  --sidebar-bg-color: var(--background-color-box, light-dark(#fff, #23222b));
   --sidebar-border-color: light-dark(rgb(21 20 26 / 0.1), rgb(251 251 254 / 0.1));
   --sidebar-box-shadow:
     0 0.25px 0.75px light-dark(rgb(0 0 0 / 0.05), rgb(0 0 0 / 0.2)),
@@ -5982,13 +5875,13 @@
   --sidebar-width: 239px;
   --resizer-width: 4px;
   --resizer-shift: calc(0px - var(--resizer-width) - 2px);
-  --resizer-hover-bg-color: light-dark(#0062fa, #00cadb);
+  --resizer-hover-bg-color: var(--color-accent-primary, light-dark(#0062fa, #00cadb));
 
   @media screen and (forced-colors: active) {
-    --sidebar-bg-color: Canvas;
+    --sidebar-bg-color: var(--background-color-box, Canvas);
     --sidebar-border-color: CanvasText;
     --sidebar-box-shadow: none;
-    --resizer-hover-bg-color: CanvasText;
+    --resizer-hover-bg-color: var(--text-color, CanvasText);
   }
 
   border-radius: var(--sidebar-border-radius);
@@ -6055,8 +5948,11 @@
   --page-border: 9px solid transparent;
   --spreadHorizontalWrapped-margin-LR: -3.5px;
   --loading-icon-delay: 400ms;
-  --focus-ring-color: light-dark(#0060df, #0df);
-  --focus-ring-outline: 2px solid var(--focus-ring-color);
+  --focus-ring-color: var(--focus-outline-color, light-dark(#0060df, #0df));
+  --focus-ring-outline: var(--focus-outline-width, 2px) solid var(--focus-ring-color);
+  --text-primary-color: var(--text-color, light-dark(#15141a, #fbfbfe));
+  --link-fg-color: var(--link-color, light-dark(#0060df, #0df));
+  --link-hover-fg-color: var(--link-color-hover, light-dark(#0250bb, #80ebff));
   --new-badge-bg: light-dark(#070, #37b847);
   --new-badge-color: light-dark(#fff, #15141a);
   --new-badge-border-color: light-dark(#fbfbfe / 40%, #15141a / 40%);
@@ -6066,7 +5962,10 @@
     --page-margin: 8px auto -1px;
     --page-border: 1px solid CanvasText;
     --spreadHorizontalWrapped-margin-LR: 3.5px;
-    --focus-ring-color: CanvasText;
+    --focus-ring-color: var(--focus-outline-color, CanvasText);
+    --text-primary-color: var(--text-color, CanvasText);
+    --link-fg-color: var(--link-color, LinkText);
+    --link-hover-fg-color: var(--link-color-hover, LinkText);
     --new-badge-bg: AccentColor;
     --new-badge-color: ButtonFace;
     --new-badge-border-color: CanvasText;
@@ -6079,6 +5978,7 @@
   border-radius: 4px;
   border: 1px solid var(--new-badge-border-color);
   padding-inline: 4px;
+
   margin-inline: 4px;
   font: menu;
   font-size: 12px;
@@ -6393,6 +6293,7 @@
 .abyss-documents .abyss-annotation-color-rows {
   overflow: auto hidden;
   padding-block: var(--size-2-1);
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- Optional scrollbar styling; older Chromium retains its native scrollbar. */
   scrollbar-width: thin;
 }
 
@@ -6535,6 +6436,7 @@
   padding-inline-end: 28px;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- The adjacent ::-webkit-scrollbar rule covers Chromium before 121. */
   scrollbar-width: none;
 }
 
@@ -6907,6 +6809,7 @@
 }
 
 .abyss-documents .abyss-annotation-footer {
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- This div is a layout wrapper with no semantic accessibility role. */
   display: contents;
 }
 
@@ -6950,6 +6853,7 @@
   overflow: auto hidden;
   padding: 0;
   overscroll-behavior-inline: contain;
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- The adjacent ::-webkit-scrollbar rule covers Chromium before 121. */
   scrollbar-width: none;
 }
 
@@ -7005,7 +6909,7 @@
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
-  border: var(--border-width) solid color-mix(in srgb, var(--abyss-annotation-color) 72%, black);
+  border: var(--border-width) solid color-mix(in srgb, var(--abyss-annotation-color) 72%, #000);
   border-radius: 50%;
   background: var(--abyss-annotation-color);
 }
@@ -7290,6 +7194,7 @@
   height: 1px;
   padding: 0;
   margin: -1px;
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- Chromium 114 supports inset() clipping; this does not use SVG or external masks. */
   clip-path: inset(50%);
   overflow: hidden;
   white-space: nowrap;
@@ -7329,6 +7234,7 @@
   :is(.annotationLayer, .annotationEditorLayer)
   :is(.annotationCommentButton, .editToolbar),
 .abyss-documents .textLayer .editToolbar {
+  /* stylelint-disable-next-line declaration-no-important -- Override PDF.js inline toolbar visibility while its selection layer remains active. */
   display: none !important;
 }
 
@@ -7392,11 +7298,13 @@
     display: none;
   }
 
+  /* stylelint-disable selector-pseudo-class-disallowed-list -- Bounded to a toolbar control's pressed tool, not the document subtree. */
   .abyss-documents
     .abyss-annotation-toolbar:not([data-annotation-mode='select'])
     > .abyss-reader-split-control:not(:has([data-annotation-tool][aria-pressed='true'])) {
     display: none;
   }
+  /* stylelint-enable selector-pseudo-class-disallowed-list */
 }
 
 @media (pointer: coarse) {
@@ -7502,11 +7410,13 @@
     display: none;
   }
 
+  /* stylelint-disable selector-pseudo-class-disallowed-list -- Bounded to a toolbar control's pressed tool, not the document subtree. */
   .abyss-documents
     .abyss-annotation-toolbar:not([data-annotation-mode='select'])
     > .abyss-reader-split-control:not(:has([data-annotation-tool][aria-pressed='true'])) {
     display: none;
   }
+  /* stylelint-enable selector-pseudo-class-disallowed-list */
 
   .abyss-documents .abyss-reader-toolbar-page-field,
   .abyss-documents .abyss-reader-sidebar-tab,
@@ -7523,8 +7433,10 @@
 @media (prefers-reduced-motion: reduce) {
   .abyss-documents,
   .abyss-documents * {
+    /* stylelint-disable declaration-no-important -- Respect reduced motion even when vendor or theme rules set animation behavior. */
     scroll-behavior: auto !important;
     transition: none !important;
+    /* stylelint-enable declaration-no-important */
   }
 }
 

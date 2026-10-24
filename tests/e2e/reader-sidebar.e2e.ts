@@ -176,7 +176,7 @@ async function selectedPdfEditorSnapshot(): Promise<{
           storageSize: storage?.size ?? null,
           visiblePopoverCount: Array.from(
             document.querySelectorAll<HTMLElement>('[data-annotation-editor-popover]'),
-          ).filter((popover) => !popover.hidden).length,
+          ).filter((popover) => popover.hidden === false).length,
         })}`,
       );
     return { color: editor.color ?? null, count: storage.size };
@@ -1334,7 +1334,7 @@ describe('PDF reader sidebar', () => {
         selectedEditors: document.querySelectorAll('.annotationEditorLayer .selectedEditor').length,
         visiblePopovers: Array.from(
           document.querySelectorAll<HTMLElement>('[data-annotation-editor-popover]'),
-        ).filter((popover) => !popover.hidden).length,
+        ).filter((popover) => popover.hidden === false).length,
       })),
     ).toEqual({ selectedEditors: 0, visiblePopovers: 0 });
     await $('.abyss-annotation-card-edit').click();
@@ -1478,7 +1478,7 @@ describe('PDF reader sidebar', () => {
       const editorGeometry = await browser.execute(() => {
         const editors = Array.from(
           document.querySelectorAll<HTMLElement>('[data-annotation-editor-popover]'),
-        ).filter((editor) => !editor.hidden);
+        ).filter((editor) => editor.hidden === false);
         const rect = editors[0]?.getBoundingClientRect();
         return {
           count: editors.length,

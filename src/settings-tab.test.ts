@@ -103,6 +103,16 @@ function requiredControl<Component>(controls: Map<string, Component>, name: stri
   return control;
 }
 
+function enterText(component: TextComponent | TextAreaComponent, value: string): void {
+  component.inputEl.value = value;
+  component.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function chooseOption(component: DropdownComponent, value: string): void {
+  component.selectEl.value = value;
+  component.selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 function sectionControls(
   tab: AbyssDocumentsSettingTab,
   title: string,
@@ -407,12 +417,12 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(body.textContent).toContain('Default pages');
     expect(body.textContent).toContain('Default scrolling');
     expect(body.textContent).toContain('Remember layout per document');
-    controls.dropdowns.get('Default pages')?.setValue('unknown');
-    controls.dropdowns.get('Default scrolling')?.setValue('unknown');
+    chooseOption(requiredControl(controls.dropdowns, 'Default pages'), 'unknown');
+    chooseOption(requiredControl(controls.dropdowns, 'Default scrolling'), 'unknown');
     expect(persistence.saveData).not.toHaveBeenCalled();
 
-    controls.dropdowns.get('Default pages')?.setValue('facing');
-    controls.dropdowns.get('Default scrolling')?.setValue('page-by-page');
+    chooseOption(requiredControl(controls.dropdowns, 'Default pages'), 'facing');
+    chooseOption(requiredControl(controls.dropdowns, 'Default scrolling'), 'page-by-page');
     controls.toggles.get('Remember layout per document')?.setValue(true);
     await vi.waitFor(() => {
       expect(persistence.saveData).toHaveBeenCalledTimes(3);
@@ -460,16 +470,16 @@ describe('AbyssDocumentsSettingTab', () => {
     const { onSettingsChange, persistence, store, tab } = fixture();
     tab.render();
 
-    controls.dropdowns.get('Default profile')?.setValue('unknown');
+    chooseOption(requiredControl(controls.dropdowns, 'Default profile'), 'unknown');
     expect(persistence.saveData).not.toHaveBeenCalled();
-    controls.dropdowns.get('Default profile')?.setValue('dark');
+    chooseOption(requiredControl(controls.dropdowns, 'Default profile'), 'dark');
     controls.toggles.get('Remember profile per document')?.setValue(true);
     controls.colors.get('Foreground')?.setValue('#112233');
     controls.colors.get('Page tint')?.setValue('#fefefe');
     controls.toggles.get('Debug logging')?.setValue(true);
-    controls.texts.get('Annotation author')?.setValue('Ada');
-    controls.texts.get('Yellow meaning')?.setValue('Important');
-    controls.textAreas.get('Annotation transfer template')?.setValue('> {{quote}}');
+    enterText(requiredControl(controls.texts, 'Annotation author'), 'Ada');
+    enterText(requiredControl(controls.texts, 'Yellow meaning'), 'Important');
+    enterText(requiredControl(controls.textAreas, 'Annotation transfer template'), '> {{quote}}');
     await vi.waitFor(() => {
       expect(persistence.saveData).toHaveBeenCalledTimes(8);
     });
@@ -500,8 +510,8 @@ describe('AbyssDocumentsSettingTab', () => {
     expandSection(tab, 'Annotations');
 
     requiredControl(controls.colors, 'Yellow color').setValue('#123456');
-    requiredControl(controls.texts, 'Yellow name').setValue('Thesis');
-    requiredControl(controls.texts, 'Yellow meaning').setValue('Central claim');
+    enterText(requiredControl(controls.texts, 'Yellow name'), 'Thesis');
+    enterText(requiredControl(controls.texts, 'Yellow meaning'), 'Central claim');
 
     await vi.waitFor(() => {
       expect(persistence.saveData).toHaveBeenCalledTimes(3);
@@ -524,8 +534,8 @@ describe('AbyssDocumentsSettingTab', () => {
     const name = requiredControl(controls.texts, 'Yellow name');
     const meaning = requiredControl(controls.texts, 'Yellow meaning');
     color.setValue('#123456');
-    name.setValue('Thesis');
-    meaning.setValue('Central claim');
+    enterText(name, 'Thesis');
+    enterText(meaning, 'Central claim');
     await vi.waitFor(() => {
       expect(persistence.saveData).toHaveBeenCalledTimes(3);
       expect(color.getValue()).toBe('#ffd400');
@@ -632,9 +642,9 @@ describe('AbyssDocumentsSettingTab', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     tab.render();
 
-    requiredControl(controls.texts, 'Annotation author').setValue('Ada');
-    requiredControl(controls.texts, 'Yellow meaning').setValue('Important');
-    requiredControl(controls.textAreas, 'Annotation transfer template').setValue('> Quote');
+    enterText(requiredControl(controls.texts, 'Annotation author'), 'Ada');
+    enterText(requiredControl(controls.texts, 'Yellow meaning'), 'Important');
+    enterText(requiredControl(controls.textAreas, 'Annotation transfer template'), '> Quote');
 
     await vi.waitFor(() => {
       expect(notice).toHaveBeenCalledTimes(3);

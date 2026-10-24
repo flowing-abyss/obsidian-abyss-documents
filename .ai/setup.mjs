@@ -8,13 +8,17 @@
 //
 //   node .ai/setup.mjs
 //
-// Safe to re-run: existing correct links are left alone, and anything that isn't
+// Safe to re-run: existing correct links are left alone. A broken symlink to one of the four
+// previous harness-script locations is repaired after the source move. Anything else that isn't
 // already the expected link is reported and skipped rather than overwritten.
 //
 // `.ai/configs/` is laid out as a literal mirror of the repo root — e.g.
 // `.ai/configs/.codex/hooks.json` becomes `<repo-root>/.codex/hooks.json`.
 // To wire up a new agent config, just add the file at its real repo-root-relative
-// path under `.ai/configs/` and re-run this script; nothing else to edit.
+// path under `.ai/configs/` and re-run this script; nothing else to edit. The one
+// exception is a harness plugin in JavaScript or TypeScript, which the Obsidian
+// community directory's review would read as plugin code: it lives in
+// `.ai/scripts/`, which the review skips, and is linked explicitly below.
 //
 // Real symlinks require Administrator privileges or Windows Developer Mode,
 // so `pnpm install` would fail on an ordinary Windows account. Directory
@@ -34,6 +38,7 @@ import {
   realpathSync,
   statSync,
   symlinkSync,
+  unlinkSync,
 } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -57,6 +62,17 @@ const links = [
   ['.pi/skills', '.ai/skills'],
   ['.agents/skills', '.ai/skills'],
 
+  // Harness plugins live outside the configs mirror, in `.ai/scripts/`, so the
+  // community directory's review doesn't read them as plugin code.
+  ['.opencode/plugins/pnpm-policy.js', '.ai/scripts/opencode/pnpm-policy.js'],
+  ['.opencode/plugins/codegraph.js', '.ai/scripts/opencode/codegraph.js'],
+  ['.pi/extensions/pnpm-policy.ts', '.ai/scripts/pi/pnpm-policy.ts'],
+  ['.pi/extensions/codegraph.ts', '.ai/scripts/pi/codegraph.ts'],
+
+  // Claude Code's local CodeGraph installer writes project instructions here.
+  // Keep it on the same canonical source as every other agent instruction file.
+  ['.claude/CLAUDE.md', path.join('.ai/configs', 'AGENTS.md')],
+
   // AGENTS.md is the canonical agent-instructions file (mirrored from
   // `.ai/configs/AGENTS.md` below, like everything else). CLAUDE.md is
   // just a name Claude Code specifically looks for, so it links straight to
@@ -74,17 +90,21 @@ const links = [
 ];
 
 let created = 0;
+let replaced = 0;
 let skipped = 0;
 let conflicts = 0;
 
 for (const [linkPath, targetPath] of links) {
   const result = ensureLink(linkPath, targetPath);
   if (result === 'created') created += 1;
+  if (result === 'replaced') replaced += 1;
   if (result === 'skipped') skipped += 1;
   if (result === 'conflict') conflicts += 1;
 }
 
-console.log(`\n${created} created, ${skipped} already OK, ${conflicts} conflicts.`);
+console.log(
+  `\n${created} created, ${replaced} replaced, ${skipped} already OK, ${conflicts} conflicts.`,
+);
 if (conflicts > 0) {
   console.log('Resolve conflicts above manually, then re-run this script.');
   process.exitCode = 1;
@@ -111,6 +131,7 @@ function ensureLink(linkPath, targetPath) {
 
   mkdirSync(path.dirname(linkPath), { recursive: true });
 
+  let staleTarget;
   if (existsSync(linkPath) || isBrokenSymlink(linkPath)) {
     const check = isExistingLinkCorrect(linkPath, targetPath, relativeTarget, linkKind);
     if (check.ok) {
@@ -118,10 +139,19 @@ function ensureLink(linkPath, targetPath) {
       return 'skipped';
     }
 
-    console.log(
-      `conflict ${linkPath} (exists and is not the expected link to ${relativeTarget}: ${check.reason})`,
-    );
-    return 'conflict';
+    staleTarget = ownStaleLinkTarget(linkPath);
+    if (staleTarget === undefined) {
+      console.log(
+        `conflict ${linkPath} (exists and is not the expected link to ${relativeTarget}: ${check.reason})`,
+      );
+      if (isWindows && targetPath.startsWith('.ai/scripts/')) {
+        console.log(
+          `If ${linkPath} is the old generated hard link, remove that file and re-run node .ai/setup.mjs. Preserve custom files before doing so.`,
+        );
+      }
+      return 'conflict';
+    }
+    unlinkSync(linkPath);
   }
 
   try {
@@ -133,8 +163,32 @@ function ensureLink(linkPath, targetPath) {
     return 'conflict';
   }
 
+  if (staleTarget !== undefined) {
+    console.log(
+      `replaced ${linkPath} -> ${relativeTarget} (the old link pointed to "${staleTarget}")`,
+    );
+    return 'replaced';
+  }
   console.log(`created  ${linkPath} -> ${relativeTarget}`);
   return 'created';
+}
+
+// Repair only the known previous source for each moved adapter. Arbitrary broken
+// links inside `.ai/` may belong to the user and must remain conflicts.
+function ownStaleLinkTarget(linkPath) {
+  if (existsSync(linkPath) || !isBrokenSymlink(linkPath)) return undefined;
+  const storedTarget = readlinkSync(linkPath);
+  const resolved = path.resolve(realpathSync(path.dirname(linkPath)), storedTarget);
+  const previousSources = {
+    '.opencode/plugins/pnpm-policy.js': 'configs/.opencode/plugins/pnpm-policy.js',
+    '.opencode/plugins/codegraph.js': 'configs/.opencode/plugins/codegraph.js',
+    '.pi/extensions/pnpm-policy.ts': 'configs/.pi/extensions/pnpm-policy.ts',
+    '.pi/extensions/codegraph.ts': 'configs/.pi/extensions/codegraph.ts',
+  };
+  const previousSource = previousSources[linkPath];
+  return previousSource && resolved === path.join(realpathSync(aiRoot), previousSource)
+    ? storedTarget
+    : undefined;
 }
 
 function createLink(linkPath, targetPath, relativeTarget, isDirTarget) {

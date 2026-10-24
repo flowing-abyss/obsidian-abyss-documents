@@ -942,7 +942,6 @@ describe('native PDF.js annotation save qualification', () => {
         annotationType: 9,
         color: [255, 222, 0],
         opacity: 0.75,
-        isCopy: true,
         pageIndex: 0,
         quadPoints: new Float32Array([72, 590, 220, 590, 72, 568, 220, 568]),
         rect: [72, 568, 220, 590],
@@ -1033,7 +1032,6 @@ describe('native PDF.js annotation save qualification', () => {
       data: {
         annotationType: 9,
         color: [255, 212, 0],
-        isCopy: true,
         opacity: 0.75,
         pageIndex: 0,
         quadPoints: new Float32Array([72, 590, 220, 590, 72, 568, 220, 568]),
@@ -1096,7 +1094,6 @@ describe('native PDF.js annotation save qualification', () => {
         annotationType: 9,
         color: [255, 212, 0],
         commentText: firstComment,
-        isCopy: true,
         opacity: 0.75,
         pageIndex: 0,
         quadPoints: new Float32Array([72, 590, 220, 590, 72, 568, 220, 568]),

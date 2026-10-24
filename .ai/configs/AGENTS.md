@@ -23,6 +23,33 @@ for `verify` at branch completion.
 - Releasing means bumping `version` in **both** `manifest.json` and `versions.json`; the release tag must match `manifest.json`'s version exactly (no leading `v`).
 - Any network call or external service needs explicit opt-in and disclosure (README + settings) — default is local/offline. Never fetch-and-eval remote code or self-update outside normal releases.
 - Use `this.register*` (`registerEvent`, `registerDomEvent`, `registerInterval`) for anything that needs cleanup — nothing lints for a raw `addEventListener`/`setInterval` leaking past unload.
+- `docs/` (specs, plans, notes) is gitignored and stays local — never commit or force-add it.
+
+## Human-facing writing
+
+Use `humanizer` before finalizing pull request descriptions, release notes,
+or authorized README edits. Preserve technical facts, commands, links, and
+verification limits; embedded use returns only the final text. This does not
+authorize editing a README excluded by the current task.
+
+## CodeGraph
+
+Prefer CodeGraph for dependency discovery, blast-radius analysis, unfamiliar code,
+and cross-module refactoring. For obvious local changes, prefer ordinary Read/Search.
+
+`pnpm install` initializes/syncs each checkout's own ignored `.codegraph/` as best
+effort, including the main checkout and every worktree. It is skipped in CI and
+whenever pnpm reports dependencies already up to date — run
+`pnpm run codegraph:setup` then. Before a batch of graph queries, check for
+`.codegraph/codegraph.db` at the current checkout root and run
+`pnpm exec codegraph sync` there; repeat after edits. Always pass that absolute root
+(`git rev-parse --show-toplevel`) as MCP `codegraph_explore.projectPath` (load the
+tool by name via tool search if it is deferred), or run
+`pnpm exec codegraph explore "<symbols or question>"` from that root. MCP can
+discover a new index without restarting, but cross-project queries do not start a
+watcher. If the local index is missing, sync fails, or results report another
+worktree/stale files, use Read/Search. This project policy takes precedence over
+CodeGraph's generic agent guidance.
 
 ## References
 

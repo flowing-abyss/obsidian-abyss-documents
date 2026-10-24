@@ -509,7 +509,7 @@ describe('PDF reader foundation on Android', () => {
             window.innerHeight - bounds.bottom,
           ),
           label: editor.getAttribute('aria-label'),
-          metadataVisible: !metadata.hidden,
+          metadataVisible: metadata.hidden === false,
           width: bounds.width,
         };
       });

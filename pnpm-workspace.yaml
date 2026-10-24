@@ -1,31 +1,66 @@
 packages:
   - .
 
+catalog:
+  typescript: ^6.0.3
+
+packageExtensions:
+  # Browsers 3 made proxy support optional. Retain HTTP(S)_PROXY behavior for
+  # Obsidian/ChromeDriver downloads when replacing Puppeteer's older downloader.
+  '@puppeteer/browsers@3':
+    dependencies:
+      proxy-agent: ^8.0.2
+
 minimumReleaseAge: 1440
-minimumReleaseAgeExclude:
-  - obsidian-test-mocks@3.7.0
 blockExoticSubdeps: true
 saveExact: true
+strictPeerDependencies: true
 peerDependencyRules:
-  # eslint-plugin-obsidianmd@0.4.1 pins its `obsidian` peer to the exact version that
+  # eslint-plugin-obsidianmd@0.4.2 pins its `obsidian` peer to the exact version that
   # was current when it was published — it only reads `obsidian`'s stable, long-lived
   # PluginManifest type shape, not runtime behavior, so a newer `obsidian` (which this
-  # template intentionally tracks via "latest" for current API typings) is fine here.
+  # template pins for reproducible API typings) is fine here.
   allowedVersions:
-    'eslint-plugin-obsidianmd>obsidian': '*'
+    'eslint-plugin-obsidianmd@0.4.2>obsidian': '1.14.4'
 
 overrides:
+  # SonarJS inspects the parser's TypeFlags. TS 5 and TS 6 assign different bits,
+  # so both must use the root compiler rather than a separately locked TS 5.
+  'eslint-plugin-sonarjs>typescript': 'catalog:'
   # Security patch for a transitive dep of mocha/wdio; drop-in bump everywhere it's
   # pulled in.
   serialize-javascript: '>=7.0.7'
-  # NOT overriding brace-expansion (`pnpm audit` flags GHSA-mh99-v99m-4gvg via several
-  # minimatch@<10 chains — eslint's own resolution, and @wdio/cli's). Every minimatch
-  # below 10.x expects brace-expansion's old default-export shape; forcing the patched
-  # major (which only exports named bindings) breaks eslint and wdio outright — tried
-  # it, confirmed both failures directly. No compatible patched version exists for the
-  # old API shape. Not exploitable here: only matches this repo's own glob patterns,
-  # never attacker-controlled input. Tracked via Renovate; resolves once eslint/wdio
-  # move to minimatch@10+.
+  # brace-expansion's DoS fixes (GHSA-mh99-v99m-4gvg, GHSA-rgw5-rvv9-x895) were
+  # backported to the 1.x line minimatch@3 (eslint's) still depends on, but `pnpm
+  # update` keeps the locked 1.1.16 even though minimatch's ^1.1.7 allows the fix.
+  # Scoped to minimatch@3 so the 2.x/5.x lines keep their own, already-patched ranges.
+  'minimatch@3>brace-expansion': '^1.1.18'
+  # Browser downloads must use validated extraction instead of extract-zip
+  # (GHSA-7pqw-9j4j-h8q3, GHSA-jmr9-qjv8-65gv). Browsers 3 retains the APIs used by
+  # WDIO 9 and Puppeteer 24, which the Obsidian E2E service still requires.
+  '@wdio/utils>@puppeteer/browsers': '^3.2.0'
+  'puppeteer-core>@puppeteer/browsers': '^3.2.6'
+  # Appium pins 2.3.0; the same-major patch fixes compressed-body denial of service
+  # (GHSA-27r3-jxmh-p828). Express also needs its own compatible transitive update.
+  '@appium/base-driver>body-parser': '^2.4.0'
+  'express>body-parser': '^2.4.0'
+  # Puppeteer 24's chromium-bidi still needs Zod 3's ZodError.errors. Zod 4 removes
+  # it, so GHSA-mrhx-c7xc-m3w5 currently has no compatible fix in this dev-only path.
+  # get-uri 8 also retains basic-ftp 5: v6 changes PASV transfer-host defaults, and
+  # get-uri cannot opt into its prior behavior. GHSA-c475-qrg2-pj4r remains dev-only.
+  # @appium/base-driver pins morgan to exactly 1.11.0; 1.12 fixes log forging
+  # (GHSA-jxfw-x594-9x9m) with no API change. Drop once appium lifts the pin.
+  morgan: '^1.12.0'
+
+  # obsidian-test-mocks pins Moment 2.29.4; 2.31.0 fixes locale path traversal
+  # (GHSA-4p3w-j4w9-5jqw). Remove when the mock package lifts its pin.
+  'obsidian-test-mocks>moment': '^2.31.0'
+  # Android screenshot tooling pins sharp 0.35.4; patch its librsvg dependency
+  # (GHSA-wq5f-xc86-pv6w) without changing the sharp minor version.
+  'appium-uiautomator2-driver>sharp': '^0.35.5'
+  # @appium/support pins shell-quote 1.10.0; 1.12 includes the command injection
+  # fix (GHSA-pqg4-j6r4-53mv). Remove when Appium updates its pin.
+  '@appium/support>shell-quote': '^1.12.0'
 
 allowBuilds:
   # webdriverio's Firefox/Edge driver managers — Obsidian is Electron/Chromium-only,

@@ -1,5 +1,5 @@
 {
-  "description": "Project-local Superpowers bootstrap and pnpm policy.",
+  "description": "Project-local Superpowers bootstrap, CodeGraph prompt context, and pnpm policy.",
   "hooks": {
     "SessionStart": [
       {
@@ -12,6 +12,19 @@
             "async": false,
             "timeout": 10,
             "statusMessage": "Loading superpowers skill-check instructions"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$(git rev-parse --show-toplevel)/.ai/codegraph.mjs\" prompt-hook",
+            "commandWindows": "powershell -NoProfile -Command \"node (Join-Path (git rev-parse --show-toplevel) '.ai/codegraph.mjs') prompt-hook\"",
+            "timeout": 30,
+            "statusMessage": "Loading CodeGraph context"
           }
         ]
       }

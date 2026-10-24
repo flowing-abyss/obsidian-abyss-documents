@@ -191,7 +191,7 @@ export interface PdfJsCommentManagerRuntime {
   updatePopupColor(editor: PdfCommentEditor): void;
 }
 
-/** Headless structural seam consumed by pdfjs-dist 6.2.108's comment manager. */
+/** Headless structural seam consumed by pdfjs-dist 6.4.299's comment manager. */
 export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   readonly dialogElement: HTMLElement;
 

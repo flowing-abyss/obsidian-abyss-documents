@@ -193,6 +193,7 @@ describe('ReaderSidebar', () => {
     const host = createDiv();
     host.doc.body.append(host);
     const sidebar = new ReaderSidebar(host, callbacks());
+    sidebar.open('outline');
     const tabs = Array.from(sidebar.root.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
     const OwnerKeyboardEvent = (
       sidebar.root.win as Window & {

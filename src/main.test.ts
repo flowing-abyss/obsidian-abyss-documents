@@ -2,8 +2,10 @@ import type { Command, PluginManifest, TFile } from 'obsidian';
 import {
   App,
   Menu,
+  FileView as MockFileView,
   MarkdownView as MockMarkdownView,
   TFile as MockTFile,
+  View as MockView,
   Notice,
   WorkspaceLeaf,
 } from 'obsidian-test-mocks/obsidian';
@@ -175,7 +177,7 @@ async function loadedReader(
   if (creator === undefined) throw new Error('Expected the document view creator.');
   const view = creator(WorkspaceLeaf.create2__(app).asOriginalType3__());
   if (!(view instanceof AbyssDocumentView)) throw new Error('Expected an Abyss document view.');
-  await view.onLoadFile(pdfFile(app));
+  await view.setState({ file: pdfFile(app).path }, { history: false });
   return { plugin, saveData, view };
 }
 
@@ -381,6 +383,65 @@ describe('AbyssDocumentsPlugin', () => {
     expect(setViewState).toHaveBeenCalledOnce();
   });
 
+  it('hands off a PDF view whose file path is available only through public state', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    class StateOnlyPdfView extends MockView {
+      override getViewType(): string {
+        return 'pdf';
+      }
+      override getDisplayText(): string {
+        return 'PDF';
+      }
+    }
+    const view = new StateOnlyPdfView(leaf);
+    await view.setState({ file: 'Books/Guide.pdf' }, { history: false });
+    Object.defineProperty(leaf, 'view', { configurable: true, value: view, writable: true });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf' },
+      });
+    });
+  });
+
+  it('uses the live PDF file when a FileView omits its path from public state', async () => {
+    const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
+    const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
+    const leaf = app.workspace.getLeaf(false);
+    class CorePdfFileView extends MockFileView {
+      override getViewType(): string {
+        return 'pdf';
+      }
+      override getDisplayText(): string {
+        return 'PDF';
+      }
+      override getState(): Record<string, unknown> {
+        return {};
+      }
+    }
+    const view = new CorePdfFileView(leaf);
+    view.file = MockTFile.fromOriginalType2__(pdfFile(app));
+    Object.defineProperty(leaf, 'view', { configurable: true, value: view, writable: true });
+    const setViewState = vi.spyOn(leaf, 'setViewState');
+
+    await plugin.onload();
+    app.workspace.trigger('file-open', pdfFile(app));
+
+    await vi.waitFor(() => {
+      expect(setViewState).toHaveBeenCalledWith({
+        type: DOCUMENT_VIEW_TYPE,
+        state: { file: 'Books/Guide.pdf' },
+      });
+    });
+  });
+
   it('preserves a public annotation subpath across the core PDF handoff', async () => {
     const app = App.createConfigured__({ files: { 'Books/Guide.pdf': '' } });
     const plugin = new AbyssDocumentsPlugin(app.asOriginalType__(), manifest);
@@ -389,21 +450,13 @@ describe('AbyssDocumentsPlugin', () => {
       subpath: '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4',
     };
     await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
-    Object.defineProperty(leaf, 'view', {
-      configurable: true,
-      value: { getEphemeralState: () => ephemeral },
-      writable: true,
-    });
+    vi.spyOn(leaf.view, 'getEphemeralState').mockReturnValue(ephemeral);
     const applyViewState = leaf.setViewState.bind(leaf);
     const setEphemeralState = vi.fn();
     vi.spyOn(leaf, 'setViewState').mockImplementation(async (state) => {
       await applyViewState(state);
       if (state.type !== DOCUMENT_VIEW_TYPE) return;
-      Object.defineProperty(leaf, 'view', {
-        configurable: true,
-        value: { setEphemeralState },
-        writable: true,
-      });
+      vi.spyOn(leaf.view, 'setEphemeralState').mockImplementation(setEphemeralState);
     });
 
     await plugin.onload();
@@ -422,19 +475,12 @@ describe('AbyssDocumentsPlugin', () => {
     await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
     const setViewState = vi.spyOn(leaf, 'setViewState');
     const subpath = '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
-    const sourceContainer = document.body.createDiv();
+    const sourceContainer = leaf.view.containerEl;
+    document.body.append(sourceContainer);
     const link = sourceContainer.createEl('a');
     link.className = 'internal-link';
     link.dataset['href'] = `Books/Guide.pdf${subpath}`;
-    Object.defineProperty(leaf, 'view', {
-      configurable: true,
-      value: {
-        containerEl: sourceContainer,
-        getEphemeralState: () => ({}),
-        setEphemeralState: vi.fn(),
-      },
-      writable: true,
-    });
+    vi.spyOn(leaf.view, 'getEphemeralState').mockReturnValue({});
 
     await plugin.onload();
     link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
@@ -456,19 +502,12 @@ describe('AbyssDocumentsPlugin', () => {
     await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
     const setViewState = vi.spyOn(leaf, 'setViewState');
     const subpath = '#annotation=12R&page=2&fingerprint=rectangle%3A1%2C2%2C3%2C4';
-    const sourceContainer = document.body.createDiv();
+    const sourceContainer = leaf.view.containerEl;
+    document.body.append(sourceContainer);
     const link = sourceContainer.createEl('a');
     link.className = 'internal-link';
     link.dataset['href'] = `Books/Guide.pdf${subpath}`;
-    Object.defineProperty(leaf, 'view', {
-      configurable: true,
-      value: {
-        containerEl: sourceContainer,
-        getEphemeralState: () => ({}),
-        setEphemeralState: vi.fn(),
-      },
-      writable: true,
-    });
+    vi.spyOn(leaf.view, 'getEphemeralState').mockReturnValue({});
 
     await plugin.onload();
     link.dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
@@ -510,7 +549,6 @@ describe('AbyssDocumentsPlugin', () => {
     });
     document.body.append(foreignView.containerEl);
     await foreignView.setState({ file: 'Books/Guide.pdf', subpath }, { history: false });
-    await foreignView.onLoadFile(pdfFile(app));
 
     await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
     app.workspace.trigger('file-open', pdfFile(app));
@@ -535,7 +573,6 @@ describe('AbyssDocumentsPlugin', () => {
     });
     document.body.append(intendedView.containerEl);
     await intendedView.setState({ file: 'Books/Guide.pdf', subpath }, { history: false });
-    await intendedView.onLoadFile(pdfFile(app));
     await leaf.setViewState({ type: 'pdf', state: { file: 'Books/Guide.pdf' } });
     app.workspace.trigger('file-open', pdfFile(app));
     await vi.waitFor(() => {

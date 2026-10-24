@@ -216,7 +216,7 @@ export class AnnotationToolbar {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
-    this.activeMenu?.menu.close();
+    this.activeMenu?.menu.hide();
     this.activeMenu = null;
     for (const frame of this.focusFrames) this.root.win.cancelAnimationFrame(frame);
     this.focusFrames.clear();
@@ -274,10 +274,10 @@ export class AnnotationToolbar {
     event?: MouseEvent,
   ): void {
     if (this.activeMenu?.trigger === trigger) {
-      this.activeMenu.menu.close();
+      this.activeMenu.menu.hide();
       return;
     }
-    this.activeMenu?.menu.close();
+    this.activeMenu?.menu.hide();
     const menu = new Menu();
     menu.setUseNativeMenu(false);
     menu.setParentElement(trigger);

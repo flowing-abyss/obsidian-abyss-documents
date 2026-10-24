@@ -566,10 +566,7 @@ async function inspectPassiveImportedAnnotation(selector: string): Promise<{
       ).length,
       popoverHeight: popover?.getBoundingClientRect().height ?? 0,
       readOnlyMetadata:
-        popover?.getAttribute('aria-label') === 'Annotation details' &&
-        readOnly !== null &&
-        readOnly !== undefined &&
-        !readOnly.hidden,
+        popover?.getAttribute('aria-label') === 'Annotation details' && readOnly?.hidden === false,
       selectedEditors: document.querySelectorAll('.annotationEditorLayer .selectedEditor').length,
     };
   }, selector);
@@ -615,7 +612,7 @@ async function assertCompactReadOnlyCard(comment: string): Promise<void> {
         ),
       ).filter((element) => element.offsetParent !== null).length,
       label: editor.getAttribute('aria-label'),
-      metadataVisible: !readOnly.hidden,
+      metadataVisible: readOnly.hidden === false,
       popoverHeight: editor.getBoundingClientRect().height,
       popoverWidth: editor.getBoundingClientRect().width,
     };

@@ -460,7 +460,7 @@ describe('reader compact toolbar', () => {
     const validVisibleMatch = tooltipState.matches.some(
       ({ display, hidden, intersectsViewport, opacity, pointerEvents, rect, visibility }) =>
         display !== 'none' &&
-        !hidden &&
+        hidden === false &&
         intersectsViewport &&
         opacity > 0 &&
         pointerEvents === 'none' &&

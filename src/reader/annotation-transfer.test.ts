@@ -269,7 +269,7 @@ describe('annotation transfer and deep links', () => {
     const replaceRange = vi.fn();
     const focus = vi.fn();
     const markdownView = Object.assign(Object.create(MarkdownView.prototype) as MarkdownView, {
-      editor: { getCursor: () => ({ line: 1, ch: 2 }), replaceRange, focus },
+      editMode: { editor: { getCursor: () => ({ line: 1, ch: 2 }), replaceRange, focus } },
       file: { path: 'Notes/Recent.md' },
     });
     const setActiveLeaf = vi.fn();
@@ -294,7 +294,7 @@ describe('annotation transfer and deep links', () => {
   it('does not insert into an arbitrary Markdown leaf when the most recent leaf is not Markdown', () => {
     const replaceRange = vi.fn();
     const markdownView = Object.assign(Object.create(MarkdownView.prototype) as MarkdownView, {
-      editor: { getCursor: () => ({ line: 0, ch: 0 }), replaceRange, focus: vi.fn() },
+      editMode: { editor: { getCursor: () => ({ line: 0, ch: 0 }), replaceRange, focus: vi.fn() } },
       file: { path: 'Notes/Fallback.md' },
     });
     const service = new AnnotationTransferService({

@@ -93,7 +93,7 @@ export async function loadPdfAnnotationCapabilities(
 
 function documentReadOnlyReason(
   isPureXfa: boolean,
-  permissions: readonly number[] | null,
+  permissions: ReadonlySet<number> | null,
   signatures: readonly object[] | null,
   permissionFlags: PermissionFlags,
 ): PdfDocumentReadOnlyReason | null {
@@ -109,7 +109,7 @@ function documentReadOnlyReason(
       'Signed PDF documents are opened read-only to preserve signatures.',
     );
   }
-  if (permissions !== null && !permissions.includes(permissionFlags.MODIFY_CONTENTS)) {
+  if (permissions !== null && !permissions.has(permissionFlags.MODIFY_CONTENTS)) {
     return documentReason(
       'permission-restricted',
       'This PDF does not grant permission to modify its contents.',

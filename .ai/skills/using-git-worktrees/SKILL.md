@@ -141,6 +141,43 @@ if [ -f go.mod ]; then go mod download; fi
 `--frozen-lockfile`; use whichever the detected Yarn version actually
 supports.
 
+### CodeGraph (best effort)
+
+In this repository `pnpm install` also initializes/syncs the **current
+checkout's** CodeGraph index (`prepare` runs `.ai/setup-codegraph.mjs`). pnpm
+skips `prepare` when it reports dependencies already up to date (an existing
+worktree or the main checkout), so if the install printed that — or you
+skipped it — run the setup yourself:
+
+```bash
+pnpm run codegraph:setup
+```
+
+Each checkout owns its ignored `.codegraph/`; never copy or symlink another
+checkout's index. The script checks the local `.codegraph/codegraph.db`, not
+`codegraph status`: path lookup can fall back to a parent checkout's index,
+and `.worktrees/` sits inside the main checkout. `init --yes` builds a missing
+index without prompts; an existing one (including after an interrupted build)
+needs `sync`. Failure is non-blocking — the script warns and continues; do not
+install/upgrade CodeGraph globally or restart the agent/MCP as part of setup.
+
+For MCP queries always pass this absolute checkout root
+(`git rev-parse --show-toplevel`) as `projectPath`. The running server
+discovers a newly initialized local index on the next call. Cross-project
+`projectPath` queries have no watcher: before a batch of structural queries,
+run `pnpm exec codegraph sync` in that checkout (again after edits). If the
+local DB is absent, sync fails, or results warn of another worktree or stale
+files, use Read/Search rather than relying on that graph.
+
+### Local docs
+
+This project gitignores `docs/`, so a new worktree has none of the specs and
+plans written in the main checkout. Pass them by absolute path — including
+as `PLAN_FILE` to the execution skills' scripts — and never copy, symlink,
+or commit them into the worktree. Anything you write under the worktree's
+own `docs/` exists only there; finishing-a-development-branch moves it back
+to the main checkout before removing the worktree.
+
 ## Step 3: Verify Clean Baseline
 
 Run tests using the same package manager detected in Step 2 (`pnpm test`,

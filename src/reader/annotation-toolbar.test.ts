@@ -303,7 +303,7 @@ describe('AnnotationToolbar', () => {
 
   it('closes the active palette when its disclosure is activated again', () => {
     const addItem = vi.spyOn(Menu.prototype, 'addItem');
-    const close = vi.spyOn(Menu.prototype, 'close');
+    const close = vi.spyOn(Menu.prototype, 'hide');
     const host = document.body.createDiv();
     const toolbar = new AnnotationToolbar(host, palette, null, vi.fn());
     const trigger = host.querySelector<HTMLButtonElement>('[data-control="quick-highlight-menu"]');

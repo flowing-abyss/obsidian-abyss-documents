@@ -796,7 +796,7 @@ export class AnnotationEditorPopover {
   }
 
   private handleSuggestionKey(event: KeyboardEvent): void {
-    if (this.suggestionsElement.hidden) return;
+    if (this.suggestionsElement.hidden !== false) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();

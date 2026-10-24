@@ -341,7 +341,7 @@ export class OutlinePanel {
     const row = this.rows[index];
     if (row?.group === null || row === undefined) return;
     event.preventDefault();
-    if (row.group.hidden && this.query === '') {
+    if (row.group.hidden !== false && this.query === '') {
       this.setExpanded(index, true);
       return;
     }
@@ -353,7 +353,7 @@ export class OutlinePanel {
     const row = this.rows[index];
     if (row === undefined) return;
     event.preventDefault();
-    if (row.group !== null && !row.group.hidden && this.query === '') {
+    if (row.group !== null && row.group.hidden === false && this.query === '') {
       this.setExpanded(index, false);
       return;
     }

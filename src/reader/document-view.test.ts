@@ -137,7 +137,6 @@ describe('AbyssDocumentView', () => {
       },
       { history: false },
     );
-    await fixture.view.onLoadFile(fixture.file);
     expect(reader.resolveAnnotationLink).toHaveBeenCalledWith({
       id: '12R',
       page: 2,
@@ -159,7 +158,6 @@ describe('AbyssDocumentView', () => {
     reader.resolveAnnotationLink.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
 
     await fixture.view.setState({ file: fixture.file.path, subpath }, { history: false });
-    await fixture.view.onLoadFile(fixture.file);
     expect(resolved).not.toHaveBeenCalled();
 
     fixture.view.setEphemeralState({ subpath });
@@ -182,7 +180,7 @@ describe('AbyssDocumentView', () => {
     expect(fixture.view.getViewType()).toBe(DOCUMENT_VIEW_TYPE);
     expect(fixture.view.getDisplayText()).toBe('Document');
 
-    await fixture.view.onLoadFile(fixture.file);
+    await fixture.view.setState({ file: fixture.file.path }, { history: false });
 
     expect(fixture.view.getDisplayText()).toBe('Guide');
   });
@@ -191,7 +189,7 @@ describe('AbyssDocumentView', () => {
     const reader = controller();
     const fixture = viewFixture(reader.reader);
 
-    await fixture.view.onLoadFile(fixture.file);
+    await fixture.view.setState({ file: fixture.file.path }, { history: false });
 
     expect(reader.open).toHaveBeenCalledWith(fixture.file, fixture.view.contentEl);
     expect(fixture.view.file).toBe(fixture.file);
@@ -205,7 +203,9 @@ describe('AbyssDocumentView', () => {
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    await expect(fixture.view.onLoadFile(fixture.file)).resolves.toBeUndefined();
+    await expect(
+      fixture.view.setState({ file: fixture.file.path }, { history: false }),
+    ).resolves.toBeUndefined();
 
     expect(notice).toHaveBeenCalledWith('Could not open Guide.pdf: The PDF is damaged.', undefined);
     expect(log).toHaveBeenCalledWith('[abyss-documents] Failed to open PDF', {
@@ -230,7 +230,7 @@ describe('AbyssDocumentView', () => {
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    await fixture.view.onLoadFile(fixture.file);
+    await fixture.view.setState({ file: fixture.file.path }, { history: false });
     fixture.view.contentEl.querySelector<HTMLButtonElement>('[data-action="retry"]')?.click();
     await vi.waitFor(() => {
       expect(log).toHaveBeenCalledTimes(2);
@@ -251,7 +251,7 @@ describe('AbyssDocumentView', () => {
     const notice = vi.spyOn(Notice.prototype, 'constructor__');
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const firstOpen = fixture.view.onLoadFile(fixture.file);
+    const firstOpen = fixture.view.setState({ file: fixture.file.path }, { history: false });
     await vi.waitFor(() => {
       expect(reader.open).toHaveBeenCalledOnce();
     });
@@ -273,7 +273,7 @@ describe('AbyssDocumentView', () => {
   it('closes the controller before delegating file unload', async () => {
     const reader = controller();
     const fixture = viewFixture(reader.reader);
-    await fixture.view.onLoadFile(fixture.file);
+    await fixture.view.setState({ file: fixture.file.path }, { history: false });
 
     await fixture.view.onUnloadFile(fixture.file);
 
@@ -285,7 +285,7 @@ describe('AbyssDocumentView', () => {
     const cause = new DOMException('Pending annotation creation.', 'InvalidStateError');
     reader.close.mockRejectedValueOnce(cause);
     const fixture = viewFixture(reader.reader);
-    await fixture.view.onLoadFile(fixture.file);
+    await fixture.view.setState({ file: fixture.file.path }, { history: false });
     const unload = vi.spyOn(MockFileView.prototype, 'onUnloadFile');
 
     await expect(fixture.view.onUnloadFile(fixture.file)).rejects.toBe(cause);
@@ -373,7 +373,7 @@ describe('AbyssDocumentView', () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     fixture.view.contentEl.click();
-    await fixture.view.onLoadFile(fixture.file);
+    await fixture.view.setState({ file: fixture.file.path }, { history: false });
 
     expect(reader.open).toHaveBeenCalledOnce();
     expect(notice).toHaveBeenCalledWith('Could not open Guide.pdf: Unknown failure.', undefined);

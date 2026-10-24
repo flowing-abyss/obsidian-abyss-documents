@@ -12,15 +12,13 @@ const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   beforeParse(window) {
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
-      value: (media: string): MediaQueryList => ({
+      value: (media: string): Omit<MediaQueryList, 'addListener' | 'removeListener'> => ({
         addEventListener: () => undefined,
-        addListener: () => undefined,
         dispatchEvent: () => false,
         matches: false,
         media,
         onchange: null,
         removeEventListener: () => undefined,
-        removeListener: () => undefined,
       }),
     });
   },

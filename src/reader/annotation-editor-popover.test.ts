@@ -275,7 +275,7 @@ describe('AnnotationEditorPopover', () => {
     const popover = new AnnotationEditorPopover(host);
     const comment = popover.element.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
     if (comment === null) throw new Error('Expected the comment textarea.');
-    const measurements: Array<{ hidden: boolean; maxWidth: string }> = [];
+    const measurements: Array<{ hidden: HTMLElement['hidden']; maxWidth: string }> = [];
     Object.defineProperty(comment, 'scrollHeight', {
       configurable: true,
       get: () => {
@@ -310,9 +310,9 @@ describe('AnnotationEditorPopover', () => {
     });
 
     expect(measurements.length).toBeGreaterThan(0);
-    expect(measurements.every(({ hidden, maxWidth }) => !hidden && maxWidth === '244px')).toBe(
-      true,
-    );
+    expect(
+      measurements.every(({ hidden, maxWidth }) => hidden === false && maxWidth === '244px'),
+    ).toBe(true);
     expect(comment.style.getPropertyValue('--abyss-annotation-comment-height')).toBe('220px');
     expect(popover.element.style.top).toBe('8px');
     Reflect.deleteProperty(host.win, 'visualViewport');

@@ -392,9 +392,9 @@ export class PdfDomSelectionObserver implements PdfSelectionObserver {
     if (text.trim().length === 0) return null;
     const anchorLayer = closestTextLayer(anchorNode, this.root);
     const focusLayer = closestTextLayer(focusNode, this.root);
-    // PDF.js 6.2.108 highlightSelection only accepts one text layer, so a
+    // PDF.js 6.4.299 highlightSelection only accepts one text layer, so a
     // cross-page selection has no palette instead of risking an invalid action.
-    // Source: https://raw.githubusercontent.com/mozilla/pdf.js/v6.2.108/src/display/editor/tools.js
+    // Source: https://raw.githubusercontent.com/mozilla/pdf.js/v6.4.299/src/display/editor/tools.js
     if (anchorLayer === null || anchorLayer !== focusLayer) return null;
     const pageIndex = selectionPageIndex(anchorLayer);
     if (pageIndex === null) return null;

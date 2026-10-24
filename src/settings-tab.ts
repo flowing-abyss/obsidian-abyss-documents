@@ -159,7 +159,7 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     header.addEventListener(
       'click',
       () => {
-        setExpanded(body.hidden);
+        setExpanded(Boolean(body.hidden));
       },
       { signal },
     );
@@ -168,7 +168,7 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
       (event) => {
         if ((event.key === 'Enter' || event.key === ' ') && !event.repeat) {
           event.preventDefault();
-          setExpanded(body.hidden);
+          setExpanded(Boolean(body.hidden));
         }
       },
       { signal },

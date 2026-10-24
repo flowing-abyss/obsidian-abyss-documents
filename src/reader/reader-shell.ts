@@ -489,7 +489,7 @@ function hasOpenReaderMenu(root: HTMLElement): boolean {
   );
   if (trigger === null) return false;
   return Array.from(root.ownerDocument.querySelectorAll<HTMLElement>('.menu')).some((menu) => {
-    if (menu.hidden) return false;
+    if (menu.hidden !== false) return false;
     const style = menu.win.getComputedStyle(menu);
     if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
       return false;

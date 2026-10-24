@@ -314,7 +314,7 @@ export class ReaderToolbar {
     if (this.destroyed) return;
     this.destroyed = true;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
-    this.activeMenu?.menu.close();
+    this.activeMenu?.menu.hide();
     this.activeMenu = null;
     for (const frame of this.focusFrames) this.root.win.cancelAnimationFrame(frame);
     this.focusFrames.clear();
@@ -645,10 +645,10 @@ export class ReaderToolbar {
 
   private createMenu(trigger: HTMLButtonElement): Menu | null {
     if (this.activeMenu?.trigger === trigger) {
-      this.activeMenu.menu.close();
+      this.activeMenu.menu.hide();
       return null;
     }
-    this.activeMenu?.menu.close();
+    this.activeMenu?.menu.hide();
     const menu = new Menu();
     menu.setUseNativeMenu(false);
     menu.setParentElement(trigger);

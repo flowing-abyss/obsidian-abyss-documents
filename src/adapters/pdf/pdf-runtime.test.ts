@@ -6,7 +6,7 @@ import {
 } from '../../reader-performance.js';
 import { installPdfEditorDocumentMetrics, PdfRuntimeLoader } from './pdf-runtime.js';
 
-const PDFJS_VERSION = '6.2.108';
+const PDFJS_VERSION = '6.4.299';
 const WORKER_PAYLOAD = btoa('compressed worker');
 const WORKER_BYTES = new TextEncoder().encode('worker source');
 

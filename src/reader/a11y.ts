@@ -72,7 +72,7 @@ function isHidden(element: HTMLElement): boolean {
   while (current !== null) {
     const style = win.getComputedStyle(current);
     if (
-      current.hidden ||
+      current.hidden !== false ||
       current.getAttribute('aria-hidden') === 'true' ||
       style.display === 'none' ||
       style.visibility === 'hidden' ||

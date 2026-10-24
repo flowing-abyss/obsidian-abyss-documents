@@ -233,7 +233,7 @@ describe('Community installer package smoke', () => {
     await expect($('[data-page-number="1"] canvas')).toExist();
 
     const runtime = await metrics();
-    expect(runtime.versions).toEqual({ pdfjs: '6.2.108', plugin: manifest.version });
+    expect(runtime.versions).toEqual({ pdfjs: '6.4.299', plugin: manifest.version });
     expect(runtime.counters.pdfRuntimeLoads).toBe(1);
     expect(runtime.counters.workerUrlsActive).toBe(1);
     const network = await browser.execute(() => {

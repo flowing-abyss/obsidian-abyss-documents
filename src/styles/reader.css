@@ -125,6 +125,7 @@
 .abyss-documents .abyss-annotation-color-rows {
   overflow: auto hidden;
   padding-block: var(--size-2-1);
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- Optional scrollbar styling; older Chromium retains its native scrollbar. */
   scrollbar-width: thin;
 }
 
@@ -267,6 +268,7 @@
   padding-inline-end: 28px;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- The adjacent ::-webkit-scrollbar rule covers Chromium before 121. */
   scrollbar-width: none;
 }
 
@@ -639,6 +641,7 @@
 }
 
 .abyss-documents .abyss-annotation-footer {
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- This div is a layout wrapper with no semantic accessibility role. */
   display: contents;
 }
 
@@ -682,6 +685,7 @@
   overflow: auto hidden;
   padding: 0;
   overscroll-behavior-inline: contain;
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- The adjacent ::-webkit-scrollbar rule covers Chromium before 121. */
   scrollbar-width: none;
 }
 
@@ -737,7 +741,7 @@
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
-  border: var(--border-width) solid color-mix(in srgb, var(--abyss-annotation-color) 72%, black);
+  border: var(--border-width) solid color-mix(in srgb, var(--abyss-annotation-color) 72%, #000);
   border-radius: 50%;
   background: var(--abyss-annotation-color);
 }
@@ -1022,6 +1026,7 @@
   height: 1px;
   padding: 0;
   margin: -1px;
+  /* stylelint-disable-next-line plugin/no-unsupported-browser-features -- Chromium 114 supports inset() clipping; this does not use SVG or external masks. */
   clip-path: inset(50%);
   overflow: hidden;
   white-space: nowrap;
@@ -1061,6 +1066,7 @@
   :is(.annotationLayer, .annotationEditorLayer)
   :is(.annotationCommentButton, .editToolbar),
 .abyss-documents .textLayer .editToolbar {
+  /* stylelint-disable-next-line declaration-no-important -- Override PDF.js inline toolbar visibility while its selection layer remains active. */
   display: none !important;
 }
 
@@ -1124,11 +1130,13 @@
     display: none;
   }
 
+  /* stylelint-disable selector-pseudo-class-disallowed-list -- Bounded to a toolbar control's pressed tool, not the document subtree. */
   .abyss-documents
     .abyss-annotation-toolbar:not([data-annotation-mode='select'])
     > .abyss-reader-split-control:not(:has([data-annotation-tool][aria-pressed='true'])) {
     display: none;
   }
+  /* stylelint-enable selector-pseudo-class-disallowed-list */
 }
 
 @media (pointer: coarse) {
@@ -1234,11 +1242,13 @@
     display: none;
   }
 
+  /* stylelint-disable selector-pseudo-class-disallowed-list -- Bounded to a toolbar control's pressed tool, not the document subtree. */
   .abyss-documents
     .abyss-annotation-toolbar:not([data-annotation-mode='select'])
     > .abyss-reader-split-control:not(:has([data-annotation-tool][aria-pressed='true'])) {
     display: none;
   }
+  /* stylelint-enable selector-pseudo-class-disallowed-list */
 
   .abyss-documents .abyss-reader-toolbar-page-field,
   .abyss-documents .abyss-reader-sidebar-tab,
@@ -1255,7 +1265,9 @@
 @media (prefers-reduced-motion: reduce) {
   .abyss-documents,
   .abyss-documents * {
+    /* stylelint-disable declaration-no-important -- Respect reduced motion even when vendor or theme rules set animation behavior. */
     scroll-behavior: auto !important;
     transition: none !important;
+    /* stylelint-enable declaration-no-important */
   }
 }

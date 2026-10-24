@@ -319,7 +319,7 @@ interface ContextualActivationFailureOwner {
 
 interface SuppressedNativeToolbar {
   readonly display: string;
-  readonly hidden: boolean;
+  readonly hidden: HTMLElement['hidden'];
   readonly priority: string;
 }
 
@@ -1816,10 +1816,10 @@ export class PdfAnnotationEditor {
     transaction: PendingSelectionTransaction,
     reservation: SelectionHighlightReservation,
   ): Promise<DocumentAnnotation> {
-    // PDF.js 6.2.108 snapshots the live DOM selection inside this call before
+    // PDF.js 6.4.299 snapshots the live DOM selection inside this call before
     // its asynchronous mode switch. Keep it before the first await so a view
     // transition cannot invalidate the selection geometry.
-    // Source: https://github.com/mozilla/pdf.js/blob/v6.2.108/src/display/editor/tools.js
+    // Source: https://github.com/mozilla/pdf.js/blob/v6.4.299/src/display/editor/tools.js
     manager.highlightSelection('abyss-selection');
     await this.enterCapturedSelectionMode(transaction);
     return waitWithSignal(reservation.created, transaction.controller.signal);

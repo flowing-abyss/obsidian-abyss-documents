@@ -183,7 +183,7 @@ export async function installTenThousandDeleteTrace(
       for (const node of Array.from(document.querySelectorAll<HTMLElement>(nativeSelector))) {
         const style = getComputedStyle(node);
         if (
-          node.hidden ||
+          node.hidden !== false ||
           style.display === 'none' ||
           style.visibility === 'hidden' ||
           style.opacity === '0'

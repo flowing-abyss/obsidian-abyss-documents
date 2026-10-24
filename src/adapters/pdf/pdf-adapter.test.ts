@@ -202,7 +202,7 @@ describe('PdfDocumentAdapter', () => {
     },
     {
       name: 'permission-restricted',
-      document: pdf({ getPermissions: vi.fn(async () => [0x04, 0x10]) }),
+      document: pdf({ getPermissions: vi.fn(async () => new Set([0x04, 0x10])) }),
       code: 'permission-restricted',
     },
   ])('opens a $name document without annotation writing', async ({ document, code }) => {
@@ -280,7 +280,7 @@ describe('PdfDocumentAdapter', () => {
   });
 
   it('aborts promptly during annotation capability resolution and destroys the loading task', async () => {
-    const permissions = deferred<number[] | null>();
+    const permissions = deferred<Set<number> | null>();
     const fixture = adapterFixture({
       pdf: pdf({ getPermissions: vi.fn(() => permissions.promise) }),
     });
@@ -327,7 +327,7 @@ describe('PdfDocumentAdapter', () => {
     'preserves an annotation capability rejection as the typed cause: %s',
     async (cause) => {
       const fixture = adapterFixture({
-        pdf: pdf({ getPermissions: vi.fn(() => rejectedWith<number[] | null>(cause)) }),
+        pdf: pdf({ getPermissions: vi.fn(() => rejectedWith<Set<number> | null>(cause)) }),
       });
 
       await expect(
@@ -354,7 +354,7 @@ describe('PdfDocumentAdapter', () => {
     const destroyFailure = new Error('destroy failed');
     const fixture = adapterFixture({
       destroyFailure,
-      pdf: pdf({ getPermissions: vi.fn(() => rejectedWith<number[] | null>(cause)) }),
+      pdf: pdf({ getPermissions: vi.fn(() => rejectedWith<Set<number> | null>(cause)) }),
     });
 
     await expect(

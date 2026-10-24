@@ -658,8 +658,7 @@ async function installOverlapContinuityTrace(expectedIds: readonly string[]): Pr
         viewer === null ||
         page === null ||
         canvas === null ||
-        popover === null ||
-        popover.hidden ||
+        popover?.hidden !== false ||
         cards.length !== stableIds.length
       )
         throw new Error('Persisted overlap continuity targets are incomplete.');
@@ -705,7 +704,7 @@ async function installOverlapContinuityTrace(expectedIds: readonly string[]): Pr
           currentCards.some((card, index) => card !== cards[index])
         )
           state.identityBreaks += 1;
-        if (!popover.hidden && popover.innerText.includes('Read-only'))
+        if (popover.hidden === false && popover.innerText.includes('Read-only'))
           state.phantomOrReadOnlyRows += 1;
       };
       const cardsWithin = (node: Node): HTMLElement[] => {
@@ -792,7 +791,7 @@ async function waitForInitialContextualActivation(): Promise<void> {
         return (
           document.querySelectorAll('.highlightEditor.selectedEditor').length === 1 &&
           popover !== null &&
-          !popover.hidden &&
+          popover.hidden === false &&
           comment !== null &&
           comment !== undefined &&
           !comment.disabled
@@ -1145,7 +1144,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         if (node.nodeType !== Node.ELEMENT_NODE) return [];
         const element = node as Element;
         return [
-          ...(element.matches('canvas') ? [element as HTMLCanvasElement] : []),
+          ...(element.matches('canvas') ? [element] : []),
           ...Array.from(element.querySelectorAll<HTMLCanvasElement>('canvas')),
         ];
       };
@@ -1265,7 +1264,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
           trace.canvasWrapperRemounts += 1;
         const currentCanvas = canvasWrapper.querySelector<HTMLCanvasElement>('canvas');
         if (currentCanvas === null) trace.canvasWrapperEmpty += 1;
-        if (canvasWrapper.hidden || getComputedStyle(canvasWrapper).display === 'none')
+        if (canvasWrapper.hidden !== false || getComputedStyle(canvasWrapper).display === 'none')
           trace.canvasWrapperHidden += 1;
         if (leaf.querySelector(popoverSelector) !== popover || !popover.isConnected)
           trace.popoverRemounts += 1;
@@ -1276,7 +1275,9 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
           trace.cardRemounts += 1;
         const selected = reader.querySelectorAll(`${editorSelector}.selectedEditor`).length;
         const visible =
-          popover.isConnected && !popover.hidden && getComputedStyle(popover).display !== 'none';
+          popover.isConnected &&
+          popover.hidden === false &&
+          getComputedStyle(popover).display !== 'none';
         if (trace.lastPopoverVisible && !visible) trace.hiddenAfterVisible += 1;
         trace.lastPopoverVisible = visible;
         if (visible && popover.innerText.includes('Read-only')) trace.readonlyVisible += 1;
@@ -1644,7 +1645,7 @@ async function waitForPassivePersistedTarget(selector: string): Promise<string> 
             target === null ||
             layer === null ||
             bounds === undefined ||
-            target.hidden ||
+            target.hidden !== false ||
             !target.isConnected ||
             bounds.width <= 2 ||
             bounds.height <= 2 ||
@@ -1679,7 +1680,7 @@ async function waitForPassivePersistedTarget(selector: string): Promise<string> 
           if (
             target === null ||
             bounds === undefined ||
-            target.hidden ||
+            target.hidden !== false ||
             !target.isConnected ||
             bounds.width <= 2 ||
             bounds.height <= 2 ||
@@ -2070,7 +2071,7 @@ async function installCreationContinuityProbe(): Promise<void> {
         if (recordValue.type === 'attributes' && recordValue.target === popover) {
           const popoverStyle = getComputedStyle(popover);
           state.popoverHidden ||=
-            popover.hidden ||
+            popover.hidden !== false ||
             popoverStyle.display === 'none' ||
             popoverStyle.visibility === 'hidden';
         }
@@ -2452,7 +2453,7 @@ describe('reader selection-first annotations', () => {
         if (native === null || custom === null)
           throw new Error('Task 4 replacement baseline is incomplete.');
         const comment = custom.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
-        if (!custom.isConnected || custom.hidden || comment === null || comment.disabled)
+        if (!custom.isConnected || custom.hidden !== false || comment === null || comment.disabled)
           throw new Error('Task 4 custom popover is not interactable at the replacement baseline.');
         type ContinuityTransition = {
           readonly kind: 'disconnected' | 'hidden';
@@ -2989,7 +2990,7 @@ describe('reader selection-first annotations', () => {
           sameCanvas: state.canvas === canvas,
           sameCard: state.card === card && card.isConnected,
           samePage: state.page === page,
-          samePopover: state.popover === popover && popover.isConnected && !popover.hidden,
+          samePopover: state.popover === popover && popover.isConnected && popover.hidden === false,
           sameScroll: state.scrollTop === scrollHost.scrollTop,
           sameViewer: state.viewer === viewer,
           surfaceFailuresAfterActivation: state.surfaceFailuresAfterActivation,
@@ -3421,7 +3422,7 @@ describe('reader selection-first annotations', () => {
           const sample = (): void => {
             const editor = document.querySelector<HTMLElement>(editorSelector);
             const focused = document.activeElement;
-            if (editor === null || editor.hidden || focused === null || !editor.contains(focused)) {
+            if (editor?.hidden !== false || focused === null || !editor.contains(focused)) {
               resolve(false);
               return;
             }
@@ -3815,7 +3816,7 @@ describe('reader selection-first annotations', () => {
             document.querySelectorAll<HTMLElement>('.selectedEditor .editToolbar'),
           ).some(
             (toolbar) =>
-              !toolbar.hidden &&
+              toolbar.hidden === false &&
               getComputedStyle(toolbar).display !== 'none' &&
               getComputedStyle(toolbar).visibility !== 'hidden',
           ),
@@ -3901,7 +3902,7 @@ describe('reader selection-first annotations', () => {
         const button = document.querySelector<HTMLButtonElement>(
           `${selector} [data-editor-color="#5fb236"]`,
         );
-        if (button === null || button.hidden || !button.disabled)
+        if (button?.hidden !== false || !button.disabled)
           throw new Error('Unified batch palette action is not safely disabled.');
         button.click();
       }, nativeEditorSelector);
@@ -3910,7 +3911,7 @@ describe('reader selection-first annotations', () => {
         const button = document.querySelector<HTMLButtonElement>(
           `${selector} [data-action="delete-annotation"]`,
         );
-        if (button === null || button.hidden || !button.disabled)
+        if (button?.hidden !== false || !button.disabled)
           throw new Error('Unified batch delete action is not safely disabled.');
         button.click();
       }, nativeEditorSelector);
