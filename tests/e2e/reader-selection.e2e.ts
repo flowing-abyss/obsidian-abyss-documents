@@ -1077,6 +1077,7 @@ async function createSelectionComment(spanIndex: number, value: string): Promise
       { timeout: 10_000, timeoutMsg: 'Unified selection editor did not create one highlight.' },
     );
     await expect(popover).toBeDisplayed();
+    await expect(popover.$('[data-action="delete-annotation"]')).toBeDisplayed();
   } catch (cause) {
     const trace = await browser.execute(
       () =>
@@ -1133,6 +1134,7 @@ async function createPersistedWritableAnnotation(fixture: PersistedWritableFixtu
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
     await dragFixtureTextWhileInspectingPalette({ endRatio: 0.42, startRatio: 0.12 });
     await $(fixture.editorSelector).waitForExist({ timeout: 10_000 });
+    await expect($('[data-abyss-selection-preview]')).not.toExist();
     await browser.keys(Key.Escape);
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
     return;
@@ -3375,6 +3377,7 @@ describe('reader selection-first annotations', () => {
     await selectionEditor.$('[data-editor-color="#ffd400"]').click();
     await $('.highlightEditor').waitForExist({ timeout: 10_000 });
     await expect(selectionEditor).toBeDisplayed();
+    await expect(selectionEditor.$('[data-action="delete-annotation"]')).toBeDisplayed();
     await browser.keys(Key.Escape);
     await expect(selectionEditor).not.toBeDisplayed();
     hash = await waitForPdfBytesToChange(workingPath, hash);
@@ -3484,6 +3487,7 @@ describe('reader selection-first annotations', () => {
       { timeout: 10_000, timeoutMsg: 'Second Quick Highlight gesture was not singular.' },
     );
     await expect($(selectionEditorSelector)).not.toBeDisplayed();
+    await expect($('[data-abyss-selection-preview]')).not.toExist();
 
     await browser.keys(Key.Escape);
     await expect(quick).toHaveAttribute('aria-pressed', 'false');
@@ -3640,6 +3644,7 @@ describe('reader selection-first annotations', () => {
     await selectionEditor.$('[data-editor-color="#ffd400"]').click();
     await $('.highlightEditor').waitForExist({ timeout: 10_000 });
     await expect(selectionEditor).toBeDisplayed();
+    await expect(selectionEditor.$('[data-action="delete-annotation"]')).toBeDisplayed();
     await browser.keys(Key.Escape);
     await expect(selectionEditor).not.toBeDisplayed();
     hash = await waitForPdfBytesToChange(workingPath, hash);
