@@ -1631,9 +1631,6 @@ export class PdfDocumentViewport implements DocumentViewport {
   private isNativeTextEntrySurface(target: Element, page: HTMLElement): boolean {
     if (target.closest('a, button, input, select, textarea') !== null) return false;
     const nativeText = target.closest('.annotationEditorLayer .freeTextEditor');
-    const editing =
-      nativeText?.querySelector('[contenteditable]:not([contenteditable="false"])') ?? null;
-    if (editing !== null) return false;
     return (
       target === page ||
       target.closest('.canvasWrapper, .annotationLayer .freeTextAnnotation') !== null ||

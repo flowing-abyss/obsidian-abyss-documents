@@ -2096,7 +2096,9 @@ describe('PdfDocumentViewport', () => {
     eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager: manager });
     const root = fixture.host.querySelector<HTMLElement>('.pdfViewerContainer');
     if (root === null) throw new Error('Expected PDF root.');
-    const nativeNode = root
+    const page = root.querySelector<HTMLElement>('.page[data-page-number="1"]');
+    if (page === null) throw new Error('Expected the native FreeText page.');
+    const nativeNode = page
       .createDiv({ cls: 'annotationEditorLayer' })
       .createDiv({ cls: 'freeTextEditor selectedEditor' });
     nativeNode.id = 'persisted-freetext-editor';
@@ -2112,12 +2114,21 @@ describe('PdfDocumentViewport', () => {
     });
     const clearSelection = vi.spyOn(interaction, 'clearAnnotationSelection');
     editable.addEventListener('click', nativeClick);
+    let nativePresses = 0;
+    editable.addEventListener('mousedown', () => {
+      nativePresses += 1;
+    });
+    vi.spyOn(editor, 'hitTestProjectedAnnotations').mockReturnValue([
+      { stableId: 'persisted-freetext-editor' },
+    ]);
 
     editable.click();
     editable.setAttribute('contenteditable', 'true');
     editable.click();
+    editable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, detail: 2 }));
 
     expect(nativeClick).toHaveBeenCalledTimes(2);
+    expect(nativePresses).toBe(1);
     expect(clearSelection).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(editable);
     expect(focusAnnotation).not.toHaveBeenCalled();
@@ -2189,6 +2200,9 @@ describe('PdfDocumentViewport', () => {
     ['failed', 'canvas', 'mousedown'],
     ['accepted', 'static-freetext', 'mousedown'],
     ['accepted', 'native-freetext', 'mousedown'],
+    ['accepted', 'native-editable-freetext', 'mousedown'],
+    ['refused', 'native-editable-freetext', 'mousedown'],
+    ['unowned', 'native-editable-freetext', 'mousedown'],
   ] as const)(
     'preserves a double-click retargeted to a rebuilding FreeText surface (%s, %s, %s)',
     async (outcome, surface, eventType) => {
@@ -2204,7 +2218,9 @@ describe('PdfDocumentViewport', () => {
       ]);
       const request = vi.spyOn(editor, 'requestNativeTextEdit').mockImplementation((id) => {
         if (id !== '30R' || outcome === 'unowned') return null;
-        return outcome === 'failed' ? Promise.reject(cause) : Promise.resolve(true);
+        return outcome === 'failed'
+          ? Promise.reject(cause)
+          : Promise.resolve(outcome !== 'refused');
       });
       const clearSelection = vi.spyOn(editor, 'clearAnnotationSelection');
       const events: ViewportEvent[] = [];
@@ -2221,6 +2237,18 @@ describe('PdfDocumentViewport', () => {
         target = page
           .createDiv({ cls: 'annotationEditorLayer' })
           .createDiv({ cls: 'freeTextEditor selectedEditor' });
+      else if (surface === 'native-editable-freetext') {
+        const native = page
+          .createDiv({ cls: 'annotationEditorLayer' })
+          .createDiv({ cls: 'freeTextEditor selectedEditor' });
+        const content = native.createDiv({ cls: 'internal' });
+        content.setAttribute('contenteditable', 'true');
+        target = content.createDiv();
+      }
+      let nativeDeliveries = 0;
+      target.addEventListener(eventType, () => {
+        nativeDeliveries += 1;
+      });
       target.dispatchEvent(
         new MouseEvent(eventType, {
           bubbles: true,
@@ -2233,6 +2261,7 @@ describe('PdfDocumentViewport', () => {
       await Promise.resolve();
 
       expect(request.mock.calls.map(([id]) => id)).toEqual(['overlapping-highlight', '30R']);
+      expect(nativeDeliveries).toBe(outcome === 'unowned' ? 1 : 0);
       expect(clearSelection).toHaveBeenCalledTimes(
         outcome === 'unowned' && eventType === 'click' ? 1 : 0,
       );

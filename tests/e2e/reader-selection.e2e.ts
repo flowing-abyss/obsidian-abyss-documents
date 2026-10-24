@@ -966,40 +966,137 @@ async function createSelectionComment(spanIndex: number, value: string): Promise
   const editorCount = await browser.execute(
     () => document.querySelectorAll('.highlightEditor').length,
   );
-  await selectFixtureText(spanIndex);
-  const popover = $(selectionEditorSelector);
-  await popover.waitForDisplayed({ timeout: 5_000 });
-  const input = popover.$('[aria-label="Comment"]');
-  await input.waitForDisplayed({ timeout: 5_000 });
-  try {
-    await inputValue(`${selectionEditorSelector} [aria-label="Comment"]`, value);
-    await expect(input).toHaveValue(value);
-  } catch (cause) {
-    const diagnostics = await browser.execute((editorSelector) => {
-      const popover = document.querySelector<HTMLElement>(editorSelector);
-      const textarea = popover?.querySelector<HTMLTextAreaElement>('textarea') ?? null;
-      const rect = textarea?.getBoundingClientRect();
-      return {
-        activeTag: document.activeElement?.tagName ?? null,
-        popoverHidden: popover?.hidden ?? null,
-        popoverStyle: popover === null ? null : getComputedStyle(popover).display,
-        textareaHidden: textarea?.hidden ?? null,
-        textareaRect: rect === undefined ? null : { height: rect.height, width: rect.width },
-        textareaStyle: textarea === null ? null : getComputedStyle(textarea).display,
-        value: textarea?.value ?? null,
+  await browser.executeObsidian(({ app }) => {
+    type Popover = {
+      readonly element: HTMLElement;
+      readonly openGeneration: number;
+      readonly selectionCreationState: string;
+      readonly active?: { readonly target?: { readonly kind?: string } } | null;
+      close: (...args: unknown[]) => boolean;
+    };
+    const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+      controller?: {
+        shell?: { annotationEditor?: Popover };
+        annotationInteractionController?: {
+          readonly activeEditorKind?: string | null;
+          readonly activeSelectionRevision?: number;
+          readonly ownedSelectionRevision?: number | null;
+          readonly activeAbort?: AbortController | null;
+        };
+        viewport?: {
+          viewer?: { readonly annotationEditorMode?: number };
+          annotationEditorInstance?: { readonly logicalMode?: string };
+        };
       };
-    }, selectionEditorSelector);
-    throw new Error(
-      `Selection editor became unavailable: ${JSON.stringify(diagnostics)}; ${String(cause)}`,
+    };
+    const controller = view.controller;
+    const popover = controller?.shell?.annotationEditor;
+    if (popover === undefined) throw new Error('Selection creation close trace is unavailable.');
+    const interaction = controller?.annotationInteractionController;
+    const viewport = controller?.viewport;
+    const events: Array<Record<string, unknown>> = [];
+    const snapshot = () => ({
+      at: performance.now(),
+      activeEditorKind: interaction?.activeEditorKind ?? null,
+      activeSelectionRevision: interaction?.activeSelectionRevision ?? null,
+      ownedSelectionRevision: interaction?.ownedSelectionRevision ?? null,
+      creating: interaction?.activeAbort != null,
+      creationAborted: interaction?.activeAbort?.signal.aborted ?? null,
+      logicalMode: viewport?.annotationEditorInstance?.logicalMode ?? null,
+      nativeMode: viewport?.viewer?.annotationEditorMode ?? null,
+      openGeneration: popover.openGeneration,
+      targetKind: popover.active?.target?.kind ?? null,
+      selectionCreationState: popover.selectionCreationState,
+      popoverConnected: popover.element.isConnected,
+      popoverHidden: popover.element.hidden,
+      visiblePopovers: document.querySelectorAll('[data-annotation-editor-popover]:not([hidden])')
+        .length,
+      focusedTag: document.activeElement?.tagName ?? null,
+      focusedClass: document.activeElement?.getAttribute('class') ?? null,
+    });
+    const originalClose = popover.close;
+    const descriptor = Object.getOwnPropertyDescriptor(popover, 'close');
+    const observedClose = function (this: Popover, ...args: unknown[]): boolean {
+      if (events.length < 40)
+        events.push({
+          kind: 'close-request',
+          reason: args[0] ?? 'external',
+          stack: new Error().stack,
+          ...snapshot(),
+        });
+      const result = originalClose.apply(this, args);
+      if (events.length < 40)
+        events.push({ kind: 'close-result', accepted: result, ...snapshot() });
+      return result;
+    };
+    popover.close = observedClose;
+    const state = {
+      cleanup: () => {
+        if (popover.close !== observedClose) return;
+        if (descriptor === undefined) Reflect.deleteProperty(popover, 'close');
+        else Object.defineProperty(popover, 'close', descriptor);
+      },
+      read: () => ({ events: [...events], current: snapshot() }),
+    };
+    (
+      window as Window & { __abyssSelectionCreationCloseTrace?: typeof state }
+    ).__abyssSelectionCreationCloseTrace = state;
+  });
+  try {
+    await selectFixtureText(spanIndex);
+    const popover = $(selectionEditorSelector);
+    await popover.waitForDisplayed({ timeout: 5_000 });
+    const input = popover.$('[aria-label="Comment"]');
+    await input.waitForDisplayed({ timeout: 5_000 });
+    try {
+      await inputValue(`${selectionEditorSelector} [aria-label="Comment"]`, value);
+      await expect(input).toHaveValue(value);
+    } catch (cause) {
+      const diagnostics = await browser.execute((editorSelector) => {
+        const popover = document.querySelector<HTMLElement>(editorSelector);
+        const textarea = popover?.querySelector<HTMLTextAreaElement>('textarea') ?? null;
+        const rect = textarea?.getBoundingClientRect();
+        return {
+          activeTag: document.activeElement?.tagName ?? null,
+          popoverHidden: popover?.hidden ?? null,
+          popoverStyle: popover === null ? null : getComputedStyle(popover).display,
+          textareaHidden: textarea?.hidden ?? null,
+          textareaRect: rect === undefined ? null : { height: rect.height, width: rect.width },
+          textareaStyle: textarea === null ? null : getComputedStyle(textarea).display,
+          value: textarea?.value ?? null,
+        };
+      }, selectionEditorSelector);
+      throw new Error(
+        `Selection editor became unavailable: ${JSON.stringify(diagnostics)}; ${String(cause)}`,
+      );
+    }
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() => document.querySelectorAll('.highlightEditor').length)) ===
+        editorCount + 1,
+      { timeout: 10_000, timeoutMsg: 'Unified selection editor did not create one highlight.' },
     );
+    await expect(popover).toBeDisplayed();
+  } catch (cause) {
+    const trace = await browser.execute(
+      () =>
+        (
+          window as Window & {
+            __abyssSelectionCreationCloseTrace?: { read(): unknown };
+          }
+        ).__abyssSelectionCreationCloseTrace?.read() ?? null,
+    );
+    console.info('[selection-creation-close-trace]', JSON.stringify({ spanIndex, value, trace }));
+    throw cause;
+  } finally {
+    await browser.execute(() => {
+      const host = window as Window & {
+        __abyssSelectionCreationCloseTrace?: { cleanup(): void };
+      };
+      host.__abyssSelectionCreationCloseTrace?.cleanup();
+      delete host.__abyssSelectionCreationCloseTrace;
+    });
   }
-  await browser.waitUntil(
-    async () =>
-      (await browser.execute(() => document.querySelectorAll('.highlightEditor').length)) ===
-      editorCount + 1,
-    { timeout: 10_000, timeoutMsg: 'Unified selection editor did not create one highlight.' },
-  );
-  await expect(popover).toBeDisplayed();
 }
 
 type PersistedWritableFixture = {
@@ -1813,6 +1910,7 @@ async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Pr
     const tracePointerClick = (event: MouseEvent) => {
       const target = event.target;
       if (!(target instanceof Element) || modeEvents.length >= 80) return;
+      const native = target.closest('.annotationEditorLayer .freeTextEditor');
       modeEvents.push({
         type: event.type,
         detail: event.detail,
@@ -1825,6 +1923,11 @@ async function assertNativeFreeTextEditingUnaffected(selectedNative = false): Pr
         target: target.tagName,
         class: target.getAttribute('class'),
         annotationId: target.closest('[data-annotation-id]')?.getAttribute('data-annotation-id'),
+        nativeEditorId: native?.id ?? null,
+        nativeEditorClass: native?.getAttribute('class') ?? null,
+        nativeEditable:
+          (native?.querySelector('[contenteditable]:not([contenteditable="false"])') ?? null) !==
+          null,
         mode: viewport.viewer?.annotationEditorMode,
       });
     };
