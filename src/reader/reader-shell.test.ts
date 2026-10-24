@@ -1,3 +1,4 @@
+import { Menu } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
 import type { PdfTextSelection } from '../adapters/pdf/pdf-selection-observer.js';
 import { asAnnotationId, type DocumentAnnotation } from '../document-core/annotations.js';
@@ -903,45 +904,63 @@ describe('ReaderShell', () => {
     host.remove();
   });
 
-  it('leaves Escape available to an open Obsidian menu before disarming Quick Highlight', () => {
-    const host = document.body.createDiv();
-    const intents: unknown[] = [];
-    const shell = new ReaderShell(host, (intent) => intents.push(intent));
-    shell.configureAnnotationToolbar([], null);
-    shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
-    const menu = document.body.createDiv({ cls: 'menu' });
-    vi.spyOn(menu, 'getBoundingClientRect').mockReturnValue({
-      bottom: 80,
-      height: 40,
-      left: 40,
-      right: 120,
-      top: 40,
-      width: 80,
-      x: 40,
-      y: 40,
-      toJSON: () => undefined,
-    });
-    const trigger = shell.root.createEl('button');
-    trigger.setAttribute('aria-expanded', 'true');
-    trigger.setAttribute('aria-haspopup', 'menu');
-    const escape = new KeyboardEvent('keydown', {
-      bubbles: true,
-      cancelable: true,
-      key: 'Escape',
-    });
-    trigger.addEventListener('keydown', () => {
-      trigger.setAttribute('aria-expanded', 'false');
-      trigger.dataset['abyssMenuClosing'] = '';
-      menu.remove();
-    });
-
-    trigger.dispatchEvent(escape);
-
-    expect(escape.defaultPrevented).toBe(false);
-    expect(intents).toEqual([]);
-    shell.destroy();
-    host.remove();
-  });
+  it.each(['fit-menu', 'quick-highlight-menu'])(
+    'consumes only the Escape closing %s and accepts a second press before the next frame',
+    (control) => {
+      const host = document.body.createDiv();
+      const intents: unknown[] = [];
+      const shell = new ReaderShell(host, (intent) => intents.push(intent));
+      shell.configureAnnotationToolbar([], null);
+      shell.setQuickHighlightState({ armed: true, color: '#ffd400' });
+      shell.setLayout({ pages: 'single', scrolling: 'page-by-page' });
+      const shown = vi.spyOn(Menu.prototype, 'showAtPosition').mockReturnThis();
+      const trigger = shell.root.querySelector<HTMLButtonElement>(`[data-control="${control}"]`);
+      if (trigger === null) throw new Error('Expected a menu trigger.');
+      trigger.click();
+      const menu = shown.mock.contexts[0] as Menu | undefined;
+      if (menu === undefined) throw new Error('Expected an open reader menu.');
+      let menuOpen = true;
+      const nativeMenuEscape = (event: KeyboardEvent): void => {
+        if (event.key !== 'Escape' || !menuOpen) return;
+        menuOpen = false;
+        // Obsidian's menu scope calls hide with the original keyboard event
+        // at window capture, before the reader sees that same event.
+        (menu.hide as (event: KeyboardEvent) => Menu).call(menu, event);
+      };
+      window.addEventListener('keydown', nativeMenuEscape, true);
+      try {
+        const closingEscape = new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        });
+        trigger.dispatchEvent(closingEscape);
+        expect(trigger.getAttribute('aria-expanded')).toBe('false');
+        expect(intents).toEqual([]);
+        // Subsequent independent keys work without running a frame or timer.
+        shell.documentHost.dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'ArrowRight' }),
+        );
+        expect(intents).toEqual([{ type: 'next-page' }]);
+        trigger.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Escape',
+          }),
+        );
+        expect(intents).toEqual([
+          { type: 'next-page' },
+          { tool: 'select', type: 'set-annotation-tool' },
+        ]);
+        expect(closingEscape.defaultPrevented).toBe(true);
+      } finally {
+        window.removeEventListener('keydown', nativeMenuEscape, true);
+        shell.destroy();
+        host.remove();
+      }
+    },
+  );
 
   it('keeps Quick Highlight armed for Escape dispatched at the reader while its owned menu is open', () => {
     const host = document.body.createDiv();

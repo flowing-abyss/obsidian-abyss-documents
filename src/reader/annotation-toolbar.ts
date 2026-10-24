@@ -1,10 +1,10 @@
-import { Menu, type IconName } from 'obsidian';
+import type { IconName, Menu } from 'obsidian';
 import type { PdfAnnotationTool } from '../adapters/pdf/pdf-annotation-editor.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { createIconButton, updateIconButtonLabel } from './icon-button.js';
 import {
   bindMenuTriggerKeyboardToggle,
-  markReaderMenuClosing,
+  ReaderMenu,
   shouldRestoreMenuTriggerFocus,
 } from './menu-focus.js';
 import { ownerWindow } from './owner-dom.js';
@@ -291,7 +291,7 @@ export class AnnotationToolbar {
       return;
     }
     this.activeMenu?.menu.hide();
-    const menu = new Menu();
+    const menu = new ReaderMenu();
     menu.setUseNativeMenu(false);
     menu.setParentElement(trigger);
     this.activeMenu = { menu, trigger };
@@ -307,7 +307,6 @@ export class AnnotationToolbar {
       });
     }
     menu.onHide(() => {
-      markReaderMenuClosing(trigger);
       if (this.activeMenu?.menu === menu) this.activeMenu = null;
       trigger.setAttribute('aria-expanded', 'false');
       this.restoreMenuTriggerFocus(trigger);

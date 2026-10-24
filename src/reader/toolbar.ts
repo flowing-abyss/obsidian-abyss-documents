@@ -1,4 +1,4 @@
-import { Menu, type IconName } from 'obsidian';
+import type { IconName, Menu } from 'obsidian';
 import {
   DEFAULT_READER_LAYOUT,
   type ReaderLayout,
@@ -8,7 +8,7 @@ import {
 import { createIconButton } from './icon-button.js';
 import {
   bindMenuTriggerKeyboardToggle,
-  markReaderMenuClosing,
+  ReaderMenu,
   shouldRestoreMenuTriggerFocus,
 } from './menu-focus.js';
 
@@ -666,13 +666,12 @@ export class ReaderToolbar {
       return null;
     }
     this.activeMenu?.menu.hide();
-    const menu = new Menu();
+    const menu = new ReaderMenu();
     menu.setUseNativeMenu(false);
     menu.setParentElement(trigger);
     this.activeMenu = { menu, trigger };
     trigger.setAttribute('aria-expanded', 'true');
     menu.onHide(() => {
-      markReaderMenuClosing(trigger);
       if (this.activeMenu?.menu === menu) this.activeMenu = null;
       trigger.setAttribute('aria-expanded', 'false');
       this.restoreMenuTriggerFocus(trigger);

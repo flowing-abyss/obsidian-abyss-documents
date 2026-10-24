@@ -1,3 +1,5 @@
+import { Menu } from 'obsidian';
+
 const INTERACTIVE_FOCUS_TARGET = [
   'a[href]',
   'audio[controls]',
@@ -12,7 +14,14 @@ const INTERACTIVE_FOCUS_TARGET = [
   '[tabindex]',
 ].join(',');
 
-const menuClosingFrames = new WeakMap<HTMLElement, number>();
+export class ReaderMenu extends Menu {
+  override hide(event?: Event): this {
+    // Obsidian binds the menu scope's Escape handler to hide and passes the
+    // original keydown. Consume that event before it bubbles into the reader.
+    if (event?.type === 'keydown') event.preventDefault();
+    return super.hide();
+  }
+}
 
 export function bindMenuTriggerKeyboardToggle(
   host: HTMLElement,
@@ -31,18 +40,6 @@ export function bindMenuTriggerKeyboardToggle(
   return () => {
     owner.removeEventListener('keydown', onKeyDown, true);
   };
-}
-
-export function markReaderMenuClosing(trigger: HTMLElement): void {
-  const previous = menuClosingFrames.get(trigger);
-  if (previous !== undefined) trigger.win.cancelAnimationFrame(previous);
-  trigger.dataset['abyssMenuClosing'] = '';
-  const frame = trigger.win.requestAnimationFrame(() => {
-    if (menuClosingFrames.get(trigger) !== frame) return;
-    menuClosingFrames.delete(trigger);
-    delete trigger.dataset['abyssMenuClosing'];
-  });
-  menuClosingFrames.set(trigger, frame);
 }
 
 export function shouldRestoreMenuTriggerFocus(trigger: HTMLButtonElement): boolean {
