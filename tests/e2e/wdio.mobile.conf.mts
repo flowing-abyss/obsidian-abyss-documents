@@ -16,13 +16,13 @@ const vault = path.resolve(repoRoot, 'dev-documents-vault');
 
 // Obsidian's Android app requires 1.8.10+; beta versions aren't published for Android.
 // "earliest" resolves to manifest.json's minAppVersion, which this template sets to
-// 1.0.3 (wdio-obsidian-service's own desktop floor) — below the Android floor, and
+// 1.7.2 — below the Android floor, and
 // there's no APK for it. Substitute the real Android minimum wherever "earliest" appears.
 const ANDROID_MIN_VERSION = '1.8.10';
 const versionsSpec = (
   env['OBSIDIAN_MOBILE_VERSIONS'] ??
   env['OBSIDIAN_VERSIONS'] ??
-  'earliest/earliest 1.13.4/1.13.4'
+  'earliest latest'
 ).replace(/\bearliest\b/g, ANDROID_MIN_VERSION);
 const versions = await parseObsidianVersions(versionsSpec, { cacheDir });
 

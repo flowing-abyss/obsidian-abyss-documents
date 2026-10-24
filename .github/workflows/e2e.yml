@@ -69,8 +69,8 @@ jobs:
       - name: Run e2e tests
         run: pnpm run test:e2e
         env:
-          # macOS GitHub runners are lower-memory; keep desktop instances modest everywhere.
-          WDIO_MAX_INSTANCES: 2
+          # Native tooltip and focus assertions require one foreground Obsidian window.
+          WDIO_MAX_INSTANCES: 1
 
   android:
     strategy:

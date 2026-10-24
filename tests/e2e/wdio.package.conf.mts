@@ -10,7 +10,7 @@ if (pluginDirectory === undefined || vaultDirectory === undefined) {
 }
 const cacheDir = path.resolve(repoRoot, '.obsidian-cache');
 const versions = await parseObsidianVersions(
-  env['OBSIDIAN_PACKAGE_VERSIONS'] ?? env['OBSIDIAN_VERSIONS'] ?? '1.13.4/1.13.4',
+  env['OBSIDIAN_PACKAGE_VERSIONS'] ?? env['OBSIDIAN_VERSIONS'] ?? 'latest/latest',
   { cacheDir },
 );
 
