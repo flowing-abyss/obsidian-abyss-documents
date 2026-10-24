@@ -1,10 +1,6 @@
 import { $, $$, browser, expect } from '@wdio/globals';
 import { afterEach, beforeEach, describe, it } from 'mocha';
-import { join } from 'node:path';
-import { env, pid } from 'node:process';
-import type { Browser as PuppeteerBrowser } from 'puppeteer-core';
 import { Key } from 'webdriverio';
-import { startDeleteTimeline } from './delete-timeline-diagnostics.js';
 import { waitForPdfPageReady } from './pdf-ready.js';
 
 import {
@@ -665,15 +661,6 @@ async function waitForTenThousandDeleteConvergence(
       `Ten-thousand delete projection did not converge: ${JSON.stringify(lastStatus)}; ${String(cause)}`,
     );
   }
-}
-
-async function cleanupTenThousandDeleteFrameTrace(): Promise<TenThousandDeleteFrameTrace | null> {
-  const exists = await browser.execute(
-    () =>
-      (window as Window & { __abyssTask7DeleteFrameTrace?: unknown })
-        .__abyssTask7DeleteFrameTrace !== undefined,
-  );
-  return exists ? readTenThousandDeleteFrameTrace() : null;
 }
 
 describe('PDF reader sidebar', () => {
@@ -2157,55 +2144,5 @@ describe('PDF reader sidebar', () => {
       targetPresent: false,
     });
     expect(trace.maxRafGapMs).toBeLessThan(100);
-  });
-
-  // Temporary MacCI investigation; remove this case and its workflow artifact
-  // after the legacy frame gap is understood. The unprofiled gate above remains authoritative.
-  it('captures a diagnostic-only renderer timeline for the deletion scenario', async function () {
-    const directory = env['E2E_DELETE_TIMELINE_DIR'];
-    if (directory === undefined || directory.length === 0) {
-      this.skip();
-    }
-    const puppeteer = await (
-      browser as unknown as { getPuppeteer(): Promise<PuppeteerBrowser> }
-    ).getPuppeteer();
-    const page = (await puppeteer.pages()).find((candidate) =>
-      candidate.url().startsWith('app://obsidian.md/'),
-    );
-    if (page === undefined) throw new Error('The Obsidian renderer is unavailable for tracing.');
-    const destination = join(directory, `delete-${pid}-${Date.now()}.trace.json`);
-    const capture = await startDeleteTimeline(await page.createCDPSession(), destination);
-    let trace: TenThousandDeleteFrameTrace | null = null;
-    let alignment: { readonly startTime: number; readonly timeOrigin: number } | null = null;
-    let scenarioError: string | null = null;
-    try {
-      const target = await prepareTenThousandDeleteScenario();
-      alignment = await browser.execute(() => ({
-        startTime: performance.mark('abyss-delete:before-monitor').startTime,
-        timeOrigin: performance.timeOrigin,
-      }));
-      await installTenThousandDeleteFrameTrace(target);
-      await deleteAnnotationAndExpectFirstFrame(target);
-      await waitForTenThousandDeleteConvergence(readTenThousandDeleteFrameStatus);
-      trace = await readTenThousandDeleteFrameTrace();
-      expect(trace).toMatchObject({
-        deleteClickTrusted: true,
-        indexedBatches: 1,
-        setSize: 9_999,
-        settledFrames: 5,
-        targetPresent: false,
-      });
-    } catch (cause) {
-      scenarioError = String(cause);
-      throw cause;
-    } finally {
-      try {
-        trace ??= await cleanupTenThousandDeleteFrameTrace();
-      } finally {
-        await capture.stop({ alignment, trace, scenarioError });
-      }
-      if (trace !== null)
-        console.info('[annotation-delete-diagnostic-frame-trace]', JSON.stringify(trace));
-    }
   });
 });
