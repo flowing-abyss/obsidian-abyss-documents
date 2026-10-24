@@ -1464,8 +1464,88 @@ describe('reader compact toolbar', () => {
         const menuText = await $('.menu').getText();
         expect(menuText).not.toContain('Previous page');
         expect(menuText).not.toContain('Next page');
-        await browser.keys(Key.Escape);
-        await expect($('.menu')).not.toBeDisplayed();
+        const menuProbe = await browser.executeObsidian(({ app }) => {
+          const view = app.workspace.getMostRecentLeaf()?.view as unknown as
+            | {
+                controller?: {
+                  shell?: {
+                    toolbar?: {
+                      activeMenu?: {
+                        menu: {
+                          readonly _loaded?: boolean;
+                          readonly scope?: { readonly win?: Window | null };
+                        };
+                        trigger: HTMLElement;
+                      } | null;
+                    };
+                  };
+                };
+              }
+            | undefined;
+          const owned = view?.controller?.shell?.toolbar?.activeMenu;
+          // Cached app 1.13.4/1.14.5 Keymap owns this per-window WeakMap.
+          const keymap = app.keymap as typeof app.keymap & {
+            readonly windowScopes?: WeakMap<Window, { readonly scope?: unknown }>;
+          };
+          const events: Array<Record<string, unknown>> = [];
+          const snapshot = () => ({
+            loaded: owned?.menu._loaded ?? null,
+            scopeOnWindow: owned?.menu.scope?.win === window,
+            topScopeIsMenu:
+              keymap.windowScopes === undefined || owned?.menu.scope === undefined
+                ? null
+                : keymap.windowScopes.get(window)?.scope === owned.menu.scope,
+            menuStillOwned: view?.controller?.shell?.toolbar?.activeMenu === owned,
+            expanded: owned?.trigger.getAttribute('aria-expanded') ?? null,
+            documentFocused: document.hasFocus(),
+            activeControl:
+              (document.activeElement as HTMLElement | null)?.dataset['control'] ?? null,
+            menus: document.querySelectorAll('.menu').length,
+          });
+          const onKey = (event: KeyboardEvent) => {
+            if (events.length < 8 && event.key === 'Escape')
+              events.push({
+                type: event.type,
+                trusted: event.isTrusted,
+                defaultPrevented: event.defaultPrevented,
+                ...snapshot(),
+              });
+          };
+          window.addEventListener('keydown', onKey, true);
+          window.addEventListener('keyup', onKey, true);
+          (
+            window as Window & { __abyssMenuDismissProbe?: { cleanup(): unknown } }
+          ).__abyssMenuDismissProbe = {
+            cleanup() {
+              window.removeEventListener('keydown', onKey, true);
+              window.removeEventListener('keyup', onKey, true);
+              return { events, after: snapshot() };
+            },
+          };
+          return snapshot();
+        });
+        let menuDismissFailed = false;
+        try {
+          await browser.keys(Key.Escape);
+          await expect($('.menu')).not.toBeDisplayed();
+        } catch (cause) {
+          menuDismissFailed = true;
+          throw cause;
+        } finally {
+          const menuAfter = await browser.execute(() => {
+            const host = window as Window & { __abyssMenuDismissProbe?: { cleanup(): unknown } };
+            try {
+              return host.__abyssMenuDismissProbe?.cleanup();
+            } finally {
+              delete host.__abyssMenuDismissProbe;
+            }
+          });
+          if (menuDismissFailed)
+            console.info(
+              '[responsive-menu-dismissal]',
+              JSON.stringify({ width, sidebarOpen, before: menuProbe, ...(menuAfter as object) }),
+            );
+        }
       }
     }
   });

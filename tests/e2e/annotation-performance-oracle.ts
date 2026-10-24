@@ -649,6 +649,17 @@ export async function readTenThousandDeleteTrace(): Promise<TenThousandDeleteTra
 export interface TenThousandDeleteFrameTrace extends TenThousandDeleteStatus {
   readonly deleteClickTrusted: boolean | null;
   readonly maxRafGapMs: number;
+  readonly diagnostics: {
+    readonly installedAtMs: number;
+    readonly deleteClickedAtMs: number | null;
+    readonly completedAtMs: number | null;
+    readonly maxGap: {
+      readonly fromFrameAtMs: number | null;
+      readonly toFrameAtMs: number | null;
+      readonly fromCallbackAtMs: number | null;
+      readonly toCallbackAtMs: number | null;
+    };
+  };
 }
 
 export async function installTenThousandDeleteFrameTrace(
@@ -673,11 +684,19 @@ export async function installTenThousandDeleteFrameTrace(
       throw new Error('Ten-thousand delete frame boundary is unavailable.');
     const state = {
       complete: false,
+      installedAtMs: performance.now(),
+      deleteClickedAtMs: null as number | null,
+      completedAtMs: null as number | null,
       deleteClickTrusted: null as boolean | null,
       frame: null as number | null,
       indexedBatches: 0,
       lastFrameAt: null as number | null,
+      lastCallbackAtMs: null as number | null,
       maxRafGapMs: 0,
+      fromFrameAtMs: null as number | null,
+      toFrameAtMs: null as number | null,
+      fromCallbackAtMs: null as number | null,
+      toCallbackAtMs: null as number | null,
       setSize: Number(
         panel.querySelector('.abyss-annotation-card-row')?.getAttribute('aria-setsize'),
       ),
@@ -695,15 +714,27 @@ export async function installTenThousandDeleteFrameTrace(
         state.deleteClickTrusted === null &&
         event.target instanceof Element &&
         event.target.closest('[data-action="delete-annotation"]') !== null
-      )
+      ) {
         state.deleteClickTrusted = event.isTrusted;
+        state.deleteClickedAtMs = performance.now();
+      }
     };
     const onFrame = (frameAt: number): void => {
       if (state.stopped || state.complete) return;
       state.frame = null;
-      if (state.lastFrameAt !== null)
-        state.maxRafGapMs = Math.max(state.maxRafGapMs, frameAt - state.lastFrameAt);
+      const callbackAtMs = performance.now();
+      if (state.lastFrameAt !== null) {
+        const gapMs = frameAt - state.lastFrameAt;
+        if (gapMs > state.maxRafGapMs) {
+          state.maxRafGapMs = gapMs;
+          state.fromFrameAtMs = state.lastFrameAt;
+          state.toFrameAtMs = frameAt;
+          state.fromCallbackAtMs = state.lastCallbackAtMs;
+          state.toCallbackAtMs = callbackAtMs;
+        }
+      }
       state.lastFrameAt = frameAt;
+      state.lastCallbackAtMs = callbackAtMs;
       state.targetPresent = panel.querySelector(selector) !== null;
       state.setSize = Number(
         panel.querySelector('.abyss-annotation-card-row')?.getAttribute('aria-setsize'),
@@ -714,6 +745,7 @@ export async function installTenThousandDeleteFrameTrace(
           : 0;
       if (state.settledFrames >= 5) {
         state.complete = true;
+        state.completedAtMs = performance.now();
         return;
       }
       state.frame = requestAnimationFrame(onFrame);
@@ -744,6 +776,17 @@ export async function installTenThousandDeleteFrameTrace(
           ...status(),
           deleteClickTrusted: state.deleteClickTrusted,
           maxRafGapMs: state.maxRafGapMs,
+          diagnostics: {
+            installedAtMs: state.installedAtMs,
+            deleteClickedAtMs: state.deleteClickedAtMs,
+            completedAtMs: state.completedAtMs,
+            maxGap: {
+              fromFrameAtMs: state.fromFrameAtMs,
+              toFrameAtMs: state.toFrameAtMs,
+              fromCallbackAtMs: state.fromCallbackAtMs,
+              toCallbackAtMs: state.toCallbackAtMs,
+            },
+          },
         };
       },
       status,

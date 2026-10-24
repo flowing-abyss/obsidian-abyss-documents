@@ -72,6 +72,8 @@ function fixture() {
   );
   transport.execute.mockImplementation(async (script, ...args) => invoke(script, ...args));
   const frames = new Map<number, FrameRequestCallback>();
+  let callbackClock = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => callbackClock);
   let nextFrame = 0;
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
     const id = ++nextFrame;
@@ -99,7 +101,8 @@ function fixture() {
       installed = false;
       return result;
     },
-    frame(timestamp: number) {
+    frame(timestamp: number, callbackAt = timestamp) {
+      callbackClock = callbackAt;
       const pending = Array.from(frames.values());
       frames.clear();
       for (const callback of pending) callback(timestamp);
@@ -114,7 +117,8 @@ function fixture() {
     setSize(size: number) {
       retainedRow.setAttribute('aria-setsize', String(size));
     },
-    click() {
+    click(callbackAt = callbackClock) {
+      callbackClock = callbackAt;
       remove.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     },
   };
@@ -141,12 +145,39 @@ describe('passive ten-thousand deletion frame budget', () => {
         deleteClickTrusted: false,
         indexedBatches: 1,
         maxRafGapMs: gap,
+        diagnostics: {
+          installedAtMs: 0,
+          deleteClickedAtMs: 0,
+          completedAtMs: gap + 80,
+          maxGap: { fromFrameAtMs: 0, toFrameAtMs: gap, fromCallbackAtMs: 0, toCallbackAtMs: gap },
+        },
         setSize: 9999,
         settledFrames: 5,
         targetPresent: false,
       });
     },
   );
+
+  it('records raw and callback endpoints separately without resetting the interval at click', async () => {
+    const current = fixture();
+    await current.install();
+    current.frame(0, 7);
+    current.click(10);
+    current.removeTarget();
+    current.projection.applyViewportBatch([]);
+    current.frame(150, 180);
+    for (const timestamp of [166, 182, 198, 214]) current.frame(timestamp, timestamp + 35);
+
+    const trace = await current.finish();
+
+    expect(trace.maxRafGapMs).toBe(150);
+    expect(trace.diagnostics).toEqual({
+      installedAtMs: 0,
+      deleteClickedAtMs: 10,
+      completedAtMs: 249,
+      maxGap: { fromFrameAtMs: 0, toFrameAtMs: 150, fromCallbackAtMs: 7, toCallbackAtMs: 180 },
+    });
+  });
 
   it('keeps a pre-click stall inside the monitoring interval', async () => {
     const current = fixture();
