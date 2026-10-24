@@ -601,6 +601,7 @@ export class AnnotationsPanel {
     index: number,
     rowId: string,
   ): void {
+    const contentChanged = this.cardAnnotations.get(button) !== annotation;
     this.cardAnnotations.set(button, annotation);
     button.dataset['annotationId'] = annotationId(annotation);
     button.dataset['annotationIndex'] = String(index);
@@ -611,12 +612,14 @@ export class AnnotationsPanel {
     button.tabIndex = rowId === this.rovingRowId ? 0 : -1;
     if (rowId === this.selectedRowId) button.setAttribute('aria-current', 'true');
     else button.removeAttribute('aria-current');
-    button.replaceChildren(
-      this.cardHeader(annotation),
-      ...[this.cardQuote(annotation), this.cardComment(annotation)].filter(
-        (element): element is HTMLElement => element !== null,
-      ),
-    );
+    if (contentChanged) {
+      button.replaceChildren(
+        this.cardHeader(annotation),
+        ...[this.cardQuote(annotation), this.cardComment(annotation)].filter(
+          (element): element is HTMLElement => element !== null,
+        ),
+      );
+    }
   }
 
   private onCardClick(button: HTMLButtonElement, event: MouseEvent): void {

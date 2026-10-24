@@ -1474,12 +1474,21 @@ describe('AnnotationsPanel', () => {
     const unrelatedAction = root.querySelector<HTMLButtonElement>(
       '.abyss-annotation-card-row[data-annotation-row-id="second-row"] > .abyss-annotation-card-edit',
     );
+    const unrelatedHeader = unrelatedCard?.querySelector('[data-annotation-header]');
+    const unrelatedComment = unrelatedCard?.querySelector('[data-annotation-comment]');
+    expect(unrelatedHeader).toBeTruthy();
+    expect(unrelatedComment).toBeTruthy();
 
     const updatedFirst = {
       ...firstRow,
       annotation: annotation(0, { color: '#00aa44', comment: 'Updated first comment' }),
     } satisfies AnnotationProjectionRow;
     panel.setProjectedAnnotations([updatedFirst, secondRow]);
+    expect(unrelatedCard?.querySelector('[data-annotation-header]')).toBe(unrelatedHeader);
+    expect(unrelatedCard?.querySelector('[data-annotation-comment]')).toBe(unrelatedComment);
+    expect(root.querySelector('[data-annotation-row-id="first-row"]')?.textContent).toContain(
+      'Updated first comment',
+    );
     expect(root.querySelector('.abyss-annotation-card[data-annotation-row-id="second-row"]')).toBe(
       unrelatedCard,
     );
@@ -1505,6 +1514,8 @@ describe('AnnotationsPanel', () => {
     ).toBe(unrelatedAction);
 
     panel.setProjectedAnnotations([secondRow]);
+    expect(unrelatedCard?.querySelector('[data-annotation-header]')).toBe(unrelatedHeader);
+    expect(unrelatedCard?.querySelector('[data-annotation-comment]')).toBe(unrelatedComment);
     expect(root.querySelector('[data-annotation-row-id="first-row"]')).toBeNull();
     expect(root.querySelector('.abyss-annotation-card[data-annotation-row-id="second-row"]')).toBe(
       unrelatedCard,

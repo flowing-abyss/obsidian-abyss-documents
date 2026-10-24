@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
 import {
@@ -91,7 +91,8 @@ export async function generatePdfFixtures(outputDirectory: string): Promise<PdfF
       PDF_FIXTURE_NAMES[8],
       1,
       'Standard Security Handler permissions deny content and annotation modification.',
-      permissionRestrictedFixture(),
+      // Preserve the PDF R2 compatibility input without generating legacy cryptography.
+      readFile(path.join(import.meta.dirname, 'static', 'permission-restricted.pdf')),
       1,
     ),
     fixture(
@@ -259,131 +260,6 @@ async function signedDocumentFixture(): Promise<Uint8Array> {
   }
   Buffer.from(replacement, 'ascii').copy(bytes, byteRangeOffset);
   return bytes;
-}
-
-function permissionRestrictedFixture(): Uint8Array {
-  const fileId = Buffer.from('00112233445566778899AABBCCDDEEFF', 'hex');
-  const permissions = -44;
-  const owner = paddedPassword('owner');
-  const user = paddedPassword('');
-  const ownerKey = md5(owner).subarray(0, 5);
-  const ownerEntry = rc4(ownerKey, user);
-  const permissionBytes = Buffer.alloc(4);
-  permissionBytes.writeInt32LE(permissions);
-  const fileKey = md5(Buffer.concat([user, ownerEntry, permissionBytes, fileId])).subarray(0, 5);
-  const userEntry = rc4(fileKey, PDF_PASSWORD_PADDING);
-  const encrypt = (objectNumber: number, bytes: Uint8Array): Buffer => {
-    const objectSuffix = Buffer.from([
-      objectNumber & 0xff,
-      (objectNumber >>> 8) & 0xff,
-      (objectNumber >>> 16) & 0xff,
-      0,
-      0,
-    ]);
-    const key = md5(Buffer.concat([fileKey, objectSuffix])).subarray(0, 10);
-    return rc4(key, bytes);
-  };
-  const content = encrypt(
-    5,
-    Buffer.from(
-      'BT /F1 20 Tf 54 724 Td (Permission restricted fixture) Tj 0 -44 Td /F1 12 Tf (Editing is disabled by standard PDF permissions.) Tj ET\n',
-      'ascii',
-    ),
-  );
-  const annotationContents = encrypt(6, Buffer.from('Restricted #secure', 'utf8'));
-  const annotationName = encrypt(6, Buffer.from('restricted-highlight', 'utf8'));
-  const objects = [
-    Buffer.from('<< /Type /Catalog /Pages 2 0 R >>', 'ascii'),
-    Buffer.from('<< /Type /Pages /Kids [3 0 R] /Count 1 >>', 'ascii'),
-    Buffer.from(
-      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [6 0 R] >>',
-      'ascii',
-    ),
-    Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>', 'ascii'),
-    Buffer.concat([
-      Buffer.from(`<< /Length ${content.byteLength} >>\nstream\n`, 'ascii'),
-      content,
-      Buffer.from('\nendstream', 'ascii'),
-    ]),
-    Buffer.from(
-      `<< /Type /Annot /Subtype /Highlight /Rect [72 540 240 562] /QuadPoints [72 562 240 562 72 540 240 540] /C [1 0.831 0] /Contents <${annotationContents.toString('hex')}> /NM <${annotationName.toString('hex')}> /P 3 0 R >>`,
-      'ascii',
-    ),
-    Buffer.from(
-      `<< /Filter /Standard /V 1 /Length 40 /O <${ownerEntry.toString('hex')}> /U <${userEntry.toString('hex')}> /P ${permissions} /R 2 >>`,
-      'ascii',
-    ),
-  ];
-  const chunks: Buffer[] = [Buffer.from('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n', 'latin1')];
-  const offsets = [0];
-  for (const [index, object] of objects.entries()) {
-    offsets.push(chunks.reduce((length, chunk) => length + chunk.byteLength, 0));
-    chunks.push(
-      Buffer.from(`${index + 1} 0 obj\n`, 'ascii'),
-      object,
-      Buffer.from('\nendobj\n', 'ascii'),
-    );
-  }
-  const xrefOffset = chunks.reduce((length, chunk) => length + chunk.byteLength, 0);
-  const xref = [
-    'xref',
-    `0 ${objects.length + 1}`,
-    '0000000000 65535 f ',
-    ...offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n `),
-  ].join('\n');
-  chunks.push(
-    Buffer.from(
-      `${xref}\ntrailer\n<< /Size ${objects.length + 1} /Root 1 0 R /Encrypt 7 0 R /ID [<${fileId.toString('hex')}> <${fileId.toString('hex')}>] >>\nstartxref\n${xrefOffset}\n%%EOF\n`,
-      'ascii',
-    ),
-  );
-  return Uint8Array.from(Buffer.concat(chunks));
-}
-
-const PDF_PASSWORD_PADDING = Buffer.from(
-  '28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE6453697A',
-  'hex',
-);
-
-function paddedPassword(value: string): Buffer {
-  return Buffer.concat([Buffer.from(value, 'latin1'), PDF_PASSWORD_PADDING]).subarray(0, 32);
-}
-
-function md5(value: Uint8Array): Buffer {
-  // eslint-disable-next-line sonarjs/hashing -- Test-only PDF R2 fixtures require the legacy Standard Security Handler algorithm.
-  return createHash('md5').update(value).digest();
-}
-
-function rc4(key: Uint8Array, value: Uint8Array): Buffer {
-  const state = Uint8Array.from({ length: 256 }, (_unused, index) => index);
-  let right = 0;
-  for (let left = 0; left < state.length; left += 1) {
-    right = (right + requiredByte(state, left) + requiredByte(key, left % key.length)) & 0xff;
-    swapBytes(state, left, right);
-  }
-  const output = Buffer.alloc(value.byteLength);
-  let left = 0;
-  right = 0;
-  for (const [index, byte] of value.entries()) {
-    left = (left + 1) & 0xff;
-    right = (right + requiredByte(state, left)) & 0xff;
-    swapBytes(state, left, right);
-    output[index] =
-      byte ^ requiredByte(state, (requiredByte(state, left) + requiredByte(state, right)) & 0xff);
-  }
-  return output;
-}
-
-function requiredByte(bytes: Uint8Array, index: number): number {
-  const value = bytes[index];
-  if (value === undefined) throw new Error(`Missing byte at ${index}.`);
-  return value;
-}
-
-function swapBytes(bytes: Uint8Array, left: number, right: number): void {
-  const value = requiredByte(bytes, left);
-  bytes[left] = requiredByte(bytes, right);
-  bytes[right] = value;
 }
 
 function drawPage(page: PDFPage, font: PDFFont, heading: string, body: string): void {

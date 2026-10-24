@@ -1775,6 +1775,10 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
             focusAnnotation: (...args: [string, unknown]) => Promise<unknown>;
             onAnnotationFocus(listener: (focus: { editable?: boolean } | null) => void): () => void;
           };
+          eventBus?: {
+            on(name: string, listener: (event: unknown) => void): void;
+            off(name: string, listener: (event: unknown) => void): void;
+          };
           viewer?: { annotationEditorMode?: number };
         };
       };
@@ -1785,6 +1789,23 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
       throw new Error('Neutral FreeText edit probe targets are incomplete.');
     const original = interaction.focusAnnotation;
     const focusEvents: Array<boolean | null> = [];
+    const modeEvents: Array<Record<string, unknown>> = [];
+    const onModeRequest = (event: unknown) => {
+      const request = event as { editId?: unknown; mode?: unknown };
+      modeEvents.push({
+        editId: request.editId,
+        mode: request.mode,
+        editors: Array.from(
+          document.querySelectorAll<HTMLElement>('.freeTextEditor'),
+          (editor) => ({
+            id: editor.id,
+            selected: editor.classList.contains('selectedEditor'),
+            editable: editor.querySelector('[contenteditable="true"]') !== null,
+          }),
+        ),
+      });
+    };
+    viewport.eventBus?.on('switchannotationeditormode', onModeRequest);
     const stopFocus = interaction.onAnnotationFocus((focus) => {
       focusEvents.push(focus?.editable ?? null);
     });
@@ -1793,8 +1814,10 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
       cleanup: () => {
         interaction.focusAnnotation = original;
         stopFocus();
+        viewport.eventBus?.off('switchannotationeditormode', onModeRequest);
       },
       focusEvents,
+      modeEvents,
       mode: viewport.viewer.annotationEditorMode ?? null,
       viewer: viewport.viewer,
     };
@@ -1808,7 +1831,38 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
 
   await $(nativeSurface).doubleClick();
   const editable = $(inputSelector);
-  await editable.waitForExist({ timeout: 5_000 });
+  try {
+    await editable.waitForExist({ timeout: 5_000 });
+  } catch (cause) {
+    const diagnostic = await browser.execute(() => {
+      const host = window as Window & {
+        __abyssTask3FreeTextProbe?: {
+          calls: number;
+          focusEvents: unknown[];
+          modeEvents: unknown[];
+          viewer: { annotationEditorMode?: number };
+        };
+      };
+      const state = host.__abyssTask3FreeTextProbe;
+      return {
+        probe: {
+          calls: state?.calls,
+          focusEvents: state?.focusEvents,
+          modeEvents: state?.modeEvents,
+          mode: state?.viewer.annotationEditorMode,
+        },
+        editors: Array.from(
+          document.querySelectorAll<HTMLElement>('.freeTextEditor'),
+          (editor) => ({
+            id: editor.id,
+            class: editor.className,
+            editable: editor.querySelector('[contenteditable="true"]') !== null,
+          }),
+        ),
+      };
+    });
+    throw new Error(`Native FreeText edit failed: ${JSON.stringify(diagnostic)}; ${String(cause)}`);
+  }
   await editable.click();
   await browser.keys(Key.End);
   await browser.keys(' caret');

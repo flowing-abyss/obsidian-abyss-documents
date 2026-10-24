@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   annotationCliExecOptions,
   evaluateAnnotationBudget,
+  exactReaderLeafSource,
   hasNativeAnnotationStorageGrowth,
   isAnnotationBenchmarkPageReady,
   isAnnotationPluginReady,
@@ -19,12 +20,49 @@ import {
   isSelectableAnnotationBenchmarkPageReady,
   parseAnnotationBenchmarkInput,
   parseObsidianEvalOutput,
+  readerRootStatusSource,
   retryObsidianCliProbe,
   shouldInjectAnnotationBufferPressure,
   summarizeAnnotationSamples,
 } from './benchmark-annotations.mjs';
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
+
+describe.each([exactReaderLeafSource, readerRootStatusSource])(
+  '%s JavaScript literals',
+  (source) => {
+    it.each([
+      'Documents/ordinary.pdf',
+      'Documents/quotes-\'"-backslash-\\.pdf',
+      "Documents/');globalThis.injected=true;//.pdf",
+      'Documents/${globalThis.injected=true}.pdf',
+      'Documents/</ScRiPt><script>globalThis.injected=true</script>.pdf',
+      'Documents/line\u2028paragraph\u2029.pdf',
+      'Documents/control-\0\n\r\t.pdf',
+      'Documents/Резюме-😀-\ud800.pdf',
+    ])('preserves the exact path as data: %j', (workingPath) => {
+      const root = {};
+      const leaf = {
+        getViewState: () => ({ state: { file: workingPath } }),
+        containerEl: { querySelector: () => root },
+      };
+      const staleLeaf = { getViewState: () => ({ state: { file: `${workingPath}.stale` } }) };
+      const context = {
+        app: { workspace: { getLeavesOfType: () => [staleLeaf, leaf] } },
+        injected: false,
+      };
+      const program = `(()=>{${source(workingPath)}return {leaf,root};})()`;
+
+      expect(program).not.toMatch(/<\/script/iu);
+      expect(program).not.toMatch(/[\u2028\u2029]/u);
+      // eslint-disable-next-line sonarjs/code-eval -- Exercise only the local source builders with fixed hostile string fixtures in an isolated context.
+      const result = runInNewContext(program, context) as { leaf: unknown; root: unknown };
+      expect(result.leaf).toBe(leaf);
+      expect(result.root).toBe(root);
+      expect(context.injected).toBe(false);
+    });
+  },
+);
 
 function runBenchmark(
   arguments_: readonly string[],

@@ -697,6 +697,7 @@ describe('PDF reader sidebar', () => {
         { timeout: 3_000, timeoutMsg: 'Reader container did not become narrow.' },
       );
       await waitForReaderLayoutToSettle();
+      await waitForPdfPageReady();
       const closedDocumentWidth = await browser.execute(
         () =>
           document.querySelector('[data-region="document"]')?.getBoundingClientRect().width ?? 0,
@@ -1351,7 +1352,7 @@ describe('PDF reader sidebar', () => {
     await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
     await browser.keys(Key.Escape);
     await expect($('[data-annotation-editor-popover]')).not.toBeDisplayed();
-    await $('.abyss-annotation-card').click();
+    await $('.abyss-annotation-card [data-annotation-header]').click();
     await expect($('.abyss-annotation-card')).toHaveAttribute('aria-current', 'true');
     await expect($('[data-annotation-editor-popover]')).not.toBeDisplayed();
     expect(

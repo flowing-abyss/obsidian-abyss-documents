@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
 import {
   copyFile,
   lstat,
@@ -131,45 +132,67 @@ export async function registerVaultInConfig(
   configFile: string,
   vaultPath: string,
 ): Promise<{ readonly added: boolean; readonly vaultId: string }> {
-  const configStat = await lstat(configFile);
-  if (configStat.isSymbolicLink()) {
-    throw new Error(`Refusing Obsidian registry through symbolic link: ${configFile}`);
-  }
-  const parsed = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>;
-  const existingVaults =
-    typeof parsed['vaults'] === 'object' && parsed['vaults'] !== null
-      ? (parsed['vaults'] as Record<string, unknown>)
-      : {};
-  const resolvedVault = path.resolve(vaultPath);
-  for (const [vaultId, value] of Object.entries(existingVaults)) {
-    if (
-      typeof value === 'object' &&
-      value !== null &&
-      'path' in value &&
-      typeof value.path === 'string' &&
-      path.resolve(value.path) === resolvedVault
-    ) {
-      return { added: false, vaultId };
-    }
-  }
-  let salt = 0;
-  let vaultId: string;
-  do {
-    vaultId = createHash('sha256').update(`${resolvedVault}\0${salt}`).digest('hex').slice(0, 16);
-    salt += 1;
-  } while (existingVaults[vaultId] !== undefined);
-  parsed['vaults'] = {
-    ...existingVaults,
-    [vaultId]: { open: true, path: resolvedVault, ts: Date.now() },
-  };
-  const handle = await openFile(configFile, 'r+');
+  // O_NOFOLLOW is unavailable on Windows. Verify the opened identity on every OS.
+  const noFollow = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+  const handle = await openFile(configFile, constants.O_RDWR | noFollow);
   try {
-    await handle.truncate(0);
-    await handle.writeFile(JSON.stringify(parsed));
+    const opened = await handle.stat({ bigint: true });
+    const named = await lstat(configFile, { bigint: true });
+    if (
+      !opened.isFile() ||
+      !named.isFile() ||
+      named.isSymbolicLink() ||
+      opened.ino === 0n ||
+      named.ino === 0n ||
+      opened.dev !== named.dev ||
+      opened.ino !== named.ino
+    ) {
+      throw new Error(`Unable to verify Obsidian registry file identity: ${configFile}`);
+    }
+    const parsed = JSON.parse(await handle.readFile('utf8')) as Record<string, unknown>;
+    const existingVaults =
+      typeof parsed['vaults'] === 'object' && parsed['vaults'] !== null
+        ? (parsed['vaults'] as Record<string, unknown>)
+        : {};
+    const resolvedVault = path.resolve(vaultPath);
+    for (const [vaultId, value] of Object.entries(existingVaults)) {
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        'path' in value &&
+        typeof value.path === 'string' &&
+        path.resolve(value.path) === resolvedVault
+      ) {
+        return { added: false, vaultId };
+      }
+    }
+    let salt = 0;
+    let vaultId: string;
+    do {
+      vaultId = createHash('sha256').update(`${resolvedVault}\0${salt}`).digest('hex').slice(0, 16);
+      salt += 1;
+    } while (existingVaults[vaultId] !== undefined);
+    parsed['vaults'] = {
+      ...existingVaults,
+      [vaultId]: { open: true, path: resolvedVault, ts: Date.now() },
+    };
+    const payload = Buffer.from(JSON.stringify(parsed), 'utf8');
+    let offset = 0;
+    while (offset < payload.byteLength) {
+      const { bytesWritten } = await handle.write(
+        payload,
+        offset,
+        payload.byteLength - offset,
+        offset,
+      );
+      if (bytesWritten === 0) throw new Error(`Unable to write Obsidian registry: ${configFile}`);
+      offset += bytesWritten;
+    }
+    await handle.truncate(payload.byteLength);
+    return { added: true, vaultId };
   } finally {
     await handle.close();
   }
-  return { added: true, vaultId };
 }
 
 async function knownVaultPaths(): Promise<string[]> {

@@ -57,7 +57,7 @@ export function assertLocalOnlyBundle(source: string): void {
   for (const assignment of source.matchAll(OBSIDIAN_REQUIRE_ALIAS)) {
     const alias = assignment[1];
     if (alias === undefined) continue;
-    const escapedAlias = alias.replaceAll(/[$()*+.?[\]^{|}]/gu, '\\$&');
+    const escapedAlias = alias.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&');
     const transportReference = new RegExp(
       `(?<![\\w$])${escapedAlias}(?:\\s*\\.\\s*${OBSIDIAN_TRANSPORT_PROPERTY}\\b|\\s*\\[\\s*['"]${OBSIDIAN_TRANSPORT_PROPERTY}['"]\\s*\\])`,
       'u',

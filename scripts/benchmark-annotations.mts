@@ -10,6 +10,7 @@ import {
   readCurrentBuildVersions,
   requireMatchingBuildVersions,
 } from './current-build-versions.mjs';
+import { serializeJavaScriptString } from './javascript-string-literal.mjs';
 import {
   parseObsidianVersionEvidence,
   requireSuccessfulObsidianCliOutput,
@@ -322,12 +323,12 @@ async function main(): Promise<void> {
   }
 }
 
-function exactReaderLeafSource(workingPath: string): string {
-  return `const candidates=app.workspace.getLeavesOfType('abyss-document-view').filter(candidate=>candidate.getViewState()?.state?.file===${JSON.stringify(workingPath)});if(candidates.length!==1)throw new Error('Benchmark reader leaf cardinality mismatch.');const leaf=candidates[0];if(!leaf)throw new Error('Benchmark reader leaf unavailable.');const root=leaf.containerEl.querySelector('[data-abyss-document]');if(!root)throw new Error('Benchmark reader root unavailable.');`;
+export function exactReaderLeafSource(workingPath: string): string {
+  return `const candidates=app.workspace.getLeavesOfType('abyss-document-view').filter(candidate=>candidate.getViewState()?.state?.file===${serializeJavaScriptString(workingPath)});if(candidates.length!==1)throw new Error('Benchmark reader leaf cardinality mismatch.');const leaf=candidates[0];if(!leaf)throw new Error('Benchmark reader leaf unavailable.');const root=leaf.containerEl.querySelector('[data-abyss-document]');if(!root)throw new Error('Benchmark reader root unavailable.');`;
 }
 
-function readerRootStatusSource(workingPath: string): string {
-  return `const candidates=app.workspace.getLeavesOfType('abyss-document-view').filter(candidate=>candidate.getViewState()?.state?.file===${JSON.stringify(workingPath)});const leaf=candidates.length===1?candidates[0]:null;const root=leaf?.containerEl.querySelector('[data-abyss-document]')??null;`;
+export function readerRootStatusSource(workingPath: string): string {
+  return `const candidates=app.workspace.getLeavesOfType('abyss-document-view').filter(candidate=>candidate.getViewState()?.state?.file===${serializeJavaScriptString(workingPath)});const leaf=candidates.length===1?candidates[0]:null;const root=leaf?.containerEl.querySelector('[data-abyss-document]')??null;`;
 }
 
 async function qualifyRecoverableAnnotationPressure(input: {
@@ -368,7 +369,7 @@ async function qualifyRecoverableAnnotationPressure(input: {
   await evaluate(
     input.executable,
     input.vaultName,
-    `(()=>{const state=globalThis.__abyssRecoverableMemoryPressure;if(!state)throw new Error('Recoverable pressure probe unavailable before Retry.');const matches=(${isNewRetryNoticeForAnnotationPath.toString()});const notice=Array.from(document.querySelectorAll('.notice')).find(candidate=>matches(candidate,state.notices,${JSON.stringify(input.workingPath)}));const retry=Array.from(notice?.querySelectorAll('button')??[]).find(button=>button.textContent?.trim()==='Retry');if(!(retry instanceof HTMLButtonElement))throw new Error('Product Retry action unavailable after save pressure.');retry.click();return true})()`,
+    `(()=>{const state=globalThis.__abyssRecoverableMemoryPressure;if(!state)throw new Error('Recoverable pressure probe unavailable before Retry.');const matches=(${isNewRetryNoticeForAnnotationPath.toString()});const notice=Array.from(document.querySelectorAll('.notice')).find(candidate=>matches(candidate,state.notices,${serializeJavaScriptString(input.workingPath)}));const retry=Array.from(notice?.querySelectorAll('button')??[]).find(button=>button.textContent?.trim()==='Retry');if(!(retry instanceof HTMLButtonElement))throw new Error('Product Retry action unavailable after save pressure.');retry.click();return true})()`,
   );
   await waitFor(
     input.executable,
@@ -398,7 +399,7 @@ async function qualifyRecoverableAnnotationPressure(input: {
   await evaluate(
     input.executable,
     input.vaultName,
-    `(async()=>{${exactPriorLeaf}globalThis.__abyssAnnotationBenchmarkPreviousRoot=root;for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const file=app.vault.getFileByPath(${JSON.stringify(input.workingPath)});if(!file)throw new Error('Recovered benchmark PDF unavailable.');const reopenedLeaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(reopenedLeaf,{focus:true});await reopenedLeaf.openFile(file);return true})()`,
+    `(async()=>{${exactPriorLeaf}globalThis.__abyssAnnotationBenchmarkPreviousRoot=root;for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const file=app.vault.getFileByPath(${serializeJavaScriptString(input.workingPath)});if(!file)throw new Error('Recovered benchmark PDF unavailable.');const reopenedLeaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(reopenedLeaf,{focus:true});await reopenedLeaf.openFile(file);return true})()`,
   );
   const reopenedRootStatus = readerRootStatusSource(input.workingPath);
   const exactReopenedLeaf = exactReaderLeafSource(input.workingPath);
@@ -406,7 +407,7 @@ async function qualifyRecoverableAnnotationPressure(input: {
     await waitFor(
       input.executable,
       input.vaultName,
-      `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});${reopenedRootStatus}return ready({candidateCount:candidates.length,hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:root!==null&&root!==globalThis.__abyssAnnotationBenchmarkPreviousRoot,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${JSON.stringify(input.workingPath)})})()`,
+      `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});${reopenedRootStatus}return ready({candidateCount:candidates.length,hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:root!==null&&root!==globalThis.__abyssAnnotationBenchmarkPreviousRoot,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${serializeJavaScriptString(input.workingPath)})})()`,
       'Recovered annotation PDF did not reopen to a usable page.',
       30_000,
     );
@@ -522,14 +523,14 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
       await evaluate(
         executable,
         vaultName,
-        `(async()=>{for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const bytes=await app.vault.adapter.readBinary('Documents/annotations-10000.pdf');const path=${JSON.stringify(workingPath)};const existing=app.vault.getFileByPath(path);if(existing)await app.vault.modifyBinary(existing,bytes);else await app.vault.createBinary(path,bytes);const file=app.vault.getFileByPath(path);if(!file)throw new Error('Annotation benchmark PDF unavailable.');const leaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(leaf,{focus:true});await leaf.openFile(file);return true})()`,
+        `(async()=>{for(const leaf of app.workspace.getLeavesOfType('abyss-document-view'))await leaf.setViewState({type:'empty',state:{}});const bytes=await app.vault.adapter.readBinary('Documents/annotations-10000.pdf');const path=${serializeJavaScriptString(workingPath)};const existing=app.vault.getFileByPath(path);if(existing)await app.vault.modifyBinary(existing,bytes);else await app.vault.createBinary(path,bytes);const file=app.vault.getFileByPath(path);if(!file)throw new Error('Annotation benchmark PDF unavailable.');const leaf=app.workspace.getLeaf(true);app.workspace.setActiveLeaf(leaf,{focus:true});await leaf.openFile(file);return true})()`,
       );
       const openedRootStatus = readerRootStatusSource(workingPath);
       const exactOpenedLeaf = exactReaderLeafSource(workingPath);
       await waitFor(
         executable,
         vaultName,
-        `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});${openedRootStatus}return ready({candidateCount:candidates.length,hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:true,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${JSON.stringify(workingPath)})})()`,
+        `(()=>{const ready=(${isAnnotationBenchmarkPageReady.toString()});${openedRootStatus}return ready({candidateCount:candidates.length,hasCanvas:Boolean(root?.querySelector('[data-page-number="1"] canvas')),hasErrorBoundary:Boolean(root?.querySelector('[data-reader-error]')),hasFreshReaderRoot:true,hasReaderRoot:root!==null,leafId:String(leaf?.id??''),path:leaf?.getViewState()?.state?.file??null},${serializeJavaScriptString(workingPath)})})()`,
         'First annotation benchmark page did not become usable.',
       );
       await waitFor(
@@ -622,7 +623,7 @@ async function measureDesktop(): Promise<AnnotationBenchmarkEvidence> {
       await waitFor(
         executable,
         vaultName,
-        `(()=>{const ready=(${isSelectableAnnotationBenchmarkPageReady.toString()});${exactOpenedLeaf}const textLayer=root.querySelector('[data-page-number="1"] .textLayer');const manager=leaf.view?.controller?.viewport?.annotationEditorInstance?.manager;return ready({hasEditorLayer:Boolean(textLayer&&manager?.getLayer?.(0)?.hasTextLayer?.(textLayer)),hasErrorBoundary:Boolean(root.querySelector('[data-reader-error]')),leafId:String(leaf.id),path:leaf.getViewState()?.state?.file??null,textCount:root.querySelectorAll('[data-page-number="1"] .textLayer span').length},${JSON.stringify(workingPath)},String(leaf.id))})()`,
+        `(()=>{const ready=(${isSelectableAnnotationBenchmarkPageReady.toString()});${exactOpenedLeaf}const textLayer=root.querySelector('[data-page-number="1"] .textLayer');const manager=leaf.view?.controller?.viewport?.annotationEditorInstance?.manager;return ready({hasEditorLayer:Boolean(textLayer&&manager?.getLayer?.(0)?.hasTextLayer?.(textLayer)),hasErrorBoundary:Boolean(root.querySelector('[data-reader-error]')),leafId:String(leaf.id),path:leaf.getViewState()?.state?.file??null,textCount:root.querySelectorAll('[data-page-number="1"] .textLayer span').length},${serializeJavaScriptString(workingPath)},String(leaf.id))})()`,
         'Selectable benchmark text did not become ready.',
       );
       const annotationStorageBaseline = Number(
@@ -780,7 +781,7 @@ async function installRecoverableMemoryPressure(
   await evaluate(
     executable,
     vaultName,
-    `(async()=>{const h=globalThis;if(h.__abyssRecoverableMemoryPressure)throw new Error('Recoverable pressure probe already installed.');const path=${JSON.stringify(path)};const digest=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');const before=await app.vault.adapter.readBinary(path);const original=app.vault.modifyBinary;const shouldInject=(${shouldInjectAnnotationBufferPressure.toString()});const state={attempts:0,beforeHash:await digest(before),interval:0,notices:new Set(document.querySelectorAll('.notice')),original,path,peakBytes:null};const sample=()=>{const value=performance.memory?.usedJSHeapSize;if(typeof value==='number'&&Number.isFinite(value))state.peakBytes=Math.max(state.peakBytes??0,value)};state.interval=setInterval(sample,10);sample();h.__abyssRecoverableMemoryPressure=state;app.vault.modifyBinary=async function(file,data,options){if(state.attempts===0&&shouldInject(file?.path,state.path,data)){state.attempts+=1;sample();throw new RangeError('One-shot renderer allocation pressure at PDF vault transfer.')}return Reflect.apply(original,this,arguments)};return true})()`,
+    `(async()=>{const h=globalThis;if(h.__abyssRecoverableMemoryPressure)throw new Error('Recoverable pressure probe already installed.');const path=${serializeJavaScriptString(path)};const digest=async bytes=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');const before=await app.vault.adapter.readBinary(path);const original=app.vault.modifyBinary;const shouldInject=(${shouldInjectAnnotationBufferPressure.toString()});const state={attempts:0,beforeHash:await digest(before),interval:0,notices:new Set(document.querySelectorAll('.notice')),original,path,peakBytes:null};const sample=()=>{const value=performance.memory?.usedJSHeapSize;if(typeof value==='number'&&Number.isFinite(value))state.peakBytes=Math.max(state.peakBytes??0,value)};state.interval=setInterval(sample,10);sample();h.__abyssRecoverableMemoryPressure=state;app.vault.modifyBinary=async function(file,data,options){if(state.attempts===0&&shouldInject(file?.path,state.path,data)){state.attempts+=1;sample();throw new RangeError('One-shot renderer allocation pressure at PDF vault transfer.')}return Reflect.apply(original,this,arguments)};return true})()`,
   );
 }
 

@@ -218,16 +218,10 @@ describe('PDF reader foundation on Android', () => {
       const menu = document.querySelector<HTMLElement>('.menu');
       if (menu === null) throw new Error('Mobile More menu is missing.');
       const itemState = (item: HTMLElement) => {
-        const bounds = item.getBoundingClientRect();
         return {
           ariaDisabled: item.getAttribute('aria-disabled') ?? null,
           clickable: item.offsetParent !== null && getComputedStyle(item).pointerEvents !== 'none',
           label: item.querySelector('.menu-item-title')?.textContent.trim() ?? '',
-          reachable:
-            bounds.top >= 0 &&
-            bounds.bottom <= window.innerHeight &&
-            bounds.left >= 0 &&
-            bounds.right <= window.innerWidth,
         };
       };
       const actionable = (section: string) =>
@@ -257,16 +251,38 @@ describe('PDF reader foundation on Android', () => {
       'Custom',
     ]);
     expect(essentialMoreItems.export.map((item) => item.label)).toEqual(['Export annotations…']);
-    expect(
-      [
-        ...essentialMoreItems.layout,
-        ...essentialMoreItems.appearance,
-        ...essentialMoreItems.export,
-      ].every((item) => item.ariaDisabled === null && item.clickable && item.reachable),
-    ).toBe(true);
-    await $(
+    const essentialItems = [
+      ...essentialMoreItems.layout,
+      ...essentialMoreItems.appearance,
+      ...essentialMoreItems.export,
+    ];
+    expect(essentialItems.every((item) => item.ariaDisabled === null && item.clickable)).toBe(true);
+    for (const { label } of essentialItems) {
+      const item = $(`//*[contains(@class, "menu-item-title") and normalize-space(.)="${label}"]`);
+      await item.scrollIntoView({ block: 'center', inline: 'nearest' });
+      expect(
+        await browser.execute((title) => {
+          const target = Array.from(
+            document.querySelectorAll<HTMLElement>('.menu .menu-item-title'),
+          ).find((element) => element.textContent.trim() === title);
+          const bounds = target?.getBoundingClientRect();
+          const scrollBounds = target?.closest('.menu-scroll')?.getBoundingClientRect();
+          return (
+            bounds !== undefined &&
+            scrollBounds !== undefined &&
+            bounds.top >= Math.max(0, scrollBounds.top) &&
+            bounds.bottom <= Math.min(window.innerHeight, scrollBounds.bottom) &&
+            bounds.left >= 0 &&
+            bounds.right <= window.innerWidth
+          );
+        }, label),
+      ).toBe(true);
+    }
+    const singlePage = $(
       '//*[contains(@class, "menu-item-title") and normalize-space(.)="Single page"]',
-    ).click();
+    );
+    await singlePage.scrollIntoView({ block: 'center', inline: 'nearest' });
+    await singlePage.click();
     await expect($('.menu')).not.toBeDisplayed();
     await $('[data-control="overflow"]').click();
     await $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Default"]').click();
@@ -457,50 +473,27 @@ describe('PDF reader foundation on Android', () => {
         card.dataset['mobileContextTarget'] = '';
       }, qualification.comment);
       const popover = $('[data-annotation-editor-popover]');
-      const target = await browser.execute(() => {
-        const card = document.querySelector<HTMLElement>('[data-mobile-context-target]');
-        if (card === null) throw new Error('Read-only mobile context target disappeared.');
-        const bounds = card.getBoundingClientRect();
+      const nativeCardCenter = async () => {
+        const card = $('[data-mobile-context-target]');
+        // ChromeDriver's CDP touch injection disables native long-press recognition.
+        // UiAutomator2 translates this WebView element to actual Android coordinates.
+        const bounds = await browser.execute<
+          { x: number; y: number; width: number; height: number },
+          [{ elementId: string }]
+        >('mobile: viewportElementRect', {
+          elementId: await card.elementId,
+        });
         return {
-          x: Math.round(bounds.left + bounds.width / 2),
-          y: Math.round(bounds.top + bounds.height / 2),
+          x: Math.round(bounds.x + bounds.width / 2),
+          y: Math.round(bounds.y + bounds.height / 2),
         };
-      });
-      try {
-        await browser.performActions([
-          {
-            type: 'pointer',
-            id: 'annotation-card-short-tap',
-            parameters: { pointerType: 'touch' },
-            actions: [
-              { type: 'pointerMove', duration: 0, origin: 'viewport', ...target },
-              { type: 'pointerDown', button: 0 },
-              { type: 'pause', duration: 50 },
-              { type: 'pointerUp', button: 0 },
-            ],
-          },
-        ]);
-      } finally {
-        await browser.releaseActions();
-      }
+      };
+      await browser.execute('mobile: clickGesture', await nativeCardCenter());
       await expect(popover).not.toBeDisplayed();
-      try {
-        await browser.performActions([
-          {
-            type: 'pointer',
-            id: 'annotation-card-long-press',
-            parameters: { pointerType: 'touch' },
-            actions: [
-              { type: 'pointerMove', duration: 0, origin: 'viewport', ...target },
-              { type: 'pointerDown', button: 0 },
-              { type: 'pause', duration: 650 },
-              { type: 'pointerUp', button: 0 },
-            ],
-          },
-        ]);
-      } finally {
-        await browser.releaseActions();
-      }
+      await browser.execute('mobile: longClickGesture', {
+        ...(await nativeCardCenter()),
+        duration: 650,
+      });
       await popover.waitForDisplayed({ timeout: 5_000 });
       const readOnlyGeometry = await browser.execute(() => {
         const editor = document.querySelector<HTMLElement>('[data-annotation-editor-popover]');

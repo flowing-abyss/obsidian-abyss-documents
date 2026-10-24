@@ -2709,7 +2709,18 @@ export class PdfAnnotationEditor {
       typeof request.editId !== 'string'
     )
       return false;
-    const native = manager.getEditor(this.nativeEditorUid(request.editId));
+    const identities = new Set([request.editId, this.nativeEditorUid(request.editId)]);
+    const candidates = [
+      manager.firstSelectedEditor,
+      ...Array.from(this.dependencies.commentBridge.nativeEditorIds(manager), (id) =>
+        manager.getEditor(id),
+      ),
+    ];
+    const native = candidates.find(
+      (candidate) =>
+        candidate?.mode === request.mode &&
+        nativeEditorIdentityIds(candidate).some((id) => identities.has(id)),
+    );
     if (native?.enterInEditMode === undefined) return false;
     // PDFViewer ignores same-mode requests, including mustEnterInEditMode.
     // The already materialized FreeText editor can enter its native text mode.

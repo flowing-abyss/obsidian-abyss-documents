@@ -1,5 +1,6 @@
 import { $, browser, expect } from '@wdio/globals';
 import { afterEach, beforeEach, describe, it } from 'mocha';
+import { Key } from 'webdriverio';
 import { focusObsidianWindow, waitForPdfPageReady } from './pdf-ready.js';
 
 const pluginId = 'abyss-documents';
@@ -830,14 +831,8 @@ describe('reader compact toolbar', () => {
     await quickMenu.click();
     await expect(fitMenu).toHaveAttribute('aria-expanded', 'false');
     await expect(quickMenu).toHaveAttribute('aria-expanded', 'true');
-    expect(
-      await browser.execute(
-        () =>
-          Array.from(document.querySelectorAll<HTMLElement>('.menu')).filter(
-            (menu) => menu.offsetParent !== null,
-          ).length,
-      ),
-    ).toBe(1);
+    const displayedMenus = await browser.$$('.menu').map((menu) => menu.isDisplayed());
+    expect(displayedMenus.filter(Boolean).length).toBe(1);
     await quickMenu.click();
     await expect($('.menu')).not.toBeDisplayed();
 
@@ -1469,7 +1464,7 @@ describe('reader compact toolbar', () => {
         const menuText = await $('.menu').getText();
         expect(menuText).not.toContain('Previous page');
         expect(menuText).not.toContain('Next page');
-        await $('[data-control="overflow"]').click();
+        await browser.keys(Key.Escape);
         await expect($('.menu')).not.toBeDisplayed();
       }
     }

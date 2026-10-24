@@ -4,6 +4,7 @@ import { builtinModules } from 'node:module';
 import process from 'process';
 import { createBuildStylesPlugin } from './scripts/build-styles-plugin.mjs';
 import { createPdfjsAnnotationAssetsPlugin } from './scripts/pdfjs-annotation-assets-plugin.mjs';
+import { createPdfjsCorePlugin } from './scripts/pdfjs-core-plugin.mjs';
 import { createPdfjsViewerPlugin } from './scripts/pdfjs-viewer-plugin.mjs';
 import { createPdfjsWorkerPlugin } from './scripts/pdfjs-worker-plugin.mjs';
 
@@ -78,6 +79,7 @@ const context = await esbuild.context({
   metafile: prod || analyze,
   plugins: [
     buildStylesPlugin,
+    createPdfjsCorePlugin(),
     pdfjsViewerPlugin,
     pdfjsAnnotationAssetsPlugin,
     gzipBase64Plugin,

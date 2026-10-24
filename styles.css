@@ -7451,6 +7451,13 @@
   }
 }
 
+/* Older Chromium gives PDF.js's nested span selector higher specificity than
+   its end marker rule. Keep the marker below text during native selection. */
+/* stylelint-disable-next-line selector-class-pattern -- These public PDF.js classes define its native text layers. */
+.abyss-documents .pdfViewer .page .textLayer .endOfContent {
+  z-index: 0;
+}
+
 .abyss-documents-settings {
   container-type: inline-size;
 }

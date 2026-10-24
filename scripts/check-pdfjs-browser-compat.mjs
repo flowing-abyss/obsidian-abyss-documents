@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { createContext, runInContext } from 'node:vm';
 import { createReadonlyAnnotationFixture } from '../tests/fixtures/pdf-fixtures.mts';
+import { createPdfjsCorePlugin } from './pdfjs-core-plugin.mjs';
 import { createPdfjsViewerPlugin } from './pdfjs-viewer-plugin.mjs';
 import { createPdfjsWorkerPlugin } from './pdfjs-worker-plugin.mjs';
 
@@ -33,7 +34,7 @@ async function loadPackagedRuntime() {
     format: 'iife',
     target: 'es2021',
     write: false,
-    plugins: [createPdfjsViewerPlugin(), createPdfjsWorkerPlugin()],
+    plugins: [createPdfjsCorePlugin(), createPdfjsViewerPlugin(), createPdfjsWorkerPlugin()],
   });
   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
     runScripts: 'outside-only',

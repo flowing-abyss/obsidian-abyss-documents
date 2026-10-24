@@ -307,16 +307,50 @@ async function dragFixtureText(scope = '.workspace-leaf.mod-active'): Promise<vo
       },
     ]);
     // Native Highlight creation may clear the DOM range on pointerup.
-    const held = await browser.execute((point) => {
-      const target = document.elementFromPoint(point.x, point.y);
-      return {
-        selectedText: window.getSelection()?.toString().trim() ?? '',
-        target: target?.getAttribute('class'),
-        isMobile: document.body.classList.contains('is-mobile'),
-        width: innerWidth,
-        height: innerHeight,
-      };
-    }, points.start);
+    const held = await browser.execute(
+      ({ point, scope: activeScope }) => {
+        const target = document.elementFromPoint(point.x, point.y);
+        const text =
+          target?.closest<HTMLElement>('.textLayer span') ??
+          document.querySelectorAll<HTMLElement>(
+            `${activeScope} [data-page-number="1"] .textLayer span`,
+          )[1];
+        const style = text === undefined ? null : getComputedStyle(text);
+        const targetStyle = target === null ? null : getComputedStyle(target);
+        return {
+          selectedText: window.getSelection()?.toString().trim() ?? '',
+          target: target?.outerHTML.slice(0, 350),
+          focus: document.hasFocus(),
+          targetStyle: {
+            zIndex: targetStyle?.zIndex,
+            position: targetStyle?.position,
+            inset: targetStyle?.inset,
+            userSelect: targetStyle?.userSelect,
+          },
+          text:
+            text === undefined
+              ? null
+              : {
+                  bounds: {
+                    width: text.getBoundingClientRect().width,
+                    height: text.getBoundingClientRect().height,
+                    left: text.getBoundingClientRect().left,
+                    top: text.getBoundingClientRect().top,
+                  },
+                  text: text.textContent,
+                  fontSize: style?.fontSize,
+                  userSelect: style?.userSelect,
+                  transform: style?.transform,
+                  zIndex: style?.zIndex,
+                  leaf: text.closest('.workspace-leaf')?.className,
+                },
+          isMobile: document.body.classList.contains('is-mobile'),
+          width: innerWidth,
+          height: innerHeight,
+        };
+      },
+      { point: points.start, scope },
+    );
     if (held.selectedText.length === 0)
       throw new Error(
         `Trusted PDF text drag selected nothing: ${JSON.stringify({ held, points })}`,
@@ -713,7 +747,30 @@ describe('PDF reader foundation', () => {
     }
     await expect($('[data-tab="search"][aria-selected="true"]')).toExist();
     await $('[data-document-search]').setValue('fixture');
-    await expect($('[data-search-count]')).toHaveText(/^[1-9]/);
+    try {
+      await expect($('[data-search-count]')).toHaveText(/^[1-9]/);
+    } catch (cause) {
+      const diagnostics = await browser.executeObsidian(({ app }) => {
+        const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+          controller?: { viewport?: { search(query: string): void; lastQuery?: string } };
+        };
+        const viewport = view.controller?.viewport;
+        let dispatchError: string | null = null;
+        try {
+          viewport?.search('fixture');
+        } catch (error) {
+          dispatchError = String(error);
+        }
+        return {
+          dispatchError,
+          input: document.querySelector<HTMLInputElement>('[data-document-search]')?.value,
+          lastQuery: viewport?.lastQuery,
+          count: document.querySelector('[data-search-count]')?.textContent,
+          focused: document.hasFocus(),
+        };
+      });
+      throw new Error(`PDF search failed: ${JSON.stringify(diagnostics)}; ${String(cause)}`);
+    }
     await expect($('[data-sidebar-panel="annotations"]')).not.toBeDisplayed();
     await expect($('[data-document-search]')).toBeFocused();
 
@@ -1227,7 +1284,18 @@ describe('PDF reader foundation', () => {
     await $(`${active} [data-page-number="1"] canvas`).waitForExist({ timeout: 10_000 });
     await $(`${active} .annotationLayer .highlightAnnotation`).waitForExist({ timeout: 10_000 });
     saveBaseline = await captureAnnotationSaveBaseline(leaves.secondary);
-    await $(`${active} [data-annotation-tool="ink"]`).click();
+    if (await $(`${active} [data-annotation-tool="ink"]`).isDisplayed()) {
+      await $(`${active} [data-annotation-tool="ink"]`).click();
+    } else {
+      await $(`${active} [data-control="overflow"]`).click();
+      const ink = $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Ink"]');
+      await ink.waitForDisplayed();
+      await ink.click();
+    }
+    await expect($(`${active} [data-annotation-tool="ink"]`)).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
     await drawInk(`${active} [data-page-number="1"] .annotationEditorLayer`);
     await $(`${active} [data-annotation-tool="ink"]`).click();
     await expect($(`${active} [data-annotation-tool="ink"]`)).toHaveAttribute(

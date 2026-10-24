@@ -5413,48 +5413,57 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
   });
 
-  it('enters native FreeText editing when contextual activation already set the viewer mode', () => {
-    const current = fixture();
-    document.body.append(current.annotationRoot);
-    const annotationLayer = current.annotationRoot.createDiv({ cls: 'annotationLayer' });
-    const container = annotationLayer.createDiv();
-    const editable = current.annotationRoot.createDiv();
-    editable.setAttribute('contenteditable', 'false');
-    const native = {
-      ...selectedEditor('native-freetext-42', 3),
-      enterInEditMode: () => {
-        editable.setAttribute('contenteditable', 'true');
-      },
-    };
-    const uiManager = manager(native);
-    uiManager.getEditor.mockReturnValue(native);
-    current.commentBridge.nativeEditorUidForAnnotation.mockReturnValue('native-freetext-42');
-    current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
-    current.editor.setAnnotationProjection([
-      {
-        annotation: createdAnnotation('', { id: 'persisted-freetext', type: 'free-text' }),
-        stableId: 'persisted-freetext',
-      },
-    ]);
-    current.viewer.currentMode = 3;
+  it.each(['matching-selection', 'unrelated-selection', 'missing-target'])(
+    'resolves the exact native FreeText editor while its mode is already active (%s)',
+    (state) => {
+      const current = fixture();
+      document.body.append(current.annotationRoot);
+      const annotationLayer = current.annotationRoot.createDiv({ cls: 'annotationLayer' });
+      const container = annotationLayer.createDiv();
+      const editable = current.annotationRoot.createDiv();
+      editable.setAttribute('contenteditable', 'false');
+      const native = {
+        ...selectedEditor('persisted-freetext', 3),
+        enterInEditMode: () => {
+          editable.setAttribute('contenteditable', 'true');
+        },
+      };
+      const uiManager = manager(
+        state === 'matching-selection' ? native : selectedEditor('other', 3),
+      );
+      uiManager.getEditor.mockImplementation((id: string) =>
+        id === 'pdfjs_internal_editor_42' && state !== 'missing-target' ? native : undefined,
+      );
+      current.commentBridge.nativeEditorIds.mockReturnValue(new Set(['pdfjs_internal_editor_42']));
+      current.commentBridge.nativeEditorUidForAnnotation.mockReturnValue('persisted-freetext');
+      current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+      current.editor.setAnnotationProjection([
+        {
+          annotation: createdAnnotation('', { id: 'persisted-freetext', type: 'free-text' }),
+          stableId: 'persisted-freetext',
+        },
+      ]);
+      current.viewer.currentMode = 3;
 
-    current.eventBus.dispatch('switchannotationeditormode', {
-      editId: 'persisted-freetext',
-      mode: 3,
-      mustEnterInEditMode: true,
-      source: {
-        annotationEditorType: 3,
-        container,
-        layer: annotationLayer,
-        data: { id: 'persisted-freetext' },
-      },
-    });
+      current.eventBus.dispatch('switchannotationeditormode', {
+        editId: 'persisted-freetext',
+        mode: 3,
+        mustEnterInEditMode: true,
+        source: {
+          annotationEditorType: 3,
+          container,
+          layer: annotationLayer,
+          data: { id: 'persisted-freetext' },
+        },
+      });
 
-    expect(editable.getAttribute('contenteditable')).toBe('true');
-    expect(uiManager.getEditor).toHaveBeenCalledWith('native-freetext-42');
-    current.editor.destroy();
-    current.annotationRoot.remove();
-  });
+      expect(editable.getAttribute('contenteditable')).toBe(
+        state === 'missing-target' ? 'false' : 'true',
+      );
+      current.editor.destroy();
+      current.annotationRoot.remove();
+    },
+  );
 
   it('forwards PDF.js native annotation edit requests to the embedded viewer', () => {
     const { annotationRoot, commentBridge, editor, eventBus, modeRequests, viewer } = fixture();
