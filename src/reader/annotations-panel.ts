@@ -333,7 +333,13 @@ export class AnnotationsPanel {
     const annotation = this.filtered.find(
       (candidate) => annotationId(candidate) === id || (this.nativeIds.get(candidate) ?? '') === id,
     );
-    return annotation === undefined ? false : this.selectRow(this.rowId(annotation), focus);
+    if (annotation === undefined) return false;
+    const rowId = this.rowId(annotation);
+    if (!focus && this.selectedRowId === rowId) {
+      this.clearResolutionFeedback();
+      return true;
+    }
+    return this.selectRow(rowId, focus);
   }
 
   clearSelection(expectedRowId?: string): void {

@@ -1604,22 +1604,38 @@ export class PdfDocumentViewport implements DocumentViewport {
     const page = this.nativeTextEntryPage(event, target);
     if (page === null) return false;
     const pageNumber = positiveInteger(Number(page.dataset['pageNumber']));
-    if (pageNumber === null) return false;
+    const editor = this.annotationEditorInstance;
+    if (pageNumber === null || editor === null) return false;
+    const nativeNode = target.closest<HTMLElement>('.annotationEditorLayer .freeTextEditor');
+    if (nativeNode !== null) {
+      const native = editor.resolveNativeEditor(nativeNode.id);
+      if (native !== null)
+        return (
+          native.kind === 'freetext' && this.requestNativeTextEditForId(event, editor, native.id)
+        );
+    }
     const point = this.projectClientRects(pageNumber - 1, [
       { bottom: event.clientY, left: event.clientX, right: event.clientX, top: event.clientY },
     ])[0];
-    const editor = this.annotationEditorInstance;
-    if (point === undefined || editor === null) return false;
+    if (point === undefined) return false;
     for (const hit of editor.hitTestProjectedAnnotations(pageNumber - 1, point)) {
-      const pending = editor.requestNativeTextEdit(hit.stableId);
-      if (pending === null) continue;
-      event.stopPropagation();
-      void pending.catch((cause: unknown) => {
-        this.events.emit({ type: 'annotation-mutation-error', action: 'open-annotation', cause });
-      });
-      return true;
+      if (this.requestNativeTextEditForId(event, editor, hit.stableId)) return true;
     }
     return false;
+  }
+
+  private requestNativeTextEditForId(
+    event: MouseEvent,
+    editor: PdfAnnotationEditor,
+    id: string,
+  ): boolean {
+    const pending = editor.requestNativeTextEdit(id);
+    if (pending === null) return false;
+    event.stopPropagation();
+    void pending.catch((cause: unknown) => {
+      this.events.emit({ type: 'annotation-mutation-error', action: 'open-annotation', cause });
+    });
+    return true;
   }
 
   private nativeTextEntryPage(event: MouseEvent, target: Element): HTMLElement | null {

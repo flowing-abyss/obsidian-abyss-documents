@@ -339,6 +339,135 @@ describe('AnnotationsPanel', () => {
     root.remove();
   });
 
+  it('preserves Home focus and scroll when the same selection is synchronized without focus', () => {
+    const root = createDiv();
+    root.doc.body.append(root);
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const rows = Array.from({ length: 200 }, (_, index) => ({
+      annotation: annotation(index),
+      key: `row-${String(index)}`,
+      nativeId: `native-${String(index)}`,
+      writable: true,
+    }));
+    try {
+      panel.setProjectedAnnotations(rows);
+      expect(panel.selectAnnotation('native-1', false)).toBe(true);
+      const selected = root.querySelector<HTMLButtonElement>(
+        '.abyss-annotation-card[data-annotation-row-id="row-1"]',
+      );
+      if (selected === null) throw new Error('Expected the selected annotation card.');
+      selected.focus();
+      selected.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Home' }));
+      const first = root.querySelector<HTMLButtonElement>(
+        '.abyss-annotation-card[data-annotation-row-id="row-0"]',
+      );
+      const scrollHost = annotationScrollHost(root);
+      scrollHost.scrollTop = 1;
+      expect(root.doc.activeElement).toBe(first);
+
+      // Public identity and native identity refer to the same projected row.
+      expect(panel.selectAnnotation('annotation-1', false)).toBe(true);
+
+      expect(scrollHost.scrollTop).toBe(1);
+      expect(root.doc.activeElement).toBe(first);
+      expect(root.querySelectorAll('.abyss-annotation-card[tabindex="0"]')).toHaveLength(1);
+      expect(first?.tabIndex).toBe(0);
+      expect(selected.getAttribute('aria-current')).toBe('true');
+    } finally {
+      panel.destroy();
+      root.remove();
+    }
+  });
+
+  it('preserves a manually scrolled virtual window when the same selection is synchronized without focus', () => {
+    const root = createDiv();
+    const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+    const rows = Array.from({ length: 200 }, (_, index) => ({
+      annotation: annotation(index),
+      key: `row-${String(index)}`,
+      nativeId: `native-${String(index)}`,
+      writable: true,
+    }));
+    try {
+      panel.setProjectedAnnotations(rows);
+      expect(panel.selectAnnotation('native-1', false)).toBe(true);
+      const scrollHost = annotationScrollHost(root);
+      scrollHost.scrollTop = 120 * 112;
+      scrollHost.dispatchEvent(new Event('scroll'));
+      const firstRow = root.querySelector('.abyss-annotation-card-row');
+      expect(Number(firstRow?.getAttribute('aria-posinset'))).toBeGreaterThan(100);
+      expect(
+        root.querySelector('.abyss-annotation-card[data-annotation-row-id="row-1"]'),
+      ).toBeNull();
+
+      expect(panel.selectAnnotation('native-1', false)).toBe(true);
+
+      expect(scrollHost.scrollTop).toBe(120 * 112);
+      expect(root.querySelector('.abyss-annotation-card-row')).toBe(firstRow);
+      expect(
+        root.querySelector('.abyss-annotation-card[data-annotation-row-id="row-1"]'),
+      ).toBeNull();
+    } finally {
+      panel.destroy();
+    }
+  });
+
+  it.each(['focus', 'activation'] as const)(
+    'still reveals an offscreen selected row for an explicit %s request',
+    (request) => {
+      const root = createDiv();
+      root.doc.body.append(root);
+      const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });
+      const rows = Array.from({ length: 200 }, (_, index) => ({
+        annotation: annotation(index),
+        key: `row-${String(index)}`,
+        nativeId: `native-${String(index)}`,
+        writable: true,
+      }));
+      const geometry = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+        bottom: 128,
+        height: 112,
+        left: 16,
+        right: 256,
+        top: 16,
+        width: 240,
+        x: 16,
+        y: 16,
+        toJSON: () => ({}),
+      });
+      try {
+        panel.setProjectedAnnotations(rows);
+        expect(panel.selectAnnotation('native-1', false)).toBe(true);
+        const scrollHost = annotationScrollHost(root);
+        scrollHost.scrollTop = 120 * 112;
+        scrollHost.dispatchEvent(new Event('scroll'));
+        expect(
+          root.querySelector('.abyss-annotation-card[data-annotation-row-id="row-1"]'),
+        ).toBeNull();
+
+        if (request === 'focus') expect(panel.selectAnnotation('native-1', true)).toBe(true);
+        else
+          expect(panel.resolveActivation('row-1')).toMatchObject({
+            clientPosition: { x: 16, y: 128 },
+            nativeId: 'native-1',
+            rowId: 'row-1',
+          });
+
+        const selected = root.querySelector<HTMLButtonElement>(
+          '.abyss-annotation-card[data-annotation-row-id="row-1"]',
+        );
+        expect(selected).not.toBeNull();
+        expect(scrollHost.scrollTop).toBeLessThan(120 * 112);
+        expect(selected?.getAttribute('aria-current')).toBe('true');
+        if (request === 'focus') expect(root.doc.activeElement).toBe(selected);
+      } finally {
+        geometry.mockRestore();
+        panel.destroy();
+        root.remove();
+      }
+    },
+  );
+
   it('does not resolve an activation after its projected row is removed', () => {
     const root = createDiv();
     const panel = new AnnotationsPanel(root, { onNavigate: vi.fn() });

@@ -2274,6 +2274,102 @@ describe('PdfDocumentViewport', () => {
     },
   );
 
+  it.each([
+    ['accepted', 'empty'],
+    ['accepted', 'overlap'],
+    ['accepted', 'unavailable'],
+    ['refused', 'overlap'],
+    ['unowned', 'overlap'],
+  ] as const)(
+    'routes a native FreeText child by its live identity (%s, %s)',
+    async (outcome, geometry) => {
+      const fixture = await mountedViewport(3);
+      document.body.append(fixture.host);
+      const editor = fixture.viewport.annotationEditor;
+      const eventBus = fixture.runtime.state.eventBus;
+      const viewer = fixture.runtime.state.viewer;
+      const page = fixture.host.querySelector<HTMLElement>('[data-page-number="1"]');
+      if (editor === null || eventBus === undefined || viewer === undefined || page === null)
+        throw new Error('Expected the native FreeText viewport.');
+      const node = page
+        .createDiv({ cls: 'annotationEditorLayer' })
+        .createDiv({ cls: 'freeTextEditor draggable selectedEditor' });
+      node.id = 'pdfjs_internal_editor_0';
+      const content = node.createDiv({ cls: 'internal' });
+      content.setAttribute('contenteditable', outcome === 'unowned' ? 'true' : 'false');
+      content.tabIndex = 0;
+      const target = content.createDiv();
+      const popover = fixture.host.createDiv();
+      popover.dataset['annotationEditorPopover'] = '';
+      popover.hidden = outcome === 'unowned';
+      let nativeEntries = 0;
+      const native = {
+        ...nativeHighlight('30R'),
+        editorType: 'freetext',
+        mode: 3,
+        enterInEditMode: () => {
+          nativeEntries += 1;
+          content.setAttribute('contenteditable', 'true');
+          content.focus();
+        },
+      };
+      const uiManager = annotationManager(native, [[node.id, native]]);
+      eventBus.dispatch('annotationeditoruimanager', { source: viewer, uiManager });
+      if (outcome === 'unowned') {
+        await editor.setTool('freetext');
+        content.focus();
+      } else await editor.editAnnotation({ editComment: false, id: '30R', kind: 'freetext' });
+      let handoffs = 0;
+      editor.onNativeTextEdit(() => {
+        handoffs += 1;
+        if (outcome === 'refused') return false;
+        popover.hidden = true;
+        return true;
+      });
+      const project = vi.spyOn(fixture.viewport, 'projectClientRects');
+      if (geometry === 'unavailable') project.mockReturnValue([]);
+      const hitTest = vi
+        .spyOn(editor, 'hitTestProjectedAnnotations')
+        .mockReturnValue(
+          geometry === 'overlap' ? [{ stableId: 'overlapping-other-annotation' }] : [],
+        );
+      const request = vi.spyOn(editor, 'requestNativeTextEdit');
+      const focus = vi.spyOn(editor, 'focusAnnotation');
+      const modesBefore = [...viewer.annotationEditorRequests];
+      let nativeDeliveries = 0;
+      target.addEventListener('mousedown', () => {
+        nativeDeliveries += 1;
+      });
+      try {
+        target.dispatchEvent(
+          new MouseEvent('mousedown', {
+            bubbles: true,
+            button: 0,
+            detail: 2,
+            clientX: 50,
+            clientY: 80,
+          }),
+        );
+        for (let index = 0; index < 12; index += 1) await Promise.resolve();
+
+        expect(nativeDeliveries).toBe(outcome === 'unowned' ? 1 : 0);
+        expect(request.mock.calls.map(([id]) => id)).toEqual(['30R']);
+        expect(project).not.toHaveBeenCalled();
+        expect(hitTest).not.toHaveBeenCalled();
+        expect(handoffs).toBe(outcome === 'unowned' ? 0 : 1);
+        expect(nativeEntries).toBe(outcome === 'accepted' ? 1 : 0);
+        expect(popover.hidden).toBe(outcome !== 'refused');
+        expect(editor.hasContextualEdit).toBe(outcome === 'refused');
+        expect(focus).not.toHaveBeenCalled();
+        expect(viewer.annotationEditorRequests).toEqual(modesBefore);
+        if (outcome !== 'refused') expect(document.activeElement).toBe(content);
+      } finally {
+        fixture.host.remove();
+        await fixture.viewport.destroy();
+      }
+    },
+  );
+
   it('owns a persisted FreeText pointer gesture before PDF.js and coalesces its click', async () => {
     const fixture = await mountedViewport(3);
     const interaction = fixture.viewport.annotationInteraction;
