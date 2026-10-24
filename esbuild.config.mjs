@@ -1,11 +1,11 @@
 import esbuild from 'esbuild';
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
-import { gzipSync } from 'node:zlib';
 import process from 'process';
 import { createBuildStylesPlugin } from './scripts/build-styles-plugin.mjs';
 import { createPdfjsAnnotationAssetsPlugin } from './scripts/pdfjs-annotation-assets-plugin.mjs';
 import { createPdfjsViewerPlugin } from './scripts/pdfjs-viewer-plugin.mjs';
+import { createPdfjsWorkerPlugin } from './scripts/pdfjs-worker-plugin.mjs';
 
 // Shared with release-check.mjs, which re-checks the same threshold against an
 // already-built main.js — both read this key so the two checks can't drift apart.
@@ -30,23 +30,7 @@ const buildStylesPlugin = createBuildStylesPlugin();
 const pdfjsAnnotationAssetsPlugin = createPdfjsAnnotationAssetsPlugin();
 const pdfjsViewerPlugin = createPdfjsViewerPlugin();
 
-const gzipBase64Plugin = {
-  name: 'gzip-base64',
-  setup(build) {
-    build.onResolve({ filter: /^pdfjs-dist\/build\/pdf\.worker\.mjs\?gzip-base64$/ }, async () => ({
-      namespace: 'gzip-base64',
-      path: await import.meta.resolve('pdfjs-dist/build/pdf.worker.mjs'),
-    }));
-    build.onLoad({ filter: /.*/, namespace: 'gzip-base64' }, ({ path }) => {
-      const workerSource = readFileSync(new URL(path));
-      const compressedWorker = gzipSync(workerSource, { level: 9 });
-      return {
-        contents: `export default ${JSON.stringify(compressedWorker.toString('base64'))};`,
-        loader: 'js',
-      };
-    });
-  },
-};
+const gzipBase64Plugin = createPdfjsWorkerPlugin();
 
 // Obsidian strips inline source maps from dev builds unless main.js ends with
 // this exact marker comment: https://forum.obsidian.md/t/source-map-trimming-in-dev-builds/87612

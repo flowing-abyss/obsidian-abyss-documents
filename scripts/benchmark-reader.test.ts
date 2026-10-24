@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   evaluateReaderBudget,
   parseMeasuredSamples,
@@ -64,6 +64,7 @@ describe('reader benchmark summaries', () => {
   });
 
   it('runs setup before launching WDIO with normalized focused arguments', () => {
+    vi.stubEnv('npm_execpath', 'C:\\Program Files\\pnpm\\pnpm.exe');
     const calls: Array<{ readonly arguments_: readonly string[]; readonly command: string }> = [];
 
     expect(
@@ -74,10 +75,14 @@ describe('reader benchmark summaries', () => {
     ).toBe(0);
 
     expect(calls).toEqual([
-      { command: 'pnpm', arguments_: ['dev:vault', '--', '--no-launch'] },
       {
-        command: 'wdio',
+        command: 'C:\\Program Files\\pnpm\\pnpm.exe',
+        arguments_: ['dev:vault', '--', '--no-launch'],
+      },
+      {
+        command: process.execPath,
         arguments_: [
+          path.join(repoRoot, 'node_modules', '@wdio', 'cli', 'bin', 'wdio.js'),
           'run',
           'tests/e2e/wdio.conf.mts',
           '--spec',
@@ -88,6 +93,7 @@ describe('reader benchmark summaries', () => {
   });
 
   it('returns setup failure without launching WDIO', () => {
+    vi.stubEnv('npm_execpath', 'C:\\Program Files\\pnpm\\pnpm.exe');
     const calls: string[] = [];
 
     expect(
@@ -97,7 +103,7 @@ describe('reader benchmark summaries', () => {
       }),
     ).toBe(7);
 
-    expect(calls).toEqual(['pnpm']);
+    expect(calls).toEqual(['C:\\Program Files\\pnpm\\pnpm.exe']);
   });
 
   it('restarts a loaded plugin through bounded disable and enable commands, never reload', () => {

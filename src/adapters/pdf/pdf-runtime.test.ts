@@ -11,12 +11,12 @@ const WORKER_PAYLOAD = btoa('compressed worker');
 const WORKER_BYTES = new TextEncoder().encode('worker source');
 
 vi.mock('fflate', () => ({ gunzipSync: () => WORKER_BYTES }));
-vi.mock('pdfjs-dist/build/pdf.worker.mjs?gzip-base64', () => ({ default: WORKER_PAYLOAD }));
-vi.mock('pdfjs-dist/build/pdf.mjs', () => ({
+vi.mock('pdfjs-dist/legacy/build/pdf.worker.mjs?gzip-base64', () => ({ default: WORKER_PAYLOAD }));
+vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => ({
   GlobalWorkerOptions: { workerSrc: '' },
   version: PDFJS_VERSION,
 }));
-vi.mock('pdfjs-dist/web/pdf_viewer.mjs', () => ({ PDFViewer: class PDFViewer {} }));
+vi.mock('pdfjs-dist/legacy/web/pdf_viewer.mjs', () => ({ PDFViewer: class PDFViewer {} }));
 
 interface Deferred<T> {
   promise: Promise<T>;

@@ -2,6 +2,12 @@
   container-type: inline-size;
 }
 
+.abyss-documents-settings.abyss-documents-settings-custom-row {
+  display: block;
+  padding: 0;
+  border: 0;
+}
+
 .abyss-documents-settings .abyss-documents-settings-group {
   border-bottom: var(--border-width) solid var(--background-modifier-border);
   padding-block: var(--size-2-1);

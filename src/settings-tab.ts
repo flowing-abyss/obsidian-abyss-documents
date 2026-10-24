@@ -1,4 +1,12 @@
-import { Notice, PluginSettingTab, Setting, setIcon, type App, type Plugin } from 'obsidian';
+import {
+  Notice,
+  PluginSettingTab,
+  Setting,
+  setIcon,
+  type App,
+  type Plugin,
+  type SettingDefinitionRender,
+} from 'obsidian';
 import type {
   ReaderPages,
   ReaderScrolling,
@@ -83,14 +91,20 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
-  override getSettingDefinitions(): [] {
-    // An empty definition list keeps the imperative, collapsible UI active on
-    // Obsidian 1.13+ while retaining compatibility with minAppVersion 1.7.2.
-    return [];
-  }
-
-  override display(): void {
-    this.render();
+  override getSettingDefinitions(): SettingDefinitionRender[] {
+    return [
+      {
+        name: 'Document reader settings',
+        aliases: ['Reading appearance', 'Page layout', 'Annotations', 'Advanced'],
+        render: (setting) => {
+          setting.settingEl.addClass('abyss-documents-settings-custom-row');
+          this.render(setting.settingEl);
+          return () => {
+            this.hide();
+          };
+        },
+      },
+    ];
   }
 
   override hide(): void {
@@ -98,31 +112,40 @@ export class AbyssDocumentsSettingTab extends PluginSettingTab {
     this.sectionEvents = null;
   }
 
-  render(): void {
+  render(host: HTMLElement = this.containerEl): void {
     this.sectionEvents?.abort();
-    const AbortControllerConstructor =
-      this.containerEl.doc.defaultView?.AbortController ?? AbortController;
+    const AbortControllerConstructor = host.doc.defaultView?.AbortController ?? AbortController;
     this.sectionEvents = new AbortControllerConstructor();
-    this.containerEl.empty();
-    this.containerEl.addClass('abyss-documents-settings');
-    const reading = this.collapsibleSection('Reading appearance', 'reading-appearance', 'palette');
+    host.empty();
+    host.addClass('abyss-documents-settings');
+    const reading = this.collapsibleSection(
+      'Reading appearance',
+      'reading-appearance',
+      'palette',
+      host,
+    );
     this.renderReadingAppearance(reading.body);
-    const layout = this.collapsibleSection('Page layout', 'page-layout', 'layout-template');
+    const layout = this.collapsibleSection('Page layout', 'page-layout', 'layout-template', host);
     this.renderPageLayout(layout.body);
-    const annotations = this.collapsibleSection('Annotations', 'annotations', 'highlighter');
+    const annotations = this.collapsibleSection('Annotations', 'annotations', 'highlighter', host);
     this.renderAnnotations(annotations.body);
-    const advanced = this.collapsibleSection('Advanced', 'advanced', 'settings-2');
+    const advanced = this.collapsibleSection('Advanced', 'advanced', 'settings-2', host);
     this.renderAdvanced(advanced.body);
   }
 
-  private collapsibleSection(title: string, id: string, icon: string): CollapsibleSection {
+  private collapsibleSection(
+    title: string,
+    id: string,
+    icon: string,
+    host: HTMLElement,
+  ): CollapsibleSection {
     if (this.sectionEvents === null) {
       throw new Error('Settings section events are not active.');
     }
     const { signal } = this.sectionEvents;
     const bodyId = `${this.regionIdPrefix}-${id}`;
     const headerId = `${bodyId}-header`;
-    const section = this.containerEl.createDiv({ cls: 'abyss-documents-settings-group' });
+    const section = host.createDiv({ cls: 'abyss-documents-settings-group' });
     const header = section.createEl('button', {
       attr: {
         'aria-controls': bodyId,

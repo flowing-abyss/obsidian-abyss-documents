@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PDFJS_VIEWER_SPECIFIER = 'pdfjs-dist/web/pdf_viewer.mjs';
+const PDFJS_VIEWER_SPECIFIER = 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
 const PDFJS_GLOBAL_REFERENCE = 'globalThis.pdfjsLib';
 
 export function bindPdfjsViewerSource(source) {
@@ -22,7 +22,7 @@ export function createPdfjsViewerPlugin() {
   return {
     name: 'bind-pdfjs-viewer-core',
     setup(build) {
-      build.onResolve({ filter: /^pdfjs-dist\/web\/pdf_viewer\.mjs$/ }, () => ({
+      build.onResolve({ filter: /^pdfjs-dist\/legacy\/web\/pdf_viewer\.mjs$/ }, () => ({
         namespace: 'bound-pdfjs-viewer',
         path: fileURLToPath(import.meta.resolve(PDFJS_VIEWER_SPECIFIER)),
       }));

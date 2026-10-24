@@ -10,11 +10,11 @@ const cacheDir = path.resolve(repoRoot, '.obsidian-cache');
 // against; an empty "hostile" or "migration-v1" vault today would test nothing.
 const vault = path.resolve(repoRoot, 'dev-documents-vault');
 
-// The manifest's 1.7.2 floor is an Insiders beta. Test its first public successor,
-// 1.7.4, on the same earliest installer, plus the newest stable release.
+// Exercise the manifest's minimum app on its earliest supported installer,
+// plus the newest stable app and installer.
 // Override for a one-off run, e.g.: OBSIDIAN_VERSIONS="1.8.0/1.8.0" pnpm run test:e2e
 const desktopVersions = await parseObsidianVersions(
-  env['OBSIDIAN_VERSIONS'] ?? '1.7.4/earliest latest/latest',
+  env['OBSIDIAN_VERSIONS'] ?? 'earliest/earliest latest/latest',
   {
     cacheDir,
   },

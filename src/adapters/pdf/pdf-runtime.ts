@@ -1,5 +1,5 @@
-import type * as PdfjsLibModule from 'pdfjs-dist/build/pdf.mjs';
-import type * as PdfjsViewerModule from 'pdfjs-dist/web/pdf_viewer.mjs';
+import type * as PdfjsLibModule from 'pdfjs-dist/legacy/build/pdf.mjs';
+import type * as PdfjsViewerModule from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
 import {
   incrementReaderCounter,
   markReaderPerformance,
@@ -76,11 +76,13 @@ interface RuntimeDependencies {
 type ImportRuntime = () => Promise<RuntimeDependencies>;
 
 async function importRuntime(): Promise<RuntimeDependencies> {
+  // The legacy core, viewer and worker supply APIs missing from older Electron
+  // installers and Android WebViews, even when the Obsidian app is up to date.
   const [{ gunzipSync }, workerPayload, pdfjsLib, pdfjsViewer] = await Promise.all([
     import('fflate'),
-    import('pdfjs-dist/build/pdf.worker.mjs?gzip-base64'),
-    import('pdfjs-dist/build/pdf.mjs'),
-    import('pdfjs-dist/web/pdf_viewer.mjs'),
+    import('pdfjs-dist/legacy/build/pdf.worker.mjs?gzip-base64'),
+    import('pdfjs-dist/legacy/build/pdf.mjs'),
+    import('pdfjs-dist/legacy/web/pdf_viewer.mjs'),
   ]);
 
   return { gunzipSync, workerPayload, pdfjsLib, pdfjsViewer };

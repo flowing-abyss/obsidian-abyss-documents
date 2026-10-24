@@ -7,7 +7,7 @@ import type {
   TextComponent,
   ToggleComponent,
 } from 'obsidian';
-import { Setting } from 'obsidian';
+import { Setting, SettingGroup } from 'obsidian';
 import { App, Notice } from 'obsidian-test-mocks/obsidian';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AbyssDocumentsPlugin from './main.js';
@@ -183,8 +183,26 @@ describe('AbyssDocumentsSettingTab', () => {
     expect(tab.containerEl.textContent).toContain('Advanced');
     expect(tab.containerEl.textContent).not.toMatch(/ocr/iu);
     expect(tab.containerEl.classList.contains('abyss-documents-settings')).toBe(true);
-    expect(tab.getSettingDefinitions()).toEqual([]);
-    (tab as unknown as { display(): void }).display();
+  });
+
+  it('renders the existing sections through the declarative settings row and cleans its handlers', () => {
+    const { tab } = fixture();
+    const definition = tab.getSettingDefinitions()[0];
+    if (definition === undefined)
+      throw new Error('The declarative settings renderer is unavailable.');
+    const setting = new Setting(tab.containerEl);
+    const cleanup = definition.render(setting, new SettingGroup(tab.containerEl));
+
+    expect(setting.settingEl.querySelectorAll('.abyss-documents-settings-group')).toHaveLength(4);
+    expect(setting.settingEl.textContent).toContain('Reading appearance');
+    const button = setting.settingEl.querySelector<HTMLButtonElement>('[aria-expanded]');
+    button?.click();
+    expect(button?.getAttribute('aria-expanded')).toBe('true');
+    if (typeof cleanup !== 'function')
+      throw new Error('The settings renderer must release handlers.');
+    cleanup();
+    button?.click();
+    expect(button?.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('renders four ordered semantic section buttons with native icons and unique ARIA regions', () => {
@@ -259,7 +277,7 @@ describe('AbyssDocumentsSettingTab', () => {
     previousButton.click();
     expect(previousButton.getAttribute('aria-expanded')).toBe('true');
 
-    (tab as unknown as { display(): void }).display();
+    tab.render();
 
     const buttons = sectionButtons(tab);
     expect(buttons).toHaveLength(4);
