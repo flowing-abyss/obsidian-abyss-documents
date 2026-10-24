@@ -1,13 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-test('the companion serves dollar sequences in a fragment literally', async (t) => {
+test('the companion uses an OS-assigned port and serves dollar sequences literally', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'brainstorm-literal-'));
   mkdirSync(path.join(root, 'content'));
   const fragment = '<h1>Price: $$; match: $&; before: $`; after: $\'; group: $1</h1>';
@@ -17,6 +17,9 @@ test('the companion serves dollar sequences in a fragment literally', async (t) 
       ...process.env,
       BRAINSTORM_DIR: root,
       BRAINSTORM_HOST: '127.0.0.1',
+      BRAINSTORM_PORT: '0',
+      BRAINSTORM_PORT_FILE: path.join(root, 'port'),
+      BRAINSTORM_TOKEN_FILE: path.join(root, 'token'),
       BRAINSTORM_TOKEN: 'test-literal-token',
       BRAINSTORM_OWNER_PID: String(process.pid),
       BRAINSTORM_OPEN: '0',
@@ -49,6 +52,9 @@ test('the companion serves dollar sequences in a fragment literally', async (t) 
       resolve(JSON.parse(line));
     });
   });
+  assert.ok(info.port > 0, 'the startup metadata reports the actual bound TCP port');
+  assert.equal(readFileSync(path.join(root, 'port'), 'utf8'), String(info.port));
+  assert.equal(readFileSync(path.join(root, 'token'), 'utf8'), 'test-literal-token');
   const response = await fetch(`http://127.0.0.1:${info.port}/`, {
     headers: { Cookie: `brainstorm-key-${info.port}=test-literal-token` },
     signal: AbortSignal.timeout(5000),

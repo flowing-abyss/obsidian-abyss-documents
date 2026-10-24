@@ -83,9 +83,8 @@ function decodeFrame(buffer) {
 // ========== Configuration ==========
 
 const PORT_FILE = process.env.BRAINSTORM_PORT_FILE || null;
-const randomPort = () => 49152 + Math.floor(Math.random() * 16383);
 // Prefer an explicit port, else the port this session last bound (so a restart
-// reuses it and an already-open browser tab reconnects), else a random high port.
+// reuses it and an already-open browser tab reconnects), else let the OS pick a free port.
 function preferredPort() {
   if (process.env.BRAINSTORM_PORT) return Number(process.env.BRAINSTORM_PORT);
   if (PORT_FILE) {
@@ -94,7 +93,7 @@ function preferredPort() {
       if (Number.isInteger(p) && p > 1023 && p < 65536) return p;
     } catch (e) { /* no prior port recorded */ }
   }
-  return randomPort();
+  return 0;
 }
 let PORT = preferredPort();
 const HOST = process.env.BRAINSTORM_HOST || '127.0.0.1';
@@ -595,10 +594,13 @@ function startServer() {
   }
 
   // If the preferred port is already taken (e.g. a previous server is still
-  // alive), fall back to a random port once instead of failing.
+  // alive), ask the OS for a free port once instead of failing.
   let triedFallback = false;
 
   function onListen() {
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('Expected a bound TCP address');
+    PORT = address.port;
     // Cookie name keys on the ACTUAL bound port (may differ from the preferred
     // one after an EADDRINUSE fallback) so it can't collide with another server's
     // cookie in the shared localhost jar.
@@ -633,7 +635,7 @@ function startServer() {
         process.exit(1);
       }
       triedFallback = true;
-      PORT = randomPort();
+      PORT = 0;
       if (tokenSource === 'file') {
         TOKEN = generateToken();
         tokenSource = 'generated-fallback';
