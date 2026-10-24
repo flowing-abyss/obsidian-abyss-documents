@@ -14,6 +14,25 @@ const INTERACTIVE_FOCUS_TARGET = [
 
 const menuClosingFrames = new WeakMap<HTMLElement, number>();
 
+export function bindMenuTriggerKeyboardToggle(
+  host: HTMLElement,
+  activeTrigger: () => HTMLButtonElement | null,
+  close: () => void,
+): () => void {
+  const owner = host.win;
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== 'Enter' || event.target !== activeTrigger()) return;
+    // Obsidian's menu scope consumes Enter at window capture before the button
+    // receives it. Close only a menu still owned by this exact trigger.
+    event.preventDefault();
+    close();
+  };
+  owner.addEventListener('keydown', onKeyDown, true);
+  return () => {
+    owner.removeEventListener('keydown', onKeyDown, true);
+  };
+}
+
 export function markReaderMenuClosing(trigger: HTMLElement): void {
   const previous = menuClosingFrames.get(trigger);
   if (previous !== undefined) trigger.win.cancelAnimationFrame(previous);

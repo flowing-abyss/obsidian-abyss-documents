@@ -7,6 +7,7 @@ import {
   readAnnotationSaveLifecycleSnapshot,
   type AnnotationSaveBaseline,
 } from './annotation-save-oracle.js';
+import { waitForPdfPageReady } from './pdf-ready.js';
 
 const pluginId = 'abyss-documents';
 
@@ -198,6 +199,7 @@ async function waitForFirstPage(): Promise<void> {
     await $('.workspace-leaf.mod-active [data-page-number="1"] canvas').waitForExist({
       timeout: 15_000,
     });
+    await waitForPdfPageReady();
   } catch (error) {
     const diagnostics = await browser.execute(() => ({
       errorBoundary: document.querySelector<HTMLElement>('[data-reader-error]')?.innerText ?? null,
@@ -217,6 +219,7 @@ async function waitForFirstPage(): Promise<void> {
 }
 
 async function waitForNativeHighlightReadiness(): Promise<void> {
+  await waitForPdfPageReady();
   await browser.waitUntil(
     async () =>
       browser.executeObsidian(({ app }) => {
@@ -256,17 +259,22 @@ async function waitForNativeHighlightReadiness(): Promise<void> {
   );
 }
 
-async function dragFixtureText(): Promise<void> {
+async function dragFixtureText(scope = '.workspace-leaf.mod-active'): Promise<void> {
   await waitForNativeHighlightReadiness();
-  const points = await browser.execute(async () => {
+  const points = await browser.execute(async (activeScope) => {
     const text = document.querySelectorAll<HTMLElement>(
-      '[data-page-number="1"] .textLayer span',
+      `${activeScope} [data-page-number="1"] .textLayer span`,
     )[1];
     if (text === undefined) throw new Error('Expected selectable text on fixture page 1.');
     const scrollHost = text.closest<HTMLElement>('.pdfViewerContainer');
     if (scrollHost === null) throw new Error('Expected the PDF viewer scroll host.');
     const before = text.getBoundingClientRect();
     scrollHost.scrollTop += before.top - window.innerHeight / 2;
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        resolve();
+      });
+    });
     await new Promise<void>((resolve) => {
       requestAnimationFrame(() => {
         resolve();
@@ -283,7 +291,7 @@ async function dragFixtureText(): Promise<void> {
         y: Math.round(bounds.top + bounds.height / 2),
       },
     };
-  });
+  }, scope);
   try {
     await browser.performActions([
       {
@@ -298,11 +306,32 @@ async function dragFixtureText(): Promise<void> {
         ],
       },
     ]);
+    // Native Highlight creation may clear the DOM range on pointerup.
+    const held = await browser.execute((point) => {
+      const target = document.elementFromPoint(point.x, point.y);
+      return {
+        selectedText: window.getSelection()?.toString().trim() ?? '',
+        target: target?.getAttribute('class'),
+        isMobile: document.body.classList.contains('is-mobile'),
+        width: innerWidth,
+        height: innerHeight,
+      };
+    }, points.start);
+    if (held.selectedText.length === 0)
+      throw new Error(
+        `Trusted PDF text drag selected nothing: ${JSON.stringify({ held, points })}`,
+      );
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'reader-highlight-selection',
+        parameters: { pointerType: 'mouse' },
+        actions: [{ type: 'pointerUp', button: 0 }],
+      },
+    ]);
   } finally {
     await browser.releaseActions();
   }
-  const selectedText = await browser.execute(() => window.getSelection()?.toString().trim() ?? '');
-  if (selectedText.length === 0) throw new Error('Trusted PDF text drag selected nothing.');
 }
 
 async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<void> {
@@ -399,6 +428,7 @@ async function waitForTargetPageCanvas(target: string): Promise<void> {
 }
 
 async function activatePersistedHighlightForComment(): Promise<void> {
+  await waitForPdfPageReady();
   const persistedHighlight = activeReaderDescendant(
     '.annotationLayer .highlightAnnotation[data-annotation-id]',
   );
@@ -655,9 +685,6 @@ describe('PDF reader foundation', () => {
       document
         .querySelector<HTMLElement>('.pdfViewerContainer')
         ?.setAttribute('data-e2e-search-viewport-identity', 'preserved');
-      document
-        .querySelector<HTMLElement>('[data-page-number="1"] canvas')
-        ?.setAttribute('data-e2e-search-canvas-identity', 'preserved');
     });
 
     const documentSurface = $('[data-region="document"]');
@@ -740,6 +767,13 @@ describe('PDF reader foundation', () => {
       resultsOverflowY: 'auto',
     });
 
+    // Opening the sidebar refits page-width canvases. Query edits retain the
+    // rendered canvas once the sidebar has reached its final width.
+    await browser.execute(() => {
+      document
+        .querySelector<HTMLElement>('[data-page-number="1"] canvas')
+        ?.setAttribute('data-e2e-search-canvas-identity', 'preserved');
+    });
     await $('[data-document-search]').setValue('ordinary');
     await browser.waitUntil(
       async () =>
@@ -1183,23 +1217,10 @@ describe('PDF reader foundation', () => {
       'aria-pressed',
       'true',
     );
-    await waitForNativeHighlightReadiness();
-    await browser.execute((scope) => {
-      const text = document.querySelectorAll(`${scope} [data-page-number="1"] .textLayer span`)[1];
-      if (text === undefined) throw new Error('Primary view text unavailable.');
-      const range = document.createRange();
-      range.selectNodeContents(text);
-      getSelection()?.removeAllRanges();
-      getSelection()?.addRange(range);
-      text.dispatchEvent(
-        new PointerEvent('pointerup', {
-          bubbles: true,
-          clientX: 200,
-          clientY: 200,
-          pointerType: 'mouse',
-        }),
-      );
-    }, active);
+    await dragFixtureText(active);
+    await $(`${active} .highlightEditor, ${active} .highlightAnnotation`).waitForExist({
+      timeout: 5_000,
+    });
     await waitForAnnotationSave(saveBaseline, leaves.primary);
 
     await activateLeaf(leaves.secondary);
@@ -1302,13 +1323,16 @@ describe('PDF reader foundation', () => {
       `${nativeEditorSelector} [aria-label="Comment"]`,
       'Comment #review [[Linked note]]',
     );
-    await waitForAnnotationSave(saveBaseline);
     await expect(commentEditor).toBeDisplayed();
     await expect(commentEditor.$('[aria-label="Comment"]')).toHaveValue(
       'Comment #review [[Linked note]]',
     );
     await expect(commentEditor.$('[aria-label="Tags"]')).not.toExist();
     await expect(commentEditor.$('[aria-label="Links"]')).not.toExist();
+
+    // Automatic saving resumes after the comment editor closes.
+    await browser.keys(Key.Escape);
+    await waitForAnnotationSave(saveBaseline);
 
     await closeReaderLeaves();
     await openPdf(workingPath);
@@ -1338,9 +1362,8 @@ describe('PDF reader foundation', () => {
     await expect(revisedComment).toHaveValue('Revised #verified [[Linked note]]');
     await expect($(nativeEditorSelector).$('[aria-label="Tags"]')).not.toExist();
     await expect($(nativeEditorSelector).$('[aria-label="Links"]')).not.toExist();
+    await browser.keys(Key.Escape);
     await waitForAnnotationSave(saveBaseline);
-    await expect($(nativeEditorSelector)).toBeDisplayed();
-    await expect(revisedComment).toHaveValue('Revised #verified [[Linked note]]');
 
     await closeReaderLeaves();
     await openPdf(workingPath);

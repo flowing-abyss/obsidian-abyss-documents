@@ -2,7 +2,11 @@ import { Menu, type IconName } from 'obsidian';
 import type { PdfAnnotationTool } from '../adapters/pdf/pdf-annotation-editor.js';
 import type { AnnotationPaletteEntry } from '../settings.js';
 import { createIconButton, updateIconButtonLabel } from './icon-button.js';
-import { markReaderMenuClosing, shouldRestoreMenuTriggerFocus } from './menu-focus.js';
+import {
+  bindMenuTriggerKeyboardToggle,
+  markReaderMenuClosing,
+  shouldRestoreMenuTriggerFocus,
+} from './menu-focus.js';
 import { ownerWindow } from './owner-dom.js';
 import { LongPressMenuGesture } from './toolbar.js';
 
@@ -71,6 +75,15 @@ export class AnnotationToolbar {
     this.root.setAttribute('aria-label', 'PDF annotation tools');
     if (readOnlyReason !== null) this.root.setAttribute('aria-description', readOnlyReason);
     host.append(this.root);
+    this.cleanups.push(
+      bindMenuTriggerKeyboardToggle(
+        this.root,
+        () => this.activeMenu?.trigger ?? null,
+        () => {
+          this.activeMenu?.menu.hide();
+        },
+      ),
+    );
 
     this.createSelectControl();
     this.createQuickControl(readOnlyReason);

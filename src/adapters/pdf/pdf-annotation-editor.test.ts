@@ -5413,6 +5413,49 @@ describe('PdfAnnotationEditor lifecycle', () => {
     expect(eventBus.listeners.get('annotationeditormodechanged')).toHaveLength(1);
   });
 
+  it('enters native FreeText editing when contextual activation already set the viewer mode', () => {
+    const current = fixture();
+    document.body.append(current.annotationRoot);
+    const annotationLayer = current.annotationRoot.createDiv({ cls: 'annotationLayer' });
+    const container = annotationLayer.createDiv();
+    const editable = current.annotationRoot.createDiv();
+    editable.setAttribute('contenteditable', 'false');
+    const native = {
+      ...selectedEditor('native-freetext-42', 3),
+      enterInEditMode: () => {
+        editable.setAttribute('contenteditable', 'true');
+      },
+    };
+    const uiManager = manager(native);
+    uiManager.getEditor.mockReturnValue(native);
+    current.commentBridge.nativeEditorUidForAnnotation.mockReturnValue('native-freetext-42');
+    current.eventBus.dispatch('annotationeditoruimanager', { source: current.viewer, uiManager });
+    current.editor.setAnnotationProjection([
+      {
+        annotation: createdAnnotation('', { id: 'persisted-freetext', type: 'free-text' }),
+        stableId: 'persisted-freetext',
+      },
+    ]);
+    current.viewer.currentMode = 3;
+
+    current.eventBus.dispatch('switchannotationeditormode', {
+      editId: 'persisted-freetext',
+      mode: 3,
+      mustEnterInEditMode: true,
+      source: {
+        annotationEditorType: 3,
+        container,
+        layer: annotationLayer,
+        data: { id: 'persisted-freetext' },
+      },
+    });
+
+    expect(editable.getAttribute('contenteditable')).toBe('true');
+    expect(uiManager.getEditor).toHaveBeenCalledWith('native-freetext-42');
+    current.editor.destroy();
+    current.annotationRoot.remove();
+  });
+
   it('forwards PDF.js native annotation edit requests to the embedded viewer', () => {
     const { annotationRoot, commentBridge, editor, eventBus, modeRequests, viewer } = fixture();
     document.body.append(annotationRoot);
@@ -6287,6 +6330,38 @@ describe('PdfAnnotationEditor save boundary', () => {
     await expect(committing).resolves.toBe('dismissed');
     expect(fixtureValue.commentBridge.focusAnnotation).not.toHaveBeenCalled();
     expect(uiManager.highlightSelection).not.toHaveBeenCalled();
+  });
+
+  it('retries lifecycle neutralization after activation cancellation aborts its close', async () => {
+    const current = fixture({ dispatchModeChanges: false });
+    const uiManager = manager();
+    current.eventBus.dispatch('annotationeditoruimanager', {
+      source: current.viewer,
+      uiManager,
+    });
+    const activation = current.editor.activateAnnotation({
+      id: 'cancelled-materialization',
+      kind: 'highlight',
+      editComment: false,
+      anchor: createdAnnotation().anchor,
+    });
+    await vi.waitFor(() => {
+      expect(current.modeRequests).toEqual([
+        expect.objectContaining({ mode: 9, editId: 'cancelled-materialization' }),
+      ]);
+    });
+    current.editor.clearAnnotationSelection();
+    await expect(activation).resolves.toBe('cancelled');
+    const suspending = current.editor.suspendInteractions();
+    current.eventBus.dispatch('annotationeditormodechanged', {
+      source: current.viewer,
+      mode: 0,
+    });
+    await expect(suspending).resolves.toBeUndefined();
+    expect(current.modeRequests[current.modeRequests.length - 1]).toMatchObject({ mode: 0 });
+    expect(uiManager.disableUserSelect).toHaveBeenLastCalledWith(false);
+    expect(current.editor.hasContextualEdit).toBe(false);
+    current.editor.destroy();
   });
 
   it('rolls back interaction suspension when native neutralization fails', async () => {

@@ -1121,7 +1121,17 @@
   }
 
   .abyss-documents .abyss-reader-toolbar {
+    position: relative;
     padding-inline: var(--size-4-1);
+  }
+
+  .abyss-documents .abyss-annotation-toolbar > [data-annotation-tool='select'] {
+    position: absolute;
+    inset-block-start: 50%;
+    inset-inline-start: calc(
+      var(--size-4-1) + var(--abyss-reader-toolbar-control-size) + var(--size-2-1)
+    );
+    transform: translateY(-50%);
   }
 
   .abyss-documents
@@ -1141,6 +1151,7 @@
 
 @media (pointer: coarse) {
   .abyss-documents .abyss-reader-toolbar {
+    --abyss-reader-toolbar-control-size: 2.75rem;
     --abyss-reader-split-control-size: 44px;
     --abyss-reader-split-disclosure-height: 10px;
     --abyss-reader-split-main-height: 34px;

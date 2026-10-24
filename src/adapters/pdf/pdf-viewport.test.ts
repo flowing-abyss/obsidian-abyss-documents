@@ -1404,6 +1404,45 @@ describe('PdfDocumentViewport', () => {
     Reflect.deleteProperty(document, 'elementsFromPoint');
   });
 
+  it('preserves a completed text selection when its release click overlaps an annotation', async () => {
+    const fixture = await mountedViewport(3);
+    const interaction = fixture.viewport.annotationInteraction;
+    if (interaction === null) throw new Error('Expected interaction.');
+    const focusAnnotation = vi.spyOn(interaction, 'focusAnnotation').mockResolvedValue('editable');
+    const page = fixture.host.querySelector<HTMLElement>('[data-page-number="1"]');
+    if (page === null) throw new Error('Expected page.');
+    const annotation = page
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'highlightAnnotation' });
+    annotation.dataset['annotationId'] = 'existing-highlight';
+    schedulePointerSelection(fixture.host);
+    const layers = Array.from(page.querySelectorAll<HTMLElement>('.textLayer'));
+    const layer = layers[layers.length - 1];
+    if (layer === undefined) throw new Error('Expected selected text layer.');
+    Object.defineProperty(document, 'elementsFromPoint', {
+      configurable: true,
+      value: () => [layer, annotation, page],
+    });
+    try {
+      layer.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          button: 0,
+          clientX: 10,
+          clientY: 20,
+          detail: 1,
+        }),
+      );
+      expect(document.getSelection()?.isCollapsed).toBe(false);
+      expect(focusAnnotation).not.toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(document, 'elementsFromPoint');
+      await fixture.viewport.destroy();
+      fixture.host.remove();
+      document.getSelection()?.removeAllRanges();
+    }
+  });
+
   it('selects a projected static highlight when browser stack hit-testing is unavailable', async () => {
     const fixture = await mountedViewport(3);
     const interaction = fixture.viewport.annotationInteraction;
@@ -1558,7 +1597,12 @@ describe('PdfDocumentViewport', () => {
     annotation.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
 
     expect(selectAnnotation).not.toHaveBeenCalled();
-    expect(focusAnnotation).not.toHaveBeenCalled();
+    expect(focusAnnotation).toHaveBeenCalledTimes(2);
+    expect(focusAnnotation).toHaveBeenCalledWith('multi-native', {
+      clientPosition: { x: 0, y: 0 },
+      kind: 'root-click',
+      preserveNativeSelection: true,
+    });
   });
 
   it('clears synchronized annotation selection from an empty document click', async () => {
@@ -2024,8 +2068,12 @@ describe('PdfDocumentViewport', () => {
       second.dispatchEvent(gesture);
 
       expect(gesture.defaultPrevented).toBe(false);
-      expect(focusAnnotation).not.toHaveBeenCalled();
-      expect(activationOrder).toEqual(['pdfjs-target']);
+      expect(focusAnnotation).toHaveBeenCalledExactlyOnceWith('multi-second', {
+        clientPosition: { x: 0, y: 0 },
+        kind: 'root-click',
+        preserveNativeSelection: true,
+      });
+      expect(activationOrder).toEqual(['abyss-capture', 'pdfjs-target']);
       expect(dirty).not.toHaveBeenCalled();
       expect(viewer.annotationEditorRequests).toEqual([]);
     },

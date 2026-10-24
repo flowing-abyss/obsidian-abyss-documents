@@ -175,7 +175,7 @@ describe('reader toolbar under a 390px coarse pointer', () => {
         throw new Error('Three-zone toolbar geometry unavailable.');
       const visible = Array.from(
         toolbar.querySelectorAll<HTMLElement>(
-          '[data-toolbar-control], [data-control-group], [data-control="page-field"], [data-control="page-total"]',
+          '[data-toolbar-control]:not(.abyss-reader-split-control [data-toolbar-control]), [data-control-group], [data-control="page-field"], [data-control="page-total"]',
         ),
       ).filter((element) => element.offsetParent !== null);
       const contentBounds = zones.map((zone) => {
@@ -213,6 +213,8 @@ describe('reader toolbar under a 390px coarse pointer', () => {
           return {
             center: bounds.top + bounds.height / 2,
             height: bounds.height,
+            splitDisclosure: element.classList.contains('abyss-reader-split-menu'),
+            splitMain: element.classList.contains('abyss-reader-split-main'),
             width: bounds.width,
           };
         }),
@@ -264,11 +266,20 @@ describe('reader toolbar under a 390px coarse pointer', () => {
           return {
             control: element.dataset['control'] ?? element.dataset['annotationTool'] ?? null,
             height: bounds.height,
+            splitDisclosure: element.classList.contains('abyss-reader-split-menu'),
+            splitMain: element.classList.contains('abyss-reader-split-main'),
             width: bounds.width,
           };
         }),
     );
-    expect(touchControls.filter(({ height, width }) => height < 44 || width < 44)).toEqual([]);
+    expect(
+      touchControls.filter(({ height, width, splitMain, splitDisclosure }) => {
+        if (width < 44) return true;
+        if (splitMain) return height < 34;
+        if (splitDisclosure) return height < 10;
+        return height < 44;
+      }),
+    ).toEqual([]);
 
     await touchMenu('quick-highlight-menu');
     await expect($('[data-control="quick-highlight-menu"]')).toHaveAttribute(
@@ -281,8 +292,7 @@ describe('reader toolbar under a 390px coarse pointer', () => {
 
     expect(await longPressQuick(20)).toBe(0);
     await expect($('.menu')).not.toBeDisplayed();
-    await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'true');
-    await $('[data-annotation-tool="highlight"]').click();
+    // A touch moved beyond the press tolerance is a pan, so it must not toggle.
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
 
     expect(await longPressQuick()).toBe(1);

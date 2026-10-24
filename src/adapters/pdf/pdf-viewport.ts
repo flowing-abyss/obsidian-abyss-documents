@@ -180,6 +180,10 @@ function hasNativeSelectionModifier(event: MouseEvent | PointerEvent): boolean {
   return event.ctrlKey || event.metaKey || event.shiftKey;
 }
 
+function nodeIsInTextLayer(root: HTMLElement, node: Node | null): boolean {
+  return root.contains(node?.parentElement?.closest('.textLayer') ?? null);
+}
+
 function nativeAnnotationClickShouldPropagate(event: MouseEvent, target: Element): boolean {
   return (
     hasNativeSelectionModifier(event) ||
@@ -1557,6 +1561,7 @@ export class PdfDocumentViewport implements DocumentViewport {
   private readonly onRootClick = (event: MouseEvent): void => {
     const target = event.target;
     if (!isElementTarget(target)) return;
+    if (this.hasRootTextSelection(target)) return;
     const annotation = this.annotationActivationTarget(target, event.clientX, event.clientY);
     if (annotation !== null) {
       if (!nativeAnnotationClickShouldPropagate(event, target)) event.stopPropagation();
@@ -1574,12 +1579,33 @@ export class PdfDocumentViewport implements DocumentViewport {
     this.retryPage(this.viewer, page, pageNumber, retry);
   };
 
+  private hasRootTextSelection(target: Element): boolean {
+    const root = this.root;
+    if (root === null || target.closest('.textLayer') === null) return false;
+    const selection = root.doc.getSelection();
+    if (selection === null || selection.isCollapsed) return false;
+    return (
+      nodeIsInTextLayer(root, selection.anchorNode) && nodeIsInTextLayer(root, selection.focusNode)
+    );
+  }
+
   private handleRootAnnotationClick(
     event: MouseEvent,
     target: Element,
     annotationId: string,
   ): void {
-    if (hasNativeSelectionModifier(event)) return;
+    if (hasNativeSelectionModifier(event)) {
+      this.activateRootAnnotation(
+        annotationId,
+        'root-click',
+        {
+          x: event.clientX,
+          y: event.clientY,
+        },
+        true,
+      );
+      return;
+    }
     if (event.detail >= 2) return;
     if (!this.rootAnnotationIsSelected(target)) this.selectRootAnnotation(annotationId, target);
     this.activateRootAnnotation(annotationId, 'root-click', {
@@ -1654,11 +1680,13 @@ export class PdfDocumentViewport implements DocumentViewport {
     id: string,
     kind: 'root-click' | 'root-context',
     clientPosition?: { readonly x: number; readonly y: number },
+    preserveNativeSelection = false,
   ): void {
     this.annotationInteraction
       ?.focusAnnotation(id, {
         ...(clientPosition === undefined ? {} : { clientPosition }),
         kind,
+        ...(preserveNativeSelection ? { preserveNativeSelection: true } : {}),
       })
       .catch((cause: unknown) => {
         if (!isAbortFailure(cause))

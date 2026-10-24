@@ -6,7 +6,11 @@ import {
   type ReadingProfileId,
 } from '../document-core/reading.js';
 import { createIconButton } from './icon-button.js';
-import { markReaderMenuClosing, shouldRestoreMenuTriggerFocus } from './menu-focus.js';
+import {
+  bindMenuTriggerKeyboardToggle,
+  markReaderMenuClosing,
+  shouldRestoreMenuTriggerFocus,
+} from './menu-focus.js';
 
 export type ReaderToolbarIntent =
   | { readonly type: 'toggle-sidebar' }
@@ -206,6 +210,7 @@ export class ReaderToolbar {
   ) {
     this.root = host;
     this.root.addClass('abyss-reader-toolbar');
+    this.bindMenuKeyboardToggle();
     const left = this.root.createDiv({
       cls: 'abyss-reader-toolbar-zone',
       attr: { 'data-toolbar-zone': 'left' },
@@ -291,6 +296,18 @@ export class ReaderToolbar {
     this.pageCount = Number.isFinite(pageCount) ? Math.max(0, Math.floor(pageCount)) : 0;
     this.currentPageIndex = this.clampPageIndex(this.currentPageIndex);
     this.refreshPageState();
+  }
+
+  private bindMenuKeyboardToggle(): void {
+    this.cleanups.push(
+      bindMenuTriggerKeyboardToggle(
+        this.root,
+        () => this.activeMenu?.trigger ?? null,
+        () => {
+          this.activeMenu?.menu.hide();
+        },
+      ),
+    );
   }
 
   setCurrentPage(pageIndex: number): void {

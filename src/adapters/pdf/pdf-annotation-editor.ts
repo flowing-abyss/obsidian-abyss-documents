@@ -166,6 +166,7 @@ interface PdfAnnotationUiManager {
 }
 
 interface PdfNativeEditorReference {
+  enterInEditMode?(): void;
   readonly color?: string | undefined;
   readonly elementBeforePopup?: Element | null | undefined;
   getData?(): { readonly id?: string | undefined };
@@ -2693,8 +2694,28 @@ export class PdfAnnotationEditor {
       this.dependencies.annotationRoot,
     );
     if (request === null || !this.isCurrentNativeModeRequest(request, manager)) return;
+    if (this.enterCurrentNativeTextEditor(request, manager)) return;
     this.dependencies.viewer.annotationEditorMode = request;
   };
+
+  private enterCurrentNativeTextEditor(
+    request: PdfAnnotationModeRequest,
+    manager: PdfAnnotationUiManager,
+  ): boolean {
+    if (
+      request.mode !== this.dependencies.annotationEditorType.FREETEXT ||
+      request.editComment === true ||
+      this.dependencies.viewer.annotationEditorMode !== request.mode ||
+      typeof request.editId !== 'string'
+    )
+      return false;
+    const native = manager.getEditor(this.nativeEditorUid(request.editId));
+    if (native?.enterInEditMode === undefined) return false;
+    // PDFViewer ignores same-mode requests, including mustEnterInEditMode.
+    // The already materialized FreeText editor can enter its native text mode.
+    native.enterInEditMode();
+    return true;
+  }
 
   private isCurrentNativeModeRequest(
     request: PdfAnnotationModeRequest,
@@ -2928,11 +2949,7 @@ export class PdfAnnotationEditor {
       },
     );
     const closing = transition.finally(() => {
-      if (
-        session.closing === closing &&
-        (this.contextualEditSession !== session || wait.signal?.aborted !== true)
-      )
-        session.closing = null;
+      if (session.closing === closing) session.closing = null;
     });
     session.closing = closing;
     return closing;

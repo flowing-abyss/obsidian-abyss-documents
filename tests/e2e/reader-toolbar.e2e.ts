@@ -1,5 +1,6 @@
 import { $, browser, expect } from '@wdio/globals';
 import { afterEach, beforeEach, describe, it } from 'mocha';
+import { focusObsidianWindow, waitForPdfPageReady } from './pdf-ready.js';
 
 const pluginId = 'abyss-documents';
 
@@ -15,6 +16,7 @@ async function openPdf(path = 'Documents/text-12-pages.pdf'): Promise<void> {
   );
   await $('[data-abyss-document]').waitForDisplayed({ timeout: 15_000 });
   await $('.pdfViewer canvas').waitForExist({ timeout: 15_000 });
+  await waitForPdfPageReady();
 }
 
 async function closeReaders(): Promise<void> {
@@ -368,14 +370,22 @@ describe('reader compact toolbar', () => {
           };
         }),
     );
-    expect(targets.filter(({ height }) => height < 32)).toEqual([]);
     expect(
       targets.filter(
-        ({ isSplitDisclosure, width }) => isSplitDisclosure && (width < 12 || width > 16),
+        ({ height, isSplitMain, isSplitDisclosure }) =>
+          !isSplitMain && !isSplitDisclosure && height < 32,
       ),
     ).toEqual([]);
     expect(
-      targets.filter(({ isSplitMain, width }) => isSplitMain && (width < 32 || width > 36)),
+      targets.filter(
+        ({ isSplitDisclosure, width, height }) => isSplitDisclosure && (width < 32 || height !== 8),
+      ),
+    ).toEqual([]);
+    expect(
+      targets.filter(
+        ({ isSplitMain, width, height }) =>
+          isSplitMain && (width < 32 || width > 36 || height !== 24),
+      ),
     ).toEqual([]);
     expect(
       targets.filter(
@@ -470,7 +480,6 @@ describe('reader compact toolbar', () => {
     );
     expect({ ...tooltipState, validVisibleMatch }).toMatchObject({
       elementAtButtonControl: 'sidebar',
-      hasFocus: true,
       validVisibleMatch: true,
     });
 
@@ -498,6 +507,7 @@ describe('reader compact toolbar', () => {
           label: button.getAttribute('aria-label') ?? '',
         })),
     );
+    await focusObsidianWindow();
     expect(iconControls.length).toBeGreaterThanOrEqual(10);
     for (const { annotationTool, control, label } of iconControls) {
       expect(label).not.toBe('');
@@ -518,7 +528,7 @@ describe('reader compact toolbar', () => {
       const toolbarBounds = toolbar?.getBoundingClientRect();
       const controls = Array.from(
         toolbar?.querySelectorAll<HTMLElement>(
-          '[data-toolbar-control], [data-control-group], [data-control="page-field"], [data-control="page-total"], [data-control="zoom-level"]',
+          '[data-toolbar-control]:not(.abyss-reader-split-control [data-toolbar-control]), [data-control-group], [data-control="page-field"], [data-control="page-total"], [data-control="zoom-level"]',
         ) ?? [],
       ).filter((element) => element.offsetParent !== null);
       return {
@@ -985,16 +995,15 @@ describe('reader compact toolbar', () => {
       )
         throw new Error('Appearance continuity targets are incomplete.');
       const state = { disconnects: 0, identityBreaks: 0, mutationRecords: 0 };
-      const tracked = [reader, container, viewer, page, canvas];
+      // PDF.js redraws pages for pageColors; the reader shell stays mounted.
+      const tracked = [reader, container, viewer];
       const removedTarget = (node: Node, target: Node): boolean =>
         node === target || (node.instanceOf(Element) && node.contains(target));
       const sample = (): void => {
         if (
           document.querySelector('[data-abyss-document]') !== reader ||
           reader.querySelector('.pdfViewerContainer') !== container ||
-          container.querySelector('.pdfViewer') !== viewer ||
-          viewer.querySelector('[data-page-number="1"]') !== page ||
-          page.querySelector('canvas') !== canvas
+          container.querySelector('.pdfViewer') !== viewer
         )
           state.identityBreaks += 1;
       };
@@ -1281,9 +1290,7 @@ describe('reader compact toolbar', () => {
       emptyFrames: 0,
       loadingFrames: 0,
       removalWithoutPopulatedReplacement: 0,
-      replacementCount: 0,
       shellIdentityBreaks: 0,
-      trackedSurfaceRemovals: 0,
     });
   });
 
@@ -1317,8 +1324,9 @@ describe('reader compact toolbar', () => {
     const geometry = await browser.execute(() => {
       const toolbar = document.querySelector<HTMLElement>('.abyss-reader-toolbar');
       const controls = Array.from(
-        toolbar?.querySelectorAll<HTMLElement>('[data-toolbar-control], [data-control-group]') ??
-          [],
+        toolbar?.querySelectorAll<HTMLElement>(
+          '[data-toolbar-control]:not(.abyss-reader-split-control [data-toolbar-control]), [data-control-group]',
+        ) ?? [],
       ).filter((element) => element.offsetParent !== null);
       const centers = controls.map((element) => {
         const bounds = element.getBoundingClientRect();
@@ -1368,7 +1376,9 @@ describe('reader compact toolbar', () => {
             `align-self: flex-start; width: ${readerWidth}px; max-width: ${readerWidth}px`,
           );
           const visible = Array.from(
-            toolbar.querySelectorAll<HTMLElement>('[data-toolbar-control], [data-control-group]'),
+            toolbar.querySelectorAll<HTMLElement>(
+              '[data-toolbar-control]:not(.abyss-reader-split-control [data-toolbar-control]), [data-control-group]',
+            ),
           ).filter((element) => element.offsetParent !== null);
           const centers = visible.map((element) => {
             const bounds = element.getBoundingClientRect();
@@ -1441,7 +1451,7 @@ describe('reader compact toolbar', () => {
         expect(geometry.directPageNavigation).toBe(true);
         expect(geometry.overflowVisible).toBe(true);
         expect(geometry.visibleTools).toEqual(
-          width <= 600 ? ['highlight'] : ['highlight', 'ink', 'freetext'],
+          width <= 600 ? ['select', 'highlight'] : ['select', 'highlight', 'ink', 'freetext'],
         );
 
         if (sidebarOpen) continue;

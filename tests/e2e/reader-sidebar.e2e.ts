@@ -1,6 +1,7 @@
 import { $, $$, browser, expect } from '@wdio/globals';
 import { afterEach, beforeEach, describe, it } from 'mocha';
 import { Key } from 'webdriverio';
+import { waitForPdfPageReady } from './pdf-ready.js';
 
 import {
   installTenThousandDeleteTrace,
@@ -75,6 +76,7 @@ async function resetWorkingPdf(sourcePath: string, targetPath: string): Promise<
 }
 
 async function dragFixtureText(): Promise<void> {
+  await waitForPdfPageReady();
   await browser.waitUntil(
     async () =>
       browser.executeObsidian(({ app }) => {
@@ -137,15 +139,24 @@ async function dragFixtureText(): Promise<void> {
           { type: 'pointerDown', button: 0 },
           { type: 'pointerMove', duration: 400, origin: 'viewport', ...points.end },
           { type: 'pause', duration: 150 },
-          { type: 'pointerUp', button: 0 },
         ],
+      },
+    ]);
+    const selectedText = await browser.execute(
+      () => window.getSelection()?.toString().trim() ?? '',
+    );
+    if (selectedText.length === 0) throw new Error('Trusted PDF text drag selected nothing.');
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'sidebar-search-native-selection',
+        parameters: { pointerType: 'mouse' },
+        actions: [{ type: 'pointerUp', button: 0 }],
       },
     ]);
   } finally {
     await browser.releaseActions();
   }
-  const selectedText = await browser.execute(() => window.getSelection()?.toString().trim() ?? '');
-  if (selectedText.length === 0) throw new Error('Trusted PDF text drag selected nothing.');
 }
 
 async function selectedPdfEditorSnapshot(): Promise<{
@@ -1189,7 +1200,19 @@ describe('PDF reader sidebar', () => {
         hasTagRegion: card.querySelector('[data-annotation-card-tag]') !== null,
         header: card.querySelector('[data-annotation-header]')?.textContent ?? '',
         meaning: card.querySelector('[data-annotation-meaning]')?.textContent ?? '',
-        paddingInlineEnd: Number.parseFloat(getComputedStyle(card).paddingInlineEnd),
+        editControlClear: (() => {
+          const edit = row.querySelector<HTMLElement>(':scope > .abyss-annotation-card-edit');
+          if (edit === null) return false;
+          const bounds = edit.getBoundingClientRect();
+          const contentRight =
+            card.getBoundingClientRect().right -
+            Number.parseFloat(getComputedStyle(card).paddingRight);
+          return (
+            bounds.width >= 28 &&
+            contentRight <= bounds.left &&
+            bounds.right <= card.getBoundingClientRect().right
+          );
+        })(),
         page: card.querySelector('[data-annotation-page]')?.textContent ?? '',
         panelRight: panel.getBoundingClientRect().right,
         quoteCount: card.querySelectorAll('[data-annotation-quote]').length,
@@ -1218,7 +1241,7 @@ describe('PDF reader sidebar', () => {
     expect(initial.header).toContain('Page 1 · Highlight');
     expect(initial.comment).toContain('Annotation 00000');
     expect(initial.cardRight).toBeLessThanOrEqual(initial.panelRight + 1);
-    expect(initial.paddingInlineEnd).toBeLessThan(30);
+    expect(initial.editControlClear).toBe(true);
     expectAnnotationContentAligned(await annotationContentGeometry(), ['header', 'comment']);
     const containment = await browser.execute(() => {
       const panel = document.querySelector<HTMLElement>('[data-sidebar-panel="annotations"]');
@@ -1326,6 +1349,8 @@ describe('PDF reader sidebar', () => {
 
     await $('[data-annotation-search]').setValue('Annotation 00001');
     await expect($('.abyss-annotation-card-row')).toHaveAttribute('aria-setsize', '1');
+    await browser.keys(Key.Escape);
+    await expect($('[data-annotation-editor-popover]')).not.toBeDisplayed();
     await $('.abyss-annotation-card').click();
     await expect($('.abyss-annotation-card')).toHaveAttribute('aria-current', 'true');
     await expect($('[data-annotation-editor-popover]')).not.toBeDisplayed();

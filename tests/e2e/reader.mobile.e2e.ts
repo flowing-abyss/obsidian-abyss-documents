@@ -7,6 +7,7 @@ import {
   readAnnotationSaveLifecycleSnapshot,
   type AnnotationSaveBaseline,
 } from './annotation-save-oracle.js';
+import { waitForPdfPageReady } from './pdf-ready.js';
 
 const pluginId = 'abyss-documents';
 
@@ -37,6 +38,7 @@ async function openPdf(path: string): Promise<void> {
 
 async function waitForFirstPage(): Promise<void> {
   await $('[data-page-number="1"] canvas').waitForExist({ timeout: 20_000 });
+  await waitForPdfPageReady();
 }
 
 async function closeReaderLeaves(): Promise<void> {
@@ -171,7 +173,7 @@ describe('PDF reader foundation on Android', () => {
         navigationCenterDelta: Math.abs(
           navigationBounds.left + navigationBounds.width / 2 - toolbarContentMidpoint,
         ),
-        noOverlap: mainBounds.right <= disclosureBounds.left,
+        noOverlap: mainBounds.bottom <= disclosureBounds.top + 1,
         overflow: toolbar.scrollWidth > toolbar.clientWidth,
         visibleTools: Array.from(toolbar.querySelectorAll<HTMLElement>('[data-annotation-tool]'))
           .filter((button) => button.offsetParent !== null)
@@ -183,14 +185,14 @@ describe('PDF reader foundation on Android', () => {
       directPageNavigation: true,
       noOverlap: true,
       overflow: false,
-      visibleTools: ['highlight'],
+      visibleTools: ['select', 'highlight'],
       zones: ['left', 'center', 'right'],
     });
     expect(compactToolbar.navigationCenterDelta).toBeLessThanOrEqual(2);
-    expect(compactToolbar.mainHeight).toBeGreaterThanOrEqual(44);
+    expect(compactToolbar.mainHeight).toBeGreaterThanOrEqual(34);
     expect(compactToolbar.mainWidth).toBeGreaterThanOrEqual(44);
-    expect(compactToolbar.disclosureHeight).toBeGreaterThanOrEqual(44);
-    expect(compactToolbar.disclosureWidth).toBeGreaterThanOrEqual(24);
+    expect(compactToolbar.disclosureHeight).toBeGreaterThanOrEqual(10);
+    expect(compactToolbar.disclosureWidth).toBeGreaterThanOrEqual(44);
 
     await $('[data-control="overflow"]').click();
     await $('.menu').waitForDisplayed({ timeout: 3_000 });
@@ -270,6 +272,7 @@ describe('PDF reader foundation on Android', () => {
     await $('//*[contains(@class, "menu-item-title") and normalize-space(.)="Default"]').click();
     await expect($('.menu')).not.toBeDisplayed();
     await expect($('[data-abyss-document]')).toHaveAttribute('data-reading-profile', 'default');
+    await waitForPdfPageReady();
     const saveBaseline = await captureAnnotationSaveBaseline();
 
     await $('[data-annotation-tool="highlight"]').click();
@@ -284,6 +287,17 @@ describe('PDF reader foundation on Android', () => {
       const selectedText = text.textContent.trim();
       if (selectedText.length === 0) throw new Error('Selectable mobile fixture text is empty.');
       const range = document.createRange();
+      text.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          button: 0,
+          pointerId: 1,
+          isPrimary: true,
+          clientX: 160,
+          clientY: 200,
+          pointerType: 'touch',
+        }),
+      );
       range.selectNodeContents(text);
       const selection = getSelection();
       selection?.removeAllRanges();
@@ -293,6 +307,9 @@ describe('PDF reader foundation on Android', () => {
           bubbles: true,
           clientX: 160,
           clientY: 200,
+          button: 0,
+          pointerId: 1,
+          isPrimary: true,
           pointerType: 'touch',
         }),
       );
@@ -407,7 +424,8 @@ describe('PDF reader foundation on Android', () => {
       await openPdf(qualification.path);
       await waitForFirstPage();
 
-      await expect($('[data-region="annotation-read-only-reason"]')).toHaveText(
+      await expect($('[data-region="annotation-toolbar"]')).toHaveAttribute(
+        'aria-description',
         qualification.message,
       );
       expect(

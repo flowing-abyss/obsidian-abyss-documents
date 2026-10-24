@@ -108,6 +108,39 @@ async function nextAnimationFrame(owner: Window): Promise<void> {
 }
 
 describe('ReaderToolbar', () => {
+  it.each(['fit-menu', 'quick-highlight-menu'] as const)(
+    'closes %s from its trigger when the native menu scope consumes Enter',
+    (control) => {
+      const consumeNativeEnter = (event: KeyboardEvent): void => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        event.stopPropagation();
+      };
+      window.addEventListener('keydown', consumeNativeEnter, true);
+      const { host, toolbar } = fixture();
+      document.body.append(host);
+      const annotations = new AnnotationToolbar(toolbar.annotationHost, [], null, vi.fn());
+      const trigger = host.querySelector<HTMLButtonElement>(`[data-control="${control}"]`);
+      if (trigger === null) throw new Error('Expected a menu trigger.');
+      const outside = host.createEl('button');
+      try {
+        trigger.click();
+        outside.dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', cancelable: true }),
+        );
+        expect(trigger.getAttribute('aria-expanded')).toBe('true');
+        trigger.dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', cancelable: true }),
+        );
+        expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      } finally {
+        window.removeEventListener('keydown', consumeNativeEnter, true);
+        annotations.destroy();
+        toolbar.destroy();
+        host.remove();
+      }
+    },
+  );
   it('clamps an entered page and navigates on Enter', () => {
     const { host, onIntent, toolbar } = fixture();
     toolbar.setPageCount(702);

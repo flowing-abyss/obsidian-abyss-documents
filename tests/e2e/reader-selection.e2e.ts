@@ -6,6 +6,7 @@ import {
   isVerifiedAnnotationSaveSettled,
   readAnnotationSaveLifecycleSnapshot,
 } from './annotation-save-oracle.js';
+import { waitForPdfPageReady } from './pdf-ready.js';
 
 const pluginId = 'abyss-documents';
 const activeReaderSelector = '.workspace-leaf.mod-active [data-abyss-document]';
@@ -258,6 +259,7 @@ async function closeReaders(): Promise<void> {
 }
 
 async function waitForNativeHighlightReadiness(): Promise<void> {
+  await waitForPdfPageReady();
   await browser.waitUntil(
     async () =>
       browser.executeObsidian(({ app }) => {
@@ -439,6 +441,14 @@ async function dragFixtureTextWhileInspectingPalette(
     if (held.selectedText.length === 0)
       throw new Error(`Genuine PDF text drag selected nothing: ${JSON.stringify(held)}`);
     expect(held.paletteVisible).toBe(false);
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'selection-drag-pointer',
+        parameters: { pointerType: 'mouse' },
+        actions: [{ type: 'pointerUp', button: 0 }],
+      },
+    ]);
   } finally {
     await browser.releaseActions();
   }
@@ -860,13 +870,38 @@ async function waitForPdfBytesToChange(path: string, previous: string): Promise<
     recoveries: initial.recoveries,
   };
   let current = previous;
-  await browser.waitUntil(
-    async () => {
-      current = await vaultFileSha256(path);
-      return current !== previous;
-    },
-    { timeout: 15_000, timeoutMsg: `PDF bytes did not change after annotation mutation: ${path}` },
-  );
+  try {
+    await browser.waitUntil(
+      async () => {
+        current = await vaultFileSha256(path);
+        return current !== previous;
+      },
+      {
+        timeout: 15_000,
+        timeoutMsg: `PDF bytes did not change after annotation mutation: ${path}`,
+      },
+    );
+  } catch (cause) {
+    const diagnostics = await browser.executeObsidian(({ app }) => {
+      const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
+        controller?: {
+          annotationActivationAbort?: AbortController | null;
+          shell?: { annotationEditorOpen?: boolean };
+          currentAnnotationTool?: string;
+        };
+      };
+      return {
+        editorOpen: view.controller?.shell?.annotationEditorOpen,
+        activationPending: view.controller?.annotationActivationAbort !== null,
+        tool: view.controller?.currentAnnotationTool,
+        selection: document.getSelection()?.toString(),
+        selectedEditors: document.querySelectorAll('.annotationEditorLayer .selectedEditor').length,
+      };
+    });
+    throw new Error(
+      `PDF save did not change bytes: ${JSON.stringify({ path, diagnostics, lifecycle: await readAnnotationSaveLifecycleSnapshot() })}; ${String(cause)}`,
+    );
+  }
   await browser.waitUntil(
     async () =>
       isVerifiedAnnotationSaveSettled(await readAnnotationSaveLifecycleSnapshot(), baseline),
@@ -1816,7 +1851,7 @@ async function assertNativeFreeTextEditingUnaffected(): Promise<void> {
     return result;
   });
   expect(result).toMatchObject({
-    calls: 0,
+    calls: 1,
     editorConnected: true,
     focused: true,
     mode: 3,
@@ -2345,9 +2380,14 @@ async function cleanupTask9SelectionProbes(): Promise<void> {
 }
 
 describe('reader selection-first annotations', () => {
-  const workingPath = 'Documents/e2e-selection-first.pdf';
+  let workingPath = '';
+  let documentOrdinal = 0;
 
   beforeEach(async () => {
+    // Reopens within one case share an identity; separate cases must not inherit
+    // the previous document's persisted view state or pending vault events.
+    documentOrdinal += 1;
+    workingPath = `Documents/e2e-selection-${String(documentOrdinal)}.pdf`;
     await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
     await openPdf(workingPath);
   });
@@ -3217,7 +3257,7 @@ describe('reader selection-first annotations', () => {
   });
 
   for (const fixture of persistedWritableFixtures) {
-    it(`selects a persisted ${fixture.kind} with a neutral click and edits it from the context menu`, async () => {
+    it(`opens a persisted ${fixture.kind} for editing by primary click and by context menu`, async () => {
       let hash = await vaultFileSha256(workingPath);
       await createPersistedWritableAnnotation(fixture);
       hash = await waitForPdfBytesToChange(workingPath, hash);
@@ -3232,9 +3272,17 @@ describe('reader selection-first annotations', () => {
       await $(persistedTarget).click();
       await expect($(persistedTarget)).toHaveAttribute('data-abyss-annotation-selected', 'true');
       expect(await computedOutline(persistedTarget)).toEqual({ style: 'solid', width: '2px' });
-      await expect($(nativeEditorSelector)).not.toBeDisplayed();
+      await assertEditablePersistedActivation(fixture);
+      await browser.keys(Key.Escape);
+      await $(nativeEditorSelector).waitForDisplayed({ reverse: true, timeout: 5_000 });
+      await reopenPdf(workingPath);
       await assertFreshNeutralReader(fixture);
-      await $(persistedTarget).click({ button: 'right' });
+      await installPersistedActivationTrace(fixture);
+      const contextTarget =
+        fixture.kind === 'freetext'
+          ? await waitForPassivePersistedTarget(activeReaderDescendant(fixture.persistedSelector))
+          : activeReaderDescendant(fixture.persistedSelector);
+      await $(contextTarget).click({ button: 'right' });
       await assertEditablePersistedActivation(fixture);
       const comment = `Persisted ${fixture.kind} activation`;
       await updateActivatedPersistedAnnotation(comment);
