@@ -178,6 +178,7 @@ interface PdfAnnotationUiManager {
 
 interface PdfNativeEditorReference {
   enterInEditMode?(): void;
+  readonly annotationElementId?: string | null | undefined;
   readonly color?: string | undefined;
   readonly elementBeforePopup?: Element | null | undefined;
   getData?(): { readonly id?: string | undefined };
@@ -3734,13 +3735,19 @@ class SelectionHighlightOwnership {
 function nativeEditorAnnotationId(
   native: PdfNativeEditorReference | undefined,
 ): string | undefined {
-  let persistedId: string | undefined;
-  try {
-    persistedId = native?.getData?.().id?.trim();
-  } catch {
-    persistedId = undefined;
-  }
+  const annotationElementId = native?.annotationElementId?.trim();
+  if (annotationElementId !== undefined && annotationElementId.length > 0)
+    return annotationElementId;
+  const persistedId = nativeEditorDataId(native);
   return persistedId === undefined || persistedId.length === 0 ? native?.uid?.trim() : persistedId;
+}
+
+function nativeEditorDataId(native: PdfNativeEditorReference | undefined): string | undefined {
+  try {
+    return native?.getData?.().id?.trim();
+  } catch {
+    return undefined;
+  }
 }
 
 function nativeEditorIdentityIds(native: PdfNativeEditorReference): readonly string[] {

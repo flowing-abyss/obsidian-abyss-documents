@@ -15,7 +15,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Server 2025 repeatedly crashes the oldest Electron GPU before PDF load.
+        # Exercise both installers on Server 2022 with their GPU sandbox intact.
+        os: [ubuntu-latest, windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
     name: Desktop (${{ matrix.os }})
     defaults:

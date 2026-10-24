@@ -161,39 +161,70 @@ async function dragFixtureText(): Promise<void> {
   }
 }
 
-async function selectedPdfEditorSnapshot(): Promise<{
+async function pdfAnnotationSnapshot(requestedStorageId: string | null = null): Promise<{
   readonly color: string | null;
   readonly count: number;
+  readonly deleted: boolean;
+  readonly storageId: string;
 }> {
-  return browser.executeObsidian(({ app }) => {
+  return browser.executeObsidian(({ app }, requestedId) => {
     const view = app.workspace.getMostRecentLeaf()?.view as unknown as {
       controller?: {
         viewport?: {
           annotationEditorInstance?: {
-            manager?: { firstSelectedEditor?: { color?: string } | null } | null;
+            manager?: {
+              firstSelectedEditor?: { readonly id?: string; readonly uid?: string } | null;
+            } | null;
           };
-          pdf?: { annotationStorage?: { size?: number } } | null;
+          pdf?: {
+            annotationStorage?: {
+              readonly size: number;
+              getRawValue(
+                key: string,
+              ): { readonly color?: string; readonly deleted?: boolean } | undefined;
+              has(key: string): boolean;
+            };
+          } | null;
         };
       };
     };
     const viewport = view.controller?.viewport;
-    const editor = viewport?.annotationEditorInstance?.manager?.firstSelectedEditor ?? null;
+    const selected = viewport?.annotationEditorInstance?.manager?.firstSelectedEditor ?? null;
     const storage = viewport?.pdf?.annotationStorage ?? null;
-    if (editor === null || storage?.size === undefined)
+    const storageId =
+      requestedId ??
+      [selected?.id, selected?.uid].find(
+        (id) => typeof id === 'string' && id.length > 0 && storage?.has(id) === true,
+      ) ??
+      null;
+    const annotation = storageId === null ? undefined : storage?.getRawValue(storageId);
+    if (
+      (requestedId === null && selected === null) ||
+      storage === null ||
+      storageId === null ||
+      annotation === undefined
+    )
       throw new Error(
-        `Expected a selected PDF.js editor with annotation storage: ${JSON.stringify({
+        `Expected a stored PDF.js annotation: ${JSON.stringify({
           hasEditorInstance: viewport?.annotationEditorInstance !== undefined,
           hasManager: viewport?.annotationEditorInstance?.manager != null,
+          hasStoredAnnotation: annotation !== undefined,
           selectedEditorCount: document.querySelectorAll('.annotationEditorLayer .selectedEditor')
             .length,
+          storageId,
           storageSize: storage?.size ?? null,
           visiblePopoverCount: Array.from(
             document.querySelectorAll<HTMLElement>('[data-annotation-editor-popover]'),
           ).filter((popover) => popover.hidden === false).length,
         })}`,
       );
-    return { color: editor.color ?? null, count: storage.size };
-  });
+    return {
+      color: annotation.color ?? null,
+      count: storage.size,
+      deleted: annotation.deleted === true,
+      storageId,
+    };
+  }, requestedStorageId);
 }
 
 async function annotationCardGeometry(): Promise<{
@@ -806,7 +837,7 @@ describe('PDF reader sidebar', () => {
     expectAnnotationContentAligned(await annotationContentGeometry(), ['header', 'quote']);
   });
 
-  it('keeps trusted search editing local while a PDF.js editor is selected', async () => {
+  it('keeps trusted search editing local after dismissing contextual PDF editing', async () => {
     const workingPath = 'Documents/e2e-search-focus.pdf';
     await resetWorkingPdf('Documents/text-12-pages.pdf', workingPath);
     await openAnnotations(workingPath);
@@ -820,7 +851,8 @@ describe('PDF reader sidebar', () => {
     const search = $('[data-annotation-search]');
     const popover = $('[data-annotation-editor-popover]');
     await expect(popover).toBeDisplayed();
-    const before = await selectedPdfEditorSnapshot();
+    const before = await pdfAnnotationSnapshot();
+    expect(before.deleted).toBe(false);
     const modifier = process.platform === 'darwin' ? Key.Command : Key.Control;
 
     await browser.execute(() => {
@@ -963,12 +995,12 @@ describe('PDF reader sidebar', () => {
       await expect(search).toHaveValue('replacement');
       await browser.keys([modifier, 'z']);
       expect(await search.getValue()).toBe('replacemen');
-      expect(await selectedPdfEditorSnapshot()).toEqual(before);
+      expect(await pdfAnnotationSnapshot(before.storageId)).toEqual(before);
       await browser.keys(
         process.platform === 'darwin' ? [modifier, Key.Shift, 'z'] : [modifier, 'y'],
       );
       await expect(search).toHaveValue('replacement');
-      expect(await selectedPdfEditorSnapshot()).toEqual(before);
+      expect(await pdfAnnotationSnapshot(before.storageId)).toEqual(before);
 
       await browser.keys([modifier, 'a']);
       await browser.keys([modifier, 'c']);
@@ -976,7 +1008,7 @@ describe('PDF reader sidebar', () => {
       await expect(search).toHaveValue('');
       await browser.keys([modifier, 'v']);
       await expect(search).toHaveValue('replacement');
-      expect(await selectedPdfEditorSnapshot()).toEqual(before);
+      expect(await pdfAnnotationSnapshot(before.storageId)).toEqual(before);
     } finally {
       await browser.execute(() => {
         const host = window as Window & {
