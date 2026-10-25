@@ -9,6 +9,7 @@ import {
 import {
   assertPdfRuntimeCompatibility,
   readPdfChromiumVersion,
+  readPdfElectronVersion,
 } from './pdf-runtime-compatibility.js';
 
 const PDFJS_VERSION = '6.4.299';
@@ -101,6 +102,8 @@ export class PdfRuntimeLoader {
     private readonly importDependencies: ImportRuntime = importRuntime,
     private readonly readChromiumVersion: () => string | undefined = () =>
       readPdfChromiumVersion(window),
+    private readonly readElectronVersion: () => string | undefined = () =>
+      readPdfElectronVersion(window),
   ) {}
 
   load(): Promise<PdfRuntime> {
@@ -130,7 +133,7 @@ export class PdfRuntimeLoader {
   }
 
   private async loadOnce(): Promise<PdfRuntime> {
-    assertPdfRuntimeCompatibility(this.readChromiumVersion());
+    assertPdfRuntimeCompatibility(this.readChromiumVersion(), this.readElectronVersion());
     const generation = this.generation;
     incrementReaderCounter('pdfImports');
     markReaderPerformance('pdf-imports-start');

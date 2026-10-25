@@ -92,6 +92,82 @@ describe('PDF.js document editor metrics', () => {
 });
 
 describe('PdfRuntimeLoader', () => {
+  it.each(['31.6.0', '39.8.3', '42.11.18'])(
+    'rejects desktop Electron %s before imports or worker allocation',
+    async (electronVersion) => {
+      beginPluginActivation();
+      endPluginActivation();
+      const { activeUrls, createObjectURL, revokeObjectURL } = stubWorkerUrls();
+      const dependencies = runtimeDependencies();
+      const importRuntime = vi.fn(async () => dependencies);
+      const loader = new PdfRuntimeLoader(
+        importRuntime,
+        () => '150.0.7871.250',
+        () => electronVersion,
+      );
+
+      await expect(loader.load()).rejects.toMatchObject({ name: 'UnsupportedPdfRuntimeError' });
+
+      expect(importRuntime).not.toHaveBeenCalled();
+      expect(createObjectURL).not.toHaveBeenCalled();
+      expect(revokeObjectURL).not.toHaveBeenCalled();
+      expect(activeUrls).toHaveLength(0);
+      expect(dependencies.pdfjsLib.GlobalWorkerOptions.workerSrc).toBe('');
+      expect(readerPerformanceSnapshot().counters).toMatchObject({
+        blobsCreated: 0,
+        gzipDecodes: 0,
+        pdfImports: 0,
+        pdfRuntimeLoads: 1,
+        workersStarted: 0,
+        workerUrlsActive: 0,
+      });
+      loader.dispose();
+    },
+  );
+
+  it('clears a desktop compatibility failure before checking the provider on retry', async () => {
+    let electronVersion = '42.11.18';
+    const { activeUrls } = stubWorkerUrls();
+    const importRuntime = vi.fn(async () => runtimeDependencies());
+    const loader = new PdfRuntimeLoader(
+      importRuntime,
+      () => '150.0.7871.250',
+      () => electronVersion,
+    );
+
+    const first = loader.load();
+    expect(loader.load()).toBe(first);
+    await expect(first).rejects.toMatchObject({ name: 'UnsupportedPdfRuntimeError' });
+    expect(importRuntime).not.toHaveBeenCalled();
+
+    electronVersion = '43.1.1';
+    const current = loader.load();
+    expect(current).not.toBe(first);
+    expect(loader.load()).toBe(current);
+    await expect(current).resolves.toMatchObject({ version: PDFJS_VERSION });
+    expect(importRuntime).toHaveBeenCalledOnce();
+    expect(activeUrls).toHaveLength(1);
+    loader.dispose();
+    expect(activeUrls).toHaveLength(0);
+  });
+
+  it('keeps Chromium 130 WebViews loadable without Electron metadata', async () => {
+    const { activeUrls } = stubWorkerUrls();
+    const importRuntime = vi.fn(async () => runtimeDependencies());
+    const loader = new PdfRuntimeLoader(
+      importRuntime,
+      () => '130.0.6723.91',
+      () => undefined,
+    );
+
+    await expect(loader.load()).resolves.toMatchObject({ version: PDFJS_VERSION });
+
+    expect(importRuntime).toHaveBeenCalledOnce();
+    expect(activeUrls).toHaveLength(1);
+    loader.dispose();
+    expect(activeUrls).toHaveLength(0);
+  });
+
   it('rejects an unsupported renderer before runtime imports or worker allocation', async () => {
     beginPluginActivation();
     endPluginActivation();

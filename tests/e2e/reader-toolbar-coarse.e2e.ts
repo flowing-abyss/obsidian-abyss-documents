@@ -126,6 +126,52 @@ async function touchMenu(control: string): Promise<void> {
   await $('.menu').waitForDisplayed({ timeout: 3_000 });
 }
 
+async function clickOutsideMenu(): Promise<void> {
+  const point = await browser.execute(() => {
+    const backdrop = document.querySelector('.suggestion-bg');
+    if (backdrop === null) throw new Error('The native menu backdrop is unavailable.');
+    for (const { left, right, top, bottom } of Array.from(backdrop.getClientRects())) {
+      for (const xRatio of [0.5, 0.25, 0.75]) {
+        for (const yRatio of [0.5, 0.25, 0.75]) {
+          const point = {
+            x: Math.round(left + (right - left) * xRatio),
+            y: Math.round(top + (bottom - top) * yRatio),
+          };
+          if (document.elementFromPoint(point.x, point.y) === backdrop) return point;
+        }
+      }
+    }
+    throw new Error('The native menu backdrop has no hittable interior point.');
+  });
+  try {
+    await browser.performActions([
+      {
+        type: 'pointer',
+        id: 'coarse-menu-outside-click',
+        parameters: { pointerType: 'mouse' },
+        actions: [
+          { type: 'pointerMove', duration: 0, origin: 'viewport', ...point },
+          { type: 'pointerDown', button: 0 },
+          { type: 'pointerUp', button: 0 },
+        ],
+      },
+    ]);
+  } finally {
+    await browser.releaseActions();
+  }
+}
+
+async function clickToolbarControl(control: string): Promise<void> {
+  const selector = `[data-control="${control}"]`;
+  try {
+    await $(selector).click();
+  } catch (cause) {
+    throw Object.assign(new Error(`Coarse toolbar click ${selector} failed: ${String(cause)}`), {
+      cause,
+    });
+  }
+}
+
 async function longPressQuick(moveBy = 0): Promise<number> {
   const point = await targetCenter('[data-annotation-tool="highlight"]');
   return countMenusOpenedBy(async () => {
@@ -286,7 +332,7 @@ describe('reader toolbar under a 390px coarse pointer', () => {
       'aria-expanded',
       'true',
     );
-    await $('.suggestion-bg').click();
+    await clickOutsideMenu();
     await expect($('.menu')).not.toBeDisplayed();
     await expect($('[data-annotation-tool="highlight"]')).toHaveAttribute('aria-pressed', 'false');
 
@@ -303,9 +349,9 @@ describe('reader toolbar under a 390px coarse pointer', () => {
 
     const pageField = $('[data-control="page-field"]');
     await expect(pageField).toHaveValue('1');
-    await $('[data-control="next-page"]').click();
+    await clickToolbarControl('next-page');
     await expect(pageField).toHaveValue('2');
-    await $('[data-control="previous-page"]').click();
+    await clickToolbarControl('previous-page');
     await expect(pageField).toHaveValue('1');
 
     await touchMenu('overflow');

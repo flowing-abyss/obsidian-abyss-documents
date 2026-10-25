@@ -21,7 +21,9 @@ const desktopVersions = await parseObsidianVersions(
     cacheDir,
   },
 );
-const legacyDesktopVersions = await parseObsidianVersions('earliest/earliest', { cacheDir });
+const legacyDesktopVersions = await parseObsidianVersions('earliest/earliest earliest/1.7.4', {
+  cacheDir,
+});
 const coarseVersion = desktopVersions[desktopVersions.length - 1];
 if (coarseVersion === undefined) throw new Error('No Obsidian version was selected.');
 const [coarseAppVersion, coarseInstallerVersion] = coarseVersion;

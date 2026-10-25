@@ -107,7 +107,7 @@ describe('PdfDocumentAdapter', () => {
     const adapter = new PdfDocumentAdapter({ readBinary }, loader, viewportFactory);
 
     const expectedCause: unknown = expect.objectContaining({ name: 'UnsupportedPdfRuntimeError' });
-    const expectedMessage: unknown = expect.stringContaining('installer 1.7.4');
+    const expectedMessage: unknown = expect.stringContaining('installer 1.13.4');
     await expect(
       adapter.open(file('Guide.pdf'), new AbortController().signal),
     ).rejects.toMatchObject({

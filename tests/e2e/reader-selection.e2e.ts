@@ -1100,6 +1100,29 @@ async function createSelectionComment(spanIndex: number, value: string): Promise
   }
 }
 
+interface PersistedActivationInput {
+  readonly atMs: number;
+  readonly button: number;
+  readonly clientX: number;
+  readonly clientY: number;
+  readonly defaultPreventedAtCapture: boolean;
+  readonly detail: number;
+  readonly isTrusted: boolean;
+  readonly modifiers: {
+    readonly alt: boolean;
+    readonly ctrl: boolean;
+    readonly meta: boolean;
+    readonly shift: boolean;
+  };
+  readonly target: {
+    readonly annotationId: string | null;
+    readonly className: string;
+    readonly id: string;
+    readonly tagName: string;
+  };
+  readonly type: string;
+}
+
 type PersistedWritableFixture = {
   readonly editorSelector: string;
   readonly kind: 'freetext' | 'highlight' | 'ink';
@@ -1251,6 +1274,8 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         canvasWrapperHidden: 0,
         canvasWrapperRemounts: 0,
         events: [] as string[],
+        inputs: [] as PersistedActivationInput[],
+        inputsDropped: 0,
         hiddenAfterVisible: 0,
         initialCanvas: canvas,
         initialCanvasDisconnects: 0,
@@ -1426,6 +1451,46 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
       const onFocus = (): void => {
         sample('focus');
       };
+      const inputTypes = [
+        'pointerdown',
+        'mousedown',
+        'pointerup',
+        'mouseup',
+        'click',
+        'dblclick',
+        'contextmenu',
+      ] as const;
+      const onInput = (event: MouseEvent): void => {
+        const target = event.target;
+        if (!(target instanceof Element) || !leaf.contains(target)) return;
+        if (trace.inputs.length >= 32) {
+          trace.inputsDropped += 1;
+          return;
+        }
+        trace.inputs.push({
+          atMs: performance.now(),
+          button: event.button,
+          clientX: event.clientX,
+          clientY: event.clientY,
+          defaultPreventedAtCapture: event.defaultPrevented,
+          detail: event.detail,
+          isTrusted: event.isTrusted,
+          modifiers: {
+            alt: event.altKey,
+            ctrl: event.ctrlKey,
+            meta: event.metaKey,
+            shift: event.shiftKey,
+          },
+          target: {
+            annotationId:
+              target.closest('[data-annotation-id]')?.getAttribute('data-annotation-id') ?? null,
+            className: target.getAttribute('class') ?? '',
+            id: target.id,
+            tagName: target.tagName,
+          },
+          type: event.type,
+        });
+      };
       observer.observe(leaf, {
         attributeFilter: ['class', 'hidden', 'style'],
         attributeOldValue: true,
@@ -1440,6 +1505,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
         sample('drain');
         observer.disconnect();
         document.removeEventListener('focusin', onFocus, true);
+        for (const type of inputTypes) document.removeEventListener(type, onInput, true);
       };
       const verifySynchronousHideTrace = (): void => {
         const originalHidden = popover.getAttribute('hidden');
@@ -1508,6 +1574,7 @@ async function installPersistedActivationTrace(fixture: PersistedWritableFixture
       };
       verifySynchronousHideTrace();
       verifyTwoPhaseCanvasTrace();
+      for (const type of inputTypes) document.addEventListener(type, onInput, true);
       (
         window as Window & { __abyssTask3ActivationTrace?: typeof trace }
       ).__abyssTask3ActivationTrace = trace;
@@ -1732,7 +1799,25 @@ async function assertEditablePersistedActivation(fixture: PersistedWritableFixtu
       const annotationEditor = viewport?.annotationEditorInstance;
       const controller = view.controller;
       const popover = document.querySelector<HTMLElement>('[data-annotation-editor-popover]');
+      const trace = (
+        window as Window & {
+          __abyssTask3ActivationTrace?: {
+            readonly events: readonly string[];
+            readonly inputs: readonly PersistedActivationInput[];
+            readonly inputsDropped: number;
+          };
+        }
+      ).__abyssTask3ActivationTrace;
       return {
+        activationTrace:
+          trace === undefined
+            ? null
+            : {
+                eventCount: trace.events.length,
+                events: trace.events.slice(-80),
+                inputs: trace.inputs,
+                inputsDropped: trace.inputsDropped,
+              },
         activationAborted: annotationEditor?.activeActivation?.controller?.signal?.aborted ?? null,
         activationId: annotationEditor?.activeActivation?.id ?? null,
         annotationLoadAborted: controller?.annotationAbort?.signal.aborted ?? null,

@@ -2902,3 +2902,213 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 });
+
+describe('PdfCommentBridge live native identity lookup', () => {
+  function identityFixture(options: ReadonlyArray<NonNullable<Parameters<typeof editor>[1]>>) {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationEditorLayer' });
+    const entries = options.map((option, index) => {
+      const node = layer.createDiv({
+        cls: `highlightEditor${index === 0 ? ' selectedEditor' : ''}`,
+      });
+      node.id = `native-dom-${String(index)}`;
+      const native = editor(`Comment ${String(index)}`, {
+        ...option,
+        anchor: node,
+      });
+      if (!Object.prototype.hasOwnProperty.call(option, 'uid'))
+        Reflect.deleteProperty(native, 'uid');
+      return { native, node, getData: vi.spyOn(native, 'getData') };
+    });
+    const mounted = new Map(entries.map(({ native, node }) => [node.id, native]));
+    const manager = uiManager(entries[0]?.native ?? null);
+    manager.getEditor.mockImplementation((id) => mounted.get(id));
+    const bridge = new PdfCommentBridge(host);
+    bridge.setSidebarUiManager(manager);
+    return { bridge, entries, host, manager, mounted };
+  }
+
+  it('resolves live persisted, uid and DOM aliases without serializing native editor data', () => {
+    const current = identityFixture([
+      {
+        annotationElementId: 'unrelatedR',
+        uid: 'unrelated-runtime',
+        dataId: 'unrelated-data',
+      },
+      {
+        annotationElementId: ' 30R ',
+        uid: ' target-runtime ',
+        dataId: 'unused-data-alias',
+      },
+    ]);
+    try {
+      const target = current.entries[1]?.native;
+      expect(target).toBeDefined();
+      expect(current.bridge.selectAnnotation('30R')).toBe(true);
+      expect(current.bridge.selectAnnotation('target-runtime')).toBe(true);
+      expect(current.bridge.selectAnnotation('native-dom-1')).toBe(true);
+      expect(current.bridge.selectAnnotation('unused-data-alias')).toBe(false);
+      expect(current.manager.setSelected).toHaveBeenCalledTimes(3);
+      expect(current.manager.setSelected).toHaveBeenLastCalledWith(target);
+      for (const entry of current.entries) expect(entry.getData).not.toHaveBeenCalled();
+    } finally {
+      current.bridge.dispose();
+      current.host.remove();
+    }
+  });
+
+  it('releases removed active focus without serializing unrelated mounted editors', () => {
+    const current = identityFixture([
+      { annotationElementId: '30R', uid: 'owner-runtime', dataId: '30R' },
+      { annotationElementId: '31R', uid: 'peer-runtime', dataId: '31R' },
+      { annotationElementId: '32R', uid: 'other-runtime', dataId: '32R' },
+    ]);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    current.bridge.onAnnotationFocus((focus) => focused.push(focus));
+    try {
+      const owner = current.entries[0];
+      if (owner === undefined) throw new Error('Expected the active native editor.');
+      current.bridge.toggleCommentPopup(owner.native, true, true, true);
+      expect(focused[0]?.annotations[0]?.identity).toEqual({
+        kind: 'stable',
+        id: '30R',
+      });
+      for (const entry of current.entries) entry.getData.mockClear();
+      // PDF.js unregisters the editor and dispatches selection change before
+      // AnnotationEditorLayer.remove detaches the still-connected editor node.
+      current.mounted.delete(owner.node.id);
+      current.manager.firstSelectedEditor = undefined;
+
+      current.bridge.refreshAnnotationFocus();
+
+      expect(focused[focused.length - 1]).toBeNull();
+      expect(current.bridge.nativeEditorUidForAnnotation('30R')).toBeNull();
+      expect(current.entries.every(({ node }) => node.isConnected)).toBe(true);
+      for (const entry of current.entries) expect(entry.getData).not.toHaveBeenCalled();
+    } finally {
+      current.bridge.dispose();
+      current.host.remove();
+    }
+  });
+
+  it('reads promoted live ids on each lookup instead of retaining a prior identity', () => {
+    const current = identityFixture([
+      { annotationElementId: 'oldR', uid: 'old-runtime', dataId: 'oldR' },
+    ]);
+    try {
+      const native = current.entries[0]?.native;
+      if (native === undefined) throw new Error('Expected the native editor.');
+      expect(current.bridge.selectAnnotation('oldR')).toBe(true);
+      Reflect.set(native, 'annotationElementId', 'newR');
+      Reflect.set(native, 'uid', 'new-runtime');
+      expect(current.bridge.selectAnnotation('newR')).toBe(true);
+      expect(current.bridge.selectAnnotation('new-runtime')).toBe(true);
+      expect(current.bridge.selectAnnotation('oldR')).toBe(false);
+      expect(current.entries[0]?.getData).not.toHaveBeenCalled();
+    } finally {
+      current.bridge.dispose();
+      current.host.remove();
+    }
+  });
+
+  it.each<{
+    readonly label: string;
+    readonly options: NonNullable<Parameters<typeof editor>[1]>;
+    readonly requestedId: string;
+  }>([
+    {
+      label: 'missing persisted id',
+      options: { uid: 'runtime', dataId: 'serialized' },
+      requestedId: 'serialized',
+    },
+    {
+      label: 'null persisted id',
+      options: {
+        annotationElementId: null,
+        uid: 'runtime',
+        dataId: 'serialized',
+      },
+      requestedId: 'serialized',
+    },
+    {
+      label: 'empty persisted id',
+      options: {
+        annotationElementId: ' ',
+        uid: 'runtime',
+        dataId: 'serialized',
+      },
+      requestedId: 'serialized',
+    },
+    {
+      label: 'missing uid',
+      options: { annotationElementId: 'persisted', dataId: 'serialized' },
+      requestedId: 'serialized',
+    },
+    {
+      label: 'empty uid',
+      options: {
+        annotationElementId: 'persisted',
+        uid: ' ',
+        dataId: 'serialized',
+      },
+      requestedId: 'serialized',
+    },
+    {
+      label: 'both live ids missing',
+      options: { dataId: ' serialized ' },
+      requestedId: 'serialized',
+    },
+    {
+      label: 'uid fallback without serialized id',
+      options: { uid: ' runtime ' },
+      requestedId: 'runtime',
+    },
+    {
+      label: 'persisted fallback without serialized id',
+      options: { annotationElementId: ' persisted ' },
+      requestedId: 'persisted',
+    },
+  ])('retains serialized identity precedence for $label', ({ options, requestedId }) => {
+    const current = identityFixture([options]);
+    try {
+      expect(current.bridge.resolveAnnotationAnchor(requestedId)).toMatchObject({
+        height: 20,
+        width: 100,
+        x: 10,
+        y: 20,
+      });
+      expect(current.manager.setSelected).not.toHaveBeenCalled();
+      expect(current.entries[0]?.getData).toHaveBeenCalled();
+    } finally {
+      current.bridge.dispose();
+      current.host.remove();
+    }
+  });
+
+  it('retains readiness rejection when neither live ids nor serialized data supplies an identity', () => {
+    const current = identityFixture([{ annotationElementId: ' ', uid: ' ', dataId: ' ' }]);
+    try {
+      expect(current.bridge.selectAnnotation('native-dom-0')).toBe(false);
+      expect(current.manager.setSelected).not.toHaveBeenCalled();
+      expect(current.entries[0]?.getData).toHaveBeenCalled();
+    } finally {
+      current.bridge.dispose();
+      current.host.remove();
+    }
+  });
+
+  it('retains live-id fallback when serialized native data is temporarily unavailable', () => {
+    const current = identityFixture([{ uid: 'runtime' }]);
+    try {
+      current.entries[0]?.getData.mockImplementation(() => {
+        throw new TypeError('Native comment data is unavailable.');
+      });
+      expect(current.bridge.selectAnnotation('runtime')).toBe(true);
+      expect(current.manager.setSelected).toHaveBeenCalledWith(current.entries[0]?.native);
+      expect(current.entries[0]?.getData).toHaveBeenCalled();
+    } finally {
+      current.bridge.dispose();
+      current.host.remove();
+    }
+  });
+});

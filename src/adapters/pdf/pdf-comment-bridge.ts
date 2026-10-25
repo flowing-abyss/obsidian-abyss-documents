@@ -1449,6 +1449,10 @@ function editorComment(editor: PdfCommentEditor): string {
 function readyEditorIds(
   editor: PdfCommentEditor,
 ): { readonly annotation: string; readonly runtime: string } | null {
+  // getData serializes native annotations; mounted identity lookup needs no snapshot.
+  const nativeId = firstNonEmpty(editor.annotationElementId ?? undefined);
+  const uid = firstNonEmpty(editor.uid);
+  if (nativeId !== undefined && uid !== undefined) return { annotation: nativeId, runtime: uid };
   const data = editorData(editor);
   const annotation = firstNonEmpty(editor.annotationElementId ?? undefined, data?.id, editor.uid);
   const runtime = firstNonEmpty(editor.uid, data?.id, editor.annotationElementId ?? undefined);

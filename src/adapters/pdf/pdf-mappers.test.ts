@@ -26,7 +26,7 @@ describe('mapPdfOpenFailure', () => {
     expect(failure).toBeInstanceOf(DocumentOpenError);
     expect(failure).toMatchObject({ path: 'Guide.pdf', cause });
     expect(failure.message).toBe(cause.message);
-    expect(failure.message).toContain('installer 1.7.4');
+    expect(failure.message).toContain('installer 1.13.4');
     expect(failure.message).toContain('Android System WebView');
   });
 
