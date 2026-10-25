@@ -200,6 +200,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   private readonly comments = new Map<string, PdfCommentData>();
   private readonly fallbackIds = new WeakMap<object, string>();
   private readonly focusListeners = new Set<(focus: PdfAnnotationFocus | null) => void>();
+  private hasPublishedFocus = false;
   private readonly focusProjections = new Map<string, DocumentAnnotation>();
   private readonly focusReadinessChecks = new Set<() => void>();
   private readonly readonlyAnnotationIds = new Set<string>();
@@ -1119,6 +1120,7 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
   }
 
   private emitFocus(focus: PdfAnnotationFocus | null): void {
+    this.hasPublishedFocus = focus !== null;
     for (const listener of [...this.focusListeners]) listener(focus);
   }
 
@@ -1128,18 +1130,21 @@ export class PdfCommentBridge implements PdfJsCommentManagerRuntime {
       this.persistenceFocusInvalidated = true;
       return;
     }
+    // PDF.js also destroys an absent popup while selecting a native editor.
+    const hadPublishedFocus = this.hasPublishedFocus;
     const lease = this.activeFocusLease;
     if (lease !== null) {
       if (this.activeSourceIsMounted()) return;
       lease.release();
-      this.emitFocus(null);
+      if (hadPublishedFocus) this.emitFocus(null);
       return;
     }
     this.releasePopupState();
-    this.emitFocus(null);
+    if (hadPublishedFocus) this.emitFocus(null);
   }
 
   private releasePopupState(): void {
+    this.hasPublishedFocus = false;
     this.popupDestroyRevision += 1;
     this.activeSource?.setCommentButtonStates?.({ hasPopup: false, selected: false });
     this.activeSource = null;

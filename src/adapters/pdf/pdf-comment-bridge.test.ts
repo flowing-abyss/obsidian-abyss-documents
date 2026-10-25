@@ -807,6 +807,96 @@ describe('PdfCommentBridge exact PDF.js comment-manager seam', () => {
     host.remove();
   });
 
+  it('does not emit a blur for native selection housekeeping when no popup owns focus', () => {
+    const host = document.body.createDiv();
+    const native = editor('Created selection annotation', { uid: 'selection-owned-native' });
+    const manager = uiManager(native);
+    mountEditor(host, manager, native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    // PDF.js setSelected calls destroyPopup before selecting the new editor.
+    manager.setSelected.mockImplementation(() => {
+      bridge.destroyPopup();
+    });
+
+    expect(bridge.selectAnnotation('selection-owned-native')).toBe(true);
+    bridge.toggleCommentPopup(null);
+
+    expect(manager.setSelected).toHaveBeenCalledExactlyOnceWith(native);
+    expect(focused).toEqual([]);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('does not emit a stale blur after the published focus lease was released', () => {
+    const host = document.body.createDiv();
+    const native = editor('Released popup', { uid: 'released-popup' });
+    const manager = uiManager(native);
+    mountEditor(host, manager, native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    bridge.toggleCommentPopup(native, true, true, true);
+    const focus = focused[0];
+    if (focus?.lease === undefined) throw new Error('Expected an owned native focus lease.');
+    focus.lease.release();
+
+    bridge.destroyPopup();
+    bridge.destroyPopup();
+
+    expect(focused).toEqual([focus]);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('dismisses an owned imported read-only focus exactly once without a native source', () => {
+    const host = document.body.createDiv();
+    const layer = host.createDiv({ cls: 'annotationLayer' });
+    const imported = layer.createDiv({ cls: 'highlightAnnotation' });
+    imported.dataset['annotationId'] = 'imported-popup-owner';
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    bridge.focusFromPointer(imported);
+    const focus = focused[0];
+    expect(focus).toMatchObject({
+      annotations: [{ identity: { id: 'imported-popup-owner', kind: 'stable' } }],
+      editable: false,
+    });
+
+    bridge.destroyPopup();
+    bridge.destroyPopup();
+
+    expect(focused).toEqual([focus, null]);
+    bridge.dispose();
+    host.remove();
+  });
+
+  it('still publishes a blur when the owned writable popup source detaches', () => {
+    const host = document.body.createDiv();
+    const native = editor('Detached popup', { uid: 'detached-popup-owner' });
+    const manager = uiManager(native);
+    mountEditor(host, manager, native);
+    const bridge = new PdfCommentBridge(host);
+    const focused: Array<PdfAnnotationFocus | null> = [];
+    bridge.setSidebarUiManager(manager);
+    bridge.onAnnotationFocus((focus) => focused.push(focus));
+    bridge.toggleCommentPopup(native, true, true, true);
+    const focus = focused[0];
+    if (focus?.lease === undefined) throw new Error('Expected an owned native focus lease.');
+    host.querySelector('.annotationEditorLayer')?.remove();
+
+    bridge.destroyPopup();
+    bridge.destroyPopup();
+
+    expect(focused).toEqual([focus, null]);
+    bridge.dispose();
+    host.remove();
+  });
+
   it('retains a selected FreeText binding across PDF.js edit-mode hover hides', async () => {
     const host = document.body.createDiv();
     const layer = host.createDiv({ cls: 'annotationEditorLayer' });

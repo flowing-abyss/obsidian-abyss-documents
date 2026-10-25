@@ -5,7 +5,7 @@ import { asAnnotationId, type DocumentAnnotation } from '../../document-core/ann
 import type { AnnotationEditorPopoverRequest } from '../../reader/annotation-editor-popover.js';
 import { AnnotationInteractionController } from '../../reader/annotation-interaction-controller.js';
 import { ReaderShell } from '../../reader/reader-shell.js';
-import { PdfAnnotationEditor } from './pdf-annotation-editor.js';
+import { PdfAnnotationEditor, type PdfAnnotationInteraction } from './pdf-annotation-editor.js';
 import { PdfCommentBridge, type PdfCommentEditor } from './pdf-comment-bridge.js';
 import type { PdfTextSelection } from './pdf-selection-observer.js';
 
@@ -254,6 +254,118 @@ function oneShotFixture(options: { readonly deferNeutralMode?: boolean } = {}) {
 }
 
 describe('PDF annotation interaction integration', () => {
+  it('keeps a committed selection editor through unowned native popup teardown', async () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const bridge = new PdfCommentBridge(shell.documentHost);
+    let emitSelection: ((selection: PdfTextSelection | null) => void) | null = null;
+    const interaction: PdfAnnotationInteraction = {
+      abortInteraction: async () => undefined,
+      commitSelection: async () => nativeAnnotation('Neutral comment'),
+      deleteAnnotations: () => true,
+      focusAnnotation: async () => 'cancelled',
+      onAnnotationFocus: (listener) => bridge.onAnnotationFocus(listener),
+      onColor: () => () => undefined,
+      onMode(listener) {
+        listener('neutral');
+        return () => undefined;
+      },
+      onSelection(listener) {
+        emitSelection = listener;
+        return () => {
+          emitSelection = null;
+        };
+      },
+      releaseSelection: () => true,
+      retainSelection: () => true,
+      setQuickHighlight: async () => undefined,
+      updateAnnotations: () => true,
+    };
+    const controller = new AnnotationInteractionController(interaction, shell, palette);
+    const publishSelection = (selection: PdfTextSelection | null): void => {
+      if (emitSelection === null) throw new Error('Expected the selection subscription.');
+      emitSelection(selection);
+    };
+    try {
+      publishSelection(textSelection('committed-popup-owner'));
+      const popover = host.querySelector<HTMLElement>('[data-annotation-editor-popover]');
+      const input = popover?.querySelector<HTMLTextAreaElement>('[aria-label="Comment"]');
+      if (popover === null || input === undefined || input === null)
+        throw new Error('Expected the unified selection editor.');
+      input.value = 'Neutral comment';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      await vi.waitFor(() => {
+        expect(popover.querySelector('[data-action="delete-annotation"]')).not.toBeNull();
+      });
+
+      // PDF.js calls this before selecting a native editor, including after its
+      // NONE transition already released the bridge's previous popup owner.
+      bridge.destroyPopup();
+      publishSelection(null);
+
+      expect(host.querySelector('[data-annotation-editor-popover]')).toBe(popover);
+      expect(popover.isConnected).toBe(true);
+      expect(popover.hidden).toBe(false);
+      expect(input.value).toBe('Neutral comment');
+      expect(popover.querySelector('[data-action="delete-annotation"]')).not.toBeNull();
+
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+      );
+      expect(popover.hidden).toBe(true);
+    } finally {
+      controller.destroy();
+      bridge.dispose();
+      shell.destroy();
+      host.remove();
+    }
+  });
+
+  it('closes genuinely published imported details when their bridge popup is destroyed', async () => {
+    const host = document.body.createDiv();
+    const shell = new ReaderShell(host);
+    const bridge = new PdfCommentBridge(shell.documentHost);
+    const interaction: PdfAnnotationInteraction = {
+      commitSelection: async () => 'dismissed',
+      deleteAnnotations: () => false,
+      focusAnnotation: async () => 'cancelled',
+      onAnnotationFocus: (listener) => bridge.onAnnotationFocus(listener),
+      onColor: () => () => undefined,
+      onMode(listener) {
+        listener('neutral');
+        return () => undefined;
+      },
+      onSelection: () => () => undefined,
+      setQuickHighlight: async () => undefined,
+      updateAnnotations: () => false,
+    };
+    const controller = new AnnotationInteractionController(interaction, shell, palette);
+    const node = shell.documentHost
+      .createDiv({ cls: 'annotationLayer' })
+      .createDiv({ cls: 'textAnnotation' });
+    node.dataset['annotationId'] = 'imported-details';
+    node.dataset['comment'] = 'Imported comment';
+    vi.spyOn(node, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ x: 20, y: 30, width: 40, height: 50 }),
+    );
+    try {
+      bridge.focusFromPointer(node);
+      const popover = host.querySelector<HTMLElement>('[data-annotation-editor-popover]');
+      if (popover === null) throw new Error('Expected the imported annotation details.');
+      expect(popover.hidden).toBe(false);
+      expect(popover.getAttribute('aria-label')).toBe('Annotation details');
+
+      bridge.destroyPopup();
+
+      expect(popover.hidden).toBe(true);
+    } finally {
+      controller.destroy();
+      bridge.dispose();
+      shell.destroy();
+      host.remove();
+    }
+  });
+
   it('keeps the selection editor open through its real one-shot native mode transaction', async () => {
     const test = oneShotFixture();
     const selection = textSelection('real-one-shot');
