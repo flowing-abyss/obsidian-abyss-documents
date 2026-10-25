@@ -3,8 +3,13 @@ import { App, TFile as MockTFile } from 'obsidian-test-mocks/obsidian';
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
 import { DocumentOpenError } from '../../document-core/errors.js';
+import {
+  beginPluginActivation,
+  endPluginActivation,
+  readerPerformanceSnapshot,
+} from '../../reader-performance.js';
 import { PdfDocumentAdapter } from './pdf-adapter.js';
-import type { PdfRuntime, PdfRuntimeLoader } from './pdf-runtime.js';
+import { type PdfRuntime, PdfRuntimeLoader } from './pdf-runtime.js';
 import type { PdfViewportFactory } from './pdf-session.js';
 
 function file(path: string): TFile {
@@ -90,6 +95,41 @@ function adapterFixture(options: {
 }
 
 describe('PdfDocumentAdapter', () => {
+  it('refuses an unsupported renderer before reading a vault PDF or starting a worker', async () => {
+    beginPluginActivation();
+    endPluginActivation();
+    const readBinary = vi.fn(async () => new ArrayBuffer(0));
+    const importRuntime = vi.fn(async () => {
+      throw new Error('Runtime imports must not run for an unsupported renderer.');
+    });
+    const loader = new PdfRuntimeLoader(importRuntime, () => '120.0.6099.291');
+    const viewportFactory = vi.fn() as unknown as PdfViewportFactory;
+    const adapter = new PdfDocumentAdapter({ readBinary }, loader, viewportFactory);
+
+    const expectedCause: unknown = expect.objectContaining({ name: 'UnsupportedPdfRuntimeError' });
+    const expectedMessage: unknown = expect.stringContaining('installer 1.7.4');
+    await expect(
+      adapter.open(file('Guide.pdf'), new AbortController().signal),
+    ).rejects.toMatchObject({
+      name: 'DocumentOpenError',
+      path: 'Guide.pdf',
+      cause: expectedCause,
+      message: expectedMessage,
+    });
+
+    expect(readBinary).not.toHaveBeenCalled();
+    expect(importRuntime).not.toHaveBeenCalled();
+    expect(viewportFactory).not.toHaveBeenCalled();
+    expect(readerPerformanceSnapshot().counters).toMatchObject({
+      blobsCreated: 0,
+      gzipDecodes: 0,
+      pdfImports: 0,
+      workersStarted: 0,
+      workerUrlsActive: 0,
+    });
+    loader.dispose();
+  });
+
   it('supports PDF extensions case-insensitively', () => {
     const { adapter } = adapterFixture({});
 

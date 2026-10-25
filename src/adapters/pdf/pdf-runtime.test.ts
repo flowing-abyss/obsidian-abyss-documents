@@ -92,6 +92,56 @@ describe('PDF.js document editor metrics', () => {
 });
 
 describe('PdfRuntimeLoader', () => {
+  it('rejects an unsupported renderer before runtime imports or worker allocation', async () => {
+    beginPluginActivation();
+    endPluginActivation();
+    const { activeUrls, createObjectURL, revokeObjectURL } = stubWorkerUrls();
+    const dependencies = runtimeDependencies();
+    const importRuntime = vi.fn(async () => dependencies);
+    const loader = new PdfRuntimeLoader(importRuntime, () => '120.0.6099.291');
+
+    await expect(loader.load()).rejects.toMatchObject({ name: 'UnsupportedPdfRuntimeError' });
+
+    expect(importRuntime).not.toHaveBeenCalled();
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    expect(activeUrls).toHaveLength(0);
+    expect(dependencies.pdfjsLib.GlobalWorkerOptions.workerSrc).toBe('');
+    expect(readerPerformanceSnapshot().counters).toMatchObject({
+      blobsCreated: 0,
+      gzipDecodes: 0,
+      pdfImports: 0,
+      pdfRuntimeLoads: 1,
+      workersStarted: 0,
+      workerUrlsActive: 0,
+    });
+    loader.dispose();
+  });
+
+  it('clears compatibility failures so retry checks the current runtime again', async () => {
+    let chromiumVersion = '124.0.6367.207';
+    const { activeUrls } = stubWorkerUrls();
+    const importRuntime = vi.fn(async () => runtimeDependencies());
+    const loader = new PdfRuntimeLoader(importRuntime, () => chromiumVersion);
+
+    const first = loader.load();
+    expect(loader.load()).toBe(first);
+    await expect(first).rejects.toMatchObject({ name: 'UnsupportedPdfRuntimeError' });
+    const retry = loader.load();
+    expect(retry).not.toBe(first);
+    await expect(retry).rejects.toMatchObject({ name: 'UnsupportedPdfRuntimeError' });
+    expect(importRuntime).not.toHaveBeenCalled();
+
+    chromiumVersion = '126.0.6478.185';
+    const current = loader.load();
+    expect(loader.load()).toBe(current);
+    await expect(current).resolves.toMatchObject({ version: PDFJS_VERSION });
+    expect(importRuntime).toHaveBeenCalledOnce();
+    expect(activeUrls).toHaveLength(1);
+    loader.dispose();
+    expect(activeUrls).toHaveLength(0);
+  });
+
   it('loads the packaged runtime through the default import boundary', async () => {
     const { createObjectURL } = stubWorkerUrls();
     const loader = new PdfRuntimeLoader();

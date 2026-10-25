@@ -1,6 +1,8 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist/build/pdf.mjs';
 import { describe, expect, it, vi } from 'vitest';
+import { DocumentCancelledError, DocumentOpenError } from '../../document-core/errors.js';
 import { isPdfAbortFailure, mapPdfOpenFailure, mapPdfOutline } from './pdf-mappers.js';
+import { UnsupportedPdfRuntimeError } from './pdf-runtime-compatibility.js';
 
 function pdfDocument(): PDFDocumentProxy {
   return {
@@ -14,6 +16,30 @@ function pdfDocument(): PDFDocumentProxy {
     }),
   } as unknown as PDFDocumentProxy;
 }
+
+describe('mapPdfOpenFailure', () => {
+  it('preserves runtime recovery guidance at the existing document error boundary', () => {
+    const cause = new UnsupportedPdfRuntimeError();
+
+    const failure = mapPdfOpenFailure('Guide.pdf', cause, new AbortController().signal);
+
+    expect(failure).toBeInstanceOf(DocumentOpenError);
+    expect(failure).toMatchObject({ path: 'Guide.pdf', cause });
+    expect(failure.message).toBe(cause.message);
+    expect(failure.message).toContain('installer 1.7.4');
+    expect(failure.message).toContain('Android System WebView');
+  });
+
+  it('keeps cancellation primary when an incompatible-runtime load was cancelled', () => {
+    const cause = new UnsupportedPdfRuntimeError();
+
+    const failure = mapPdfOpenFailure('Guide.pdf', cause, AbortSignal.abort());
+
+    expect(failure).toBeInstanceOf(DocumentCancelledError);
+    expect(failure).toMatchObject({ path: 'Guide.pdf', cause });
+    expect(failure.message).toBe('Opening this PDF was cancelled.');
+  });
+});
 
 describe('mapPdfOutline', () => {
   it('recognizes legacy numeric abort codes with a non-string name', () => {

@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { env } from 'node:process';
 import { parseObsidianVersions } from 'wdio-obsidian-service';
+import { MINIMUM_PDF_OBSIDIAN_INSTALLER } from '../../src/adapters/pdf/pdf-runtime-compatibility.js';
 import { createNativeCrashDiagnostics } from './native-crash-diagnostics.js';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
@@ -11,15 +12,16 @@ const cacheDir = path.resolve(repoRoot, '.obsidian-cache');
 // against; an empty "hostile" or "migration-v1" vault today would test nothing.
 const vault = path.resolve(repoRoot, 'dev-documents-vault');
 
-// Exercise the manifest's minimum app on its earliest supported installer,
-// plus the newest stable app and installer.
+// Exercise the minimum app on the first installer meeting PDF.js's browser floor,
+// plus the newest app/installer. Keep the old installer as a graceful-error case.
 // Override for a one-off run, e.g.: OBSIDIAN_VERSIONS="1.8.0/1.8.0" pnpm run test:e2e
 const desktopVersions = await parseObsidianVersions(
-  env['OBSIDIAN_VERSIONS'] ?? 'earliest/earliest latest/latest',
+  env['OBSIDIAN_VERSIONS'] ?? `earliest/${MINIMUM_PDF_OBSIDIAN_INSTALLER} latest/latest`,
   {
     cacheDir,
   },
 );
+const legacyDesktopVersions = await parseObsidianVersions('earliest/earliest', { cacheDir });
 const coarseVersion = desktopVersions[desktopVersions.length - 1];
 if (coarseVersion === undefined) throw new Error('No Obsidian version was selected.');
 const [coarseAppVersion, coarseInstallerVersion] = coarseVersion;
@@ -27,7 +29,10 @@ const [coarseAppVersion, coarseInstallerVersion] = coarseVersion;
 if (env['CI']) {
   // Printed so the CI workflow can key its Obsidian-binary cache off the resolved
   // versions (they can drift between "latest" runs) — see .github/workflows/e2e.yml.
-  console.log('obsidian-cache-key:', JSON.stringify(desktopVersions));
+  console.log(
+    'obsidian-cache-key:',
+    JSON.stringify([...desktopVersions, ...legacyDesktopVersions]),
+  );
 }
 
 export const config: WebdriverIO.Config = {
@@ -38,6 +43,7 @@ export const config: WebdriverIO.Config = {
   // it's invoked from.
   specs: [
     './smoke.e2e.ts',
+    './runtime-compatibility.e2e.ts',
     './reader.e2e.ts',
     './reader-selection.e2e.ts',
     './reader-toolbar.e2e.ts',
@@ -51,7 +57,17 @@ export const config: WebdriverIO.Config = {
   capabilities: [
     ...desktopVersions.map(([appVersion, installerVersion]) => ({
       browserName: 'obsidian',
-      'wdio:exclude': ['./reader-toolbar-coarse.e2e.ts'],
+      'wdio:exclude': ['./reader-toolbar-coarse.e2e.ts', './runtime-compatibility.e2e.ts'],
+      'wdio:obsidianOptions': {
+        appVersion,
+        installerVersion,
+        plugins: [repoRoot],
+        vault,
+      },
+    })),
+    ...legacyDesktopVersions.map(([appVersion, installerVersion]) => ({
+      browserName: 'obsidian',
+      'wdio:specs': ['./runtime-compatibility.e2e.ts'],
       'wdio:obsidianOptions': {
         appVersion,
         installerVersion,

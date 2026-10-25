@@ -6,6 +6,7 @@ import {
   DocumentPasswordError,
   InvalidDocumentError,
 } from '../../document-core/errors.js';
+import { UnsupportedPdfRuntimeError } from './pdf-runtime-compatibility.js';
 
 const INCORRECT_PASSWORD = 2;
 
@@ -54,6 +55,9 @@ export function mapPdfOpenFailure(
   const name = errorName(cause);
   if (signal.aborted || isPdfAbortFailure(cause)) {
     return new DocumentCancelledError(path, 'Opening this PDF was cancelled.', cause);
+  }
+  if (cause instanceof UnsupportedPdfRuntimeError) {
+    return new DocumentOpenError(path, cause.message, cause);
   }
   if (name === 'PasswordException') {
     const message =
